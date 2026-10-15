@@ -247,8 +247,8 @@ fn burn(
 ) -> ExitCode {
     use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
     use convertx_rust::burner::{
-        create_disc_image, default_iso_path, media_problem, preferred_speed, speed_label, speed_x, system_burner,
-        BurnEta, BurnOptions, BurnPhase, BurnProgress, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
+        burn_video_ts, default_iso_path, media_problem, preferred_speed, speed_label, speed_x, system_burner, BurnError,
+        BurnJob, BurnOptions, BurnPhase, BurnUpdate, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -351,14 +351,12 @@ fn burn(
 
     /// One progress line per backend message, with the remaining time of image + burn + verify.
     struct Log {
-        eta: BurnEta,
-        start: Instant,
         message: String,
         printed: Option<(u32, Instant)>,
     }
     impl Log {
-        fn show(&mut self, p: &BurnProgress) {
-            let remaining = self.eta.update(p.phase, p.fraction, self.start.elapsed().as_secs_f64());
+        fn show(&mut self, u: BurnUpdate) {
+            let p = u.progress;
             if p.phase == BurnPhase::Done {
                 return;
             }
@@ -375,63 +373,41 @@ fn burn(
                 return;
             }
             self.printed = Some((pct, Instant::now()));
-            let left = convertx_rust::eta::format_remaining(remaining);
+            let left = convertx_rust::eta::format_remaining(u.remaining_secs);
             eprint!("\r  {}: {pct:>3}% – noch {left}    ", self.message.trim_end_matches(['…', ' ']));
         }
     }
-    let mut log =
-        Log { eta: BurnEta::new(bytes, x, verify, dual_layer), start: Instant::now(), message: String::new(), printed: None };
+    let mut log = Log { message: String::new(), printed: None };
 
-    let iso = match &keep_iso {
-        Some(Some(path)) => path.clone(),
-        _ => default_iso_path(&video_ts),
+    let job = BurnJob {
+        iso: match &keep_iso {
+            Some(Some(path)) => path.clone(),
+            _ => default_iso_path(&video_ts),
+        },
+        video_ts,
+        drive_id: d.id.clone(),
+        label,
+        speed,
+        media_speeds: media.speeds.clone(),
+        options: BurnOptions { layer_break: None, verify, eject, erase: erase && !media.blank },
+        keep_iso: keep_iso.is_some(),
+        capacities: Capacities::DVD,
     };
-    let image_msg = "Disc-Image wird erstellt …";
-    log.show(&BurnProgress::new(BurnPhase::Preparing, 0.0, image_msg));
-    let result = create_disc_image(&video_ts, &iso, &label, Capacities::DVD, &cancel, |f| {
-        log.show(&BurnProgress::new(BurnPhase::Preparing, f, image_msg))
-    })
-    .map_err(|e| e.to_string())
-    .and_then(|plan| {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(String::new());
-        }
-        let options = BurnOptions {
-            layer_break: plan.layer_break.map(|l| l.l0_sectors),
-            verify,
-            eject,
-            erase: erase && !media.blank,
-        };
-        let (tx, rx) = std::sync::mpsc::channel::<BurnProgress>();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                for p in rx {
-                    log.show(&p);
-                }
-            });
-            burner.burn_iso(&d.id, &iso, speed, &options, &cancel, tx)
-        })
-        .map_err(|e| e.to_string())
-    });
+    let result = burn_video_ts(burner.as_ref(), &job, &cancel, |u| log.show(u));
     eprintln!();
-    let kept = keep_iso.is_some() && result.is_ok();
-    if !kept {
-        let _ = std::fs::remove_file(&iso);
-        let _ = std::fs::remove_file(iso.with_extension("iso.part"));
-    }
     match result {
-        Ok(()) => {
+        Ok(outcome) => {
             println!("{}", if verify { "Die DVD wurde gebrannt und überprüft." } else { "Die DVD wurde gebrannt." });
-            if kept {
+            if let Some(iso) = outcome.iso {
                 println!("  Disc-Image: {}", iso.display());
             }
             ExitCode::SUCCESS
         }
-        Err(_) if cancel.load(Ordering::SeqCst) => {
+        Err(BurnError::Cancelled) => {
             eprintln!("Brennvorgang abgebrochen.");
             ExitCode::from(130)
         }
-        Err(e) => fail(e),
+        Err(e) => fail(e.to_string()),
     }
 }
 

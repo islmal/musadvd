@@ -282,6 +282,8 @@ pub enum BurnError {
     NotEnoughSpace { needed: u64, free: u64 },
     Cancelled,
     VerifyFailed { sector: u64 },
+    /// Writing the disc image failed.
+    Image(String),
     Io(std::io::Error),
     Backend(String),
 }
@@ -299,6 +301,7 @@ impl fmt::Display for BurnError {
             ),
             BurnError::Cancelled => write!(f, "abgebrochen"),
             BurnError::VerifyFailed { sector } => write!(f, "Überprüfung fehlgeschlagen: Sektor {sector} weicht vom Image ab"),
+            BurnError::Image(m) => write!(f, "Disc-Image: {m}"),
             BurnError::Io(e) => write!(f, "{e}"),
             BurnError::Backend(m) => write!(f, "{m}"),
         }
@@ -362,6 +365,90 @@ pub fn create_disc_image(
     }
     written?;
     Ok(plan)
+}
+
+/// One disc to burn from a finished VIDEO_TS folder (shared by the GUI and the CLI).
+#[derive(Debug, Clone)]
+pub struct BurnJob {
+    pub video_ts: PathBuf,
+    pub drive_id: String,
+    /// Where the disc image is written.
+    pub iso: PathBuf,
+    /// Volume label (sanitised when the image is written).
+    pub label: String,
+    pub speed: WriteSpeed,
+    /// Speeds the medium offers (from [`OpticalBurner::probe_media`]), for the remaining time.
+    pub media_speeds: Vec<u32>,
+    pub options: BurnOptions,
+    /// Keep the image after a successful burn (otherwise it is always removed).
+    pub keep_iso: bool,
+    pub capacities: layerbreak::Capacities,
+}
+
+/// Progress of [`burn_video_ts`] with the remaining time of image + burn + verification.
+#[derive(Debug, Clone)]
+pub struct BurnUpdate {
+    pub progress: BurnProgress,
+    pub remaining_secs: f64,
+}
+
+/// What [`burn_video_ts`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurnOutcome {
+    pub dual_layer: bool,
+    /// The kept image (`keep_iso`).
+    pub iso: Option<PathBuf>,
+}
+
+/// Writes the disc image of `job.video_ts`, burns it with `burner` (layer break from the image
+/// plan) and removes the image unless it is to be kept after success. `cancel` stops image
+/// writing and burning ([`BurnError::Cancelled`]).
+pub fn burn_video_ts(
+    burner: &dyn OpticalBurner,
+    job: &BurnJob,
+    cancel: &AtomicBool,
+    mut on_update: impl FnMut(BurnUpdate) + Send,
+) -> Result<BurnOutcome, BurnError> {
+    let planned = layerbreak::plan_disc(&job.video_ts, &job.label, job.capacities).map_err(|e| BurnError::Image(e.to_string()))?;
+    let dual_layer = planned.layer_break.is_some();
+    let x = speed_x(job.speed, &job.media_speeds);
+    let mut eta = BurnEta::new(planned.image.size_bytes() as f64, x, job.options.verify, dual_layer);
+    let start = std::time::Instant::now();
+    let mut emit = |progress: BurnProgress| {
+        let remaining_secs = eta.update(progress.phase, progress.fraction, start.elapsed().as_secs_f64());
+        on_update(BurnUpdate { progress, remaining_secs });
+    };
+    const IMAGE: &str = "Disc-Image wird erstellt …";
+    emit(BurnProgress::new(BurnPhase::Preparing, 0.0, IMAGE));
+    let mut last = -1.0;
+    let result = create_disc_image(&job.video_ts, &job.iso, &job.label, job.capacities, cancel, |f| {
+        if f - last >= 0.01 || f >= 1.0 {
+            last = f;
+            emit(BurnProgress::new(BurnPhase::Preparing, f, IMAGE));
+        }
+    })
+    .map_err(|e| BurnError::Image(e.to_string()))
+    .and_then(|plan| {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(BurnError::Cancelled);
+        }
+        let options = BurnOptions { layer_break: plan.layer_break.map(|l| l.l0_sectors), ..job.options.clone() };
+        let (tx, rx) = std::sync::mpsc::channel::<BurnProgress>();
+        std::thread::scope(|scope| {
+            scope.spawn(|| rx.into_iter().for_each(&mut emit));
+            burner.burn_iso(&job.drive_id, &job.iso, job.speed, &options, cancel, tx)
+        })
+    });
+    let keep = job.keep_iso && result.is_ok();
+    if !keep {
+        let _ = std::fs::remove_file(&job.iso);
+        let _ = std::fs::remove_file(job.iso.with_extension("iso.part"));
+    }
+    match result {
+        Ok(()) => Ok(BurnOutcome { dual_layer, iso: keep.then(|| job.iso.clone()) }),
+        Err(_) if cancel.load(Ordering::SeqCst) => Err(BurnError::Cancelled),
+        Err(e) => Err(e),
+    }
 }
 
 /// Compares the first `len` bytes of `device` (raw disc) with `image`.

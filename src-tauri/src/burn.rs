@@ -8,12 +8,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
 use convertx_rust::burner::{
-    create_disc_image, default_iso_path as iso_path, media_problem, preferred_speed, sanitize_volume_label, speed_label, speed_x, system_burner, BurnError, BurnEta,
-    BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
+    burn_video_ts, default_iso_path as iso_path, media_problem, preferred_speed, sanitize_volume_label, speed_label,
+    speed_x, system_burner, BurnError, BurnJob, BurnOptions, BurnOutcome, BurnPhase, BurnProgress, DriveInfo, MediaInfo,
+    WriteSpeed, DVD_1X_SECTORS_PER_SEC,
 };
 use convertx_rust::eta::{self, Eta, JobPhase};
 use serde::{Deserialize, Serialize};
@@ -159,7 +159,7 @@ pub fn open_folder(path: String) -> Result<(), String> {
         return Err(format!("{} existiert nicht", path.display()));
     }
     let program = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    std::process::Command::new(program).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    convertx_rust::tools::blocking_tool_command(program).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -229,31 +229,12 @@ fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Emits progress with the remaining time.
-struct Reporter<'a> {
-    app: &'a AppHandle,
-    eta: BurnEta,
-    start: Instant,
-    detail: String,
-}
-
-impl Reporter<'_> {
-    fn emit(&mut self, p: BurnProgress) {
-        let remaining = self.eta.update(p.phase, p.fraction, self.start.elapsed().as_secs_f64());
-        let phase = if p.phase == BurnPhase::Preparing { JobPhase::Image } else { JobPhase::Burning };
-        let eta = Eta::new(phase, Some(self.detail.clone()), Some(remaining), None);
-        let _ = self.app.emit("burn-progress", BurnStatus { progress: p, eta });
-    }
-}
-
-fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> (Result<(), String>, Option<PathBuf>) {
+/// Burns the request with the engine's [`burn_video_ts`] and emits `burn-progress`.
+fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<BurnOutcome, BurnError> {
     let video_ts = PathBuf::from(&req.video_ts);
-    let needs = match needs(&video_ts) {
-        Ok(n) => n,
-        Err(e) => return (Err(e), None),
-    };
-    let speeds = system_burner().probe_media(&req.drive_id).map(|m| m.speeds).unwrap_or_default();
-    let x = speed_x(req.speed, &speeds);
+    let needs = needs(&video_ts).map_err(BurnError::Image)?;
+    let media_speeds = system_burner().probe_media(&req.drive_id).map(|m| m.speeds).unwrap_or_default();
+    let x = speed_x(req.speed, &media_speeds);
     let detail = format!(
         "{} bei {}{}",
         if needs.dual_layer { "DVD-9" } else { "DVD-5" },
@@ -263,39 +244,23 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> (Result<
         },
         if req.verify { ", mit Überprüfung" } else { "" }
     );
-    let mut reporter =
-        Reporter { app, eta: BurnEta::new(needs.bytes(), x, req.verify, needs.dual_layer), start: Instant::now(), detail };
-    let iso = iso_path(&video_ts);
-    reporter.emit(BurnProgress::new(BurnPhase::Preparing, 0.0, "Disc-Image wird erstellt …"));
-    let mut last = -1.0;
-    let plan = match create_disc_image(&video_ts, &iso, &req.label, Capacities::DVD, cancel, |f| {
-        if f - last >= 0.01 || f >= 1.0 {
-            last = f;
-            reporter.emit(BurnProgress::new(BurnPhase::Preparing, f, "Disc-Image wird erstellt …"));
-        }
-    }) {
-        Ok(p) => p,
-        Err(e) => return (Err(e.to_string()), None),
+    let job = BurnJob {
+        iso: iso_path(&video_ts),
+        video_ts,
+        drive_id: req.drive_id.clone(),
+        label: req.label.clone(),
+        speed: req.speed,
+        media_speeds,
+        options: BurnOptions { layer_break: None, verify: req.verify, eject: req.eject, erase: req.erase },
+        // Deleting the DVD afterwards takes the image with it.
+        keep_iso: req.keep_iso && !req.delete_after,
+        capacities: Capacities::DVD,
     };
-    if cancel.load(Ordering::Relaxed) {
-        return (Err(BurnError::Cancelled.to_string()), Some(iso));
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<BurnProgress>();
-    let options = BurnOptions {
-        layer_break: plan.layer_break.map(|l| l.l0_sectors),
-        verify: req.verify,
-        eject: req.eject,
-        erase: req.erase,
-    };
-    let result = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            for p in rx {
-                reporter.emit(p);
-            }
-        });
-        system_burner().burn_iso(&req.drive_id, &iso, req.speed, &options, cancel, tx)
-    });
-    (result.map_err(|e| e.to_string()), Some(iso))
+    burn_video_ts(system_burner().as_ref(), &job, cancel, |u| {
+        let phase = if u.progress.phase == BurnPhase::Preparing { JobPhase::Image } else { JobPhase::Burning };
+        let eta = Eta::new(phase, Some(detail.clone()), Some(u.remaining_secs), None);
+        let _ = app.emit("burn-progress", BurnStatus { progress: u.progress, eta });
+    })
 }
 
 #[tauri::command]
@@ -310,27 +275,17 @@ pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequ
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
     std::thread::spawn(move || {
-        let (result, iso) = run_burn(&app, &request, &cancel);
-        let cancelled = cancel.load(Ordering::SeqCst);
-        let keep = request.keep_iso && result.is_ok() && !request.delete_after;
-        let kept = match iso {
-            Some(iso) if keep => Some(iso.to_string_lossy().into_owned()),
-            Some(iso) => {
-                let _ = std::fs::remove_file(&iso);
-                let _ = std::fs::remove_file(iso.with_extension("iso.part"));
-                None
-            }
-            None => None,
-        };
-        let mut done = match result {
-            Ok(()) => BurnDone {
+        let mut done = match run_burn(&app, &request, &cancel) {
+            Ok(outcome) => BurnDone {
                 ok: true,
                 cancelled: false,
                 message: if request.verify { "Die DVD wurde gebrannt und überprüft." } else { "Die DVD wurde gebrannt." }.into(),
-                iso: kept,
+                iso: outcome.iso.map(|p| p.to_string_lossy().into_owned()),
             },
-            Err(_) if cancelled => BurnDone { ok: false, cancelled: true, message: "Brennvorgang abgebrochen.".into(), iso: None },
-            Err(e) => BurnDone { ok: false, cancelled: false, message: e, iso: kept },
+            Err(BurnError::Cancelled) => {
+                BurnDone { ok: false, cancelled: true, message: "Brennvorgang abgebrochen.".into(), iso: None }
+            }
+            Err(e) => BurnDone { ok: false, cancelled: false, message: e.to_string(), iso: None },
         };
         if done.ok && request.delete_after {
             done.message.push_str(&match delete_dvd_output(Path::new(&request.video_ts)) {

@@ -73,6 +73,20 @@ pub fn tool_command(program: impl AsRef<std::ffi::OsStr>, priority: ProcessPrior
     cmd
 }
 
+/// Blocking counterpart of [`tool_command`] for synchronous callers (burner backends, opening a
+/// folder): no console window (Windows), stdin closed. Callers that wait for the process kill it
+/// themselves on cancel – `std::process::Child` has no kill-on-drop.
+pub fn blocking_tool_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Live telemetry of one ffmpeg run (from `-progress`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FfmpegProgress {

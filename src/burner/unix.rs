@@ -2,9 +2,11 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+
+use crate::tools::blocking_tool_command;
 
 use super::{
     verify_against_image, BurnError, BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo, MediaType, OpticalBurner,
@@ -113,7 +115,7 @@ impl OpticalBurner for CliBurner {
     }
 
     fn probe_media(&self, drive_id: &str) -> Result<MediaInfo, BurnError> {
-        let out = Command::new(self.xorriso()?).args(["-outdev", drive_id, "-list_speeds", "-toc"]).output()?;
+        let out = blocking_tool_command(self.xorriso()?).args(["-outdev", drive_id, "-list_speeds", "-toc"]).output()?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         Ok(parse_media(&text))
     }
@@ -138,7 +140,7 @@ impl OpticalBurner for CliBurner {
         }
         if !media.blank && media.physical.starts_with("DVD-RW") {
             let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "DVD-RW wird gelöscht …"));
-            let st = Command::new(self.xorriso()?).args(["-outdev", drive_id, "-blank", "as_needed"]).status()?;
+            let st = blocking_tool_command(self.xorriso()?).args(["-outdev", drive_id, "-blank", "as_needed"]).status()?;
             if !st.success() {
                 return Err(BurnError::Backend("DVD-RW konnte nicht gelöscht werden".into()));
             }
@@ -151,7 +153,7 @@ impl OpticalBurner for CliBurner {
             WriteSpeed::Specific(s) => Some(s as f64 / DVD_1X_SECTORS_PER_SEC),
         };
         let mut cmd = if let Some(g) = &self.growisofs {
-            let mut c = Command::new(g);
+            let mut c = blocking_tool_command(g);
             c.arg("-dvd-compat");
             if let Some(x) = x {
                 c.arg(format!("-speed={}", x.round().max(1.0)));
@@ -162,7 +164,7 @@ impl OpticalBurner for CliBurner {
             c.arg("-Z").arg(format!("{drive_id}={}", iso_path.display()));
             c
         } else {
-            let mut c = Command::new(self.xorriso()?);
+            let mut c = blocking_tool_command(self.xorriso()?);
             c.args(["-as", "cdrecord", "-v", "-dao"]).arg(format!("dev={drive_id}"));
             if let Some(x) = x {
                 c.arg(format!("speed={x:.1}"));
@@ -226,7 +228,7 @@ impl OpticalBurner for CliBurner {
             })?;
         }
         if options.eject {
-            let _ = Command::new("eject").arg(drive_id).status();
+            let _ = blocking_tool_command("eject").arg(drive_id).status();
         }
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Fertig"));
         Ok(())
