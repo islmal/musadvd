@@ -1359,6 +1359,28 @@ input.time {
   pointer-events: auto;
 }
 
+/* Background shading previews (match the ffmpeg filters of the build). */
+.ed-shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* geq alpha 215/255 · clip((y/h − 0.35) / 0.65) */
+.ed-shade.shade-bottomDark {
+  background: linear-gradient(to bottom, transparent 35%, rgba(0, 0, 0, 0.84) 100%);
+}
+
+/* vignette=angle=PI/4 */
+.ed-shade.shade-vignette {
+  background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+/* colorchannelmixer 0.6 */
+.ed-shade.shade-dim {
+  background: rgba(0, 0, 0, 0.4);
+}
+
 .ed-safe {
   position: absolute;
   inset: 5% 5%;

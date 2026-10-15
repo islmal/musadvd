@@ -204,3 +204,106 @@ fn invalid_layout_fails_before_encoding() {
     assert!(err.contains("Kapitel 42"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A clip with two audio tracks (source streams 1, 2), an SRT subtitle (stream 3) and named
+/// chapters at 0/4/8 s.
+fn multi_track_clip(tools: &Toolchain, dir: &Path) -> PathBuf {
+    std::fs::write(dir.join("sub.srt"), "1\n00:00:01,000 --> 00:00:03,000\nHallo\n").unwrap();
+    std::fs::write(
+        dir.join("chapters.ffmeta"),
+        ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=4000\ntitle=Anfang\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=4000\nEND=8000\ntitle=Mitte\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=8000\nEND=12000\ntitle=Ende\n",
+    )
+    .unwrap();
+    let clip = dir.join("multi.mkv");
+    let st = Command::new(&tools.ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=12"])
+        .args(["-f", "lavfi", "-i", "sine=f=440:duration=12", "-f", "lavfi", "-i", "sine=f=880:duration=12"])
+        .arg("-i")
+        .arg(dir.join("sub.srt"))
+        .arg("-i")
+        .arg(dir.join("chapters.ffmeta"))
+        .args(["-map", "0", "-map", "1", "-map", "2", "-map", "3", "-map_chapters", "4"])
+        .args(["-metadata:s:a:0", "language=ger", "-metadata:s:a:1", "language=eng", "-metadata:s:s:0", "language=ger"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-c:s", "srt"])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    clip
+}
+
+#[test]
+fn settings_menu_chapter_thumbnails_and_shading() {
+    let Some((rt, tools, dir, _)) = setup("settings") else { return };
+    let clip = multi_track_clip(&tools, &dir);
+    // What the editor's draft produces for such a title: chapter pages with moving thumbnails
+    // from each chapter start, a settings menu with audio/subtitle buttons, shaded backgrounds.
+    let json = r##"{
+      "version": 1,
+      "menus": [
+        {"id": "main", "name": "Hauptmenü", "role": "title",
+         "background": {"color": "#102030", "gradientOverlay": "vignette"},
+         "elements": [
+           {"type": "video", "title": 1, "x": 60, "y": 120, "w": 180, "h": 112, "action": {"type": "playTitle", "title": 1}},
+           {"type": "text", "text": "Kapitel", "x": 60, "y": 238, "w": 180, "h": 30, "action": {"type": "menu", "menu": "root"}},
+           {"type": "text", "text": "Einstellungen", "x": 60, "y": 300, "w": 180, "h": 30, "action": {"type": "menu", "menu": "set"}}
+         ]},
+        {"id": "root", "name": "Kapitel", "role": "root", "title": 1, "durationSecs": 2,
+         "background": {"video": {"title": 1}, "blur": 14, "gradientOverlay": "bottomDark"},
+         "elements": [
+           {"type": "video", "title": 1, "startSecs": 0, "x": 60, "y": 110, "w": 180, "h": 101, "action": {"type": "playChapter", "title": 1, "chapter": 1}},
+           {"type": "text", "text": "Anfang", "x": 60, "y": 215, "w": 180, "h": 30, "action": {"type": "playChapter", "title": 1, "chapter": 1}},
+           {"type": "video", "title": 1, "startSecs": 4, "x": 270, "y": 110, "w": 180, "h": 101, "action": {"type": "playChapter", "title": 1, "chapter": 2}},
+           {"type": "text", "text": "Mitte", "x": 270, "y": 215, "w": 180, "h": 30, "action": {"type": "playChapter", "title": 1, "chapter": 2}},
+           {"type": "video", "title": 1, "startSecs": 8, "x": 480, "y": 110, "w": 180, "h": 101, "action": {"type": "playChapter", "title": 1, "chapter": 3}},
+           {"type": "text", "text": "Ende", "x": 480, "y": 215, "w": 180, "h": 30, "action": {"type": "playChapter", "title": 1, "chapter": 3}},
+           {"type": "text", "text": "Einstellungen", "x": 240, "y": 490, "w": 160, "h": 36, "action": {"type": "menu", "menu": "set"}},
+           {"type": "text", "text": "Hauptmenü", "x": 410, "y": 490, "w": 130, "h": 36, "action": {"type": "menu", "menu": "main"}}
+         ]},
+        {"id": "set", "name": "Einstellungen", "role": "settings", "title": 1, "durationSecs": 2,
+         "background": {"video": {"title": 1}, "blur": 14, "gradientOverlay": "dim"},
+         "elements": [
+           {"type": "text", "text": "Deutsch", "x": 60, "y": 150, "w": 300, "h": 34, "action": {"type": "setAudio", "source": 1}},
+           {"type": "text", "text": "Englisch", "x": 60, "y": 188, "w": 300, "h": 34, "action": {"type": "setAudio", "source": 2}},
+           {"type": "text", "text": "Aus", "x": 380, "y": 150, "w": 280, "h": 34, "action": {"type": "setSubtitle", "source": null}},
+           {"type": "text", "text": "Deutsch", "x": 380, "y": 188, "w": 280, "h": 34, "action": {"type": "setSubtitle", "source": 3}},
+           {"type": "text", "text": "‹ Zurück", "x": 60, "y": 490, "w": 170, "h": 36, "action": {"type": "menu", "menu": "root"}}
+         ]}
+      ]
+    }"##;
+    let opts = BuildOptions {
+        inputs: vec![clip],
+        output: dir.join("out"),
+        custom_layout: Some(CustomLayout::from_json(json).unwrap()),
+        keep_work: true,
+        ..BuildOptions::default()
+    };
+    let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));
+    let xml = &report.authoring_xml;
+
+    // Settings menu = VTSM menu 3 (dispatcher, root, settings); stream numbers on the disc.
+    for cmd in [
+        "audio = 0; jump menu 3;",
+        "audio = 1; jump menu 3;",
+        "subtitle = 0; jump menu 3;",
+        "subtitle = 64; jump menu 3;",
+        "g2 = 102; jump titleset 1 menu;",
+        "<pre>if (g2 eq 102) jump menu 3; jump menu 2;</pre>",
+    ] {
+        assert!(xml.contains(cmd), "missing {cmd}: {xml}");
+    }
+    // dvdauthor built the titleset with its menus, both audio streams and the subpicture.
+    assert!(report.video_ts.join("VTS_01_0.VOB").is_file());
+    assert_eq!(report.titles[0].audio.len(), 2);
+    assert_eq!(report.titles[0].subtitles.len(), 1);
+    assert_eq!(report.titles[0].chapters, 3);
+    // Root menu: background + 3 chapter clips, each from its chapter start, bottom shading.
+    let work = report.work_dir.as_ref().unwrap();
+    let root = streams(&tools, &work.join("cm02.mpg"));
+    assert!(root.iter().any(|l| l.starts_with("dvd_subtitle")), "{root:?}");
+    assert!((1.5..3.0).contains(&duration(&tools, &work.join("cm02.mpg"))));
+    assert_eq!(report.motion_pages, 3, "main (video), root and settings (video backgrounds)");
+    std::fs::remove_dir_all(&dir).ok();
+}

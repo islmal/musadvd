@@ -392,6 +392,9 @@ export function openMenuEditor(opts: EditorOptions) {
       bgSrc.then((url) => (bg.style.backgroundImage = `url("${url}")`)).catch(() => undefined);
       stage.append(bg);
     }
+    // Background shading, same look as the ffmpeg filters (encoder::custom_menu_args).
+    const overlay = m.background.gradientOverlay ?? "none";
+    if (overlay !== "none") stage.append(el("div", { class: `ed-shade shade-${overlay}`, "aria-hidden": "true" }));
     for (const e of m.elements) stage.append(renderElement(e));
     if (showSafe) stage.append(el("div", { class: "ed-safe", "aria-hidden": "true" }));
     layoutStage();

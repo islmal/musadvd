@@ -389,20 +389,20 @@ npm: `@tauri-apps/api` 2.12.3, `@tauri-apps/plugin-dialog` 2.8.2, `@tauri-apps/c
 
 ## 5. Completed milestones & verified tests
 
-### 5.1 Test suite (last full run 2026-10-15: **132 passed, 0 failed**)
+### 5.1 Test suite (2026-10-15: **135 tests, all green** – engine/integration from the user's full run plus the new settings test, GUI from the last GUI run)
 
-`cargo test --workspace` → engine unit tests 96, GUI unit tests 8, integration tests 28:
+`cargo test --workspace` → engine unit tests 97, GUI unit tests 9, integration tests 29:
 
 | Test file | Tests | What it proves (real tools unless noted) |
 |---|---|---|
-| unit (`src/**`) | 96 | Custom layouts (JSON round trip, DVD-limit validation, cross-domain navigation commands, dispatcher command limit, layer/mask/spec rendering, NTSC scaling), custom menu filter graph, parsers, bitrate model, filters/args, XML generation, label rules, CRC/tags/dstrings/extents of the UDF writer, layer-break choice + `TT_SRPT` patch, speed mapping, `BurnEta`, `FrameEta`, config sanitising, ffmpeg progress parsing, verify mismatch detection, IMAPI drive enumeration (real drive, read-only) |
-| GUI unit (`src-tauri`) | 8 | Layout check against project titles, media-view rules (auto-start only on suitable media, RW erase rules, DVD-9 needs DL, speed estimates), ISO path numbering, safe post-burn deletion, project calculation |
+| unit (`src/**`) | 97 | Custom layouts (settings menus and stream selection, background shading graph, JSON round trip, DVD-limit validation, cross-domain navigation commands, dispatcher command limit, layer/mask/spec rendering, NTSC scaling), custom menu filter graph, parsers, bitrate model, filters/args, XML generation, label rules, CRC/tags/dstrings/extents of the UDF writer, layer-break choice + `TT_SRPT` patch, speed mapping, `BurnEta`, `FrameEta`, config sanitising, ffmpeg progress parsing, verify mismatch detection, IMAPI drive enumeration (real drive, read-only) |
+| GUI unit (`src-tauri`) | 9 | Layout save/load round trip and error path, layout check against project titles, media-view rules (auto-start only on suitable media, RW erase rules, DVD-9 needs DL, speed estimates), ISO path numbering, safe post-burn deletion, project calculation |
 | `build_dvd.rs` | 1 | Two clips (16:9 5.1 + stereo, German SRT with umlauts, chapters) → full DVD-5 with sub-menus; stream codecs in VOBs |
 | `two_pass.rs` | 5 | 1-pass/2-pass args, real encodes produce a DVD program stream (MPEG-2 720×576 + AC-3), no `.m2v`/`.ac3`/pass logs left |
 | `motion_menu.rs` | 7 | Motion layers/slots on the real template, overlay pipeline produces DVD MPEG, full build with looping menus, sound start per chapter page |
 | `ntsc.rs` | 2 | NTSC 720×480 @ 29.97 for titles, still and motion menus, masks, subtitles; menu sound per video |
 | `playback_options.rs` | 3 | Auto start / sequential / loop; single title without title/root menu |
-| `custom_menu.rs` | 3 | Custom layout → full DVD with real ffmpeg/spumux/dvdauthor: blurred image background, video button, rotated image, sound, video background; dispatcher (`if (g2 eq 102) jump menu 3`), chapter dispatcher, VMGM router, `g2 = 0` resets accepted by dvdauthor; menu VOB has MPEG-2 + AC-3 + subpicture, ~3 s loop; mask uses only layout colours; NTSC canvas → 720×480; invalid chapter fails before encoding |
+| `custom_menu.rs` | 4 | Settings menu with `setAudio`/`setSubtitle` (2 audio tracks, SRT subtitle), chapter video buttons from each chapter start, vignette/bottomDark/dim shading → real build accepted by dvdauthor; custom layout → full DVD with real ffmpeg/spumux/dvdauthor: blurred image background, video button, rotated image, sound, video background; dispatcher (`if (g2 eq 102) jump menu 3`), chapter dispatcher, VMGM router, `g2 = 0` resets accepted by dvdauthor; menu VOB has MPEG-2 + AC-3 + subpicture, ~3 s loop; mask uses only layout colours; NTSC canvas → 720×480; invalid chapter fails before encoding |
 | `cancel.rs` | 1 | Cancel during encoding kills tools and removes the work dir |
 | `disc_image.rs` | 2 | ISO of a real DVD **mounted by Windows** (`Mount-DiskImage`): FS = UDF, label correct, every file byte-identical; layer-break plan on injected small capacities lands on a cell start, %16, L0 ≥ L1; forced padding + patched `TT_SRPT` keeps title→VTS addresses consistent and mounts correctly |
 | `real_templates.rs` | 2 | All installed "Open Style" templates parse |
@@ -452,7 +452,8 @@ ConvertX templates are missing.
 - 🟡 Custom-layout navigation on a real DVD player / VM (dvdauthor accepts it and the command
   strings are unit-tested, but no playback emulator was run).
 - 🟡 Editor features not clicked through in the GUI: image elements/backgrounds via file
-  dialog, audio file, load/save JSON, root menus, menu reordering/deletion, undo after drag.
+  dialog, audio file, loading JSON, menu reordering/deletion, undo after drag. (Saving JSON,
+  root/settings menus and stream actions were clicked through on 2026-10-15.)
 
 ---
 
@@ -593,9 +594,22 @@ Newest first. Every change to the project adds an entry here (rule in `CLAUDE.md
   "Einstellungen" menu per title with several audio tracks or subtitles, `.gitattributes` (LF).
 - Verified: `cargo check --workspace` clean, unit tests 97 engine + 9 GUI green,
   `npm run build` (tsc) clean, overlay filters run with real ffmpeg (manual test).
-  **Not yet run after this change:** the integration test suite (`cargo test --workspace`
-  incl. `tests/`), an end-to-end build of a settings menu, and the editor UI for the new
-  options.
+  Afterwards (see the next entry): full test suite, end-to-end settings build, editor UI.
+
+### 2026-10-15 — Settings menus verified end to end; shading preview in the editor
+- New integration test `settings_menu_chapter_thumbnails_and_shading`: clip with 2 audio
+  tracks, an SRT subtitle and named chapters → layout with chapter video buttons (start 0/4/8 s),
+  settings menu (`setAudio`/`setSubtitle`), all three shadings → real build; dvdauthor accepts
+  `audio = 0/1; jump menu 3;`, `subtitle = 0/64; …`, settings entered via dispatcher code 102.
+- Editor: background shading is now previewed on the stage (CSS gradients matching the ffmpeg
+  filters).
+- Files: `tests/custom_menu.rs`, `frontend/src/menuEditor.ts`, `frontend/src/styles.css`.
+- Verified: full `cargo test --workspace` run by the user before this entry (97 engine unit,
+  28 integration tests green); new test green (custom_menu.rs 4/4); `npm run build` clean;
+  release GUI (separate target dir) with a 2-audio/1-subtitle/3-chapter clip: draft has
+  chapter page with video buttons + settings menu, action panel "Tonspur wählen → Deutsch",
+  dim/bottomDark previews; **"Speichern …" writes the JSON through the native dialog** (green
+  "Gespeichert: …" message); `build-dvd --layout <saved file>` builds the DVD.
 
 ### 2026-10-15 — Git repository; real burn verified by the user
 - `git init` (branch `main`, repo-local identity `malik <user@example.invalid>`), `.gitignore`
