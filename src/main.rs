@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use convertx_rust::author::{CommandContext, Domain, TitleSpec, TvStandard};
-use convertx_rust::calculator::{self, Clamp, DiscType};
+use convertx_rust::author::{CommandContext, Domain, Resolution, TitleSpec, TvStandard};
+use convertx_rust::calculator::{self, Clamp, DiscType, EncodingProfile};
 use convertx_rust::dvd::{self, BuildOptions, Event};
 use convertx_rust::encoder::MenuAudio;
 use convertx_rust::menu::{self, MenuSetOptions, UiLang};
@@ -117,6 +117,13 @@ enum Command {
         /// TV standard of titles and menus.
         #[arg(long, value_enum, default_value = "pal")]
         tv: Tv,
+        /// Frame size of the titles (menus stay Full D1); half-d1/sif titles are always 4:3.
+        #[arg(long, value_enum, default_value = "full-d1")]
+        resolution: Res,
+        /// Upper limit of the video bitrate: auto/sp ≤ 8500, mp ≤ 6000, lp ≤ 4000 kbps (lp
+        /// switches to Half D1 below 3000 kbps).
+        #[arg(long, value_enum, default_value = "auto")]
+        encoding_profile: Profile,
         /// Name of the DVD folder inside --output (default: menu title / first video's name).
         #[arg(long)]
         project_name: Option<String>,
@@ -175,6 +182,42 @@ enum Command {
 enum Tv {
     Pal,
     Ntsc,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Res {
+    FullD1,
+    HalfD1,
+    Sif,
+}
+
+impl From<Res> for Resolution {
+    fn from(r: Res) -> Self {
+        match r {
+            Res::FullD1 => Resolution::FullD1,
+            Res::HalfD1 => Resolution::HalfD1,
+            Res::Sif => Resolution::Sif,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Profile {
+    Auto,
+    Sp,
+    Mp,
+    Lp,
+}
+
+impl From<Profile> for EncodingProfile {
+    fn from(p: Profile) -> Self {
+        match p {
+            Profile::Auto => EncodingProfile::Auto,
+            Profile::Sp => EncodingProfile::Sp,
+            Profile::Mp => EncodingProfile::Mp,
+            Profile::Lp => EncodingProfile::Lp,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -603,6 +646,8 @@ fn main() -> ExitCode {
             hw_decode,
             menu_audio,
             tv,
+            resolution,
+            encoding_profile,
             project_name,
             layout,
         } => {
@@ -643,6 +688,8 @@ fn main() -> ExitCode {
                     Tv::Pal => TvStandard::Pal,
                     Tv::Ntsc => TvStandard::Ntsc,
                 },
+                resolution: resolution.into(),
+                encoding_profile: encoding_profile.into(),
                 project_name,
                 selections: vec![],
                 parallel_jobs: jobs.map(usize::from),
@@ -702,6 +749,10 @@ fn main() -> ExitCode {
                     );
                     if r.motion_pages > 0 {
                         println!("  davon {} Motion-Menü(s)", r.motion_pages);
+                    }
+                    if r.resolution != Resolution::FullD1 {
+                        let (w, h) = r.resolution.frame_size(opts.tv_standard);
+                        println!("  Titel in {} ({w}×{h})", r.resolution.label());
                     }
                     for t in &r.titles {
                         println!(

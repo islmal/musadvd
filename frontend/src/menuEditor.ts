@@ -5,7 +5,7 @@
 // texts and pictures look as they will on the TV. Buttons are axis-aligned rectangles (no
 // rotation, at most 36 per menu, no overlaps) – the DVD subpicture only knows `x0 y0 x1 y1`.
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { checkLayout, imagePreview, loadLayout, saveLayout, titleFrame } from "./api";
+import { checkLayout, imagePreview, loadLayout, saveLayout, textLines, titleFrame } from "./api";
 import {
   FONTS,
   MAX_BUTTONS,
@@ -25,6 +25,7 @@ import {
   type EditorTitle,
   type Fit,
   type LayoutElement,
+  type TextElement,
 } from "./layout";
 
 type Child = Node | string | null | undefined | false;
@@ -134,6 +135,38 @@ export function openMenuEditor(opts: EditorOptions) {
     return preview("frame", `${t.path}@${at.toFixed(1)}`, () => titleFrame(t.path, at));
   };
   const imageOf = (path: string) => preview("image", path, () => imagePreview(path));
+
+  /** Line breaks of wrapped texts, computed by the engine (same fonts and metrics as the build). */
+  const lineCache = new Map<string, Promise<string[]>>();
+  function linesOf(e: TextElement): Promise<string[]> {
+    const key = JSON.stringify([e.text, e.font, e.size, e.bold, e.italic, e.wrap, e.w, e.h, e.rotation, L.canvas, opts.tv]);
+    let p = lineCache.get(key);
+    if (!p) {
+      p = textLines(e, L.canvas, opts.tv);
+      p.catch(() => lineCache.delete(key));
+      if (lineCache.size > 200) lineCache.clear();
+      lineCache.set(key, p);
+    }
+    return p;
+  }
+
+  /** Width of a canvas pixel on the 4:3 TV screen relative to its height (PAL 16/15). */
+  const pixelAspect = () => (4 / 3) * (H() / W());
+
+  /**
+   * Size and position of a square-pixel picture of `iw`×`ih` fitted into a `bw`×`bh` box of
+   * canvas pixels so that it keeps its proportions on the TV, like the build: the axis that
+   * ends up horizontal on the screen (the height when `sideways`) counts `pixelAspect()` wider.
+   */
+  function fitOnScreen(iw: number, ih: number, bw: number, bh: number, fit: Fit, sideways: boolean) {
+    if (fit === "stretch" || iw <= 0 || ih <= 0) return { w: bw, h: bh, x: 0, y: 0 };
+    const fx = sideways ? 1 : pixelAspect();
+    const fy = sideways ? pixelAspect() : 1;
+    const s = (fit === "cover" ? Math.max : Math.min)((bw * fx) / iw, (bh * fy) / ih);
+    const w = (iw * s) / fx;
+    const h = (ih * s) / fy;
+    return { w, h, x: (bw - w) / 2, y: (bh - h) / 2 };
+  }
 
   function actionLabel(a: Action | null | undefined): string {
     if (!a) return "";
@@ -340,6 +373,16 @@ export function openMenuEditor(opts: EditorOptions) {
     if (e.type === "text") {
       inner.classList.add("ed-text");
       inner.textContent = e.text;
+      if (e.wrap) {
+        // Browser wrapping until the engine's line breaks arrive.
+        inner.style.whiteSpace = "pre-wrap";
+        linesOf(e)
+          .then((lines) => {
+            inner.style.whiteSpace = "pre";
+            inner.textContent = lines.join("\n");
+          })
+          .catch(() => undefined);
+      }
       Object.assign(inner.style, {
         fontFamily: `"${e.font}", Arial, sans-serif`,
         fontSize: `${e.size}px`,
@@ -352,6 +395,12 @@ export function openMenuEditor(opts: EditorOptions) {
     } else {
       const img = el("img", { class: `ed-media fit-${e.fit}`, alt: "", draggable: false }) as HTMLImageElement;
       inner.append(img);
+      // Fitted with the TV's pixel shape (square-pixel preview), like the build.
+      img.addEventListener("load", () => {
+        const sideways = e.rotation % 180 === 90;
+        const r = fitOnScreen(img.naturalWidth, img.naturalHeight, sideways ? e.h : e.w, sideways ? e.w : e.h, e.fit, sideways);
+        Object.assign(img.style, { position: "absolute", objectFit: "fill", width: `${r.w}px`, height: `${r.h}px`, left: `${r.x}px`, top: `${r.y}px` });
+      });
       const src = e.type === "image" ? imageOf(e.src) : frameOf(e.title, e.startSecs);
       src.then((url) => (img.src = url)).catch(() => inner.classList.add("ed-missing"));
       if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${titles[e.title - 1]?.label ?? `Titel ${e.title} (fehlt)`}`));
@@ -362,7 +411,7 @@ export function openMenuEditor(opts: EditorOptions) {
         class: `ed-el${isButton(e) ? " is-button" : ""}${e.id === selId ? " selected" : ""}`,
         title: actionLabel(e.action),
         "data-id": e.id,
-        style: `--ed-hl: ${L.highlight.color}`,
+        style: `--ed-hl: ${e.highlight?.color ?? L.highlight.color}`,
       },
       inner,
     );
@@ -389,7 +438,18 @@ export function openMenuEditor(opts: EditorOptions) {
     if (bgSrc) {
       const bg = el("div", { class: "ed-bg" });
       bg.style.filter = m.background.blur > 0 ? `blur(${m.background.blur}px)` : "";
-      bgSrc.then((url) => (bg.style.backgroundImage = `url("${url}")`)).catch(() => undefined);
+      bgSrc
+        .then((url) => {
+          bg.style.backgroundImage = `url("${url}")`;
+          // Cover with the TV's pixel shape, like the build.
+          const probe = new Image();
+          probe.onload = () => {
+            const r = fitOnScreen(probe.naturalWidth, probe.naturalHeight, W(), H(), "cover", false);
+            bg.style.backgroundSize = `${r.w}px ${r.h}px`;
+          };
+          probe.src = url;
+        })
+        .catch(() => undefined);
       stage.append(bg);
     }
     // Background shading, same look as the ffmpeg filters (encoder::custom_menu_args).
@@ -785,6 +845,36 @@ export function openMenuEditor(opts: EditorOptions) {
     return out;
   }
 
+  /** Own marked/activated colours of a button (at most 3 different pairs per menu). */
+  function buttonColorControls(e: LayoutElement): HTMLElement[] {
+    if (!isButton(e)) return [];
+    const own = e.highlight ?? null;
+    const out: HTMLElement[] = [
+      el(
+        "label",
+        { class: "ed-check" },
+        el("input", {
+          type: "checkbox",
+          checked: !!own,
+          onchange: (ev: Event) => {
+            remember();
+            e.highlight = (ev.target as HTMLInputElement).checked ? { color: L.highlight.color, selectColor: L.highlight.selectColor } : null;
+            renderAll();
+          },
+        }),
+        "Eigene Farben",
+      ),
+    ];
+    if (own) {
+      out.push(
+        row("Ausgewählt", bind(el("input", { type: "color", value: own.color }) as HTMLInputElement, (v) => (own.color = v.toUpperCase()), { live: true })),
+        row("Aktiviert", bind(el("input", { type: "color", value: own.selectColor }) as HTMLInputElement, (v) => (own.selectColor = v.toUpperCase()), { live: true })),
+        el("p", { class: "ed-hint" }, "Eine DVD-Menüseite zeigt höchstens 3 verschiedene Farbpaare; Buttons mit derselben Markierungsfarbe brauchen dieselbe Aktivierungsfarbe."),
+      );
+    }
+    return out;
+  }
+
   function elementProps(m: CustomMenu, e: LayoutElement): HTMLElement[] {
     const kind = e.type === "text" ? "Text" : e.type === "image" ? "Bild" : "Video";
     const typeGroup: Child[] = [];
@@ -824,13 +914,14 @@ export function openMenuEditor(opts: EditorOptions) {
               ["bold", "Fett"],
               ["italic", "Kursiv"],
               ["shadow", "Schatten"],
+              ["wrap", "Zeilenumbruch"],
             ] as const).map(([k, label]) =>
               el(
                 "label",
                 { class: "ed-check" },
                 el("input", {
                   type: "checkbox",
-                  checked: t[k],
+                  checked: !!t[k],
                   onchange: (ev: Event) => {
                     remember();
                     t[k] = (ev.target as HTMLInputElement).checked;
@@ -884,7 +975,7 @@ export function openMenuEditor(opts: EditorOptions) {
     return [
       el("h3", {}, kind),
       ...(typeGroup as HTMLElement[]),
-      group("Button", ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null),
+      group("Button", ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...buttonColorControls(e)),
       group(
         "Position & Größe",
         el(
@@ -978,7 +1069,7 @@ export function openMenuEditor(opts: EditorOptions) {
     renderAll();
   }
   function addText() {
-    addElement(newText(Math.round(W() / 2 - 120), Math.round(H() / 2 - 25), 240, 50, "Neuer Text", { size: 28 }));
+    addElement(newText(Math.round(W() / 2 - 120), Math.round(H() / 2 - 25), 240, 50, "Neuer Text", { size: 28, wrap: true }));
   }
   async function addImage() {
     const p = await chooseFile(IMAGE_FILTER);

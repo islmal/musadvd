@@ -421,14 +421,16 @@ pub fn burn_video_ts(
     const IMAGE: &str = "Disc-Image wird erstellt …";
     emit(BurnProgress::new(BurnPhase::Preparing, 0.0, IMAGE));
     let mut last = -1.0;
-    let result = create_disc_image(&job.video_ts, &job.iso, &job.label, job.capacities, cancel, |f| {
+    let image = create_disc_image(&job.video_ts, &job.iso, &job.label, job.capacities, cancel, |f| {
         if f - last >= 0.01 || f >= 1.0 {
             last = f;
             emit(BurnProgress::new(BurnPhase::Preparing, f, IMAGE));
         }
     })
-    .map_err(|e| BurnError::Image(e.to_string()))
-    .and_then(|plan| {
+    .map_err(|e| BurnError::Image(e.to_string()));
+    // Until the image is renamed into place, a file at `job.iso` is not ours (CLI `--keep-iso PATH`).
+    let image_written = image.is_ok();
+    let result = image.and_then(|plan| {
         if cancel.load(Ordering::SeqCst) {
             return Err(BurnError::Cancelled);
         }
@@ -441,7 +443,9 @@ pub fn burn_video_ts(
     });
     let keep = job.keep_iso && result.is_ok();
     if !keep {
-        let _ = std::fs::remove_file(&job.iso);
+        if image_written {
+            let _ = std::fs::remove_file(&job.iso);
+        }
         let _ = std::fs::remove_file(job.iso.with_extension("iso.part"));
     }
     match result {

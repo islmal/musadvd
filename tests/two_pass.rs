@@ -51,7 +51,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
     EncodeJob {
         info,
         audio: info.audio.iter().collect(),
-        text_subtitles: vec![],
+        subtitles: vec![],
         video_kbps: 6000,
         aspect: Aspect::for_source(info.video.as_ref().unwrap().display_aspect),
         dir: dir.to_path_buf(),
@@ -59,6 +59,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         two_pass,
         fast: false,
         tv: TvStandard::Pal,
+        resolution: Default::default(),
         hwaccel: None,
     }
 }

@@ -465,7 +465,7 @@ function renderSubtitleTab(t: Title) {
   return h(
     "div",
     { class: "track-list" },
-    h("p", { class: "hint" }, "Text-Untertitel (SRT/ASS) werden als DVD-Untertitel gerendert. Bild-Untertitel (PGS/VobSub) werden noch nicht unterstützt."),
+    h("p", { class: "hint" }, "Text-Untertitel (SRT/ASS) werden als DVD-Untertitel gerendert. Bild-Untertitel (Blu-ray-PGS, DVD-VobSub) werden umgerechnet und auf 3 Farben reduziert. DVB- und XSUB-Untertitel werden nicht unterstützt."),
     ...t.meta.subtitles.map((s) =>
       h(
         "label",
@@ -608,12 +608,12 @@ function editorTitles(): EditorTitle[] {
       durationSecs: t.meta.durationSecs,
       chapterNames: starts.map((s) => t.meta.chapters.find((c) => Math.abs(c.startSecs - s) < 0.5)?.title ?? null),
       chapterStarts: starts,
-      // Tracks that go onto the disc (bitmap subtitles are skipped by the engine).
+      // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
         .filter((a) => t.audio.has(a.index))
         .map((a) => ({ source: a.index, label: a.title ? `${a.languageName} – ${a.title}` : a.languageName })),
       subtitleTracks: t.meta.subtitles
-        .filter((s) => t.subs.has(s.index) && s.kind === "text")
+        .filter((s) => t.subs.has(s.index) && s.supported)
         .map((s) => ({ source: s.index, label: s.title ? `${s.languageName} – ${s.title}` : s.languageName })),
     };
   });

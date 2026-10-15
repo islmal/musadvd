@@ -5,18 +5,19 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use windows::core::{implement, Interface, BSTR, HRESULT};
+use windows::core::{implement, Interface, Ref, BSTR, GUID, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{E_ABORT, E_NOTIMPL, S_OK, VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::Storage::Imapi::*;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, ISequentialStream_Impl, IStream, IStream_Impl, CLSCTX_ALL,
-    COINIT_MULTITHREADED, LOCKTYPE, SAFEARRAY, STATFLAG, STATSTG, STGC, STREAM_SEEK, STREAM_SEEK_CUR, STREAM_SEEK_END,
-    STREAM_SEEK_SET,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IConnectionPoint, IConnectionPointContainer, IDispatch,
+    IDispatch_Impl, ISequentialStream_Impl, IStream, IStream_Impl, ITypeInfo, CLSCTX_ALL, COINIT_MULTITHREADED,
+    DISPATCH_FLAGS, DISPPARAMS, EXCEPINFO, LOCKTYPE, SAFEARRAY, STATFLAG, STATSTG, STGC, STREAM_SEEK, STREAM_SEEK_CUR,
+    STREAM_SEEK_END, STREAM_SEEK_SET,
 };
 use windows::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
-use windows::Win32::System::Variant::{VariantClear, VARIANT, VT_BSTR, VT_I4};
+use windows::Win32::System::Variant::{VariantClear, VARIANT, VT_BSTR, VT_DISPATCH, VT_I4};
 
 use super::{
     verify_against_image, BurnError, BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo, MediaType, OpticalBurner,
@@ -37,7 +38,8 @@ fn backend(e: windows::core::Error) -> BurnError {
     }
 }
 
-/// COM for the current thread, released on drop.
+/// COM for the current thread, released on drop. `true`: initialised here as MTA; `false`: the
+/// thread already was an STA (no message loop of ours, so no COM events are delivered).
 struct Com(bool);
 
 impl Com {
@@ -243,6 +245,9 @@ struct ImageStream {
     reported: AtomicU64,
     cancel: *const AtomicBool,
     tx: Mutex<Sender<BurnProgress>>,
+    /// Set once IMAPI's write events arrive; until then (or without them) progress is derived
+    /// from the data handed to IMAPI, which runs ahead of the real write position (buffering).
+    events_seen: Arc<AtomicBool>,
 }
 
 impl ImageStream {
@@ -277,7 +282,8 @@ impl ISequentialStream_Impl for ImageStream_Impl {
         let pos = self.pos.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
         // Report every ~8 MB and at the end.
         let last = self.reported.load(Ordering::Relaxed);
-        if pos >= self.len {
+        if self.events_seen.load(Ordering::Relaxed) {
+        } else if pos >= self.len {
             self.send(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Disc wird abgeschlossen …"));
         } else if pos - last.min(pos) >= 8 << 20 || last == 0 {
             self.reported.store(pos, Ordering::Relaxed);
@@ -338,6 +344,157 @@ impl IStream_Impl for ImageStream_Impl {
     }
 }
 
+/// Progress for one IMAPI write update (`DDiscFormat2DataEvents::Update`): the current action and
+/// the sector range being written. `None` when there is nothing to report.
+fn write_update(action: IMAPI_FORMAT2_DATA_WRITE_ACTION, start_lba: i32, sector_count: i32, last_written_lba: i32) -> Option<BurnProgress> {
+    match action {
+        IMAPI_FORMAT2_DATA_WRITE_ACTION_VALIDATING_MEDIA
+        | IMAPI_FORMAT2_DATA_WRITE_ACTION_FORMATTING_MEDIA
+        | IMAPI_FORMAT2_DATA_WRITE_ACTION_INITIALIZING_HARDWARE
+        | IMAPI_FORMAT2_DATA_WRITE_ACTION_CALIBRATING_POWER => {
+            Some(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"))
+        }
+        IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA if sector_count > 0 => {
+            let done = (last_written_lba as i64 - start_lba as i64).max(0) as f64;
+            Some(BurnProgress::new(BurnPhase::Writing, done / sector_count as f64, "Daten werden geschrieben …"))
+        }
+        // IMAPI's own verification (if a drive does it) counts as part of closing the disc.
+        IMAPI_FORMAT2_DATA_WRITE_ACTION_FINALIZATION | IMAPI_FORMAT2_DATA_WRITE_ACTION_VERIFYING => {
+            Some(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Disc wird abgeschlossen …"))
+        }
+        _ => None,
+    }
+}
+
+/// Sink for IMAPI's write events: the real write position (instead of the data handed to IMAPI)
+/// and the finalizing phase. Cancels the write from inside the event when asked to.
+#[implement(DDiscFormat2DataEvents)]
+struct WriteEvents {
+    format: IDiscFormat2Data,
+    cancel: *const AtomicBool,
+    tx: Mutex<Sender<BurnProgress>>,
+    /// Last report (phase, per mille) to skip repeats.
+    last: Mutex<Option<(BurnPhase, u32)>>,
+    /// Tells the image stream to stop reporting.
+    seen: Arc<AtomicBool>,
+}
+
+impl WriteEvents {
+    fn update(&self, progress: &IDispatch) {
+        // SAFETY: the flag outlives the sink (burn_iso unadvises it before returning).
+        if unsafe { (*self.cancel).load(Ordering::Relaxed) } {
+            unsafe {
+                let _ = self.format.CancelWrite();
+            }
+            return;
+        }
+        let Ok(args) = progress.cast::<IDiscFormat2DataEventArgs>() else { return };
+        self.seen.store(true, Ordering::Relaxed);
+        let p = unsafe {
+            let (Ok(action), Ok(start), Ok(count), Ok(last)) =
+                (args.CurrentAction(), args.StartLba(), args.SectorCount(), args.LastWrittenLba())
+            else {
+                return;
+            };
+            write_update(action, start, count, last)
+        };
+        let Some(p) = p else { return };
+        let key = (p.phase, (p.fraction * 1000.0) as u32);
+        let mut last = self.last.lock().unwrap();
+        if *last != Some(key) {
+            *last = Some(key);
+            let _ = self.tx.lock().unwrap().send(p);
+        }
+    }
+}
+
+impl DDiscFormat2DataEvents_Impl for WriteEvents_Impl {
+    fn Update(&self, _object: Ref<IDispatch>, progress: Ref<IDispatch>) -> windows::core::Result<()> {
+        if let Ok(progress) = progress.ok() {
+            WriteEvents::update(self, progress);
+        }
+        Ok(())
+    }
+}
+
+/// IMAPI raises the events through `IDispatch::Invoke` (DISPID 0x200, arguments in reverse
+/// order: progress, object).
+impl IDispatch_Impl for WriteEvents_Impl {
+    fn GetTypeInfoCount(&self) -> windows::core::Result<u32> {
+        Ok(0)
+    }
+    fn GetTypeInfo(&self, _itinfo: u32, _lcid: u32) -> windows::core::Result<ITypeInfo> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetIDsOfNames(&self, _riid: *const GUID, _names: *const PCWSTR, _count: u32, _lcid: u32, _ids: *mut i32) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Invoke(
+        &self,
+        dispid: i32,
+        _riid: *const GUID,
+        _lcid: u32,
+        _flags: DISPATCH_FLAGS,
+        params: *const DISPPARAMS,
+        _result: *mut VARIANT,
+        _excepinfo: *mut EXCEPINFO,
+        _argerr: *mut u32,
+    ) -> windows::core::Result<()> {
+        if dispid as u32 != DISPID_DDISCFORMAT2DATAEVENTS_UPDATE || params.is_null() {
+            return Ok(());
+        }
+        unsafe {
+            let params = &*params;
+            if params.cArgs < 1 || params.rgvarg.is_null() {
+                return Ok(());
+            }
+            let inner = &(*params.rgvarg).Anonymous.Anonymous;
+            if inner.vt == VT_DISPATCH {
+                if let Some(progress) = (*inner.Anonymous.pdispVal).as_ref() {
+                    WriteEvents::update(self, progress);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An advised [`WriteEvents`] sink; unadvised on drop.
+struct EventConnection {
+    point: IConnectionPoint,
+    cookie: u32,
+}
+
+impl EventConnection {
+    /// Connects a sink to `format`; `None` when IMAPI does not offer the events (the stream's
+    /// progress is used then). Events need an MTA thread (they arrive on IMAPI's threads).
+    fn advise(format: &IDiscFormat2Data, cancel: &AtomicBool, tx: Sender<BurnProgress>, seen: Arc<AtomicBool>) -> Option<Self> {
+        unsafe {
+            let container: IConnectionPointContainer = format.cast().ok()?;
+            let point = container.FindConnectionPoint(&DDiscFormat2DataEvents::IID).ok()?;
+            let sink: DDiscFormat2DataEvents = WriteEvents {
+                format: format.clone(),
+                cancel: cancel as *const AtomicBool,
+                tx: Mutex::new(tx),
+                last: Mutex::new(None),
+                seen,
+            }
+            .into();
+            let cookie = point.Advise(&sink).ok()?;
+            Some(EventConnection { point, cookie })
+        }
+    }
+}
+
+impl Drop for EventConnection {
+    fn drop(&mut self) {
+        // Also breaks the reference cycle format → connection point → sink → format.
+        unsafe {
+            let _ = self.point.Unadvise(self.cookie);
+        }
+    }
+}
+
 /// Burner using the Windows Image Mastering API v2.
 pub struct ImapiBurner;
 
@@ -386,7 +543,7 @@ impl OpticalBurner for ImapiBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
-        let _com = Com::init()?;
+        let com = Com::init()?;
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …"));
         let rec = recorder(drive_id)?;
         let (media, format) = probe(&rec)?;
@@ -441,6 +598,10 @@ impl OpticalBurner for ImapiBurner {
             }
         }
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
+        // IMAPI's write events report the real position; the image stream reports until the
+        // first event arrives (or throughout, without events).
+        let events_seen = Arc::new(AtomicBool::new(false));
+        let events = if com.0 { EventConnection::advise(&format, cancel, progress_tx.clone(), events_seen.clone()) } else { None };
         let stream: IStream = ImageStream {
             file: Mutex::new(file),
             len,
@@ -448,9 +609,11 @@ impl OpticalBurner for ImapiBurner {
             reported: AtomicU64::new(0),
             cancel: cancel as *const AtomicBool,
             tx: Mutex::new(progress_tx.clone()),
+            events_seen,
         }
         .into();
         let written = unsafe { format.Write(&stream) };
+        drop(events);
         drop(stream);
         if let Err(e) = written {
             return Err(if cancel.load(Ordering::Relaxed) { BurnError::Cancelled } else { backend(e) });
@@ -482,6 +645,44 @@ impl OpticalBurner for ImapiBurner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_updates_map_to_phases() {
+        let prep = write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_CALIBRATING_POWER, 0, 0, 0).unwrap();
+        assert_eq!((prep.phase, prep.fraction), (BurnPhase::Formatting, 0.0));
+        assert_eq!(prep.message, "Disc wird vorbereitet …", "same text as before the write starts");
+        for a in [IMAPI_FORMAT2_DATA_WRITE_ACTION_VALIDATING_MEDIA, IMAPI_FORMAT2_DATA_WRITE_ACTION_FORMATTING_MEDIA, IMAPI_FORMAT2_DATA_WRITE_ACTION_INITIALIZING_HARDWARE] {
+            assert_eq!(write_update(a, 0, 0, 0).unwrap().phase, BurnPhase::Formatting);
+        }
+        // Written fraction from the LBA range.
+        let w = write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 0, 2_000_000, 500_000).unwrap();
+        assert_eq!(w.phase, BurnPhase::Writing);
+        assert!((w.fraction - 0.25).abs() < 1e-9);
+        assert_eq!(w.message, "Daten werden geschrieben …");
+        let w = write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 1000, 2000, 2000).unwrap();
+        assert!((w.fraction - 0.5).abs() < 1e-9, "relative to the start LBA");
+        assert_eq!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 1000, 2000, 500).unwrap().fraction, 0.0);
+        assert_eq!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 0, 100, 250).unwrap().fraction, 1.0, "clamped");
+        assert!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 0, 0, 10).is_none(), "no sector count yet");
+        for a in [IMAPI_FORMAT2_DATA_WRITE_ACTION_FINALIZATION, IMAPI_FORMAT2_DATA_WRITE_ACTION_VERIFYING] {
+            let f = write_update(a, 0, 100, 100).unwrap();
+            assert_eq!((f.phase, f.message.as_str()), (BurnPhase::Finalizing, "Disc wird abgeschlossen …"));
+        }
+        assert!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_COMPLETED, 0, 100, 100).is_none());
+        assert!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION(99), 0, 100, 100).is_none());
+    }
+
+    /// The sink can be connected to a real IMAPI format object (no disc access, no write).
+    #[test]
+    fn write_events_can_be_advised() {
+        let _com = Com::init().unwrap();
+        let format: IDiscFormat2Data = unsafe { CoCreateInstance(&MsftDiscFormat2Data, None, CLSCTX_ALL) }.expect("IMAPI2 available");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let connection = EventConnection::advise(&format, &cancel, tx, Arc::new(AtomicBool::new(false)))
+            .expect("IMAPI offers DDiscFormat2DataEvents");
+        drop(connection);
+    }
 
     /// Enumerates the real drives (no disc access beyond IMAPI queries).
     #[test]

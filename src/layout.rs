@@ -98,6 +98,19 @@ impl Default for Highlight {
     }
 }
 
+/// Own colours of one button (instead of the layout's [`Highlight`]). A menu can show at most
+/// [`MAX_COLOR_PAIRS`] different pairs: every pair needs its own pixel value of the 4-colour
+/// subpicture (one value is transparent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButtonColors {
+    pub color: String,
+    pub select_color: String,
+}
+
+/// Different button colour pairs one menu can use.
+pub const MAX_COLOR_PAIRS: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MenuRole {
@@ -188,6 +201,9 @@ pub struct Element {
     pub opacity: f32,
     #[serde(default)]
     pub action: Option<Action>,
+    /// Button colours of this element; `None` = the layout's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<ButtonColors>,
 }
 
 fn default_font() -> String {
@@ -226,6 +242,9 @@ pub enum Content {
         italic: bool,
         #[serde(default)]
         shadow: bool,
+        /// Break lines at the box width (otherwise only at `\n`; overlong lines end with "…").
+        #[serde(default)]
+        wrap: bool,
     },
     Image {
         src: String,
@@ -338,6 +357,36 @@ fn element_name(e: &Element, n: usize) -> String {
     format!("Element {} ({kind})", n + 1)
 }
 
+/// (marked, activated) colours of a button.
+fn button_colors(layout: &CustomLayout, e: &Element) -> ([u8; 3], [u8; 3]) {
+    let (hl, sel) = match &e.highlight {
+        Some(c) => (&c.color, &c.select_color),
+        None => (&layout.highlight.color, &layout.highlight.select_color),
+    };
+    (parse_color(hl).unwrap_or([255, 210, 0]), parse_color(sel).unwrap_or([255, 106, 0]))
+}
+
+/// The different colour pairs of a menu's buttons, in order of first use.
+fn color_pairs(layout: &CustomLayout, menu: &CustomMenu) -> Vec<([u8; 3], [u8; 3])> {
+    let mut pairs = Vec::new();
+    for e in menu.elements.iter().filter(|e| e.action.is_some()) {
+        let p = button_colors(layout, e);
+        if !pairs.contains(&p) {
+            pairs.push(p);
+        }
+    }
+    pairs
+}
+
+/// The lines a text element shows on `tv` (see [`menu::text_lines`]); `None` for other
+/// elements. The menu editor displays exactly these.
+pub fn element_text_lines(e: &Element, canvas: Canvas, tv: TvStandard) -> Option<Vec<String>> {
+    let Content::Text { text, font, size, bold, italic, wrap, .. } = &e.content else { return None };
+    let (_, _, w, h) = frame_box(e, canvas, tv);
+    let (bw, bh) = if e.rotation % 180 == 90 { (h, w) } else { (w, h) };
+    Some(menu::text_lines(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, bw, bh))
+}
+
 /// Checks the layout against the DVD limits and the project's titles. Navigation command
 /// counts are checked by [`plan_navigation`] (also called here).
 pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -> Result<(), LayoutError> {
@@ -433,6 +482,13 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
                     }
                 }
             }
+            if let Some(colors) = &e.highlight {
+                for (name, col) in [("Markierungsfarbe", &colors.color), ("Auswahlfarbe", &colors.select_color)] {
+                    if parse_color(col).is_none() {
+                        errs.push(el(&format!("{name} „{col}“ ist keine Farbe (#RRGGBB)")));
+                    }
+                }
+            }
             let Some(action) = &e.action else { continue };
             if e.rotation != 0 {
                 errs.push(el("Buttons können nicht gedreht werden (DVD-Hitboxen sind achsenparallele Rechtecke)"));
@@ -486,6 +542,20 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
         }
         if rects.len() > MAX_BUTTONS {
             errs.push(menu(format!("{} Buttons, eine DVD-Menüseite erlaubt höchstens {MAX_BUTTONS}", rects.len())));
+        }
+        let pairs = color_pairs(layout, m);
+        if pairs.len() > MAX_COLOR_PAIRS {
+            errs.push(menu(format!(
+                "{} verschiedene Button-Farben – eine DVD-Menüseite kann höchstens {MAX_COLOR_PAIRS} Farbpaare (markiert/aktiviert) zeigen",
+                pairs.len()
+            )));
+        }
+        // The pixel value of a pair is found from either colour, so colours cannot be shared.
+        let shared = pairs.iter().enumerate().any(|(i, a)| pairs[i + 1..].iter().any(|b| a.0 == b.0 || a.1 == b.1));
+        if shared {
+            errs.push(menu(
+                "Buttons mit gleicher Markierungsfarbe brauchen auch die gleiche Aktivierungsfarbe (und umgekehrt)".into(),
+            ));
         }
     }
     if errs.is_empty() {
@@ -792,8 +862,20 @@ pub struct CustomMenus {
     pub warnings: Vec<String>,
 }
 
-/// Fits `img` into `w`x`h`; `Contain` leaves transparent bars.
-fn fit_image(img: &RgbaImage, w: u32, h: u32, fit: Fit) -> RgbaImage {
+/// Fits `img` into `w`x`h` frame pixels; `Contain` leaves transparent bars. Contain/cover keep
+/// the picture's proportions on the TV: the axis that ends up horizontal (the height when
+/// `sideways`, i.e. rotated by 90°/270° afterwards) is first scaled by 1 / `pixel_aspect`.
+fn fit_image(img: &RgbaImage, w: u32, h: u32, fit: Fit, pixel_aspect: f64, sideways: bool) -> RgbaImage {
+    let squeezed;
+    let img = if fit == Fit::Stretch || (pixel_aspect - 1.0).abs() < 1e-6 {
+        img
+    } else {
+        let (iw, ih) = img.dimensions();
+        let f = 1.0 / pixel_aspect;
+        let (nw, nh) = if sideways { (iw, ((ih as f64 * f).round() as u32).max(1)) } else { (((iw as f64 * f).round() as u32).max(1), ih) };
+        squeezed = imageops::resize(img, nw, nh, FilterType::Lanczos3);
+        &squeezed
+    };
     let (iw, ih) = img.dimensions();
     if iw == 0 || ih == 0 || w == 0 || h == 0 {
         return RgbaImage::new(w.max(1), h.max(1));
@@ -885,12 +967,31 @@ fn render_custom_page(
         Ok(())
     };
 
-    let hl = parse_color(&layout.highlight.color).unwrap_or([255, 210, 0]);
-    let sel = parse_color(&layout.highlight.select_color).unwrap_or([255, 106, 0]);
+    // Button colours: with one pair, pixel value 1 is the colour and 2 its half-transparent
+    // edge (smooth text outlines); with several pairs every pair gets its own value 1..=3.
     let alpha = (layout.highlight.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let palette = |c: [u8; 3]| [[0, 0, 0, 0], [c[0], c[1], c[2], alpha], [c[0], c[1], c[2], alpha / 2], [0, 0, 0, 0]];
-    let mut highlight = IndexedImage::new(fw, fh, palette(hl));
-    let mut select = IndexedImage::new(fw, fh, palette(sel));
+    let pairs = color_pairs(layout, menu);
+    let (highlight_palette, select_palette) = match pairs.as_slice() {
+        [] | [_] => {
+            let (hl, sel) = pairs.first().copied().unwrap_or_else(|| {
+                (parse_color(&layout.highlight.color).unwrap_or([255, 210, 0]), parse_color(&layout.highlight.select_color).unwrap_or([255, 106, 0]))
+            });
+            let palette = |c: [u8; 3]| [[0, 0, 0, 0], [c[0], c[1], c[2], alpha], [c[0], c[1], c[2], alpha / 2], [0, 0, 0, 0]];
+            (palette(hl), palette(sel))
+        }
+        _ => {
+            let mut hl = [[0u8; 4]; 4];
+            let mut sel = [[0u8; 4]; 4];
+            for (i, (h, s)) in pairs.iter().take(MAX_COLOR_PAIRS).enumerate() {
+                hl[i + 1] = [h[0], h[1], h[2], alpha];
+                sel[i + 1] = [s[0], s[1], s[2], alpha];
+            }
+            (hl, sel)
+        }
+    };
+    let smooth_edges = pairs.len() <= 1;
+    let mut highlight = IndexedImage::new(fw, fh, highlight_palette);
+    let mut select = IndexedImage::new(fw, fh, select_palette);
     let mut buttons: Vec<MenuButton> = Vec::new();
 
     for (n, e) in menu.elements.iter().enumerate() {
@@ -901,8 +1002,8 @@ fn render_custom_page(
         // Glyph coverage of a text button, for its highlight shape.
         let mut text_cov = None;
         match &e.content {
-            Content::Text { text, font, size, color, align, bold, italic, shadow } => {
-                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, align, bw, bh);
+            Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
+                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, align, bw, bh);
                 let mut img = RgbaImage::new(bw, bh);
                 let [r, g, b] = parse_color(color).unwrap_or([255, 255, 255]);
                 if *shadow {
@@ -915,7 +1016,7 @@ fn render_custom_page(
             }
             Content::Image { src, fit } => {
                 let src_img = image::open(src).map_err(|err| io(Path::new(src), &err))?.to_rgba8();
-                let img = rotate(fit_image(&src_img, bw, bh, *fit), e.rotation);
+                let img = rotate(fit_image(&src_img, bw, bh, *fit, tv.menu_pixel_aspect(), e.rotation % 180 == 90), e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
             }
             Content::Video { title, start_secs, fit } => {
@@ -938,13 +1039,21 @@ fn render_custom_page(
             warnings.push(format!("{}: Button liegt außerhalb des Bildes und wurde ausgelassen", element_name(e, n)));
             continue;
         };
+        // Pixel value of this button's colour pair.
+        let value = pairs.iter().position(|p| *p == button_colors(layout, e)).unwrap_or(0).min(MAX_COLOR_PAIRS - 1) as u8 + 1;
         // Highlight shape: the glyphs of a text button, a frame around everything else.
         match &text_cov {
             Some(cov) => {
                 for py in 0..cov.height {
                     for px in 0..cov.width {
                         let v = cov.at(px as i64, py as i64);
-                        let idx = if v >= 0.5 { 1 } else if v >= 0.15 { 2 } else { 0 };
+                        let idx = if smooth_edges {
+                            if v >= 0.5 { 1 } else if v >= 0.15 { 2 } else { 0 }
+                        } else if v >= 0.35 {
+                            value
+                        } else {
+                            0
+                        };
                         let (tx, ty) = (x + px as i64, y + py as i64);
                         if idx > 0 && tx >= 0 && ty >= 0 && (tx as u32) < fw && (ty as u32) < fh {
                             let i = (ty as u32 * fw + tx as u32) as usize;
@@ -961,8 +1070,8 @@ fn render_custom_page(
                         let edge = px < rect.x0 + t || px >= rect.x1 - t || py < rect.y0 + t || py >= rect.y1 - t;
                         if edge {
                             let i = (py * fw + px) as usize;
-                            highlight.pixels[i] = 1;
-                            select.pixels[i] = 1;
+                            highlight.pixels[i] = value;
+                            select.pixels[i] = value;
                         }
                     }
                 }
@@ -1137,6 +1246,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 shadow: false,
+                wrap: false,
             },
             x,
             y,
@@ -1145,6 +1255,7 @@ mod tests {
             rotation: 0,
             opacity: 1.0,
             action,
+            highlight: None,
         }
     }
 
@@ -1361,6 +1472,107 @@ mod tests {
         let bg: Background = serde_json::from_str(r#"{"gradientOverlay": "bottomDark"}"#).unwrap();
         assert_eq!(bg.overlay, BackgroundOverlay::BottomDark);
         assert_eq!(serde_json::from_str::<MenuRole>(r#""settings""#).unwrap(), MenuRole::Settings);
+    }
+
+    fn with_colors(mut e: Element, hl: &str, sel: &str) -> Element {
+        e.highlight = Some(ButtonColors { color: hl.into(), select_color: sel.into() });
+        e
+    }
+
+    #[test]
+    fn word_wrap() {
+        let sentence = "Ein ziemlich langer Satz, der nicht in eine Zeile passt";
+        let mut e = text(0.0, 0.0, sentence, None);
+        e.w = 260.0;
+        e.h = 200.0;
+        let canvas = Canvas::default();
+        // Without wrap: one line (cut with "…" when drawn).
+        assert_eq!(element_text_lines(&e, canvas, TvStandard::Pal).unwrap(), vec![sentence.to_string()]);
+        let Content::Text { wrap, .. } = &mut e.content else { unreachable!() };
+        *wrap = true;
+        let lines = element_text_lines(&e, canvas, TvStandard::Pal).unwrap();
+        assert!(lines.len() >= 3, "{lines:?}");
+        assert_eq!(lines.join(" "), sentence, "only spaces become line breaks");
+        // Too little height: the last visible line ends with "…".
+        e.h = 76.0; // exactly two lines of 38 px
+        let short = element_text_lines(&e, canvas, TvStandard::Pal).unwrap();
+        assert_eq!(short.len(), 2, "{short:?}");
+        assert!(short[1].ends_with('…'), "{short:?}");
+        // A word wider than the box is broken at characters; \n still starts a new line.
+        let Content::Text { text: t, .. } = &mut e.content else { unreachable!() };
+        *t = "Donaudampfschifffahrtsgesellschaft\nB".into();
+        e.w = 120.0;
+        e.h = 400.0;
+        let long = element_text_lines(&e, canvas, TvStandard::Pal).unwrap();
+        assert!(long.len() >= 3 && long.last().unwrap() == "B", "{long:?}");
+        assert_eq!(long[..long.len() - 1].concat(), "Donaudampfschifffahrtsgesellschaft");
+        assert_eq!(element_text_lines(&text(0.0, 0.0, "x", None), canvas, TvStandard::Pal), Some(vec!["x".to_string()]));
+        let mut img = text(0.0, 0.0, "", None);
+        img.content = Content::Video { title: 1, start_secs: None, fit: Fit::Cover };
+        assert_eq!(element_text_lines(&img, canvas, TvStandard::Pal), None);
+    }
+
+    #[test]
+    fn button_color_pairs() {
+        let ts = titles(1);
+        let b = |y: f64, label: &str| text(10.0, y, label, Some(Action::PlayTitle { title: 1 }));
+        // Default + 2 own pairs: allowed; a 4th pair is too many.
+        let three = vec![b(10.0, "a"), with_colors(b(80.0, "b"), "#00FF00", "#008000"), with_colors(b(150.0, "c"), "#0000FF", "#000080")];
+        assert!(validate(&layout(vec![menu("main", MenuRole::Title, None, three.clone())]), &ts, TvStandard::Pal).is_ok());
+        let mut four = three.clone();
+        four.push(with_colors(b(220.0, "d"), "#FF00FF", "#800080"));
+        let err = validate(&layout(vec![menu("main", MenuRole::Title, None, four)]), &ts, TvStandard::Pal).unwrap_err();
+        assert!(err.0.iter().any(|m| m.contains("4 verschiedene Button-Farben")), "{err:?}");
+        // Same marked colour with another activated colour cannot be told apart.
+        let shared = vec![b(10.0, "a"), with_colors(b(80.0, "b"), "#FFD200", "#00FF00")];
+        let err = validate(&layout(vec![menu("main", MenuRole::Title, None, shared)]), &ts, TvStandard::Pal).unwrap_err();
+        assert!(err.0.iter().any(|m| m.contains("gleiche Aktivierungsfarbe")), "{err:?}");
+        let bad = vec![with_colors(b(10.0, "a"), "gelb", "#000000")];
+        assert!(validate(&layout(vec![menu("main", MenuRole::Title, None, bad)]), &ts, TvStandard::Pal).is_err());
+        // Colours on a non-button are ignored by the pair count.
+        let l = layout(vec![menu("main", MenuRole::Title, None, vec![b(10.0, "a"), with_colors(text(10.0, 300.0, "Deko", None), "#123456", "#654321")])]);
+        assert_eq!(color_pairs(&l, &l.menus[0]).len(), 1);
+
+        // Rendering: every pair gets its own pixel value in both masks.
+        let dir = std::env::temp_dir().join(format!("cx_layout_colors_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut picture = with_colors(b(300.0, ""), "#00FF00", "#008000");
+        picture.content = Content::Image { src: String::new(), fit: Fit::Stretch };
+        let png = dir.join("pic.png");
+        RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255])).save(&png).unwrap();
+        picture.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch };
+        let l = layout(vec![menu("main", MenuRole::Title, None, vec![b(10.0, "Erster"), picture])]);
+        let out = build_custom_menus(&l, &ts, TvStandard::Pal, &dir, 10.0).unwrap();
+        let files = &out.pages[0].1;
+        let hl = image::open(&files.highlight).unwrap().to_rgba8();
+        let sel = image::open(&files.select).unwrap().to_rgba8();
+        assert_eq!(hl.get_pixel(11, 301).0, [0, 255, 0, 204], "frame of the green button");
+        assert_eq!(sel.get_pixel(11, 301).0, [0, 128, 0, 204]);
+        let glyph = (10..310).flat_map(|x| (10..60).map(move |y| (x, y))).find(|&(x, y)| hl.get_pixel(x, y).0[3] > 0).expect("text glyphs");
+        assert_eq!(hl.get_pixel(glyph.0, glyph.1).0, [255, 210, 0, 204], "default pair, no half-transparent edge");
+        let colors: std::collections::BTreeSet<[u8; 4]> = hl.pixels().map(|p| p.0).filter(|p| p[3] > 0).collect();
+        assert_eq!(colors.len(), 2, "one colour per pair: {colors:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pictures_keep_their_proportions_on_the_tv() {
+        // A 16:9 picture "contain"-fitted into a 720×405 box: on a 4:3 PAL screen every pixel is
+        // 16/15 wide, so the picture is 675 pixels wide (= 720 on screen) with bars at the sides.
+        let img = RgbaImage::from_pixel(160, 90, image::Rgba([255, 0, 0, 255]));
+        let pal = TvStandard::Pal.menu_pixel_aspect();
+        assert!((pal - 16.0 / 15.0).abs() < 1e-9 && (TvStandard::Ntsc.menu_pixel_aspect() - 8.0 / 9.0).abs() < 1e-9);
+        let fitted = fit_image(&img, 720, 405, Fit::Contain, pal, false);
+        let visible = (0..720).filter(|&x| fitted.get_pixel(x, 200).0[3] > 0).count();
+        assert!((visible as i32 - 675).abs() <= 2, "{visible}");
+        // Rotated by 90°: the picture's height becomes the horizontal and is squeezed instead
+        // (90 → 84 rows, then scaled ×405/160 like the width: 213 instead of 228 rows).
+        let sideways = fit_image(&img, 405, 720, Fit::Contain, pal, true);
+        let tall = (0..720).filter(|&y| sideways.get_pixel(200, y).0[3] > 0).count();
+        assert!((tall as i32 - 213).abs() <= 2, "{tall}");
+        // Stretch fills the box regardless.
+        assert!(fit_image(&img, 720, 405, Fit::Stretch, pal, false).pixels().all(|p| p.0[3] == 255));
     }
 
     #[test]

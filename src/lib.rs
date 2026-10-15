@@ -10,5 +10,6 @@ pub mod eta;
 pub mod layout;
 pub mod menu;
 pub mod probe;
+pub mod subpic;
 pub mod template;
 pub mod tools;

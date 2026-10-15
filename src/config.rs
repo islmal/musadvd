@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::author::{PlaybackOptions, TvStandard};
+use crate::author::{PlaybackOptions, Resolution, TvStandard};
 use crate::encoder::MenuAudio;
-use crate::calculator::DiscType;
+use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::menu::TextOverflow;
 use crate::tools::ProcessPriority;
@@ -28,8 +28,9 @@ pub const MENU_AUDIO_MODES: &[&str] = &["title", "silence", "file"];
 /// the nearest speed the drive offers).
 pub const BURN_SPEEDS: &[&str] = &["auto", "max", "16", "12", "8", "6", "4", "2.4"];
 
-/// Choices that are stored but not implemented by the engine yet (Full D1 / Auto only).
-pub const UNSUPPORTED_CHOICES: &[&str] = &["Half D1", "SIF", "SP_Short", "MP_Medium", "LP_Long"];
+/// Choices that are stored but not implemented by the engine yet (none since Half D1, SIF and
+/// the SP/MP/LP profiles were added; kept for the GUI's "noch nicht unterstützt" marks).
+pub const UNSUPPORTED_CHOICES: &[&str] = &[];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -244,6 +245,16 @@ impl AppSettings {
         std::fs::rename(&tmp, path).map_err(io)
     }
 
+    /// The encoding profile setting as the engine's type.
+    pub fn profile(&self) -> EncodingProfile {
+        match self.encoding_profile.as_str() {
+            "SP_Short" => EncodingProfile::Sp,
+            "MP_Medium" => EncodingProfile::Mp,
+            "LP_Long" => EncodingProfile::Lp,
+            _ => EncodingProfile::Auto,
+        }
+    }
+
     pub fn playback(&self) -> PlaybackOptions {
         PlaybackOptions {
             auto_start: self.auto_start_playback,
@@ -293,6 +304,12 @@ impl AppSettings {
             opts.project_name = Some(self.default_volume_label.clone());
         }
         opts.tv_standard = if self.tv_standard == "NTSC" { TvStandard::Ntsc } else { TvStandard::Pal };
+        opts.resolution = match self.dvd_resolution.as_str() {
+            "Half D1" => Resolution::HalfD1,
+            "SIF" => Resolution::Sif,
+            _ => Resolution::FullD1,
+        };
+        opts.encoding_profile = self.profile();
         opts.motion_audio = match self.menu_audio.as_str() {
             "silence" => MenuAudio::Silence,
             "file" if !self.menu_audio_file.is_empty() => MenuAudio::File(PathBuf::from(&self.menu_audio_file)),
@@ -427,7 +444,15 @@ mod tests {
         let s = AppSettings { menu_audio: "silence".into(), ..AppSettings::default() };
         s.apply_to(&mut o);
         assert_eq!(o.motion_audio, MenuAudio::Silence);
-        assert!(!UNSUPPORTED_CHOICES.contains(&"NTSC"));
+        assert!(UNSUPPORTED_CHOICES.is_empty());
+        assert_eq!((o.resolution, o.encoding_profile), (Resolution::FullD1, EncodingProfile::Auto), "defaults");
+        let s = AppSettings { dvd_resolution: "Half D1".into(), encoding_profile: "LP_Long".into(), ..AppSettings::default() };
+        s.apply_to(&mut o);
+        assert_eq!((o.resolution, o.encoding_profile), (Resolution::HalfD1, EncodingProfile::Lp));
+        let s = AppSettings { dvd_resolution: "SIF".into(), encoding_profile: "MP_Medium".into(), ..AppSettings::default() };
+        s.apply_to(&mut o);
+        assert_eq!((o.resolution, o.encoding_profile), (Resolution::Sif, EncodingProfile::Mp));
+        assert_eq!(AppSettings { encoding_profile: "SP_Short".into(), ..AppSettings::default() }.profile(), EncodingProfile::Sp);
     }
 }
 

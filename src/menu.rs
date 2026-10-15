@@ -455,23 +455,9 @@ fn rasterize_text(
     cov
 }
 
-/// Glyph coverage of `text` in a `width`x`height` box (menu editor texts): one line per `\n`,
-/// line height 1.2 em, lines from the top, each line aligned `left`, `center` or `right`.
-/// Uses the same font chain (fallback fonts for missing characters) as template texts; lines
-/// wider than the box are cut off with "…".
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn text_coverage(
-    text: &str,
-    family: &str,
-    size_px: f32,
-    bold: bool,
-    italic: bool,
-    align: &str,
-    width: u32,
-    height: u32,
-) -> Coverage {
-    let mut cov = Coverage::new(width.max(1), height.max(1));
-    let style = TextStyle {
+/// Text style of a menu editor text box.
+fn editor_style(family: &str, size_px: f32, bold: bool, italic: bool, align: &str, height: u32) -> TextStyle {
+    TextStyle {
         font_name: family.to_string(),
         size_px: size_px.max(4.0),
         bold,
@@ -486,17 +472,110 @@ pub(crate) fn text_coverage(
         right_margin: 0,
         vert_margin: 0,
         ..fallback_style(height)
+    }
+}
+
+/// Line height of a menu editor text (1.2 em).
+fn editor_line_height(size_px: f32) -> i32 {
+    (size_px.max(4.0) * 1.2).round().max(1.0) as i32
+}
+
+/// Breaks `text` into lines of at most `max_w` pixels: at spaces, a word wider than a line at
+/// characters. `\n` always starts a new line.
+fn wrap_text(fonts: &[FontArc], text: &str, em_px: f32, max_w: f32) -> Vec<String> {
+    let width = |s: &str| text_width(fonts, &place_chars(fonts, s), em_px);
+    let max_w = max_w + 0.5;
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+            if width(&candidate) <= max_w {
+                line = candidate;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            if width(word) <= max_w {
+                line = word.to_string();
+                continue;
+            }
+            for c in word.chars() {
+                let candidate = format!("{line}{c}");
+                if width(&candidate) > max_w && !line.is_empty() {
+                    out.push(std::mem::replace(&mut line, c.to_string()));
+                } else {
+                    line = candidate;
+                }
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// The lines a menu editor text shows in its `width`×`height` box: one per `\n`, with `wrap`
+/// also broken to the box width. Lines starting below the box are dropped; with `wrap` the
+/// last shown line then ends with "…". (Without `wrap`, overlong lines are cut with "…" when
+/// drawn.) The editor shows exactly these lines.
+#[allow(clippy::too_many_arguments)]
+pub fn text_lines(text: &str, family: &str, size_px: f32, bold: bool, italic: bool, wrap: bool, width: u32, height: u32) -> Vec<String> {
+    let style = editor_style(family, size_px, bold, italic, "left", height);
+    let fonts = font_chain(&style);
+    let mut lines: Vec<String> = if wrap && !fonts.is_empty() {
+        wrap_text(&fonts, text, style.size_px, width as f32)
+    } else {
+        text.split('\n').map(str::to_string).collect()
     };
+    let line_h = editor_line_height(size_px);
+    let visible = (height as i32 + line_h - 1) / line_h;
+    if lines.len() > visible as usize {
+        lines.truncate(visible.max(0) as usize);
+        if wrap && !fonts.is_empty() {
+            if let Some(last) = lines.last_mut() {
+                // "…" at the end, dropping characters until it fits.
+                let width_of = |s: &str| text_width(&fonts, &place_chars(&fonts, s), style.size_px);
+                let mut base: Vec<char> = last.trim_end().chars().collect();
+                loop {
+                    let candidate = format!("{}…", base.iter().collect::<String>().trim_end());
+                    if base.is_empty() || width_of(&candidate) <= width as f32 + 0.5 {
+                        *last = candidate;
+                        break;
+                    }
+                    base.pop();
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// Glyph coverage of `text` in a `width`x`height` box (menu editor texts): the lines of
+/// [`text_lines`], line height 1.2 em, from the top, each aligned `left`, `center` or `right`.
+/// Uses the same font chain (fallback fonts for missing characters) as template texts; lines
+/// wider than the box are cut off with "…".
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_coverage(
+    text: &str,
+    family: &str,
+    size_px: f32,
+    bold: bool,
+    italic: bool,
+    wrap: bool,
+    align: &str,
+    width: u32,
+    height: u32,
+) -> Coverage {
+    let mut cov = Coverage::new(width.max(1), height.max(1));
+    let style = editor_style(family, size_px, bold, italic, align, height);
     let fonts = font_chain(&style);
     if fonts.is_empty() {
         return cov;
     }
-    let line_h = (style.size_px * 1.2).round().max(1.0) as i32;
-    for (i, line) in text.split('\n').enumerate() {
+    let line_h = editor_line_height(size_px);
+    for (i, line) in text_lines(text, family, size_px, bold, italic, wrap, width, height).iter().enumerate() {
         let y = i as i32 * line_h;
-        if y >= height as i32 {
-            break;
-        }
         if line.trim().is_empty() {
             continue;
         }

@@ -1,5 +1,5 @@
 // Typed wrappers around the Tauri commands in src-tauri/src/main.rs.
-import type { CustomLayout, EditorTitle } from "./layout";
+import type { CustomLayout, EditorTitle, LayoutElement } from "./layout";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -335,6 +335,9 @@ export const onBurnDone = (cb: (d: BurnDone) => void): Promise<UnlistenFn> =>
 export const checkLayout = (layout: CustomLayout, titles: EditorTitle[], tv: string) =>
   invoke<string[]>("check_layout", { layout, titles, tv });
 export const loadLayout = (path: string) => invoke<CustomLayout>("load_layout", { path });
+/** Lines of a text element exactly as the build draws them (word wrap, "…"). */
+export const textLines = (element: LayoutElement, canvas: { width: number; height: number }, tv: string) =>
+  invoke<string[]>("text_lines", { element, canvas, tv });
 export const saveLayout = (path: string, layout: CustomLayout) => invoke<void>("save_layout", { path, layout });
 /** A picture file as data URL. */
 export const imagePreview = (path: string) => invoke<string>("image_preview", { path });

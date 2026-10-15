@@ -279,6 +279,17 @@ impl Toolchain {
         run_capture(&tool, cmd).await
     }
 
+    /// ffprobe with `args`; returns its stdout (e.g. JSON).
+    pub async fn ffprobe_output(&self, args: &[OsString]) -> Result<String, ToolError> {
+        let io = |error| ToolError::Io { tool: "ffprobe".into(), error };
+        let out = self.command(&self.ffprobe).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output().await.map_err(io)?;
+        if !out.status.success() {
+            let log = String::from_utf8_lossy(&out.stderr).into_owned();
+            return Err(ToolError::Failed { tool: "ffprobe".into(), status: out.status.to_string(), log: tail(&log, 30) });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// `dvdauthor -x <xml>` in `dir`.
     pub async fn dvdauthor(&self, dir: &Path, xml: &str) -> Result<String, ToolError> {
         let mut cmd = self.command(&self.dvdauthor);

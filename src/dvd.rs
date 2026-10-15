@@ -21,10 +21,10 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::author::{
-    self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, TvStandard, DvdLayout, MenuKind, MenuLinks, MenuSpec, TitleEntry,
+    self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, Resolution, TvStandard, DvdLayout, MenuKind, MenuLinks, MenuSpec, TitleEntry,
     TitleSpec, TitlesetSpec, MAX_CHAPTERS, MAX_TITLES,
 };
-use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, DVD_MAX_TOTAL_KBPS};
+use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
 use crate::encoder::{self, ac3_settings, Aspect, EncodeJob, EncodePhase, MenuAudio};
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
 use crate::probe::{self, language_matches, language_name, MediaInfo, ProbeError, SubtitleKind};
@@ -165,10 +165,9 @@ async fn cancellable<T, E: Into<BuildError>>(
     }
 }
 
-/// Marker file identifying a work directory created by this program (only those are deleted).
-const WORK_MARKER: &str = ".convertx-work";
-/// Name of the temporary work directory inside the output directory.
-const WORK_DIR_NAME: &str = ".convertx-work";
+/// Name of the temporary work directory inside the output directory, and of the marker file in
+/// it that identifies a work directory created by this program (only those are deleted).
+pub const WORK_DIR: &str = ".convertx-work";
 
 /// Turns a project name into a valid Windows folder name: invalid characters become `_`,
 /// trailing dots/spaces are removed, reserved device names get a suffix, length is limited.
@@ -347,6 +346,11 @@ pub struct BuildOptions {
     pub force_first_subtitle: bool,
     /// PAL (720x576, 25 fps) or NTSC (720x480, 29.97 fps) for titles and menus.
     pub tv_standard: TvStandard,
+    /// Frame size of the titles (menus stay Full D1); Half D1/SIF titles are always 4:3.
+    pub resolution: Resolution,
+    /// Upper limit of the video bitrate; LP may switch Full D1 to Half D1 (see
+    /// [`effective_resolution`]).
+    pub encoding_profile: EncodingProfile,
     /// Name of the output folder (`<output>/<name>/VIDEO_TS`); `None` = menu heading, which in
     /// turn defaults to the first video's name.
     pub project_name: Option<String>,
@@ -419,14 +423,24 @@ pub struct TitleLoad {
     pub subtitle_streams: usize,
 }
 
-/// Video bitrate for `titles` on `disc`, with `menu_mb` of menus already on the disc.
-/// Used by the build itself and by the GUI's live estimate.
-pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64) -> Result<BitratePlan, CalcError> {
+/// Video bitrate for `titles` on `disc`, with `menu_mb` of menus already on the disc, limited by
+/// `profile`. Used by the build itself and by the GUI's live estimate.
+pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile: EncodingProfile) -> Result<BitratePlan, CalcError> {
     let total_secs: f64 = titles.iter().map(|t| t.duration_secs).sum();
     let subs_kbit: f64 =
         titles.iter().map(|t| (t.subtitle_streams as u32 * SUBTITLE_KBPS) as f64 * t.duration_secs).sum();
     let overhead = disc.default_mux_overhead_kbit() + menu_mb * 8192.0 + subs_kbit;
-    calculator::calculate_with_overhead(disc, total_secs, avg_audio_kbps(titles), overhead)
+    calculator::calculate_capped(disc, total_secs, avg_audio_kbps(titles), overhead, profile.max_video_kbps())
+}
+
+/// Title frame size actually used: the chosen one, except that LP turns Full D1 into Half D1
+/// when the video bitrate is below [`LP_HALF_D1_BELOW_KBPS`] (sharper than a starved Full D1).
+pub fn effective_resolution(chosen: Resolution, profile: EncodingProfile, video_kbps: u32) -> Resolution {
+    if chosen == Resolution::FullD1 && profile == EncodingProfile::Lp && video_kbps < LP_HALF_D1_BELOW_KBPS {
+        Resolution::HalfD1
+    } else {
+        chosen
+    }
 }
 
 /// Duration-weighted average audio bitrate over all titles.
@@ -493,6 +507,8 @@ pub struct BuildReport {
     pub motion_pages: usize,
     /// Sound of every menu page (menu VOB name, source; `None` = silent).
     pub menu_sounds: Vec<(String, Option<ClipSource>)>,
+    /// Frame size the titles were encoded in.
+    pub resolution: Resolution,
     pub size_mb: f64,
     pub target_mb: u32,
     pub warnings: Vec<String>,
@@ -767,13 +783,14 @@ async fn encode_title(
     fast: bool,
     hw_decode: bool,
     tv: TvStandard,
+    resolution: Resolution,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>), BuildError> {
     let hwaccel = if hw_decode { tools.probe_hwaccel(&t.info.path).await } else { None };
     let job = EncodeJob {
         info: &t.info,
         audio: t.audio.iter().map(|&a| &t.info.audio[a]).collect(),
-        text_subtitles: t.subtitles.iter().map(|&s| &t.info.subtitles[s]).collect(),
+        subtitles: t.subtitles.iter().map(|&s| &t.info.subtitles[s]).collect(),
         video_kbps,
         aspect: t.aspect,
         dir: work.to_path_buf(),
@@ -781,6 +798,7 @@ async fn encode_title(
         two_pass,
         fast,
         tv,
+        resolution,
         hwaccel,
     };
     let frames_per_run = t.info.duration_secs * output_fps(tv);
@@ -815,6 +833,65 @@ async fn encode_title(
     Ok((report, hwaccel))
 }
 
+/// Audio and subtitle streams (indices into `info.audio` / `info.subtitles`) of one title, plus
+/// warnings: the user's choice in `sel` wins over the language filters of `opts`.
+fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &BuildOptions, label: &str) -> (Vec<usize>, Vec<usize>, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut audio: Vec<usize> = (0..info.audio.len())
+        .filter(|&a| match &sel.audio {
+            Some(chosen) => chosen.contains(&info.audio[a].index),
+            None => {
+                opts.audio_langs.is_empty()
+                    || opts.audio_langs.iter().any(|l| language_matches(l, info.audio[a].language.as_deref()))
+            }
+        })
+        .collect();
+    if audio.is_empty() && !info.audio.is_empty() {
+        notes.push(format!("{label}: keine Tonspur passt zu {:?}, verwende die erste", opts.audio_langs));
+        audio.push(0);
+    }
+    if audio.len() > MAX_AUDIO_STREAMS {
+        notes.push(format!("{label}: {} Tonspuren, DVD erlaubt {MAX_AUDIO_STREAMS}", audio.len()));
+        audio.truncate(MAX_AUDIO_STREAMS);
+    }
+    if info.audio.is_empty() {
+        notes.push(format!("{label}: keine Tonspur vorhanden"));
+    }
+
+    let mut subtitles = Vec::new();
+    if !opts.no_subtitles {
+        for (n, s) in info.subtitles.iter().enumerate() {
+            let wanted = match &sel.subtitles {
+                Some(chosen) => chosen.contains(&s.index),
+                None => {
+                    opts.subtitle_langs.is_empty()
+                        || opts.subtitle_langs.iter().any(|l| language_matches(l, s.language.as_deref()))
+                }
+            };
+            if !wanted {
+                continue;
+            }
+            if s.kind == SubtitleKind::Bitmap && !crate::subpic::supported(&s.codec) {
+                notes.push(format!(
+                    "{label}: Bild-Untertitel #{} ({}) werden nicht unterstützt (nur PGS und VobSub), übersprungen",
+                    s.index, s.codec
+                ));
+                continue;
+            }
+            subtitles.push(n);
+        }
+        subtitles.truncate(MAX_SUBTITLE_STREAMS);
+    }
+    // Preferred languages become stream 0 (the player's default); the rest keep their order.
+    if let Some(lang) = &opts.preferred_audio_lang {
+        audio.sort_by_key(|&a| !language_matches(lang, info.audio[a].language.as_deref()));
+    }
+    if let Some(lang) = &opts.preferred_subtitle_lang {
+        subtitles.sort_by_key(|&s| !language_matches(lang, info.subtitles[s].language.as_deref()));
+    }
+    (audio, subtitles, notes)
+}
+
 /// Builds a complete DVD-Video structure from `opts.inputs`.
 ///
 /// When `opts.cancel` fires, all running tools are stopped, the work directory is removed and
@@ -824,8 +901,8 @@ pub async fn build_dvd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send))
     if matches!(result, Err(BuildError::Cancelled)) {
         log(Event::Step("Abgebrochen – Arbeitsordner wird gelöscht".into()));
         if let Ok(out) = std::fs::canonicalize(&opts.output) {
-            let work = display_path(out).join(WORK_DIR_NAME);
-            if work.join(WORK_MARKER).is_file() {
+            let work = display_path(out).join(WORK_DIR);
+            if work.join(WORK_DIR).is_file() {
                 if let Err(e) = remove_old_output(&work).await {
                     log(Event::Warning(format!("Arbeitsordner konnte nicht gelöscht werden: {e}")));
                 }
@@ -865,8 +942,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     // Temporary work directory; a leftover from an aborted run (recognised by its marker) is
     // removed. dvdauthor writes into it with plain ASCII names, the finished VIDEO_TS is then
     // moved into the project folder (Unicode-safe, the MinGW dvdauthor uses the ANSI file API).
-    let work = out.join(WORK_DIR_NAME);
-    if work.join(WORK_MARKER).is_file() {
+    let work = out.join(WORK_DIR);
+    if work.join(WORK_DIR).is_file() {
         remove_old_output(&work).await?;
     } else if work.exists() {
         return Err(BuildError::Template(format!(
@@ -875,7 +952,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         )));
     }
     std::fs::create_dir_all(&work).at(&work)?;
-    std::fs::write(work.join(WORK_MARKER), "temporary files of convertx-rust, safe to delete\n").at(&work)?;
+    std::fs::write(work.join(WORK_DIR), "temporary files of convertx-rust, safe to delete\n").at(&work)?;
     let tv = opts.tv_standard;
     if tv == TvStandard::Ntsc {
         log(Event::Step("TV-Norm: NTSC (720x480, 29,97 Bilder/s)".into()));
@@ -892,57 +969,9 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             input.file_stem().map_or_else(|| format!("Titel {}", i + 1), |s| s.to_string_lossy().into_owned())
         });
 
-        let mut audio: Vec<usize> = (0..info.audio.len())
-            .filter(|&a| match &sel.audio {
-                Some(chosen) => chosen.contains(&info.audio[a].index),
-                None => {
-                    opts.audio_langs.is_empty()
-                        || opts.audio_langs.iter().any(|l| language_matches(l, info.audio[a].language.as_deref()))
-                }
-            })
-            .collect();
-        if audio.is_empty() && !info.audio.is_empty() {
-            warn(log, format!("{label}: keine Tonspur passt zu {:?}, verwende die erste", opts.audio_langs));
-            audio.push(0);
-        }
-        if audio.len() > MAX_AUDIO_STREAMS {
-            warn(log, format!("{label}: {} Tonspuren, DVD erlaubt {MAX_AUDIO_STREAMS}", audio.len()));
-            audio.truncate(MAX_AUDIO_STREAMS);
-        }
-        if info.audio.is_empty() {
-            warn(log, format!("{label}: keine Tonspur vorhanden"));
-        }
-
-        let mut subtitles = Vec::new();
-        if !opts.no_subtitles {
-            for (n, s) in info.subtitles.iter().enumerate() {
-                let wanted = match &sel.subtitles {
-                    Some(chosen) => chosen.contains(&s.index),
-                    None => {
-                        opts.subtitle_langs.is_empty()
-                            || opts.subtitle_langs.iter().any(|l| language_matches(l, s.language.as_deref()))
-                    }
-                };
-                if !wanted {
-                    continue;
-                }
-                if s.kind == SubtitleKind::Bitmap {
-                    warn(log, format!(
-                        "{label}: Bild-Untertitel #{} ({}) werden noch nicht unterstützt, übersprungen",
-                        s.index, s.codec
-                    ));
-                    continue;
-                }
-                subtitles.push(n);
-            }
-            subtitles.truncate(MAX_SUBTITLE_STREAMS);
-        }
-        // Preferred languages become stream 0 (the player's default); the rest keep their order.
-        if let Some(lang) = &opts.preferred_audio_lang {
-            audio.sort_by_key(|&a| !language_matches(lang, info.audio[a].language.as_deref()));
-        }
-        if let Some(lang) = &opts.preferred_subtitle_lang {
-            subtitles.sort_by_key(|&s| !language_matches(lang, info.subtitles[s].language.as_deref()));
+        let (audio, subtitles, notes) = select_streams(&info, &sel, opts, &label);
+        for note in notes {
+            warn(log, note);
         }
 
         let chapters = match &sel.chapters {
@@ -1317,16 +1346,43 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = avg_audio_kbps(&loads);
-    let plan = bitrate_plan(opts.disc, &loads, menu_mb)?;
+    let plan = bitrate_plan(opts.disc, &loads, menu_mb, opts.encoding_profile)?;
     if plan.clamp == Clamp::Min {
         return Err(BuildError::DoesNotFit { disc: opts.disc, plan: Box::new(plan) });
     }
+    let profile = match opts.encoding_profile {
+        EncodingProfile::Auto => String::new(),
+        p => format!(", Profil {} ≤ {} kbps", p.label(), p.max_video_kbps()),
+    };
     log(Event::Step(format!(
-        "Bitrate: {} kbps Video (Laufzeit {:.0} min, Ø Audio {avg_audio} kbps, Menüs {menu_mb:.1} MB, Ziel {} MB)",
+        "Bitrate: {} kbps Video (Laufzeit {:.0} min, Ø Audio {avg_audio} kbps, Menüs {menu_mb:.1} MB, Ziel {} MB{profile})",
         plan.video_kbps,
         total_secs / 60.0,
         opts.disc.target_mb()
     )));
+    let resolution = effective_resolution(opts.resolution, opts.encoding_profile, plan.video_kbps);
+    if resolution != opts.resolution {
+        log(Event::Step(format!(
+            "LP-Profil: unter {LP_HALF_D1_BELOW_KBPS} kbps werden die Titel in {} ({}×{}) kodiert",
+            resolution.label(),
+            resolution.frame_size(tv).0,
+            resolution.frame_size(tv).1
+        )));
+    }
+    if !resolution.allows_wide() {
+        let wide: Vec<&str> =
+            titles.iter().filter(|t| t.aspect == Aspect::Wide).map(|t| t.label.as_str()).collect();
+        if !wide.is_empty() {
+            warn(log, format!(
+                "{} erlaubt nur 4:3 – {} wird mit schwarzen Balken (Letterbox) kodiert",
+                resolution.label(),
+                wide.join(", ")
+            ));
+        }
+        for t in titles.iter_mut() {
+            t.aspect = Aspect::Standard;
+        }
+    }
 
     // 7. Encode titles (independent titlesets in parallel) ---------------------------------------
     if titles.iter().any(|t| !t.subtitles.is_empty()) {
@@ -1344,8 +1400,11 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     };
     let encode_jobs = heavy_jobs.min(count);
     log(Event::Step(format!(
-        "Kodiere {count} Titel ({passes}, {encode_jobs} parallel, {} kbps Video)",
-        plan.video_kbps
+        "Kodiere {count} Titel ({passes}, {encode_jobs} parallel, {} kbps Video, {} {}×{})",
+        plan.video_kbps,
+        resolution.label(),
+        resolution.frame_size(tv).0,
+        resolution.frame_size(tv).1
     )));
     log(Event::Phase(BuildPhase::Encoding { index: 0, count }));
     let jobs: Vec<Job<(TitleReport, Option<&'static str>)>> = titles
@@ -1355,7 +1414,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             let video_kbps = plan.video_kbps.min(DVD_MAX_TOTAL_KBPS - t.audio_kbps());
             let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode);
             job(move |progress| async move {
-                encode_title(&tools, &t, &work, video_kbps, two_pass, fast, hw_decode, tv, progress).await
+                encode_title(&tools, &t, &work, video_kbps, two_pass, fast, hw_decode, tv, resolution, progress).await
             })
         })
         .collect();
@@ -1521,6 +1580,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         menu_pages,
         motion_pages,
         menu_sounds,
+        resolution,
         size_mb,
         target_mb: opts.disc.target_mb(),
         warnings,
@@ -1586,7 +1646,7 @@ mod tests {
             TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0 },
         ];
         assert_eq!(avg_audio_kbps(&loads), 491); // (640*3600 + 192*1800) / 5400
-        let plan = bitrate_plan(DiscType::Dvd5, &loads, 1.0).unwrap();
+        let plan = bitrate_plan(DiscType::Dvd5, &loads, 1.0, EncodingProfile::Auto).unwrap();
         let overhead = DiscType::Dvd5.default_mux_overhead_kbit() + 8192.0 + 10.0 * 3600.0;
         let direct = calculator::calculate_with_overhead(DiscType::Dvd5, 5400.0, 491, overhead).unwrap();
         assert_eq!(plan.video_kbps, direct.video_kbps);
@@ -1636,6 +1696,19 @@ mod tests {
         assert_eq!(AspectPolicy::Auto.aspect_for(1.33), Aspect::Standard);
         assert_eq!(AspectPolicy::Standard.aspect_for(2.35), Aspect::Standard);
         assert_eq!(AspectPolicy::Wide.aspect_for(1.33), Aspect::Wide);
+    }
+
+    #[test]
+    fn lp_switches_to_half_d1_at_low_bitrates() {
+        use EncodingProfile::*;
+        assert_eq!(effective_resolution(Resolution::FullD1, Lp, 2999), Resolution::HalfD1);
+        assert_eq!(effective_resolution(Resolution::FullD1, Lp, 3000), Resolution::FullD1);
+        for p in [Auto, Sp, Mp] {
+            assert_eq!(effective_resolution(Resolution::FullD1, p, 1500), Resolution::FullD1, "{p:?}");
+        }
+        // An explicit choice is kept.
+        assert_eq!(effective_resolution(Resolution::Sif, Lp, 1500), Resolution::Sif);
+        assert_eq!(effective_resolution(Resolution::HalfD1, Auto, 8000), Resolution::HalfD1);
     }
 
     #[test]
@@ -1720,5 +1793,55 @@ mod tests {
     fn chapter_limit() {
         let c = chapter_starts(&info(100_000.0, vec![]), 60.0, 0.0);
         assert_eq!(c.len(), MAX_CHAPTERS);
+    }
+
+    #[test]
+    fn stream_selection() {
+        use crate::probe::{AudioStream, SubtitleStream};
+        let a = |index: u32, lang: &str| AudioStream {
+            index,
+            codec: "ac3".into(),
+            channels: 2,
+            channel_layout: "stereo".into(),
+            language: Some(lang.into()),
+            title: None,
+            default: false,
+        };
+        let s = |index: u32, codec: &str, kind: SubtitleKind| SubtitleStream {
+            index,
+            codec: codec.into(),
+            kind,
+            language: Some("ger".into()),
+            title: None,
+            forced: false,
+            width: None,
+            height: None,
+        };
+        let mut src = info(60.0, vec![]);
+        src.audio = vec![a(1, "eng"), a(2, "ger"), a(3, "fra")];
+        src.subtitles = vec![s(4, "subrip", SubtitleKind::Text), s(5, "dvb_subtitle", SubtitleKind::Bitmap)];
+        let opts = BuildOptions {
+            audio_langs: vec!["de".into(), "en".into()],
+            preferred_audio_lang: Some("de".into()),
+            ..BuildOptions::default()
+        };
+        let none = StreamSelection::default();
+
+        // Language filter, preferred language first; the unsupported bitmap is skipped.
+        let (audio, subs, notes) = select_streams(&src, &none, &opts, "Film");
+        assert_eq!(audio, vec![1, 0]);
+        assert_eq!(subs, vec![0]);
+        assert!(notes.len() == 1 && notes[0].contains("dvb_subtitle"), "{notes:?}");
+
+        // No language matches: the first track, with a warning.
+        let jp = BuildOptions { audio_langs: vec!["ja".into()], ..BuildOptions::default() };
+        let (audio, _, notes) = select_streams(&src, &none, &jp, "Film");
+        assert_eq!(audio, vec![0]);
+        assert!(notes.iter().any(|n| n.contains("keine Tonspur passt")), "{notes:?}");
+
+        // The user's choice wins over the filter.
+        let chosen = StreamSelection { audio: Some(vec![3]), subtitles: Some(vec![]), ..StreamSelection::default() };
+        let (audio, subs, _) = select_streams(&src, &chosen, &opts, "Film");
+        assert_eq!((audio, subs), (vec![2], vec![]));
     }
 }

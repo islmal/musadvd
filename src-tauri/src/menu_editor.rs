@@ -1,14 +1,14 @@
 //! Backend of the menu editor: layout checks against the project's titles, loading/saving
 //! layout files, and image previews for the editor canvas.
 //!
-//! Commands: `check_layout`, `load_layout`, `save_layout`, `image_preview` (frames of the
+//! Commands: `check_layout`, `text_lines`, `load_layout`, `save_layout`, `image_preview` (frames of the
 //! titles for video placeholders come from `title_frame` in `main.rs`, which needs the tools).
 
 use std::path::Path;
 
 use base64::Engine as _;
 use convertx_rust::author::{ClipSource, TvStandard};
-use convertx_rust::layout::{self, CustomLayout, LayoutTitle};
+use convertx_rust::layout::{self, Canvas, CustomLayout, Element, LayoutTitle};
 use serde::Deserialize;
 
 /// A selected audio track or subtitle of a title (source stream index; label for the UI).
@@ -53,6 +53,14 @@ pub fn check_layout(layout: CustomLayout, titles: Vec<EditorTitle>, tv: String) 
         Ok(()) => vec![],
         Err(e) => e.0,
     }
+}
+
+/// The lines a text element shows on the disc (word wrap and "…" exactly as the build draws
+/// them); empty for other elements.
+#[tauri::command]
+pub fn text_lines(element: Element, canvas: Canvas, tv: String) -> Vec<String> {
+    let tv = if tv.eq_ignore_ascii_case("NTSC") { TvStandard::Ntsc } else { TvStandard::Pal };
+    layout::element_text_lines(&element, canvas, tv).unwrap_or_default()
 }
 
 #[tauri::command]

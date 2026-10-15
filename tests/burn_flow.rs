@@ -314,6 +314,28 @@ fn cancel_while_writing_the_image() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn cancelled_image_keeps_an_existing_file() {
+    let Some(video_ts) = fixture() else { return };
+    let dir = scratch("keep_foreign");
+    let iso = dir.join("film.iso");
+    std::fs::write(&iso, b"older image").unwrap();
+    let cancel = AtomicBool::new(false);
+    let burner = FakeBurner::new(Mode::Ok);
+    let mut j = job(video_ts, iso.clone());
+    j.keep_iso = true; // CLI `--keep-iso PATH` pointing at an existing file
+    let err = burn_video_ts(&burner, &j, &cancel, |u| {
+        if u.progress.phase == BurnPhase::Preparing && u.progress.fraction > 0.0 {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    })
+    .unwrap_err();
+    assert!(matches!(err, BurnError::Cancelled), "{err}");
+    assert_eq!(std::fs::read(&iso).unwrap(), b"older image", "a file this run never wrote stays");
+    assert!(!iso.with_extension("iso.part").exists(), "partial image left behind");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ---- CLI `burn`: error paths that stop before an image is written ---------------------------
 
 fn cli(args: &[&str]) -> (i32, String) {

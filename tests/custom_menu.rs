@@ -307,3 +307,89 @@ fn settings_menu_chapter_thumbnails_and_shading() {
     assert_eq!(report.motion_pages, 3, "main (video), root and settings (video backgrounds)");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `#RRGGBB` → RGB.
+fn rgb(hex: &str) -> [u8; 3] {
+    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap();
+    [(v >> 16) as u8, (v >> 8) as u8, v as u8]
+}
+
+/// Button colours of the first VMGM menu as a player sees them: for colour group 1 of the
+/// first NAV pack's PCI the (selected, activated) RGB of pixel values 1..=3 (palette of the
+/// VMGM PGC, YCrCb → RGB), and the colour group of every button.
+fn disc_button_colours(video_ts: &Path) -> (Vec<([u8; 3], [u8; 3])>, Vec<u8>) {
+    let vob = std::fs::read(video_ts.join("VIDEO_TS.VOB")).unwrap();
+    let ifo = std::fs::read(video_ts.join("VIDEO_TS.IFO")).unwrap();
+    let be32 = |b: &[u8], at: usize| u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+    let nav = vob.windows(4).position(|w| w == [0, 0, 1, 0xBF]).expect("NAV pack");
+    assert_eq!(vob[nav + 6], 0, "PCI");
+    let hli = &vob[nav + 7 + 0x60..];
+    let buttons = hli[0x11] as usize;
+    let groups: Vec<u8> = (0..buttons).map(|b| hli[0x2E + 18 * b] >> 6).collect();
+    let ut = be32(&ifo, 0xC8) * 2048;
+    let lu = ut + be32(&ifo, ut + 12);
+    let pgc = lu + be32(&ifo, lu + 12);
+    let palette = |k: usize| {
+        let e = &ifo[pgc + 0xA4 + 4 * k..pgc + 0xA8 + 4 * k];
+        let (y, cr, cb) = ((e[1] as f64 - 16.0) * 255.0 / 219.0, (e[2] as f64 - 128.0) * 255.0 / 224.0, (e[3] as f64 - 128.0) * 255.0 / 224.0);
+        let c = |v: f64| v.round().clamp(0.0, 255.0) as u8;
+        [c(y + 1.402 * cr), c(y - 0.344136 * cb - 0.714136 * cr), c(y + 1.772 * cb)]
+    };
+    let (selected, activated) = (be32(hli, 0x16) as u32, be32(hli, 0x1A) as u32);
+    let colour = |coli: u32, pixel: u32| palette(((coli >> (16 + 4 * pixel)) & 0xF) as usize);
+    let pairs = (1..=3).map(|p| (colour(selected, p), colour(activated, p))).collect();
+    (pairs, groups)
+}
+
+#[test]
+fn button_colours_and_word_wrap_reach_the_disc() {
+    let Some((rt, tools, dir, inputs)) = setup("colours") else { return };
+    let layout = CustomLayout::from_json(
+        r##"{"version": 1, "highlight": {"color": "#FFD200", "selectColor": "#FF6A00", "opacity": 1.0},
+          "menus": [{"id": "main", "name": "Hauptmenü", "role": "title", "background": {"color": "#203040"},
+            "elements": [
+              {"type": "text", "text": "Ein ziemlich langer Untertitel, der im Kasten umbrochen wird", "size": 30, "wrap": true, "x": 160, "y": 40, "w": 400, "h": 130},
+              {"type": "text", "text": "Gelb", "size": 34, "x": 160, "y": 220, "w": 400, "h": 50, "action": {"type": "playTitle", "title": 1}},
+              {"type": "text", "text": "Grün", "size": 34, "x": 160, "y": 320, "w": 400, "h": 50, "action": {"type": "playTitle", "title": 2},
+               "highlight": {"color": "#00FF00", "selectColor": "#008000"}},
+              {"type": "text", "text": "Blau", "size": 34, "x": 160, "y": 420, "w": 400, "h": 50, "action": {"type": "playTitle", "title": 1},
+               "highlight": {"color": "#3060FF", "selectColor": "#FF00FF"}}]}]}"##,
+    )
+    .unwrap();
+    let wrapped = convertx_rust::layout::element_text_lines(&layout.menus[0].elements[0], layout.canvas, TvStandard::Pal).unwrap();
+    assert_eq!(wrapped.len(), 3, "{wrapped:?}");
+    let opts = BuildOptions { inputs, output: dir.join("out"), custom_layout: Some(layout), keep_work: true, ..BuildOptions::default() };
+    let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));
+    let work = report.work_dir.as_ref().unwrap();
+    let log = std::fs::read_to_string(work.join("cm01_spumux.xml.log")).unwrap();
+    assert!(log.contains("PNG had 4 colors") && log.contains("1 subtitles added"), "{log}");
+
+    // On the disc: pixel values 1, 2, 3 carry the three (selected, activated) pairs.
+    let (pairs, groups) = disc_button_colours(&report.video_ts);
+    assert_eq!(groups.len(), 3);
+    let want = [("#FFD200", "#FF6A00"), ("#00FF00", "#008000"), ("#3060FF", "#FF00FF")];
+    for ((got_sel, got_act), (sel, act)) in pairs.iter().zip(want) {
+        let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(&b).all(|(x, y)| (*x as i32 - *y as i32).abs() <= 3);
+        assert!(near(*got_sel, rgb(sel)) && near(*got_act, rgb(act)), "{pairs:?}");
+    }
+    // Every button uses its own pixel value in the highlight mask.
+    let hl = image::open(work.join("cm01_hl.png")).unwrap().to_rgba8();
+    let colour_in = |y0: u32, y1: u32| {
+        let set: std::collections::BTreeSet<[u8; 4]> =
+            (160..560).flat_map(|x| (y0..y1).map(move |y| (x, y))).map(|(x, y)| hl.get_pixel(x, y).0).filter(|p| p[3] > 0).collect();
+        set.into_iter().collect::<Vec<_>>()
+    };
+    assert_eq!(colour_in(220, 270), vec![[255, 210, 0, 255]]);
+    assert_eq!(colour_in(320, 370), vec![[0, 255, 0, 255]]);
+    assert_eq!(colour_in(420, 470), vec![[48, 96, 255, 255]]);
+
+    // The wrapped heading: text in all three line bands (36 px each from y 40) of the layer.
+    let layer = image::open(work.join("cm01_l0.png")).unwrap().to_rgba8();
+    for line in 0..3 {
+        let y0 = 40 + 36 * line;
+        let ink = (160..560).flat_map(|x| (y0..y0 + 36).map(move |y| (x, y))).filter(|&(x, y)| layer.get_pixel(x, y).0[3] > 128).count();
+        assert!(ink > 100, "line {line} drawn: {ink}");
+    }
+    let _ = tools;
+    std::fs::remove_dir_all(&dir).ok();
+}

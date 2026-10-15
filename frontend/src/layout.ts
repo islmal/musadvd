@@ -27,6 +27,8 @@ interface ElementBase {
   rotation: number;
   opacity: number;
   action?: Action | null;
+  /** Own button colours (marked / activated); null = the layout's. At most 3 pairs per menu. */
+  highlight?: { color: string; selectColor: string } | null;
 }
 
 export interface TextElement extends ElementBase {
@@ -39,6 +41,8 @@ export interface TextElement extends ElementBase {
   bold: boolean;
   italic: boolean;
   shadow: boolean;
+  /** Break lines at the box width (otherwise only at line feeds). */
+  wrap?: boolean;
 }
 
 export interface ImageElement extends ElementBase {

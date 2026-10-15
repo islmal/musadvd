@@ -79,6 +79,46 @@ impl DiscType {
     }
 }
 
+/// Encoding profile ("Profil"): an upper limit for the video bitrate. `Auto` and `Sp` fill the
+/// disc up to [`MAX_VIDEO_KBPS`]; `Mp`/`Lp` stop earlier (smaller output for short projects),
+/// and `Lp` switches to Half D1 when the bitrate drops below [`LP_HALF_D1_BELOW_KBPS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EncodingProfile {
+    #[default]
+    Auto,
+    /// Short running time, highest quality.
+    Sp,
+    /// Medium running time.
+    Mp,
+    /// Long running time.
+    Lp,
+}
+
+/// LP: below this video bitrate a Full D1 project is encoded in Half D1 instead.
+pub const LP_HALF_D1_BELOW_KBPS: u32 = 3000;
+
+impl EncodingProfile {
+    /// Highest video bitrate of the profile.
+    pub fn max_video_kbps(self) -> u32 {
+        match self {
+            EncodingProfile::Auto | EncodingProfile::Sp => MAX_VIDEO_KBPS,
+            EncodingProfile::Mp => 6000,
+            EncodingProfile::Lp => 4000,
+        }
+    }
+
+    /// Short name for messages ("Auto", "SP", "MP", "LP").
+    pub fn label(self) -> &'static str {
+        match self {
+            EncodingProfile::Auto => "Auto",
+            EncodingProfile::Sp => "SP",
+            EncodingProfile::Mp => "MP",
+            EncodingProfile::Lp => "LP",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Clamp {
     None,
@@ -148,13 +188,29 @@ pub fn calculate_with_overhead(
     audio_kbps: u32,
     mux_overhead_kbit: f64,
 ) -> Result<BitratePlan, CalcError> {
+    calculate_capped(disc, duration_secs, audio_kbps, mux_overhead_kbit, MAX_VIDEO_KBPS)
+}
+
+/// Like [`calculate_with_overhead`] with a lower ceiling for the video bitrate (encoding
+/// profile); `max_video_kbps` is limited to [`MIN_VIDEO_KBPS`]..=[`MAX_VIDEO_KBPS`].
+pub fn calculate_capped(
+    disc: DiscType,
+    duration_secs: f64,
+    audio_kbps: u32,
+    mux_overhead_kbit: f64,
+    max_video_kbps: u32,
+) -> Result<BitratePlan, CalcError> {
     if !duration_secs.is_finite() || duration_secs <= 0.0 {
         return Err(CalcError::InvalidDuration(duration_secs));
     }
     if !mux_overhead_kbit.is_finite() || mux_overhead_kbit < 0.0 {
         return Err(CalcError::InvalidOverhead(mux_overhead_kbit));
     }
-    let max_video = MAX_VIDEO_KBPS.min(DVD_MAX_TOTAL_KBPS.saturating_sub(audio_kbps));
+    if DVD_MAX_TOTAL_KBPS.saturating_sub(audio_kbps) < MIN_VIDEO_KBPS {
+        return Err(CalcError::AudioTooHigh(audio_kbps));
+    }
+    let cap = max_video_kbps.clamp(MIN_VIDEO_KBPS, MAX_VIDEO_KBPS);
+    let max_video = cap.min(DVD_MAX_TOTAL_KBPS.saturating_sub(audio_kbps));
     if max_video < MIN_VIDEO_KBPS {
         return Err(CalcError::AudioTooHigh(audio_kbps));
     }
@@ -275,5 +331,24 @@ mod tests {
             calculate_with_overhead(DiscType::Dvd5, 3600.0, 192, -1.0),
             Err(CalcError::InvalidOverhead(_))
         ));
+    }
+
+    #[test]
+    fn profiles_cap_the_bitrate() {
+        assert_eq!(EncodingProfile::default(), EncodingProfile::Auto);
+        assert_eq!(EncodingProfile::Sp.max_video_kbps(), MAX_VIDEO_KBPS);
+        // 30 min on a DVD-5 would get the maximum; MP/LP stop at their ceiling.
+        for (profile, want) in [(EncodingProfile::Auto, MAX_VIDEO_KBPS), (EncodingProfile::Mp, 6000), (EncodingProfile::Lp, 4000)] {
+            let p = calculate_capped(DiscType::Dvd5, 1800.0, 192, DiscType::Dvd5.default_mux_overhead_kbit(), profile.max_video_kbps())
+                .unwrap();
+            assert_eq!((p.video_kbps, p.clamp), (want, Clamp::Max), "{profile:?}");
+            assert!(p.estimated_mb < 4300.0);
+        }
+        // Long content below the ceiling is unaffected.
+        let long = calculate_capped(DiscType::Dvd5, 4.0 * 3600.0, 192, 0.0, 4000).unwrap();
+        assert_eq!(long.clamp, Clamp::None);
+        assert_eq!(long.video_kbps, calculate_with_overhead(DiscType::Dvd5, 4.0 * 3600.0, 192, 0.0).unwrap().video_kbps);
+        // The ceiling never goes below the minimum.
+        assert_eq!(calculate_capped(DiscType::Dvd5, 1800.0, 192, 0.0, 10).unwrap().video_kbps, MIN_VIDEO_KBPS);
     }
 }

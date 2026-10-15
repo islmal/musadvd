@@ -71,6 +71,12 @@ impl TvStandard {
         (self.width(), self.height())
     }
 
+    /// Width of one frame pixel on a 4:3 screen relative to its height (PAL 16/15, NTSC 8/9):
+    /// square-pixel pictures must be squeezed by its inverse to look undistorted in menus.
+    pub fn menu_pixel_aspect(self) -> f64 {
+        4.0 / 3.0 * self.height() as f64 / self.width() as f64
+    }
+
     /// Frame rate as ffmpeg expects it.
     pub fn frame_rate(self) -> &'static str {
         match self {
@@ -117,6 +123,46 @@ impl TvStandard {
             TvStandard::Pal => "PAL",
             TvStandard::Ntsc => "NTSC",
         }
+    }
+}
+
+/// Frame size of the titles (menus are always Full D1). Half D1 and SIF trade picture detail for
+/// a lower bitrate need; subpictures keep the full raster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Resolution {
+    /// 720×576 (PAL) / 720×480 (NTSC).
+    #[default]
+    FullD1,
+    /// 352×576 / 352×480.
+    HalfD1,
+    /// 352×288 / 352×240.
+    Sif,
+}
+
+impl Resolution {
+    /// Coded frame size for `tv`.
+    pub fn frame_size(self, tv: TvStandard) -> (u32, u32) {
+        match self {
+            Resolution::FullD1 => tv.size(),
+            Resolution::HalfD1 => (352, tv.height()),
+            Resolution::Sif => (352, tv.height() / 2),
+        }
+    }
+
+    /// Name as in the settings ("Full D1", "Half D1", "SIF").
+    pub fn label(self) -> &'static str {
+        match self {
+            Resolution::FullD1 => "Full D1",
+            Resolution::HalfD1 => "Half D1",
+            Resolution::Sif => "SIF",
+        }
+    }
+
+    /// 16:9 titles. Conservative choice: DVD-Video defines the 16:9 aspect for the 720/704
+    /// wide frames, so the 352 wide sizes are encoded as 4:3 (wide sources get letterboxed).
+    pub fn allows_wide(self) -> bool {
+        self == Resolution::FullD1
     }
 }
 

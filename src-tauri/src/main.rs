@@ -8,8 +8,8 @@
 //! - `start_conversion`   run the full pipeline in the background; progress arrives as
 //!                        `convert-event` events, the result as one `convert-done` event
 //! - `default_output_dir` suggestion for the output folder
-//! - burning (see `burn.rs`): `list_drives`, `disc_needs`, `probe_media`, `sanitize_label`,
-//!   `start_burn`, `cancel_burn`
+//! - burning (see `burn.rs`): `list_drives`, `disc_needs`, `probe_media`, `start_burn`,
+//!   `cancel_burn`
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use convertx_rust::calculator::{Clamp, DiscType, Quality, DVD_MAX_TOTAL_KBPS, MAX_VIDEO_KBPS, MIN_VIDEO_KBPS};
+use convertx_rust::calculator::{Clamp, DiscType, EncodingProfile, Quality, DVD_MAX_TOTAL_KBPS, MAX_VIDEO_KBPS, MIN_VIDEO_KBPS};
 use convertx_rust::config::{AppSettings, UNSUPPORTED_CHOICES};
 use convertx_rust::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
 use convertx_rust::encoder::{ac3_settings, Aspect};
@@ -112,7 +112,7 @@ struct AudioTrack {
 struct SubtitleTrack {
     index: u32,
     codec: String,
-    /// `text` (rendered by spumux) or `bitmap` (not supported yet).
+    /// `text` (rendered by spumux) or `bitmap` (PGS/VobSub converted, others unsupported).
     kind: String,
     language: Option<String>,
     language_name: String,
@@ -198,7 +198,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                 language: s.language.clone(),
                 title: s.title.clone(),
                 forced: s.forced,
-                supported: s.kind == SubtitleKind::Text,
+                supported: s.kind == SubtitleKind::Text || convertx_rust::subpic::supported(&s.codec),
             })
             .collect(),
         has_source_chapters: !info.chapters.is_empty(),
@@ -418,8 +418,13 @@ fn quality(kbps: u32) -> f64 {
     ((kbps as f64 - MIN_VIDEO_KBPS as f64) / (MAX_VIDEO_KBPS - MIN_VIDEO_KBPS) as f64 * 100.0).clamp(0.0, 100.0)
 }
 
+/// Live estimate with the encoding profile from the global settings.
 #[tauri::command]
-fn calculate_project(settings: ProjectSettings) -> Result<CalculationResult, String> {
+fn calculate_project(state: State<'_, AppState>, settings: ProjectSettings) -> Result<CalculationResult, String> {
+    project_calculation(settings, state.settings().profile())
+}
+
+fn project_calculation(settings: ProjectSettings, profile: EncodingProfile) -> Result<CalculationResult, String> {
     let target_mb = settings.disc.target_mb();
     let menu_mb = dvd::estimate_menu_mb(
         settings.titles.len(),
@@ -440,7 +445,7 @@ fn calculate_project(settings: ProjectSettings) -> Result<CalculationResult, Str
             titles: vec![],
         });
     }
-    let plan = dvd::bitrate_plan(settings.disc, &settings.titles, menu_mb).map_err(|e| e.to_string())?;
+    let plan = dvd::bitrate_plan(settings.disc, &settings.titles, menu_mb, profile).map_err(|e| e.to_string())?;
     let titles = settings
         .titles
         .iter()
@@ -633,13 +638,13 @@ fn main() {
             burn::list_drives,
             burn::disc_needs,
             burn::probe_media,
-            burn::sanitize_label,
             burn::start_burn,
             burn::cancel_burn,
             burn::startup_burn,
             burn::open_folder,
             title_frame,
             menu_editor::check_layout,
+            menu_editor::text_lines,
             menu_editor::load_layout,
             menu_editor::save_layout,
             menu_editor::image_preview
@@ -654,7 +659,7 @@ mod tests {
 
     #[test]
     fn calculation_for_two_titles() {
-        let r = calculate_project(ProjectSettings {
+        let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
             titles: vec![
                 TitleLoad { duration_secs: 5400.0, audio_kbps: 448 + 192, subtitle_streams: 1 },
@@ -662,7 +667,7 @@ mod tests {
             ],
             motion_menu: false,
             motion_duration: None,
-        })
+        }, EncodingProfile::Auto)
         .unwrap();
         assert_eq!(r.target_mb, 4300);
         assert_eq!(r.clamp, "none");
@@ -674,12 +679,12 @@ mod tests {
 
     #[test]
     fn calculation_too_long_for_dvd5() {
-        let r = calculate_project(ProjectSettings {
+        let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
             titles: vec![TitleLoad { duration_secs: 8.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0 }],
             motion_menu: true,
             motion_duration: Some(25.0),
-        })
+        }, EncodingProfile::Auto)
         .unwrap();
         assert_eq!(r.clamp, "min");
         assert!(!r.fits);
@@ -689,8 +694,23 @@ mod tests {
     }
 
     #[test]
+    fn calculation_follows_the_profile() {
+        let project = || ProjectSettings {
+            disc: DiscType::Dvd5,
+            titles: vec![TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0 }],
+            motion_menu: false,
+            motion_duration: None,
+        };
+        let auto = project_calculation(project(), EncodingProfile::Auto).unwrap();
+        let lp = project_calculation(project(), EncodingProfile::Lp).unwrap();
+        assert_eq!((auto.video_kbps, lp.video_kbps), (MAX_VIDEO_KBPS, 4000));
+        assert_eq!(lp.clamp, "max");
+        assert!(lp.estimated_mb < auto.estimated_mb);
+    }
+
+    #[test]
     fn empty_project() {
-        let r = calculate_project(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None }).unwrap();
+        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None }, EncodingProfile::Auto).unwrap();
         assert_eq!(r.target_mb, 7950);
         assert!(r.fits);
     }

@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::author::{xml_escape, ClipSource, TvStandard};
-use crate::probe::{AudioStream, MediaInfo, SubtitleStream, VideoStream};
+use crate::author::{xml_escape, ClipSource, Resolution, TvStandard};
+use crate::probe::{AudioStream, MediaInfo, SubtitleKind, SubtitleStream, VideoStream};
+use crate::subpic;
 use crate::tools::{FfmpegProgress, ToolError, Toolchain};
 
 /// VBV buffer of DVD-Video MPEG-2 (224 KiB).
@@ -57,10 +58,10 @@ impl Aspect {
     }
 }
 
-/// Size of the picture inside the DVD frame (720x576 PAL, 720x480 NTSC): wider sources get
-/// letterbox bars, narrower ones pillarbox bars.
-pub fn active_size(source_aspect: f64, target: Aspect, tv: TvStandard) -> (u32, u32) {
-    let (fw, fh) = tv.size();
+/// Size of the picture inside a coded frame of `frame` pixels shown at `target` (e.g. 720x576
+/// PAL, 352x288 SIF): wider sources get letterbox bars, narrower ones pillarbox bars.
+pub fn active_size(source_aspect: f64, target: Aspect, frame: (u32, u32)) -> (u32, u32) {
+    let (fw, fh) = frame;
     let even = |v: f64| ((v / 2.0).round() as u32 * 2).max(2);
     let t = target.ratio();
     if source_aspect > t * 1.01 {
@@ -73,10 +74,11 @@ pub fn active_size(source_aspect: f64, target: Aspect, tv: TvStandard) -> (u32, 
 }
 
 /// ffmpeg `-vf` chain: deinterlace, frame rate of the TV standard, scale to the active area in
-/// BT.601, pad to the full DVD frame.
-pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard) -> String {
-    let (w, h) = active_size(v.display_aspect, aspect, tv);
-    let (fw, fh) = tv.size();
+/// BT.601, pad to the coded frame of `resolution`.
+pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard, resolution: Resolution) -> String {
+    let frame = resolution.frame_size(tv);
+    let (w, h) = active_size(v.display_aspect, aspect, frame);
+    let (fw, fh) = frame;
     let mut f = Vec::new();
     if v.is_interlaced() {
         f.push("bwdif=mode=send_frame".to_string());
@@ -124,8 +126,9 @@ pub enum EncodePhase {
 pub struct EncodeJob<'a> {
     pub info: &'a MediaInfo,
     pub audio: Vec<&'a AudioStream>,
-    /// Text subtitles to convert (rendered later by spumux).
-    pub text_subtitles: Vec<&'a SubtitleStream>,
+    /// Subtitles in DVD stream order: text ones are rendered by spumux, bitmap ones (PGS,
+    /// VobSub) are decoded by [`subpic`] into images for spumux.
+    pub subtitles: Vec<&'a SubtitleStream>,
     pub video_kbps: u32,
     pub aspect: Aspect,
     /// Work directory; all outputs are written here.
@@ -137,6 +140,8 @@ pub struct EncodeJob<'a> {
     /// Draft quality: no trellis quantisation (about 40 % faster, slightly lower quality).
     pub fast: bool,
     pub tv: TvStandard,
+    /// Coded frame size (Full D1, Half D1, SIF).
+    pub resolution: Resolution,
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
 }
@@ -221,7 +226,7 @@ impl EncodeJob<'_> {
             "-map".into(),
             format!("0:{}", v.index).into(),
             "-vf".into(),
-            video_filter(v, self.aspect, self.tv).into(),
+            video_filter(v, self.aspect, self.tv, self.resolution).into(),
         ]);
         a
     }
@@ -246,7 +251,11 @@ impl EncodeJob<'_> {
     pub fn srt(&self, n: usize) -> String {
         format!("{}_s{}.srt", self.stem, n + 1)
     }
-    /// spumux XML of text subtitle stream `n`.
+    /// Raw PGS stream of subtitle `n`.
+    pub fn sup(&self, n: usize) -> String {
+        format!("{}_s{}.sup", self.stem, n + 1)
+    }
+    /// spumux XML of subtitle stream `n`.
     pub fn subtitle_xml(&self, n: usize) -> String {
         format!("{}_s{}.xml", self.stem, n + 1)
     }
@@ -259,20 +268,33 @@ impl EncodeJob<'_> {
         self.audio.iter().map(|a| ac3_settings(a.channels).0).sum()
     }
 
-    /// Extraction of the text subtitles as SRT (stream copy speed, needed by spumux before the
-    /// encode starts); `None` without text subtitles.
+    /// Extraction of the text subtitles as SRT and of PGS subtitles as raw `.sup` (stream copy
+    /// speed, needed before the encode starts); `None` when no subtitle needs it (VobSub is read
+    /// by ffprobe, see [`subpic::vobsub_probe_args`]).
     pub fn subtitle_args(&self) -> Option<Vec<OsString>> {
-        if self.text_subtitles.is_empty() {
-            return None;
-        }
         let mut a: Vec<OsString> = vec!["-y".into(), "-i".into(), self.info.path.clone().into_os_string()];
-        for (n, sub) in self.text_subtitles.iter().enumerate() {
-            a.extend(
-                ["-map", &format!("0:{}", sub.index), "-c:s", "srt", "-vn", "-an", "-f", "srt"].map(OsString::from),
-            );
-            a.push(self.dir.join(self.srt(n)).into_os_string());
+        let mut any = false;
+        for (n, sub) in self.subtitles.iter().enumerate() {
+            let map = format!("0:{}", sub.index);
+            let (codec, format, file) = match (sub.kind, sub.codec.as_str()) {
+                (SubtitleKind::Text, _) => ("srt", "srt", self.srt(n)),
+                (_, "hdmv_pgs_subtitle") => ("copy", "sup", self.sup(n)),
+                _ => continue,
+            };
+            a.extend(["-map", &map, "-c:s", codec, "-vn", "-an", "-f", format].map(OsString::from));
+            a.push(self.dir.join(file).into_os_string());
+            any = true;
         }
-        Some(a)
+        any.then_some(a)
+    }
+
+    /// Where the source picture lies in the DVD frame (subpictures use the full 720-wide raster,
+    /// also for Half D1/SIF titles).
+    fn subpicture_target(&self, canvas: (u32, u32)) -> subpic::Target {
+        let v = self.info.video.as_ref().expect("probed file has video");
+        let (fw, fh) = self.tv.size();
+        let (aw, ah) = active_size(v.display_aspect, self.aspect, (fw, fh));
+        subpic::Target::new(self.tv, ((fw - aw) / 2, (fh - ah) / 2, aw, ah), canvas, (v.width, v.height))
     }
 
     /// Arguments of the transcoding run (1-pass, or the final run of a 2-pass encode): video and
@@ -316,11 +338,16 @@ pub async fn run_encode(
     let mut stages = Vec::new();
     if let Some(args) = job.subtitle_args() {
         tools.ffmpeg(&args, duration, |_| {}).await?;
-        for n in 0..job.text_subtitles.len() {
-            let xml = job.subtitle_xml(n);
-            std::fs::write(job.dir.join(&xml), spumux_textsub_xml(job.tv, &job.srt(n), SUBTITLE_FONT)).map_err(io)?;
-            stages.push((xml, n as u32));
-        }
+    }
+    for (n, sub) in job.subtitles.iter().enumerate() {
+        let xml = job.subtitle_xml(n);
+        let text = if sub.kind == SubtitleKind::Text {
+            spumux_textsub_xml(job.tv, &job.srt(n), SUBTITLE_FONT)
+        } else {
+            bitmap_subtitle_xml(tools, job, n, sub).await?
+        };
+        std::fs::write(job.dir.join(&xml), text).map_err(io)?;
+        stages.push((xml, n as u32));
     }
     let cleanup = |job: &EncodeJob| {
         job.cleanup_passlogs().map_err(|error| ToolError::Io { tool: "2-pass log cleanup".into(), error })
@@ -346,6 +373,42 @@ pub async fn run_encode(
         cleanup(job)?;
     }
     Ok(logs)
+}
+
+/// Decodes bitmap subtitle `n` (PGS from its extracted `.sup`, VobSub via ffprobe), writes its
+/// images into `<stem>_s<n>/` and returns the spumux XML.
+async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) -> Result<String, ToolError> {
+    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Bild-Untertitel #{}", sub.index), status: String::new(), log: e.to_string() };
+    let decoded = match sub.codec.as_str() {
+        "hdmv_pgs_subtitle" => {
+            let path = job.dir.join(job.sup(n));
+            let data = std::fs::read(&path).map_err(|error| ToolError::Io { tool: path.display().to_string(), error })?;
+            let _ = std::fs::remove_file(&path);
+            tokio::task::spawn_blocking(move || subpic::decode_pgs(&data)).await.map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+        }
+        "dvd_subtitle" => {
+            let json = tools.ffprobe_output(&subpic::vobsub_probe_args(&job.info.path, sub.index)).await?;
+            let v = job.info.video.as_ref().expect("probed file has video");
+            // Canvas: the .idx size, else the DVD raster the source belongs to.
+            let fallback = (720, if v.width == 720 { v.height } else if v.height >= 576 { 576 } else { 480 });
+            tokio::task::spawn_blocking(move || {
+                let probe = subpic::parse_vobsub_probe(&json)?;
+                let (palette, size) = subpic::parse_idx_header(&String::from_utf8_lossy(&probe.extradata));
+                Ok(subpic::decode_vobsub(&probe.packets, palette.as_ref(), size.unwrap_or(fallback)))
+            })
+            .await
+            .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+        }
+        other => Err(subpic::SubpicError::Format(format!("{other} wird nicht unterstützt"))),
+    }
+    .map_err(fail)?;
+    let target = job.subpicture_target(decoded.canvas);
+    let (dir, tv, folder) = (job.dir.clone(), job.tv, format!("{}_s{}", job.stem, n + 1));
+    let (xml, _count) = tokio::task::spawn_blocking(move || subpic::render(&decoded, &target, tv, &dir, &folder))
+        .await
+        .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+        .map_err(fail)?;
+    Ok(xml)
 }
 
 /// spumux XML rendering an SRT file as DVD subpictures. The font is looked up in
@@ -582,6 +645,19 @@ fn fit_filter(fit: Fit, w: u32, h: u32, pad_color: &str) -> String {
     }
 }
 
+/// Square pixels first (anamorphic sources keep their display aspect), then the pixel shape of
+/// the 4:3 menu frame, so pictures look undistorted on the TV: the axis that ends up horizontal
+/// is scaled by 1 / [`TvStandard::menu_pixel_aspect`] (`sideways`: the clip is rotated by
+/// 90°/270° afterwards, so its height becomes the horizontal).
+pub fn menu_pixels(tv: TvStandard, sideways: bool) -> String {
+    let f = 1.0 / tv.menu_pixel_aspect();
+    if sideways {
+        format!("scale=trunc(ih*dar/2)*2:trunc(ih*{f:.6}/2)*2,setsar=1")
+    } else {
+        format!("scale=trunc(ih*dar*{f:.6}/2)*2:ih,setsar=1")
+    }
+}
+
 /// ffmpeg filter rotating clockwise by `rotation` degrees (0/90/180/270).
 fn rotate_filter(rotation: u32) -> Option<&'static str> {
     match rotation % 360 {
@@ -616,8 +692,7 @@ pub fn custom_menu_args(
         a.extend(["-stream_loop", "-1", "-ss", &format!("{:.3}", clip.start_secs), "-t", &d, "-i"].map(OsString::from));
         a.push(clip.path.as_os_str().to_owned());
     };
-    // Square pixels first, so anamorphic sources keep their display aspect.
-    let square = "scale=trunc(ih*dar/2)*2:ih,setsar=1";
+    let square = menu_pixels(tv, false);
     let mut f: Vec<String> = Vec::new();
 
     // Input 0: background, then the shading over it.
@@ -679,7 +754,9 @@ pub fn custom_menu_args(
                 clip_input(&mut a, clip);
                 // Fit into the unrotated box, then rotate into the layout box.
                 let (bw, bh) = if rotation % 180 == 90 { (*height, *width) } else { (*width, *height) };
-                let mut chain = format!("[{input}:v]fps={rate},{square},{}", fit_filter(*fit, bw, bh, "black"));
+                // Stretch fills the box as it is; the other fits keep the picture's proportions.
+                let pixels = if *fit == Fit::Stretch { "setsar=1".to_string() } else { menu_pixels(tv, rotation % 180 == 90) };
+                let mut chain = format!("[{input}:v]fps={rate},{pixels},{}", fit_filter(*fit, bw, bh, "black"));
                 if let Some(r) = rotate_filter(*rotation) {
                     chain.push(',');
                     chain.push_str(r);
@@ -765,22 +842,43 @@ mod tests {
         assert_eq!(Aspect::for_source(2.39), Aspect::Wide);
         assert_eq!(Aspect::for_source(4.0 / 3.0), Aspect::Standard);
         assert_eq!(Aspect::for_source(1.5), Aspect::Standard);
-        let pal = TvStandard::Pal;
+        let pal = TvStandard::Pal.size();
         assert_eq!(active_size(16.0 / 9.0, Aspect::Wide, pal), (720, 576));
         assert_eq!(active_size(2.39, Aspect::Wide, pal), (720, 428)); // letterbox
         assert_eq!(active_size(1.5, Aspect::Standard, pal), (720, 512)); // letterbox
         assert_eq!(active_size(1.25, Aspect::Standard, pal), (676, 576)); // pillarbox
-        assert_eq!(active_size(16.0 / 9.0, Aspect::Wide, TvStandard::Ntsc), (720, 480));
-        assert_eq!(active_size(2.39, Aspect::Wide, TvStandard::Ntsc), (720, 358));
+        assert_eq!(active_size(16.0 / 9.0, Aspect::Wide, TvStandard::Ntsc.size()), (720, 480));
+        assert_eq!(active_size(2.39, Aspect::Wide, TvStandard::Ntsc.size()), (720, 358));
+        // Reduced frames: bars scale with the frame height.
+        assert_eq!(active_size(16.0 / 9.0, Aspect::Standard, (352, 576)), (352, 432));
+        assert_eq!(active_size(16.0 / 9.0, Aspect::Standard, (352, 288)), (352, 216));
+        assert_eq!(active_size(4.0 / 3.0, Aspect::Standard, (352, 240)), (352, 240));
+    }
+
+    #[test]
+    fn resolutions() {
+        assert_eq!(Resolution::FullD1.frame_size(TvStandard::Pal), (720, 576));
+        assert_eq!(Resolution::HalfD1.frame_size(TvStandard::Pal), (352, 576));
+        assert_eq!(Resolution::HalfD1.frame_size(TvStandard::Ntsc), (352, 480));
+        assert_eq!(Resolution::Sif.frame_size(TvStandard::Pal), (352, 288));
+        assert_eq!(Resolution::Sif.frame_size(TvStandard::Ntsc), (352, 240));
+        assert!(Resolution::FullD1.allows_wide() && !Resolution::HalfD1.allows_wide() && !Resolution::Sif.allows_wide());
+        let src = video(1920, 1080, 16.0 / 9.0, "progressive");
+        assert_eq!(
+            video_filter(&src, Aspect::Standard, TvStandard::Pal, Resolution::HalfD1),
+            "fps=25,scale=352:432:flags=lanczos:out_color_matrix=bt601:out_range=tv,pad=352:576:(ow-iw)/2:(oh-ih)/2:black,setdar=4/3,format=yuv420p"
+        );
+        let sif = video_filter(&video(640, 480, 4.0 / 3.0, "progressive"), Aspect::Standard, TvStandard::Ntsc, Resolution::Sif);
+        assert_eq!(sif, "fps=30000/1001,scale=352:240:flags=lanczos:out_color_matrix=bt601:out_range=tv,setdar=4/3,format=yuv420p");
     }
 
     #[test]
     fn filters() {
-        let f = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Pal);
+        let f = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Pal, Resolution::FullD1);
         assert_eq!(f, "fps=25,scale=720:576:flags=lanczos:out_color_matrix=bt601:out_range=tv,setdar=16/9,format=yuv420p");
-        let n = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Ntsc);
+        let n = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Ntsc, Resolution::FullD1);
         assert!(n.starts_with("fps=30000/1001,scale=720:480:"), "{n}");
-        let f = video_filter(&video(1920, 800, 2.4, "tt"), Aspect::Wide, TvStandard::Pal);
+        let f = video_filter(&video(1920, 800, 2.4, "tt"), Aspect::Wide, TvStandard::Pal, Resolution::FullD1);
         assert!(f.starts_with("bwdif=mode=send_frame,fps=25,scale=720:426:"), "{f}");
         assert!(f.contains("pad=720:576:(ow-iw)/2:(oh-ih)/2:black"));
     }
@@ -811,7 +909,7 @@ mod tests {
         let job = EncodeJob {
             info: &info,
             audio: info.audio.iter().collect(),
-            text_subtitles: info.subtitles.iter().collect(),
+            subtitles: info.subtitles.iter().collect(),
             video_kbps: 5000,
             aspect: Aspect::Wide,
             dir: PathBuf::from("w"),
@@ -819,6 +917,7 @@ mod tests {
             two_pass: false,
             fast: false,
             tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
             hwaccel: None,
         };
         let args: Vec<String> = job.encode_args("pipe:1").iter().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -846,7 +945,7 @@ mod tests {
         let hw = EncodeJob { hwaccel: Some("cuda"), ..job.clone() };
         let a: Vec<String> = hw.encode_args("x.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(a.join(" ").starts_with("-y -hwaccel cuda -i in.mkv"));
-        let none = EncodeJob { text_subtitles: vec![], ..job.clone() };
+        let none = EncodeJob { subtitles: vec![], ..job.clone() };
         assert!(none.subtitle_args().is_none());
 
         // Fast mode drops exactly the trellis option, in every run.
@@ -951,9 +1050,12 @@ mod tests {
             .map(|n| a.find(&format!("-i {n}")).unwrap_or_else(|| panic!("{n} missing: {a}")))
             .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{a}");
-        assert!(a.contains("[0:v]fps=25,scale=trunc(ih*dar/2)*2:ih,setsar=1,scale=720:576:force_original_aspect_ratio=increase,crop=720:576,gblur=sigma=8.0"), "{a}");
-        // Rotated by 90°: fitted into 90x160, then transposed into the 160x90 box.
-        assert!(a.contains("scale=90:160:force_original_aspect_ratio=increase,crop=90:160,transpose=1"), "{a}");
+        // Square pixels, then the PAL menu pixel shape (15/16 horizontally), then the fit.
+        assert!(a.contains("[0:v]fps=25,scale=trunc(ih*dar*0.937500/2)*2:ih,setsar=1,scale=720:576:force_original_aspect_ratio=increase,crop=720:576,gblur=sigma=8.0"), "{a}");
+        // Rotated by 90°: the height becomes the horizontal, so it is squeezed; fitted into
+        // 90x160, then transposed into the 160x90 box.
+        assert!(a.contains("scale=trunc(ih*dar/2)*2:trunc(ih*0.937500/2)*2,setsar=1,scale=90:160:force_original_aspect_ratio=increase,crop=90:160,transpose=1"), "{a}");
+        assert_eq!(menu_pixels(TvStandard::Ntsc, false), "scale=trunc(ih*dar*1.125000/2)*2:ih,setsar=1", "NTSC pixels are narrow");
         assert!(a.contains("colorchannelmixer=aa=0.500"), "{a}");
         assert!(a.contains("[l1]overlay=x=100:y=200:format=rgb:eof_action=repeat[m1]"), "{a}");
         assert!(a.contains("[m1][l2]overlay=0:0:format=rgb[m2];[m2]format=yuv420p,setdar=4/3[vout]"), "{a}");

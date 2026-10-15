@@ -1,7 +1,7 @@
 //! Burning the finished VIDEO_TS to disc (after a successful conversion).
 //!
-//! Commands: `list_drives`, `disc_needs`, `probe_media`, `sanitize_label`, `start_burn`,
-//! `cancel_burn`, `startup_burn`, `open_folder`. Progress arrives as `burn-progress`
+//! Commands: `list_drives`, `disc_needs`, `probe_media`, `start_burn`, `cancel_burn`,
+//! `startup_burn`, `open_folder`. Progress arrives as `burn-progress`
 //! ([`BurnStatus`]: phase, fraction, message and the remaining time), the result as one
 //! `burn-done` event.
 
@@ -11,16 +11,14 @@ use std::sync::Arc;
 
 use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
 use convertx_rust::burner::{
-    burn_video_ts, default_iso_path as iso_path, media_problem, preferred_speed, sanitize_volume_label, speed_label,
+    burn_video_ts, default_iso_path as iso_path, media_problem, preferred_speed, speed_label,
     speed_x, system_burner, BurnError, BurnJob, BurnOptions, BurnOutcome, BurnPhase, BurnProgress, DriveInfo, MediaInfo,
     WriteSpeed, DVD_1X_SECTORS_PER_SEC,
 };
+use convertx_rust::dvd::WORK_DIR;
 use convertx_rust::eta::{self, Eta, JobPhase};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-
-/// The engine's work directory next to the DVD folders and its marker file.
-const WORK_DIR: &str = ".convertx-work";
 
 #[derive(Default)]
 pub struct BurnState {
@@ -144,11 +142,6 @@ pub fn startup_burn() -> Option<String> {
             .find(|d| d.join("VIDEO_TS.IFO").is_file())
             .map(|d| d.to_string_lossy().into_owned())
     })
-}
-
-#[tauri::command]
-pub fn sanitize_label(text: String) -> String {
-    sanitize_volume_label(&text)
 }
 
 /// Shows a folder in the file manager (Explorer on Windows).

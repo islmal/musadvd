@@ -242,10 +242,10 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
         ]),
         select("dvd_resolution", "Auflösung", [
           ["Full D1", "Full D1 (720×576)"],
-          ["Half D1", "Half D1 (352×576)"],
-          ["SIF", "SIF (352×288)"],
+          ["Half D1", "Half D1 (352×576, NTSC 352×480)"],
+          ["SIF", "SIF (352×288, NTSC 352×240)"],
         ]),
-        note("Menüs und Titel werden in der gewählten Norm erzeugt (NTSC: 720×480, 29,97 Bilder/s). Die reduzierten Auflösungen Half D1 und SIF sind noch nicht umgesetzt."),
+        note("Menüs und Titel werden in der gewählten Norm erzeugt (NTSC: 720×480, 29,97 Bilder/s). Half D1 und SIF gelten nur für die Titel – Menüs bleiben in voller Auflösung. Diese Titel sind immer 4:3; Breitbild-Videos bekommen schwarze Balken."),
       ),
     ],
     encoding: () => [
@@ -256,11 +256,11 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           "Profil",
           [
             ["Auto", "Automatisch (Bitrate passend zur Disc)"],
-            ["SP_Short", "SP – kurze Laufzeit, höchste Qualität"],
-            ["MP_Medium", "MP – mittlere Laufzeit"],
-            ["LP_Long", "LP – lange Laufzeit"],
+            ["SP_Short", "SP – kurze Laufzeit, höchste Qualität (bis 8.500 kbps)"],
+            ["MP_Medium", "MP – mittlere Laufzeit (bis 6.000 kbps)"],
+            ["LP_Long", "LP – lange Laufzeit (bis 4.000 kbps)"],
           ],
-          "„Automatisch“ verteilt den Platz der Disc auf alle Videos (Bitrate 1.000–8.500 kbps).",
+          "„Automatisch“ verteilt den Platz der Disc auf alle Videos (Bitrate 1.000–8.500 kbps). MP und LP begrenzen die Bitrate – kurze Projekte werden dann kleiner. Bei LP werden die Titel unter 3.000 kbps automatisch in Half D1 kodiert.",
         ),
         number(
           "target_size_mb",
