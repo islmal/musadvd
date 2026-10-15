@@ -12,7 +12,7 @@ pub mod windows;
 
 use std::fmt;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
@@ -90,6 +90,43 @@ impl MediaInfo {
     pub fn can_take(&self, sectors: u64) -> bool {
         self.present && self.writable && self.blank && self.free_sectors >= sectors
     }
+}
+
+/// Why `media` cannot take a DVD of `sectors` (`dual_layer`: the content needs a DVD-9), or
+/// `None` when burning is possible – possibly after erasing a rewritable disc (`!media.blank`).
+pub fn media_problem(media: &MediaInfo, sectors: u64, dual_layer: bool) -> Option<String> {
+    let size_gb = sectors as f64 * 2048.0 / 1e9;
+    let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
+    if !media.present {
+        Some("Keine Disc eingelegt.".to_string())
+    } else if media.media_type == MediaType::Unknown {
+        Some(format!("{} ist keine beschreibbare DVD.", if media.physical.is_empty() { "Die Disc" } else { &media.physical }))
+    } else if !media.writable {
+        Some(format!("Die {} kann in diesem Laufwerk nicht beschrieben werden.", media.physical))
+    } else if !media.blank && !media.rewritable {
+        Some(format!("Die {} ist bereits beschrieben.", media.physical))
+    } else if dual_layer && media.media_type != MediaType::Dvd9 {
+        Some(format!("Die DVD braucht {size_gb:.2} GB – bitte einen Double-Layer-Rohling (DVD-9) einlegen."))
+    } else if capacity < sectors {
+        Some(format!("Nicht genug Platz: {size_gb:.2} GB benötigt, {:.2} GB verfügbar.", capacity as f64 * 2048.0 / 1e9))
+    } else {
+        None
+    }
+}
+
+/// `<output>/<project>.iso` next to the project folder (`<output>/<project>/VIDEO_TS`),
+/// numbered when the name is taken.
+pub fn default_iso_path(video_ts: &Path) -> PathBuf {
+    let project = video_ts.parent().unwrap_or(video_ts);
+    let output = project.parent().unwrap_or(project);
+    let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "DVD".into());
+    let mut path = output.join(format!("{name}.iso"));
+    let mut n = 2;
+    while path.exists() {
+        path = output.join(format!("{name} ({n}).iso"));
+        n += 1;
+    }
+    path
 }
 
 /// Speed as "8x" (one decimal below 10x when not integral, e.g. "2.4x").

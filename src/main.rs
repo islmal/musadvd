@@ -97,6 +97,10 @@ enum Command {
         /// long but hits the target size more exactly.
         #[arg(long)]
         two_pass: bool,
+        /// Fast draft encoding without trellis quantisation (about 40 % faster, slightly lower
+        /// quality).
+        #[arg(long)]
+        fast: bool,
         /// Motion menus: menu pages with video slots (e.g. Open Style chapter thumbnails) become
         /// looping MPEG-2 clips with moving previews instead of stills.
         #[arg(long)]
@@ -136,6 +140,35 @@ enum Command {
         #[arg(long, default_value = "DVD_VIDEO")]
         label: String,
     },
+    /// Burn a VIDEO_TS folder to DVD (disc image, write, optional read-back verification).
+    /// Ctrl+C cancels.
+    Burn {
+        /// The VIDEO_TS folder or the project folder containing it.
+        video_ts: PathBuf,
+        /// Drive: id, drive letter ("F:") or part of the name. Default: the only DVD writer.
+        #[arg(long)]
+        drive: Option<String>,
+        /// Write speed: auto (DVD-5 maximum, DVD-9 about 4x), max, or a speed in x (8, 2.4);
+        /// mapped to the nearest speed the drive offers.
+        #[arg(long, default_value = "auto", value_parser = parse_burn_speed)]
+        speed: String,
+        /// Volume label (sanitised to A-Z, 0-9, _; max. 32). Default: the project folder name.
+        #[arg(long)]
+        label: Option<String>,
+        /// Skip reading the disc back and comparing it with the image.
+        #[arg(long)]
+        no_verify: bool,
+        /// A rewritable disc with old content may be erased/overwritten.
+        #[arg(long)]
+        erase: bool,
+        /// Leave the disc in the drive.
+        #[arg(long)]
+        no_eject: bool,
+        /// Keep the disc image (default: <project>.iso next to the project folder); without this
+        /// option it is deleted after burning.
+        #[arg(long, value_name = "DATEI", num_args = 0..=1)]
+        keep_iso: Option<Option<PathBuf>>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -154,6 +187,16 @@ fn parse_positive_secs(s: &str) -> Result<f64, String> {
     match s.trim().replace(',', ".").parse::<f64>() {
         Ok(v) if v.is_finite() && v > 0.0 && v <= 600.0 => Ok(v),
         _ => Err(format!("'{s}' is not a duration between 0 and 600 seconds")),
+    }
+}
+
+fn parse_burn_speed(s: &str) -> Result<String, String> {
+    let v = s.trim().to_ascii_lowercase();
+    let x = v.trim_end_matches('x').replace(',', ".");
+    if v == "auto" || v == "max" || x.parse::<f64>().is_ok_and(|x| x > 0.0 && x <= 24.0) {
+        Ok(v)
+    } else {
+        Err(format!("'{s}' is not auto, max or a speed in x (e.g. 8, 2.4)"))
     }
 }
 
@@ -190,8 +233,213 @@ fn parse_duration(s: &str) -> Result<f64, String> {
     })
 }
 
+/// Burns `video_ts` (see `Command::Burn`); prints progress with the remaining time on stderr.
+#[allow(clippy::too_many_arguments)]
+fn burn(
+    video_ts: PathBuf,
+    drive: Option<String>,
+    speed: String,
+    label: Option<String>,
+    verify: bool,
+    erase: bool,
+    eject: bool,
+    keep_iso: Option<Option<PathBuf>>,
+) -> ExitCode {
+    use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
+    use convertx_rust::burner::{
+        create_disc_image, default_iso_path, media_problem, preferred_speed, speed_label, speed_x, system_burner,
+        BurnEta, BurnOptions, BurnPhase, BurnProgress, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let fail = |msg: String| {
+        eprintln!("error: {msg}");
+        ExitCode::FAILURE
+    };
+    let Some(video_ts) =
+        [video_ts.clone(), video_ts.join("VIDEO_TS")].into_iter().find(|d| d.join("VIDEO_TS.IFO").is_file())
+    else {
+        return fail(format!("{}: kein fertiger VIDEO_TS-Ordner (VIDEO_TS.IFO fehlt)", video_ts.display()));
+    };
+    let project = video_ts.parent().unwrap_or(&video_ts);
+    let label =
+        label.unwrap_or_else(|| project.file_name().map_or("DVD_VIDEO".into(), |n| n.to_string_lossy().into_owned()));
+    let plan = match plan_disc(&video_ts, "DVD_VIDEO", Capacities::DVD) {
+        Ok(p) => p,
+        Err(e) => return fail(e.to_string()),
+    };
+    let sectors = plan.image.total_sectors as u64;
+    let bytes = plan.image.size_bytes() as f64;
+    let dual_layer = plan.layer_break.is_some();
+
+    // Drive and medium.
+    let burner = system_burner();
+    let drives = match burner.list_drives() {
+        Ok(d) => d,
+        Err(e) => return fail(e.to_string()),
+    };
+    let list = || {
+        let arg = |d: &convertx_rust::burner::DriveInfo| {
+            let letter = d.path.trim_end_matches('\\');
+            if letter.is_empty() { d.id.clone() } else { letter.to_string() }
+        };
+        drives.iter().map(|d| format!("  {} (--drive {})", d.name, arg(d))).collect::<Vec<_>>().join("\n")
+    };
+    let candidates: Vec<_> = match &drive {
+        Some(want) => {
+            let w = want.trim().trim_end_matches('\\').to_lowercase();
+            drives
+                .iter()
+                .filter(|d| {
+                    d.id == *want
+                        || (!w.is_empty() && d.path.trim_end_matches('\\').to_lowercase() == w)
+                        || (!w.is_empty() && d.name.to_lowercase().contains(&w))
+                })
+                .collect()
+        }
+        None => drives.iter().collect(),
+    };
+    let d = match candidates[..] {
+        [d] => d,
+        _ if drives.is_empty() => return fail("Kein DVD-Brenner gefunden.".into()),
+        [] => return fail(format!("Laufwerk '{}' nicht gefunden. Vorhanden:\n{}", drive.unwrap_or_default(), list())),
+        _ => return fail(format!("Mehrere DVD-Brenner – bitte mit --drive wählen:\n{}", list())),
+    };
+    let media = match burner.probe_media(&d.id) {
+        Ok(m) => m,
+        Err(e) => return fail(format!("{}: Disc nicht lesbar: {e}", d.name)),
+    };
+    if let Some(problem) = media_problem(&media, sectors, dual_layer) {
+        return fail(problem);
+    }
+    if !media.blank && !erase {
+        return fail(format!("Die {} enthält Daten – zum Löschen/Überschreiben --erase angeben.", media.physical));
+    }
+    if dual_layer && !media.layer_break_supported {
+        eprintln!("warning: {}: Der Layerwechsel wird vom Laufwerk festgelegt.", media.physical);
+    }
+    let speed = preferred_speed(media.media_type, &media.speeds, &speed);
+    let x = speed_x(speed, &media.speeds);
+    println!(
+        "{}: {} – {} ({:.2} GB) bei {}{}{}",
+        d.name,
+        media.physical,
+        if dual_layer { "DVD-9" } else { "DVD-5" },
+        bytes / 1e9,
+        match speed {
+            WriteSpeed::Max => format!("max. {}", speed_label((x * DVD_1X_SECTORS_PER_SEC).round() as u32)),
+            WriteSpeed::Specific(s) => speed_label(s),
+        },
+        if verify { ", mit Überprüfung" } else { "" },
+        if media.blank { "" } else { ", alte Daten werden gelöscht" }
+    );
+
+    // Ctrl+C sets the cancel flag; the image writer and the burner stop as soon as they can.
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+            if rt.block_on(tokio::signal::ctrl_c()).is_ok() {
+                cancel.store(true, Ordering::SeqCst);
+                eprintln!("\nAbbruch angefordert – warte auf das Laufwerk …");
+            }
+        });
+    }
+
+    /// One progress line per backend message, with the remaining time of image + burn + verify.
+    struct Log {
+        eta: BurnEta,
+        start: Instant,
+        message: String,
+        printed: Option<(u32, Instant)>,
+    }
+    impl Log {
+        fn show(&mut self, p: &BurnProgress) {
+            let remaining = self.eta.update(p.phase, p.fraction, self.start.elapsed().as_secs_f64());
+            if p.phase == BurnPhase::Done {
+                return;
+            }
+            if p.message != self.message {
+                if !self.message.is_empty() {
+                    eprintln!();
+                }
+                self.message = p.message.clone();
+                self.printed = None;
+            }
+            // Reprint on a new percentage, or once a second (finalizing reports no progress).
+            let pct = (p.fraction * 100.0).floor() as u32;
+            if self.printed.is_some_and(|(last, at)| last == pct && at.elapsed().as_secs_f64() < 1.0) {
+                return;
+            }
+            self.printed = Some((pct, Instant::now()));
+            let left = convertx_rust::eta::format_remaining(remaining);
+            eprint!("\r  {}: {pct:>3}% – noch {left}    ", self.message.trim_end_matches(['…', ' ']));
+        }
+    }
+    let mut log =
+        Log { eta: BurnEta::new(bytes, x, verify, dual_layer), start: Instant::now(), message: String::new(), printed: None };
+
+    let iso = match &keep_iso {
+        Some(Some(path)) => path.clone(),
+        _ => default_iso_path(&video_ts),
+    };
+    let image_msg = "Disc-Image wird erstellt …";
+    log.show(&BurnProgress::new(BurnPhase::Preparing, 0.0, image_msg));
+    let result = create_disc_image(&video_ts, &iso, &label, Capacities::DVD, &cancel, |f| {
+        log.show(&BurnProgress::new(BurnPhase::Preparing, f, image_msg))
+    })
+    .map_err(|e| e.to_string())
+    .and_then(|plan| {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(String::new());
+        }
+        let options = BurnOptions {
+            layer_break: plan.layer_break.map(|l| l.l0_sectors),
+            verify,
+            eject,
+            erase: erase && !media.blank,
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<BurnProgress>();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for p in rx {
+                    log.show(&p);
+                }
+            });
+            burner.burn_iso(&d.id, &iso, speed, &options, &cancel, tx)
+        })
+        .map_err(|e| e.to_string())
+    });
+    eprintln!();
+    let kept = keep_iso.is_some() && result.is_ok();
+    if !kept {
+        let _ = std::fs::remove_file(&iso);
+        let _ = std::fs::remove_file(iso.with_extension("iso.part"));
+    }
+    match result {
+        Ok(()) => {
+            println!("{}", if verify { "Die DVD wurde gebrannt und überprüft." } else { "Die DVD wurde gebrannt." });
+            if kept {
+                println!("  Disc-Image: {}", iso.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(_) if cancel.load(Ordering::SeqCst) => {
+            eprintln!("Brennvorgang abgebrochen.");
+            ExitCode::from(130)
+        }
+        Err(e) => fail(e),
+    }
+}
+
 fn main() -> ExitCode {
     match Cli::parse().command {
+        Command::Burn { video_ts, drive, speed, label, no_verify, erase, no_eject, keep_iso } => {
+            burn(video_ts, drive, speed, label, !no_verify, erase, !no_eject, keep_iso)
+        }
         Command::Drives => {
             use convertx_rust::burner::{speed_label, system_burner};
             let burner = system_burner();
@@ -371,6 +619,7 @@ fn main() -> ExitCode {
             ui_lang,
             keep_work,
             two_pass,
+            fast,
             motion_menu,
             motion_duration,
             motion_silent,
@@ -406,6 +655,7 @@ fn main() -> ExitCode {
                 },
                 keep_work,
                 two_pass,
+                fast_encode: fast,
                 motion_menu,
                 motion_duration,
                 motion_audio: match (motion_silent, menu_audio) {

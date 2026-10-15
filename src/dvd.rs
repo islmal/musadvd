@@ -318,6 +318,8 @@ pub struct BuildOptions {
     pub hw_decode: bool,
     /// 2-pass video encoding (ConvertX's "2-pass encoding" checkbox): slower, more exact size.
     pub two_pass: bool,
+    /// Draft encoding without trellis quantisation: about 40 % faster, slightly lower quality.
+    pub fast_encode: bool,
     /// Motion menus: pages with video slots become looping clips instead of stills.
     pub motion_menu: bool,
     /// Motion menu length; `None` = template `main_duration` (25 s).
@@ -762,6 +764,7 @@ async fn encode_title(
     work: &Path,
     video_kbps: u32,
     two_pass: bool,
+    fast: bool,
     hw_decode: bool,
     tv: TvStandard,
     progress: JobProgress,
@@ -776,6 +779,7 @@ async fn encode_title(
         dir: work.to_path_buf(),
         stem: t.stem.clone(),
         two_pass,
+        fast,
         tv,
         hwaccel,
     };
@@ -1332,7 +1336,12 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         std::fs::copy(windir.join("Fonts").join(SUBTITLE_FONT), font_dir.join(SUBTITLE_FONT))?;
     }
     let count = titles.len();
-    let passes = if opts.two_pass { "2-Pass" } else { "1-Pass" };
+    let passes = match (opts.two_pass, opts.fast_encode) {
+        (true, true) => "2-Pass, schnell",
+        (true, false) => "2-Pass",
+        (false, true) => "1-Pass, schnell",
+        (false, false) => "1-Pass",
+    };
     let encode_jobs = heavy_jobs.min(count);
     log(Event::Step(format!(
         "Kodiere {count} Titel ({passes}, {encode_jobs} parallel, {} kbps Video)",
@@ -1344,9 +1353,9 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .map(|t| {
             let (t, tools, work) = (t.clone(), tools.clone(), work.clone());
             let video_kbps = plan.video_kbps.min(DVD_MAX_TOTAL_KBPS - t.audio_kbps());
-            let (two_pass, hw_decode) = (opts.two_pass, opts.hw_decode);
+            let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode);
             job(move |progress| async move {
-                encode_title(&tools, &t, &work, video_kbps, two_pass, hw_decode, tv, progress).await
+                encode_title(&tools, &t, &work, video_kbps, two_pass, fast, hw_decode, tv, progress).await
             })
         })
         .collect();

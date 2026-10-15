@@ -134,6 +134,8 @@ pub struct EncodeJob<'a> {
     pub stem: String,
     /// 2-pass video encoding (analysis run + final run) for a more exact average bitrate.
     pub two_pass: bool,
+    /// Draft quality: no trellis quantisation (about 40 % faster, slightly lower quality).
+    pub fast: bool,
     pub tv: TvStandard,
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
@@ -185,11 +187,14 @@ impl EncodeJob<'_> {
         let gop = self.tv.gop().to_string();
         let mut a: Vec<OsString> = [
             "-c:v", "mpeg2video", "-threads", "0", "-pix_fmt", "yuv420p", "-r", self.tv.frame_rate(), "-g", &gop, "-bf", "2",
-            "-dc", "9", "-qmin", "2", "-mbd", "rd", "-trellis", "1",
-            "-color_primaries", primaries, "-color_trc", trc, "-colorspace", matrix,
+            "-dc", "9", "-qmin", "2", "-mbd", "rd",
         ]
         .map(s)
         .to_vec();
+        if !self.fast {
+            a.extend([s("-trellis"), s("1")]);
+        }
+        a.extend(["-color_primaries", primaries, "-color_trc", trc, "-colorspace", matrix].map(s));
         a.extend([
             s("-b:v"),
             format!("{}k", self.video_kbps).into(),
@@ -812,6 +817,7 @@ mod tests {
             dir: PathBuf::from("w"),
             stem: "title_01".into(),
             two_pass: false,
+            fast: false,
             tv: TvStandard::Pal,
             hwaccel: None,
         };
@@ -840,8 +846,26 @@ mod tests {
         let hw = EncodeJob { hwaccel: Some("cuda"), ..job.clone() };
         let a: Vec<String> = hw.encode_args("x.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(a.join(" ").starts_with("-y -hwaccel cuda -i in.mkv"));
-        let none = EncodeJob { text_subtitles: vec![], ..job };
+        let none = EncodeJob { text_subtitles: vec![], ..job.clone() };
         assert!(none.subtitle_args().is_none());
+
+        // Fast mode drops exactly the trellis option, in every run.
+        let strings = |a: Vec<OsString>| a.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let without_trellis = |a: Vec<String>| {
+            let i = a.iter().position(|x| x == "-trellis").expect("default encode uses trellis");
+            assert_eq!(a[i - 2..=i + 1], ["-mbd", "rd", "-trellis", "1"]);
+            [&a[..i], &a[i + 2..]].concat()
+        };
+        let fast = EncodeJob { fast: true, two_pass: true, ..job.clone() };
+        let slow = EncodeJob { two_pass: true, ..job };
+        for (f, s) in [
+            (strings(fast.encode_args("x.mpg")), strings(slow.encode_args("x.mpg"))),
+            (strings(fast.first_pass_args()), strings(slow.first_pass_args())),
+        ] {
+            assert!(!f.iter().any(|x| x == "-trellis"), "{f:?}");
+            assert!(f.join(" ").contains("-mbd rd -color_primaries bt470bg"), "{f:?}");
+            assert_eq!(f, without_trellis(s));
+        }
     }
 
     fn slot(x: u32, has_audio: bool, letterbox: bool) -> VideoSlot {

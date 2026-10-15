@@ -220,7 +220,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           1,
           64,
           "Prozesse",
-          `Dieser Rechner hat ${info.cpuCount} logische Kerne. Jeder ffmpeg-Prozess nutzt selbst mehrere Kerne – mehr parallele Encodings brauchen vor allem mehr Arbeitsspeicher und Festplattentempo.`,
+          `Dieser Rechner hat ${info.cpuCount} logische Kerne; Standard ist die Hälfte (${Math.max(1, Math.floor(info.cpuCount / 2))}). Jeder ffmpeg-Prozess nutzt selbst mehrere Kerne – mehr parallele Encodings brauchen vor allem mehr Arbeitsspeicher und Festplattentempo.`,
         ),
         select("process_priority", "Prozesspriorität", [
           ["Normal", "Normal"],
@@ -231,7 +231,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
     ],
     output: () => [
       note("Einstellungen für das erzeugte DVD-Video. Unterpunkte: TV Format, Enkodierung und Videobearbeitung."),
-      group("Aktuell", el("p", {}, `${draft.tv_standard} · ${draft.dvd_resolution} · Seitenverhältnis ${draft.aspect_ratio_policy} · Profil ${draft.encoding_profile}`)),
+      group("Aktuell", el("p", {}, `${draft.tv_standard} · ${draft.dvd_resolution} · Seitenverhältnis ${draft.aspect_ratio_policy} · Profil ${draft.encoding_profile}${draft.fast_encode ? " · schnell" : ""}`)),
     ],
     tv: () => [
       group(
@@ -277,6 +277,11 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           "hw_decode",
           "GPU-Decoding verwenden (CUDA / D3D11VA / QSV)",
           "Die Quellvideos werden auf der Grafikkarte dekodiert, wenn ein funktionierender Decoder gefunden wird – sonst automatisch auf der CPU. Entlastet die CPU bei vielen parallelen Encodes; bei 4K-Material ohne CUDA kann es langsamer sein.",
+        ),
+        check(
+          "fast_encode",
+          "Schnelles Encoding (Entwurf)",
+          "Verzichtet auf Trellis-Quantisierung: etwa 40 % schneller, bei minimal geringerer Bildqualität. Für Testläufe und Entwürfe.",
         ),
       ),
     ],

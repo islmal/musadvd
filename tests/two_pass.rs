@@ -57,6 +57,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         dir: dir.to_path_buf(),
         stem: "title_01".into(),
         two_pass,
+        fast: false,
         tv: TvStandard::Pal,
         hwaccel: None,
     }

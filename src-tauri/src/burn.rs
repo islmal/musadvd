@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
 use convertx_rust::burner::{
-    create_disc_image, preferred_speed, sanitize_volume_label, speed_label, speed_x, system_burner, BurnError, BurnEta,
-    BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo, MediaType, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
+    create_disc_image, default_iso_path as iso_path, media_problem, preferred_speed, sanitize_volume_label, speed_label, speed_x, system_burner, BurnError, BurnEta,
+    BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
 };
 use convertx_rust::eta::{self, Eta, JobPhase};
 use serde::{Deserialize, Serialize};
@@ -107,25 +107,7 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
     speeds.extend(media.speeds.iter().map(|&s| option(WriteSpeed::Specific(s), speed_label(s))));
     let default = preferred_speed(media.media_type, &media.speeds, speed_pref);
     let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
-    let problem = if !media.present {
-        Some("Keine Disc eingelegt.".to_string())
-    } else if media.media_type == MediaType::Unknown {
-        Some(format!("{} ist keine beschreibbare DVD.", if media.physical.is_empty() { "Die Disc" } else { &media.physical }))
-    } else if !media.writable {
-        Some(format!("Die {} kann in diesem Laufwerk nicht beschrieben werden.", media.physical))
-    } else if !media.blank && !media.rewritable {
-        Some(format!("Die {} ist bereits beschrieben.", media.physical))
-    } else if needs.dual_layer && media.media_type != MediaType::Dvd9 {
-        Some(format!("Die DVD braucht {:.2} GB – bitte einen Double-Layer-Rohling (DVD-9) einlegen.", needs.size_gb))
-    } else if capacity < needs.sectors {
-        Some(format!(
-            "Nicht genug Platz: {:.2} GB benötigt, {:.2} GB verfügbar.",
-            needs.size_gb,
-            capacity as f64 * 2048.0 / 1e9
-        ))
-    } else {
-        None
-    };
+    let problem = media_problem(&media, needs.sectors, needs.dual_layer);
     let needs_erase = problem.is_none() && !media.blank;
     let mut warning = None;
     if needs_erase {
@@ -221,21 +203,6 @@ pub struct BurnStatus {
     #[serde(flatten)]
     pub progress: BurnProgress,
     pub eta: Eta,
-}
-
-/// `<output>/<project>.iso` next to the project folder (`<output>/<project>/VIDEO_TS`),
-/// numbered when the name is taken.
-fn iso_path(video_ts: &Path) -> PathBuf {
-    let project = video_ts.parent().unwrap_or(video_ts);
-    let output = project.parent().unwrap_or(project);
-    let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "DVD".into());
-    let mut path = output.join(format!("{name}.iso"));
-    let mut n = 2;
-    while path.exists() {
-        path = output.join(format!("{name} ({n}).iso"));
-        n += 1;
-    }
-    path
 }
 
 /// Deletes what the conversion produced for this disc: the project folder – only when it holds
@@ -390,6 +357,7 @@ pub fn cancel_burn(state: State<'_, BurnState>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use convertx_rust::burner::MediaType;
 
     fn media(blank: bool, rw: bool, t: MediaType, free: u64) -> MediaInfo {
         MediaInfo {

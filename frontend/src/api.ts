@@ -200,6 +200,7 @@ export interface AppSettings {
   default_subtitle_language: string;
   force_first_subtitle: boolean;
   hw_decode: boolean;
+  fast_encode: boolean;
   burn_speed: "auto" | "max" | "16" | "12" | "8" | "6" | "4" | "2.4";
   verify_after_burn: boolean;
   keep_iso: boolean;

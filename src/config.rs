@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::author::{PlaybackOptions, TvStandard};
 use crate::encoder::MenuAudio;
 use crate::calculator::DiscType;
-use crate::dvd::{available_cpus, AspectPolicy, BuildOptions, ChapterSettings};
+use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::menu::TextOverflow;
 use crate::tools::ProcessPriority;
 
@@ -59,6 +59,8 @@ pub struct AppSettings {
     pub process_priority: String,
     /// Decode the sources on the GPU (CUDA/D3D11VA/QSV) when available.
     pub hw_decode: bool,
+    /// Draft encoding without trellis quantisation (about 40 % faster, slightly lower quality).
+    pub fast_encode: bool,
     // Automatic chapters
     pub auto_chapter_enabled: bool,
     pub auto_chapter_interval_seconds: u32,
@@ -106,9 +108,10 @@ impl Default for AppSettings {
             aspect_ratio_policy: ASPECT_POLICIES[0].into(),
             encoding_profile: ENCODING_PROFILES[0].into(),
             target_size_mb: DiscType::Dvd5.target_mb() as u64,
-            max_concurrent_encodes: available_cpus(),
+            max_concurrent_encodes: default_jobs(),
             process_priority: PROCESS_PRIORITIES[0].into(),
             hw_decode: false,
+            fast_encode: false,
             auto_chapter_enabled: true,
             auto_chapter_interval_seconds: 300,
             auto_chapter_min_video_length_seconds: 900,
@@ -285,6 +288,7 @@ impl AppSettings {
         opts.preferred_subtitle_lang = lang(&self.default_subtitle_language);
         opts.force_first_subtitle = self.force_first_subtitle;
         opts.hw_decode = self.hw_decode;
+        opts.fast_encode = self.fast_encode;
         if opts.project_name.is_none() && !self.default_volume_label.is_empty() {
             opts.project_name = Some(self.default_volume_label.clone());
         }
@@ -314,7 +318,7 @@ mod tests {
         assert_eq!(s.chapter_naming_template, "Kapitel #<c>");
         assert_eq!(s.default_audio_language, "de");
         assert!(s.return_to_title_menu_after_title);
-        assert!(s.max_concurrent_encodes >= 1);
+        assert_eq!(s.max_concurrent_encodes, default_jobs(), "same default as the engine");
         assert_eq!(s.clone().sanitized(), s, "defaults are already valid");
     }
 
@@ -437,6 +441,7 @@ mod burn_settings_tests {
             burn_speed: "99x".into(),
             default_volume_label: "  Urlaub am Meer 2025!  ".into(),
             hw_decode: true,
+            fast_encode: true,
             ..AppSettings::default()
         }
         .sanitized();
@@ -447,7 +452,7 @@ mod burn_settings_tests {
 
         let mut opts = BuildOptions::default();
         s.apply_to(&mut opts);
-        assert!(opts.hw_decode);
+        assert!(opts.hw_decode && opts.fast_encode);
         assert_eq!(opts.project_name.as_deref(), Some("URLAUB_AM_MEER_2025_"), "default project name");
         // An explicit project name wins.
         let mut opts = BuildOptions { project_name: Some("Mein Film".into()), ..BuildOptions::default() };
@@ -458,5 +463,6 @@ mod burn_settings_tests {
         let old: AppSettings = serde_json::from_str(r#"{"tv_standard":"NTSC"}"#).unwrap();
         assert_eq!(old.burn_speed, "auto");
         assert!(old.verify_after_burn && !old.delete_after_burn && !old.quiet_finish && !old.auto_erase_rewritable);
+        assert!(!old.fast_encode, "full-quality encoding unless switched on");
     }
 }
