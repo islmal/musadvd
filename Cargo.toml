@@ -1,0 +1,48 @@
+[workspace]
+# The engine + CLI (this package) and the Tauri desktop app, which uses the engine as a library.
+members = [".", "src-tauri"]
+# `cargo check`/`cargo test` in the root keep building only the engine + CLI by default.
+default-members = ["."]
+resolver = "2"
+
+[package]
+name = "convertx-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Clean-room DVD authoring helpers: ConvertX template parser and DVD5/DVD9 bitrate calculator"
+
+[lib]
+name = "convertx_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "convertx-rust"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_derive = "1"
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+tokio = { version = "1", features = ["full"] }
+regex = "1"
+# Text rendering for menu labels (pure Rust, uses the Windows TTF fonts).
+ab_glyph = "0.2"
+# 8-bit palette PNG output for spumux subpicture masks (same version `image` uses).
+png = "0.18"
+# ffprobe JSON output.
+serde_json = "1"
+# Parallel menu rendering.
+rayon = "1"
+
+[target.'cfg(windows)'.dependencies]
+# IMAPI2 (disc burning) via COM.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_Imapi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+windows-core = "0.62"

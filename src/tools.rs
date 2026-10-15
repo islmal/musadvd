@@ -1,0 +1,493 @@
+//! Locating and running the external tools natively: ffmpeg/ffprobe, dvdauthor and spumux.
+//!
+//! Lookup order for every tool:
+//! 1. `bin/` next to the running executable (all-in-one distribution),
+//! 2. `bin/` in the current directory (`cargo run` / `cargo test` from the project root),
+//! 3. the system `PATH`.
+//!
+//! Native Windows builds of dvdauthor/spumux are produced by `tools/dvdauthor-win/build.sh`.
+//! dvdauthor and spumux run with the work directory as current directory and plain file names
+//! as arguments.
+
+use std::ffi::OsString;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::Command;
+
+#[derive(Debug)]
+pub enum ToolError {
+    NotFound(String),
+    Io { tool: String, error: std::io::Error },
+    Failed { tool: String, status: String, log: String },
+}
+
+impl fmt::Display for ToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ToolError::NotFound(t) => write!(f, "{t}"),
+            ToolError::Io { tool, error } => write!(f, "cannot run {tool}: {error}"),
+            ToolError::Failed { tool, status, log } => write!(f, "{tool} failed ({status}):\n{log}"),
+        }
+    }
+}
+
+impl std::error::Error for ToolError {}
+
+/// CPU priority of the external tools ("Prozesspriorität").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessPriority {
+    #[default]
+    Normal,
+    BelowNormal,
+    /// Only runs when the CPU is otherwise idle.
+    Idle,
+}
+
+impl ProcessPriority {
+    /// Windows process creation flag (`*_PRIORITY_CLASS`), `None` for normal priority.
+    pub fn creation_flag(self) -> Option<u32> {
+        match self {
+            ProcessPriority::Normal => None,
+            ProcessPriority::BelowNormal => Some(0x0000_4000),
+            ProcessPriority::Idle => Some(0x0000_0040),
+        }
+    }
+}
+
+/// `CREATE_NO_WINDOW`: the GUI runs without a console, so every console tool it starts would
+/// otherwise open its own console window.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// A command for an external tool: no console window (Windows), `priority` as CPU priority,
+/// stdin closed (callers may still redirect it), killed when dropped.
+pub fn tool_command(program: impl AsRef<std::ffi::OsStr>, priority: ProcessPriority) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.stdin(Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW | priority.creation_flag().unwrap_or(0));
+    #[cfg(not(windows))]
+    let _ = priority;
+    cmd
+}
+
+/// Live telemetry of one ffmpeg run (from `-progress`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FfmpegProgress {
+    /// 0..1 of the output duration.
+    pub fraction: f64,
+    /// Frames written so far.
+    pub frame: u64,
+    /// Current encoding speed in frames per second.
+    pub fps: f64,
+}
+
+/// Parses one `-progress` line into `p`; returns `true` at the end of a report block.
+fn parse_progress_line(line: &str, duration_secs: f64, p: &mut FfmpegProgress) -> Option<bool> {
+    let (key, value) = line.split_once('=')?;
+    let value = value.trim();
+    match key.trim() {
+        // `out_time_us` (and the misnamed `out_time_ms`) are microseconds.
+        "out_time_us" => {
+            if let (Ok(us), true) = (value.parse::<f64>(), duration_secs > 0.0) {
+                p.fraction = (us / 1e6 / duration_secs).clamp(0.0, 1.0);
+            }
+        }
+        "frame" => p.frame = value.parse().unwrap_or(p.frame),
+        "fps" => p.fps = value.parse().unwrap_or(p.fps),
+        "progress" => return Some(true),
+        "out_time_ms" | "out_time" | "bitrate" | "total_size" | "dup_frames" | "drop_frames" | "speed" => {}
+        k if k.starts_with("stream_") => {}
+        _ => return None,
+    }
+    Some(false)
+}
+
+/// Reads ffmpeg's stderr (`-progress pipe:2`): progress blocks go to `progress`, everything else
+/// is the error log.
+async fn drive_ffmpeg_stderr(
+    stderr: tokio::process::ChildStderr,
+    duration_secs: f64,
+    mut progress: impl FnMut(FfmpegProgress),
+) -> String {
+    let mut log = String::new();
+    let mut p = FfmpegProgress::default();
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        match parse_progress_line(&line, duration_secs, &mut p) {
+            Some(true) => progress(p),
+            Some(false) => {}
+            None => {
+                log.push_str(&line);
+                log.push('\n');
+            }
+        }
+    }
+    log
+}
+
+#[derive(Debug, Clone)]
+pub struct Toolchain {
+    pub ffmpeg: PathBuf,
+    pub ffprobe: PathBuf,
+    pub dvdauthor: PathBuf,
+    pub spumux: PathBuf,
+    /// Broken candidates that were skipped during detection.
+    pub notes: Vec<String>,
+    /// Priority of every ffmpeg/spumux/dvdauthor process started by this toolchain.
+    pub priority: ProcessPriority,
+}
+
+/// Splits a `PATH` value. Unlike `std::env::split_paths` a stray `"` in one entry (e.g.
+/// `C:\Program Files\dotnet"`) does not swallow all following entries.
+pub fn path_entries(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    path.to_string_lossy()
+        .split(sep)
+        .map(|e| e.trim().trim_matches('"'))
+        .filter(|e| !e.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn exe_name(name: &str) -> String {
+    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+/// Searches `PATH` for an executable (`name.exe` on Windows).
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    let exe = exe_name(name);
+    path_entries(&std::env::var_os("PATH")?)
+        .into_iter()
+        .map(|dir| dir.join(&exe))
+        .find(|p| p.is_file())
+}
+
+/// The application's `bin/` directories: next to the executable, then in the current directory.
+pub fn bundled_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        dirs.push(dir.join("bin"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let bin = cwd.join("bin");
+        if !dirs.contains(&bin) {
+            dirs.push(bin);
+        }
+    }
+    dirs
+}
+
+/// All candidate locations of a tool, in lookup order: bundled `bin/` directories, then `PATH`.
+pub fn tool_candidates(name: &str) -> Vec<PathBuf> {
+    let exe = exe_name(name);
+    let mut out: Vec<PathBuf> = bundled_bin_dirs().into_iter().map(|dir| dir.join(&exe)).filter(|p| p.is_file()).collect();
+    if let Some(p) = find_on_path(name) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Finds a tool in the bundled `bin/` directories, falling back to `PATH` (existence only).
+pub fn find_tool(name: &str) -> Option<PathBuf> {
+    tool_candidates(name).into_iter().next()
+}
+
+/// Checks that a candidate actually starts. ffmpeg/ffprobe must also answer `-version`
+/// successfully; this rejects e.g. scoop shims copied without their `.shim` file.
+async fn tool_works(path: &Path, version_check: bool) -> bool {
+    let mut cmd = tool_command(path, ProcessPriority::Normal);
+    if version_check {
+        cmd.arg("-version");
+    }
+    let run = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    match tokio::time::timeout(std::time::Duration::from_secs(20), run).await {
+        Ok(Ok(status)) => !version_check || status.success(),
+        _ => false,
+    }
+}
+
+/// First working candidate of `name`; skipped broken candidates are reported in `notes`.
+async fn locate(name: &str, version_check: bool, hint: &str, notes: &mut Vec<String>) -> Result<PathBuf, ToolError> {
+    for candidate in tool_candidates(name) {
+        if tool_works(&candidate, version_check).await {
+            return Ok(candidate);
+        }
+        notes.push(format!("{} ignoriert: startet nicht korrekt", candidate.display()));
+    }
+    Err(ToolError::NotFound(format!("{name} not found in bin/ or on PATH ({hint})")))
+}
+
+impl Toolchain {
+    pub async fn detect() -> Result<Self, ToolError> {
+        let mut notes = Vec::new();
+        let ff_hint = "scoop install ffmpeg, or copy the real ffmpeg.exe/ffprobe.exe into bin/";
+        let dvd_hint = "build it with tools/dvdauthor-win/build.sh";
+        Ok(Toolchain {
+            ffmpeg: locate("ffmpeg", true, ff_hint, &mut notes).await?,
+            ffprobe: locate("ffprobe", true, ff_hint, &mut notes).await?,
+            dvdauthor: locate("dvdauthor", false, dvd_hint, &mut notes).await?,
+            spumux: locate("spumux", false, dvd_hint, &mut notes).await?,
+            notes,
+            priority: ProcessPriority::Normal,
+        })
+    }
+
+    /// Same tools, started with another CPU priority.
+    pub fn with_priority(mut self, priority: ProcessPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// New command for `program` with this toolchain's priority (no console window).
+    fn command(&self, program: &Path) -> Command {
+        tool_command(program, self.priority)
+    }
+
+    /// `spumux -s <stream> -m dvd <xml> < <input> > <output>` in `dir`.
+    /// `HOME` is set to `dir`, so text subtitle fonts are taken from `dir/.spumux/`.
+    pub async fn spumux(&self, dir: &Path, xml: &str, input: &str, output: &str, stream: u32) -> Result<String, ToolError> {
+        let tool = format!("spumux ({xml})");
+        let open = |p: PathBuf, write: bool| {
+            let f = if write { std::fs::File::create(&p) } else { std::fs::File::open(&p) };
+            f.map_err(|error| ToolError::Io { tool: tool.clone(), error })
+        };
+        let mut cmd = self.command(&self.spumux);
+        cmd.args(["-s", &stream.to_string(), "-m", "dvd", xml])
+            .env("HOME", dir)
+            .current_dir(dir)
+            .stdin(open(dir.join(input), false)?)
+            .stdout(open(dir.join(output), true)?);
+        run_capture(&tool, cmd).await
+    }
+
+    /// `dvdauthor -x <xml>` in `dir`.
+    pub async fn dvdauthor(&self, dir: &Path, xml: &str) -> Result<String, ToolError> {
+        let mut cmd = self.command(&self.dvdauthor);
+        cmd.args(["-x", xml]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped());
+        run_capture("dvdauthor", cmd).await
+    }
+
+
+    /// Runs ffmpeg with `args`, reporting progress (0..1) for an output of `duration_secs`.
+    pub async fn ffmpeg(
+        &self,
+        args: &[OsString],
+        duration_secs: f64,
+        mut progress: impl FnMut(f64),
+    ) -> Result<(), ToolError> {
+        self.ffmpeg_with(args, duration_secs, |p| progress(p.fraction)).await
+    }
+
+    fn ffmpeg_command(&self, args: &[OsString]) -> Command {
+        let mut cmd = self.command(&self.ffmpeg);
+        // Progress goes to stderr, so stdout stays free for piped output.
+        cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:2", "-nostats"])
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    /// Runs ffmpeg with `args`, reporting progress with frame/fps telemetry.
+    pub async fn ffmpeg_with(
+        &self,
+        args: &[OsString],
+        duration_secs: f64,
+        mut progress: impl FnMut(FfmpegProgress),
+    ) -> Result<(), ToolError> {
+        let mut child =
+            self.ffmpeg_command(args).spawn().map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
+        let stderr = child.stderr.take().expect("piped stderr");
+        let log = drive_ffmpeg_stderr(stderr, duration_secs, &mut progress).await;
+        let status = child.wait().await.map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
+        if status.success() {
+            progress(FfmpegProgress { fraction: 1.0, ..Default::default() });
+            Ok(())
+        } else {
+            Err(ToolError::Failed { tool: "ffmpeg".into(), status: status.to_string(), log: tail(&log, 30) })
+        }
+    }
+
+    /// ffmpeg writing an MPEG program stream to its stdout (`args` must end with `pipe:1`),
+    /// piped through one `spumux` per `(xml, stream)` stage into `dir/output` – no intermediate
+    /// files. Without stages ffmpeg's stdout goes straight into the file. Returns the spumux logs.
+    pub async fn ffmpeg_spumux_pipeline(
+        &self,
+        args: &[OsString],
+        dir: &Path,
+        stages: &[(String, u32)],
+        output: &str,
+        duration_secs: f64,
+        mut progress: impl FnMut(FfmpegProgress),
+    ) -> Result<Vec<String>, ToolError> {
+        let io = |tool: &str| {
+            let tool = tool.to_string();
+            move |error| ToolError::Io { tool: tool.clone(), error }
+        };
+        let out_file = std::fs::File::create(dir.join(output)).map_err(io(output))?;
+        let mut ffmpeg = self.ffmpeg_command(args);
+        let mut out_file = Some(out_file);
+        if stages.is_empty() {
+            ffmpeg.stdout(out_file.take().unwrap());
+        } else {
+            ffmpeg.stdout(Stdio::piped());
+        }
+        let mut ff_child = ffmpeg.spawn().map_err(io("ffmpeg"))?;
+        let mut upstream = ff_child.stdout.take();
+        let mut spumux = Vec::new();
+        for (n, (xml, stream)) in stages.iter().enumerate() {
+            let input: Stdio = upstream.take().expect("piped stdout").try_into().map_err(io("spumux"))?;
+            let mut cmd = self.command(&self.spumux);
+            cmd.args(["-s", &stream.to_string(), "-m", "dvd", xml]).env("HOME", dir).current_dir(dir).stdin(input).stderr(Stdio::piped());
+            if n + 1 == stages.len() {
+                cmd.stdout(out_file.take().unwrap());
+            } else {
+                cmd.stdout(Stdio::piped());
+            }
+            let mut child = cmd.spawn().map_err(io("spumux"))?;
+            upstream = child.stdout.take();
+            let mut stderr = child.stderr.take().expect("piped stderr");
+            let log_task = tokio::spawn(async move {
+                let mut s = String::new();
+                let _ = stderr.read_to_string(&mut s).await;
+                s
+            });
+            spumux.push((format!("spumux ({xml})"), child, log_task));
+        }
+        let stderr = ff_child.stderr.take().expect("piped stderr");
+        let ff_log = drive_ffmpeg_stderr(stderr, duration_secs, &mut progress).await;
+        let ff_status = ff_child.wait().await.map_err(io("ffmpeg"))?;
+        let mut logs = Vec::new();
+        let mut spumux_error = None;
+        for (tool, mut child, log_task) in spumux {
+            let status = child.wait().await.map_err(io(&tool))?;
+            let log = log_task.await.unwrap_or_default();
+            if !status.success() && spumux_error.is_none() {
+                spumux_error = Some(ToolError::Failed { tool, status: status.to_string(), log: tail(&log, 30) });
+            }
+            logs.push(log);
+        }
+        // A failing spumux makes ffmpeg fail with a broken pipe: report the root cause.
+        if let Some(e) = spumux_error {
+            return Err(e);
+        }
+        if !ff_status.success() {
+            return Err(ToolError::Failed { tool: "ffmpeg".into(), status: ff_status.to_string(), log: tail(&ff_log, 30) });
+        }
+        progress(FfmpegProgress { fraction: 1.0, ..Default::default() });
+        Ok(logs)
+    }
+
+    /// Hardware decoder that works for the video of `input` (tried for 2 s of decoding), or
+    /// `None` to decode on the CPU.
+    pub async fn probe_hwaccel(&self, input: &Path) -> Option<&'static str> {
+        let candidates: &[&'static str] =
+            if cfg!(windows) { &["cuda", "d3d11va", "qsv"] } else { &["cuda", "vaapi", "qsv"] };
+        for &hw in candidates {
+            let mut cmd = self.command(&self.ffmpeg);
+            cmd.args(["-hide_banner", "-nostdin", "-loglevel", "warning", "-hwaccel", hw, "-t", "2", "-i"])
+                .arg(input)
+                .args(["-map", "0:v:0", "-f", "null", "-"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            let run = cmd.output();
+            let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(30), run).await else { continue };
+            let log = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+            // ffmpeg silently falls back to software decoding when the hwaccel fails to set up.
+            if out.status.success() && !log.contains("failed") && !log.contains("error") {
+                return Some(hw);
+            }
+        }
+        None
+    }
+}
+
+/// Runs a command, returning its captured output (stderr, plus stdout if the caller piped it);
+/// fails with the log tail on a non-zero exit.
+///
+/// Uses `spawn` + `wait_with_output` rather than `output()`: the latter forces stdout into a pipe
+/// and would discard a redirect to a file (spumux writes the muxed MPEG to stdout).
+async fn run_capture(tool: &str, mut cmd: Command) -> Result<String, ToolError> {
+    cmd.stderr(Stdio::piped());
+    let io = |error| ToolError::Io { tool: tool.to_string(), error };
+    let out = cmd.spawn().map_err(io)?.wait_with_output().await.map_err(io)?;
+    let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() {
+        Ok(log)
+    } else {
+        Err(ToolError::Failed { tool: tool.to_string(), status: out.status.to_string(), log: tail(&log, 30) })
+    }
+}
+
+fn tail(s: &str, lines: usize) -> String {
+    let v: Vec<&str> = s.lines().collect();
+    v[v.len().saturating_sub(lines)..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn stray_quote_in_path() {
+        let p = path_entries(std::ffi::OsStr::new(r#"C:\a;C:\Program Files\dotnet";C:\b; ;"C:\c d""#));
+        assert_eq!(p, vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\Program Files\dotnet"), PathBuf::from(r"C:\b"), PathBuf::from(r"C:\c d")]);
+    }
+
+    #[test]
+    fn progress_lines() {
+        let mut p = FfmpegProgress::default();
+        let block = ["frame=250", "fps=125.5", "stream_0_0_q=3.0", "out_time_us=5000000", "speed=5x", "progress=continue"];
+        let ends: Vec<Option<bool>> = block.iter().map(|l| parse_progress_line(l, 20.0, &mut p)).collect();
+        assert_eq!(ends.last(), Some(&Some(true)));
+        assert_eq!(p, FfmpegProgress { fraction: 0.25, frame: 250, fps: 125.5 });
+        // Error messages are not progress.
+        assert_eq!(parse_progress_line("[mpeg2video @ 0x1] buffer underflow", 20.0, &mut p), None);
+        assert_eq!(parse_progress_line("Error opening input: No such file", 20.0, &mut p), None);
+    }
+
+    #[test]
+    fn bundled_bin_comes_first() {
+        let dirs = bundled_bin_dirs();
+        let cwd_bin = std::env::current_dir().unwrap().join("bin");
+        assert!(dirs.contains(&cwd_bin), "{dirs:?}");
+        // `cargo test` runs in the project root, where bin/ holds the native DVD tools.
+        if cwd_bin.join(exe_name("dvdauthor")).is_file() {
+            assert_eq!(find_tool("dvdauthor"), Some(cwd_bin.join(exe_name("dvdauthor"))));
+            assert_eq!(find_tool("spumux"), Some(cwd_bin.join(exe_name("spumux"))));
+        }
+        assert_eq!(find_tool("definitely-not-a-tool-xyz"), None);
+    }
+
+    #[test]
+    fn broken_candidate_is_rejected() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = std::env::temp_dir().join(format!("cx_tools_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not an executable at all: must not count as a working tool.
+        let fake = dir.join(exe_name("fake-tool"));
+        std::fs::write(&fake, b"not a program").unwrap();
+        assert!(!rt.block_on(tool_works(&fake, true)));
+        assert!(!rt.block_on(tool_works(&dir.join("missing.exe"), false)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn priority_flags() {
+        assert_eq!(ProcessPriority::Normal.creation_flag(), None);
+        assert_eq!(ProcessPriority::BelowNormal.creation_flag(), Some(0x4000));
+        assert_eq!(ProcessPriority::Idle.creation_flag(), Some(0x40));
+    }
+
+    #[test]
+    fn tail_lines() {
+        assert_eq!(tail("a\nb\nc", 2), "b\nc");
+        assert_eq!(tail("a", 5), "a");
+    }
+}

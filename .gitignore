@@ -1,0 +1,37 @@
+# Rust build output (workspace root and any member)
+target/
+**/target/
+
+# Frontend dependencies and build output (package.json lives in the repo root;
+# the frontend/ paths are listed too in case the frontend gets its own package)
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Third-party tool binaries: ffmpeg/ffprobe are ~220 MB each (above GitHub's file limit) –
+# copy the real ffmpeg.exe/ffprobe.exe into bin/ locally (see STATUS.md §4.1).
+# dvdauthor.exe/spumux.exe are small self-built binaries and are tracked.
+bin/ffmpeg.exe
+bin/ffprobe.exe
+bin/*.iso
+
+# Disc images and build leftovers
+*.iso
+*.iso.part
+.convertx-work/
+output_menu/
+
+# Temporary patch scripts and scratch files
+patch_*.py
+*.tmp
+
+# Local Claude Code permissions (per machine)
+.claude/settings.local.json
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/

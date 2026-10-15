@@ -1,0 +1,506 @@
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use convertx_rust::author::{CommandContext, Domain, TitleSpec, TvStandard};
+use convertx_rust::calculator::{self, Clamp, DiscType};
+use convertx_rust::dvd::{self, BuildOptions, Event};
+use convertx_rust::encoder::MenuAudio;
+use convertx_rust::menu::{self, MenuSetOptions, UiLang};
+use convertx_rust::template::Template;
+
+#[derive(Parser)]
+#[command(version, about = "ConvertX clean-room tools: template parser and DVD bitrate calculator")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Parse a ConvertX template .ini and print its pages and buttons.
+    Template { path: PathBuf },
+    /// Calculate the video bitrate for a DVD5/DVD9 target.
+    Bitrate {
+        #[arg(long, value_enum, default_value = "dvd5")]
+        disc: Disc,
+        /// Runtime as seconds or HH:MM:SS.
+        #[arg(long, value_parser = parse_duration)]
+        duration: f64,
+        /// Total audio bitrate in kbps (sum of all tracks).
+        #[arg(long, default_value_t = 192)]
+        audio: u32,
+        /// Mux overhead in kbit (default: 2% of the target size).
+        #[arg(long)]
+        overhead: Option<f64>,
+    },
+    /// Render a template menu (background + highlight masks) and write the dvdauthor/spumux project.
+    RenderMenu {
+        /// Template .ini file.
+        #[arg(long)]
+        template: PathBuf,
+        /// Output directory (created if missing).
+        #[arg(long)]
+        output: PathBuf,
+        /// Title as FILE[@CHAPTERS], e.g. "movie.mpg@0,10:00,20:00". Repeatable.
+        /// Without any: placeholders title_01.mpg ... for one full menu page.
+        #[arg(long = "title", value_parser = parse_title)]
+        titles: Vec<TitleSpec>,
+        /// Text for the menu heading (replaces the template placeholder).
+        #[arg(long)]
+        menu_title: Option<String>,
+        /// Template page index (default: first title menu page).
+        #[arg(long)]
+        page: Option<usize>,
+        /// Draw button rectangles into menu_bg.png for layout checks.
+        #[arg(long)]
+        debug_frames: bool,
+    },
+    /// Probe, encode, render all menus and author a complete VIDEO_TS.
+    BuildDvd {
+        /// Input videos (.mkv, .mp4, ...), one title each.
+        #[arg(long, num_args = 1.., required = true)]
+        input: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value = "dvd5")]
+        disc: Disc,
+        /// Template .ini (sub menus are taken from sibling templates if it has none).
+        #[arg(long, required_unless_present = "layout")]
+        template: Option<PathBuf>,
+        /// Custom menu layout (JSON from the menu editor) instead of a template.
+        #[arg(long, value_name = "JSON", conflicts_with = "template")]
+        layout: Option<PathBuf>,
+        /// Output directory; the DVD ends up in <output>/<project name>/VIDEO_TS.
+        #[arg(long)]
+        output: PathBuf,
+        /// Audio languages to keep, comma separated (e.g. "de,en"); default: all.
+        #[arg(long, value_delimiter = ',')]
+        audio_lang: Vec<String>,
+        /// Subtitle languages to keep, comma separated; default: all.
+        #[arg(long, value_delimiter = ',')]
+        sub_lang: Vec<String>,
+        /// Do not include subtitles.
+        #[arg(long)]
+        no_subs: bool,
+        /// Chapter interval in minutes for inputs without chapters.
+        #[arg(long, default_value_t = 5.0)]
+        chapter_minutes: f64,
+        /// Heading of the main menu.
+        #[arg(long)]
+        menu_title: Option<String>,
+        /// Language of fixed menu texts.
+        #[arg(long, value_enum, default_value = "de")]
+        ui_lang: Lang,
+        /// Keep the work directory (<output>/.convertx-work: intermediate MPEGs, menu PNGs, logs).
+        #[arg(long)]
+        keep_work: bool,
+        /// 2-pass video encoding: an analysis run before the final encode. Takes about twice as
+        /// long but hits the target size more exactly.
+        #[arg(long)]
+        two_pass: bool,
+        /// Motion menus: menu pages with video slots (e.g. Open Style chapter thumbnails) become
+        /// looping MPEG-2 clips with moving previews instead of stills.
+        #[arg(long)]
+        motion_menu: bool,
+        /// Motion menu length in seconds (default: template main_duration, usually 25).
+        #[arg(long, value_name = "SEKUNDEN", requires = "motion_menu", value_parser = parse_positive_secs)]
+        motion_duration: Option<f64>,
+        /// Motion menus without sound (default: audio of the first preview clip).
+        #[arg(long, requires = "motion_menu")]
+        motion_silent: bool,
+        /// Sound of the main menu (motion menus): an audio file. Default: main menu silent; video menus always play their own video's sound.
+        #[arg(long, value_name = "DATEI", requires = "motion_menu", conflicts_with = "motion_silent")]
+        menu_audio: Option<PathBuf>,
+        /// TV standard of titles and menus.
+        #[arg(long, value_enum, default_value = "pal")]
+        tv: Tv,
+        /// Name of the DVD folder inside --output (default: menu title / first video's name).
+        #[arg(long)]
+        project_name: Option<String>,
+        /// Titles encoded at the same time (default: half the logical CPUs).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
+        jobs: Option<u16>,
+        /// Decode the sources on the GPU when a working hardware decoder exists (CUDA, D3D11VA,
+        /// QSV; falls back to the CPU).
+        #[arg(long)]
+        hw_decode: bool,
+    },
+    /// List DVD writers and the disc in each drive.
+    Drives,
+    /// Create a burnable disc image (UDF 1.02 + ISO 9660) from a VIDEO_TS folder.
+    MakeIso {
+        /// The VIDEO_TS folder.
+        video_ts: PathBuf,
+        /// Output .iso file.
+        output: PathBuf,
+        /// Volume label (sanitised to A-Z, 0-9, _; max. 32 characters).
+        #[arg(long, default_value = "DVD_VIDEO")]
+        label: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Tv {
+    Pal,
+    Ntsc,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Lang {
+    De,
+    En,
+}
+
+fn parse_positive_secs(s: &str) -> Result<f64, String> {
+    match s.trim().replace(',', ".").parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 && v <= 600.0 => Ok(v),
+        _ => Err(format!("'{s}' is not a duration between 0 and 600 seconds")),
+    }
+}
+
+fn parse_title(s: &str) -> Result<TitleSpec, String> {
+    TitleSpec::parse_cli(s).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Disc {
+    Dvd5,
+    Dvd9,
+}
+
+impl From<Disc> for DiscType {
+    fn from(d: Disc) -> Self {
+        match d {
+            Disc::Dvd5 => DiscType::Dvd5,
+            Disc::Dvd9 => DiscType::Dvd9,
+        }
+    }
+}
+
+fn parse_duration(s: &str) -> Result<f64, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() > 3 {
+        return Err(format!("invalid duration '{s}'"));
+    }
+    parts.iter().try_fold(0.0, |acc, p| {
+        p.trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .map(|v| acc * 60.0 + v)
+            .map_err(|_| format!("invalid duration '{s}'"))
+    })
+}
+
+fn main() -> ExitCode {
+    match Cli::parse().command {
+        Command::Drives => {
+            use convertx_rust::burner::{speed_label, system_burner};
+            let burner = system_burner();
+            match burner.list_drives() {
+                Ok(drives) if drives.is_empty() => {
+                    println!("Kein DVD-Brenner gefunden.");
+                    ExitCode::SUCCESS
+                }
+                Ok(drives) => {
+                    for d in drives {
+                        println!("{}", d.name);
+                        match burner.probe_media(&d.id) {
+                            Ok(m) if !m.present => println!("  keine Disc eingelegt"),
+                            Ok(m) => {
+                                let speeds: Vec<String> = m.speeds.iter().map(|&s| speed_label(s)).collect();
+                                println!(
+                                    "  {} ({:?}), {}{}, frei {:.2} GB, Geschwindigkeiten: {}",
+                                    m.physical,
+                                    m.media_type,
+                                    if m.blank { "leer" } else { "beschrieben" },
+                                    if m.writable { "" } else { ", nicht beschreibbar" },
+                                    m.free_sectors as f64 * 2048.0 / 1e9,
+                                    if speeds.is_empty() { "-".into() } else { speeds.join(", ") }
+                                );
+                            }
+                            Err(e) => println!("  Disc nicht lesbar: {e}"),
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::MakeIso { video_ts, output, label } => {
+            use convertx_rust::burner::{create_disc_image, layerbreak::Capacities};
+            let mut shown = 0;
+            match create_disc_image(&video_ts, &output, &label, Capacities::DVD, &Default::default(), |p| {
+                let pct = (p * 100.0) as u32;
+                if pct >= shown + 10 {
+                    shown = pct;
+                    eprint!("\r{pct:>3} %");
+                }
+            }) {
+                Ok(plan) => {
+                    eprintln!();
+                    println!(
+                        "{}: {} ({:.2} GB, Label {})",
+                        output.display(),
+                        if plan.layer_break.is_some() { "DVD-9" } else { "DVD-5" },
+                        plan.image.size_bytes() as f64 / 1e9,
+                        plan.image.label
+                    );
+                    if let Some(lb) = plan.layer_break {
+                        println!("  Layerwechsel bei Sektor {}{}", lb.l0_sectors, match lb.padding {
+                            Some((vts, p)) => format!(" ({p} Füllsektoren vor VTS {vts})"),
+                            None => String::new(),
+                        });
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Template { path } => match Template::load(&path) {
+            Ok(t) => {
+                println!(
+                    "{} (v{}, {})",
+                    t.name.as_deref().unwrap_or("<unnamed>"),
+                    t.template_version,
+                    t.kind
+                );
+                for p in &t.pages {
+                    println!("  page {} [{}] {}x{} '{}'", p.index, p.style, p.width, p.height, p.name);
+                    for bg in &p.backgrounds {
+                        println!("    background: {bg}");
+                    }
+                    for b in &p.buttons {
+                        println!(
+                            "    button {:>2}: {:>4},{:<4} {:>4}x{:<4} {:<18} scheme={} '{}'",
+                            b.index, b.x, b.y, b.width, b.height, b.location, b.color_scheme, b.name
+                        );
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {}: {e}", path.display());
+                ExitCode::FAILURE
+            }
+        },
+        Command::Bitrate { disc, duration, audio, overhead } => {
+            let disc = DiscType::from(disc);
+            let result = match overhead {
+                Some(o) => calculator::calculate_with_overhead(disc, duration, audio, o),
+                None => calculator::calculate(disc, duration, audio),
+            };
+            match result {
+                Ok(p) => {
+                    println!("disc:      {:?} ({} MB)", p.disc, p.disc.target_mb());
+                    println!("video:     {} kbps (raw {:.0})", p.video_kbps, p.raw_video_kbps);
+                    println!("audio:     {} kbps", p.audio_kbps);
+                    println!("estimated: {:.0} MB", p.estimated_mb);
+                    match p.clamp {
+                        Clamp::Min => println!("warning:   clamped to minimum, output will NOT fit on the disc"),
+                        Clamp::Max => println!("note:      clamped to maximum, disc will not be full"),
+                        Clamp::None => {}
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::RenderMenu { template, output, titles, menu_title, page, debug_frames } => {
+            let opts = MenuSetOptions {
+                template_path: &template,
+                page_index: page,
+                titles,
+                menu_title: menu_title.as_deref(),
+                output_dir: &output,
+                debug_frames,
+            };
+            match menu::render_menu_set(&opts) {
+                Ok(summary) => {
+                    for w in &summary.warnings {
+                        eprintln!("warning: {w}");
+                    }
+                    println!(
+                        "template page {}: {} menu page(s)",
+                        summary.page_index,
+                        summary.menus.len()
+                    );
+                    for (i, m) in summary.menus.iter().enumerate() {
+                        println!("  menu {} ({}): {} buttons", i + 1, m.vob, m.buttons.len());
+                        for b in &m.buttons {
+                            println!(
+                                "    {:<4} {:>3},{:<3}-{:>3},{:<3} {:<16} {}",
+                                b.name,
+                                b.rect.x0,
+                                b.rect.y0,
+                                b.rect.x1,
+                                b.rect.y1,
+                                b.location,
+                                b.action.command(CommandContext { domain: Domain::Vmgm, menu: i as u32 + 1 })
+                            );
+                        }
+                    }
+                    for f in &summary.files {
+                        println!("wrote {}", f.display());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::BuildDvd {
+            input,
+            disc,
+            template,
+            output,
+            audio_lang,
+            sub_lang,
+            no_subs,
+            chapter_minutes,
+            menu_title,
+            ui_lang,
+            keep_work,
+            two_pass,
+            motion_menu,
+            motion_duration,
+            motion_silent,
+            jobs,
+            hw_decode,
+            menu_audio,
+            tv,
+            project_name,
+            layout,
+        } => {
+            let custom_layout = match layout.as_deref().map(convertx_rust::layout::CustomLayout::load) {
+                Some(Err(e)) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+                Some(Ok(l)) => Some(l),
+                None => None,
+            };
+            let opts = BuildOptions {
+                inputs: input,
+                disc: disc.into(),
+                template: template.unwrap_or_default(),
+                custom_layout,
+                output,
+                audio_langs: audio_lang,
+                subtitle_langs: sub_lang,
+                no_subtitles: no_subs,
+                chapters: dvd::ChapterSettings { interval_secs: chapter_minutes * 60.0, ..Default::default() },
+                menu_title,
+                ui_lang: match ui_lang {
+                    Lang::De => UiLang::De,
+                    Lang::En => UiLang::En,
+                },
+                keep_work,
+                two_pass,
+                motion_menu,
+                motion_duration,
+                motion_audio: match (motion_silent, menu_audio) {
+                    (true, _) => MenuAudio::Silence,
+                    (false, Some(file)) => MenuAudio::File(file),
+                    (false, None) => MenuAudio::TitleAudio,
+                },
+                tv_standard: match tv {
+                    Tv::Pal => TvStandard::Pal,
+                    Tv::Ntsc => TvStandard::Ntsc,
+                },
+                project_name,
+                selections: vec![],
+                parallel_jobs: jobs.map(usize::from),
+                hw_decode,
+                ..Default::default()
+            };
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: cannot start async runtime: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut last_pct = u32::MAX;
+            let mut eta_text = String::new();
+            let mut on_event = move |ev: Event| match ev {
+                Event::Eta(e) => {
+                    eta_text = match e.remaining_secs {
+                        Some(s) => format!(" – noch {} ([{}/{}] {})", convertx_rust::eta::format_remaining(s), e.phase_number, e.phase_count, e.phase_label),
+                        None => String::new(),
+                    };
+                }
+                // The CLI's step messages already say what is happening.
+                Event::Phase(_) => {}
+                Event::Step(s) => {
+                    if last_pct != u32::MAX {
+                        eprintln!();
+                        last_pct = u32::MAX;
+                    }
+                    eprintln!("» {s}");
+                }
+                Event::Progress { label, fraction } => {
+                    let pct = (fraction * 100.0).round() as u32;
+                    if pct != last_pct {
+                        eprint!("\r  {label}: {pct:>3}%{eta_text}    ");
+                        last_pct = pct;
+                    }
+                }
+                Event::Warning(w) => {
+                    if last_pct != u32::MAX {
+                        eprintln!();
+                        last_pct = u32::MAX;
+                    }
+                    eprintln!("warning: {w}");
+                }
+            };
+            match runtime.block_on(dvd::build_dvd(&opts, &mut on_event)) {
+                Ok(r) => {
+                    eprintln!();
+                    println!("DVD fertig: {}", r.video_ts.display());
+                    println!(
+                        "  Größe {:.0} MB von {} MB ({:.1}%), {} Menüseite(n)",
+                        r.size_mb,
+                        r.target_mb,
+                        r.size_mb / r.target_mb as f64 * 100.0,
+                        r.menu_pages
+                    );
+                    if r.motion_pages > 0 {
+                        println!("  davon {} Motion-Menü(s)", r.motion_pages);
+                    }
+                    for t in &r.titles {
+                        println!(
+                            "  {} ({:.1} min, {}, {} kbps): Ton {:?}, Untertitel {:?}, {} Kapitel",
+                            t.label,
+                            t.duration_secs / 60.0,
+                            t.aspect.as_str(),
+                            t.video_kbps,
+                            t.audio,
+                            t.subtitles,
+                            t.chapters
+                        );
+                    }
+                    match &r.work_dir {
+                        Some(w) => println!("  Arbeitsdateien (Menü-PNGs, XMLs, Logs): {}", w.display()),
+                        None => println!("  Arbeitsordner wurde entfernt (mit --keep-work behalten)"),
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!();
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}

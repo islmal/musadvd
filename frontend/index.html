@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ConvertX Rust</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="toolbar">
+        <div class="brand"><span class="disc" aria-hidden="true"></span>ConvertX Rust</div>
+        <div class="toolbar-actions">
+          <button id="btn-add" class="btn">＋ Videos hinzufügen</button>
+          <button id="btn-remove" class="btn" disabled>Entfernen</button>
+          <button id="btn-up" class="btn icon" title="Nach oben" disabled>▲</button>
+          <button id="btn-down" class="btn icon" title="Nach unten" disabled>▼</button>
+          <button id="btn-settings" class="btn" title="Allgemeine Einstellungen">⚙ Einstellungen</button>
+        </div>
+      </header>
+
+      <main class="split">
+        <aside class="left">
+          <div id="dropzone" class="dropzone">
+            <strong>Videos hierher ziehen</strong>
+            <span>MKV, MP4, AVI, MOV, TS … – jedes Video wird ein eigenes Titleset</span>
+          </div>
+          <ul id="title-list" class="title-list" aria-label="Titlesets"></ul>
+
+          <footer class="left-footer">
+            <div class="row">
+              <label for="disc">Medium</label>
+              <select id="disc">
+                <option value="dvd5">DVD-5 (4,3 GB)</option>
+                <option value="dvd9">DVD-9 (8,2 GB)</option>
+                <option value="custom" id="disc-custom">Benutzerdefiniert</option>
+              </select>
+            </div>
+            <div class="fill">
+              <div class="fill-bar"><div id="fill-value" class="fill-value"></div></div>
+              <div id="fill-text" class="fill-text">Noch keine Videos</div>
+            </div>
+            <div class="toggles">
+              <label class="switch"><input id="two-pass" type="checkbox" /><span></span>2-Pass Encoding</label>
+              <label class="switch"><input id="motion-menu" type="checkbox" /><span></span>Motion Menu</label>
+            </div>
+            <div class="row output-row">
+              <input id="output" type="text" placeholder="Ausgabeordner" spellcheck="false" />
+              <button id="btn-output" class="btn icon" title="Ordner wählen">…</button>
+            </div>
+            <button id="btn-convert" class="btn primary big" disabled>Konvertieren</button>
+          </footer>
+        </aside>
+
+        <section class="right">
+          <nav class="tabs" role="tablist">
+            <button class="tab active" data-tab="audio" role="tab">Audio</button>
+            <button class="tab" data-tab="subtitles" role="tab">Untertitel</button>
+            <button class="tab" data-tab="chapters" role="tab">Kapitel</button>
+            <button class="tab" data-tab="template" role="tab">Menüvorlage</button>
+          </nav>
+          <div id="tab-body" class="tab-body"></div>
+        </section>
+      </main>
+
+      <div id="status-bar" class="status-bar"></div>
+    </div>
+
+    <div id="overlay" class="overlay" hidden>
+      <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
+        <h2 id="overlay-title">Konvertierung läuft</h2>
+        <ol id="phases" class="phases">
+          <li data-phase="menus">Menüs</li>
+          <li data-phase="encoding">Videos</li>
+          <li data-phase="authoring">Authoring</li>
+          <li data-phase="image" title="im Brenndialog">ISO</li>
+          <li data-phase="burning" title="im Brenndialog">Brennen</li>
+        </ol>
+        <div class="progress-block">
+          <div class="progress-label"><span>Gesamt</span><span id="total-pct">0 %</span></div>
+          <div class="progress"><div id="total-bar" class="progress-value"></div></div>
+        </div>
+        <div id="eta-line" class="eta-line" aria-live="polite"></div>
+        <div class="progress-block">
+          <div class="progress-label"><span id="step-label">Starte …</span><span id="step-pct"></span></div>
+          <div class="progress thin"><div id="step-bar" class="progress-value"></div></div>
+        </div>
+        <ul id="log" class="log"></ul>
+        <div class="overlay-actions">
+          <button id="btn-cancel" class="btn danger">Abbrechen</button>
+          <button id="btn-burn" class="btn" hidden>Auf DVD brennen …</button>
+          <button id="btn-close-overlay" class="btn primary" hidden>Schließen</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
