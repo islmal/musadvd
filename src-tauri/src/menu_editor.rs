@@ -11,7 +11,13 @@ use convertx_rust::author::{ClipSource, TvStandard};
 use convertx_rust::layout::{self, CustomLayout, LayoutTitle};
 use serde::Deserialize;
 
-/// A project title as the editor knows it.
+/// A selected audio track or subtitle of a title (source stream index; label for the UI).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrackRef {
+    pub source: u32,
+}
+
+/// A project title as the editor knows it (further fields of the frontend are ignored).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorTitle {
@@ -19,6 +25,10 @@ pub struct EditorTitle {
     pub path: String,
     pub chapters: usize,
     pub duration_secs: f64,
+    #[serde(default)]
+    pub audio_tracks: Vec<TrackRef>,
+    #[serde(default)]
+    pub subtitle_tracks: Vec<TrackRef>,
 }
 
 fn layout_titles(titles: &[EditorTitle]) -> Vec<LayoutTitle> {
@@ -29,6 +39,8 @@ fn layout_titles(titles: &[EditorTitle]) -> Vec<LayoutTitle> {
             chapters: t.chapters,
             duration_secs: t.duration_secs,
             clip: ClipSource { path: t.path.clone().into(), start_secs: (t.duration_secs * 0.1).min(300.0), has_audio: true },
+            audio_sources: t.audio_tracks.iter().map(|a| a.source).collect(),
+            subtitle_sources: t.subtitle_tracks.iter().map(|s| s.source).collect(),
         })
         .collect()
 }
@@ -90,10 +102,33 @@ mod tests {
                  "action": {"type": "playChapter", "title": 1, "chapter": 5}}]}]}"#,
         )
         .unwrap();
-        let t = |chapters| vec![EditorTitle { label: "A".into(), path: "a.mkv".into(), chapters, duration_secs: 60.0 }];
+        let t = |chapters| {
+            vec![EditorTitle {
+                label: "A".into(),
+                path: "a.mkv".into(),
+                chapters,
+                duration_secs: 60.0,
+                audio_tracks: vec![],
+                subtitle_tracks: vec![],
+            }]
+        };
         assert!(check_layout(layout.clone(), t(5), "PAL".into()).is_empty());
         let errs = check_layout(layout, t(3), "PAL".into());
         assert!(errs[0].contains("Kapitel 5"), "{errs:?}");
         assert!(image_preview("x.txt".into()).is_err());
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let dir = std::env::temp_dir().join(format!("cx_layout_io_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("menue-layout.json").to_string_lossy().into_owned();
+        let layout = CustomLayout::from_json(r#"{"menus": [{"id": "m", "name": "Haupt", "role": "title"}]}"#).unwrap();
+        save_layout(path.clone(), layout.clone()).unwrap();
+        assert_eq!(load_layout(path.clone()).unwrap(), layout);
+        // Writing into a missing folder reports the path instead of failing silently.
+        let bad = dir.join("missing").join("x.json").to_string_lossy().into_owned();
+        assert!(save_layout(bad.clone(), layout).unwrap_err().contains(&bad));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

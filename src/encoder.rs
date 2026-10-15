@@ -544,10 +544,25 @@ pub enum MenuLayer {
     Video { clip: ClipSource, x: u32, y: u32, width: u32, height: u32, rotation: u32, fit: Fit, opacity: f32 },
 }
 
+/// Shading over the background (below all elements), so texts stay legible on busy pictures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackgroundOverlay {
+    #[default]
+    None,
+    /// Vertical gradient, clear at the top, dark at the bottom (computed once, then looped).
+    BottomDark,
+    /// Darkened corners (`vignette`).
+    Vignette,
+    /// Whole picture darkened to 60 %.
+    Dim,
+}
+
 /// Everything ffmpeg needs to compile a custom menu page.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CustomMenuMedia {
     pub background: MenuBackground,
+    pub overlay: BackgroundOverlay,
     pub layers: Vec<MenuLayer>,
 }
 
@@ -600,18 +615,27 @@ pub fn custom_menu_args(
     let square = "scale=trunc(ih*dar/2)*2:ih,setsar=1";
     let mut f: Vec<String> = Vec::new();
 
-    // Input 0: background.
+    // Input 0: background, then the shading over it.
     let blur = |b: f32| if b > 0.0 { format!(",gblur=sigma={b:.1}") } else { String::new() };
+    // Applied before the conversion to RGBA (vignette) resp. right after it (dim).
+    let (pre_rgba, post_rgba) = match media.overlay {
+        BackgroundOverlay::Vignette => (",vignette=angle=PI/4", ""),
+        BackgroundOverlay::Dim => ("", ",colorchannelmixer=rr=0.6:gg=0.6:bb=0.6"),
+        BackgroundOverlay::None | BackgroundOverlay::BottomDark => ("", ""),
+    };
+    let bg_label = if media.overlay == BackgroundOverlay::BottomDark { "bg0" } else { "bg" };
     match &media.background {
         MenuBackground::Color([r, g, b]) => {
             a.extend(["-f", "lavfi", "-i"].map(OsString::from));
             a.push(format!("color=c=0x{r:02X}{g:02X}{b:02X}:s={fw}x{fh}:r={rate}:d={d}").into());
-            f.push("[0:v]format=rgba,setsar=1[bg]".to_string());
+            let pre = pre_rgba.trim_start_matches(',');
+            let pre = if pre.is_empty() { String::new() } else { format!("{pre},") };
+            f.push(format!("[0:v]{pre}format=rgba{post_rgba},setsar=1[{bg_label}]"));
         }
         MenuBackground::Image { path, blur: b } => {
             still(&mut a, path);
             f.push(format!(
-                "[0:v]fps={rate},{square},{}{},format=rgba,setsar=1[bg]",
+                "[0:v]fps={rate},{square},{}{}{pre_rgba},format=rgba{post_rgba},setsar=1[{bg_label}]",
                 fit_filter(Fit::Cover, fw, fh, "black"),
                 blur(*b)
             ));
@@ -619,11 +643,21 @@ pub fn custom_menu_args(
         MenuBackground::Video { clip, blur: b } => {
             clip_input(&mut a, clip);
             f.push(format!(
-                "[0:v]fps={rate},{square},{}{},format=rgba,setsar=1,trim=duration={d},setpts=PTS-STARTPTS[bg]",
+                "[0:v]fps={rate},{square},{}{}{pre_rgba},format=rgba{post_rgba},setsar=1,trim=duration={d},setpts=PTS-STARTPTS[{bg_label}]",
                 fit_filter(Fit::Cover, fw, fh, "black"),
                 blur(*b)
             ));
         }
+    }
+    if media.overlay == BackgroundOverlay::BottomDark {
+        // Black with an alpha ramp from 35 % of the height down (max. 84 %), rendered once and
+        // repeated for the whole loop.
+        f.push(format!(
+            "color=c=black:s={fw}x{fh}:r={rate}:d=0.04,format=rgba,\
+             geq=r=0:g=0:b=0:a='215*clip((Y/H-0.35)/0.65\\,0\\,1)',\
+             loop=loop=-1:size=1,trim=duration={d},setpts=N/FRAME_RATE/TB[shade]"
+        ));
+        f.push("[bg0][shade]overlay=0:0:format=rgb[bg]".to_string());
     }
 
     // Inputs 1..=n: layers, overlaid bottom to top.
@@ -870,6 +904,7 @@ mod tests {
         let clip = |p: &str| ClipSource { path: p.into(), start_secs: 12.5, has_audio: true };
         let media = CustomMenuMedia {
             background: MenuBackground::Image { path: "bg.jpg".into(), blur: 8.0 },
+            overlay: BackgroundOverlay::None,
             layers: vec![
                 MenuLayer::Image("under.png".into()),
                 MenuLayer::Video {
@@ -902,11 +937,26 @@ mod tests {
         assert!(a.contains("-t 20.000 -target pal-dvd"), "{a}");
 
         // Colour background, no layers, silence, NTSC.
-        let still = CustomMenuMedia { background: MenuBackground::Color([0x10, 0x20, 0xA0]), layers: vec![] };
+        let still = CustomMenuMedia { background: MenuBackground::Color([0x10, 0x20, 0xA0]), overlay: BackgroundOverlay::None, layers: vec![] };
         let a = joined(&custom_menu_args(TvStandard::Ntsc, &still, 1.0, None, Path::new("m.mpg")));
         assert!(a.contains("color=c=0x1020A0:s=720x480:r=30000/1001:d=1.000"), "{a}");
         assert!(a.contains("[bg]format=yuv420p,setdar=4/3[vout]") && a.contains("[1:a]asetpts=N/SR/TB[aout]"), "{a}");
         assert!(a.contains("-target ntsc-dvd"));
+
+        // Shading over the background.
+        let with = |overlay| {
+            let m = CustomMenuMedia { overlay, ..media.clone() };
+            joined(&custom_menu_args(TvStandard::Pal, &m, 20.0, None, Path::new("m.mpg")))
+        };
+        let a = with(BackgroundOverlay::Vignette);
+        assert!(a.contains("gblur=sigma=8.0,vignette=angle=PI/4,format=rgba,setsar=1[bg]"), "{a}");
+        let a = with(BackgroundOverlay::Dim);
+        assert!(a.contains("format=rgba,colorchannelmixer=rr=0.6:gg=0.6:bb=0.6,setsar=1[bg]"), "{a}");
+        let a = with(BackgroundOverlay::BottomDark);
+        assert!(a.contains("setsar=1[bg0]"), "{a}");
+        assert!(a.contains("color=c=black:s=720x576:r=25:d=0.04,format=rgba,geq=r=0:g=0:b=0:a='215*clip((Y/H-0.35)/0.65\\,0\\,1)',loop=loop=-1:size=1,trim=duration=20.000"), "{a}");
+        // The shaded background is what the first layer goes onto.
+        assert!(a.contains("[bg0][shade]overlay=0:0:format=rgb[bg];") && a.contains("[bg][l0]overlay"), "{a}");
     }
 
     #[test]

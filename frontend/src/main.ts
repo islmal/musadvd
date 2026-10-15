@@ -607,6 +607,14 @@ function editorTitles(): EditorTitle[] {
       chapters: Math.max(1, starts.length),
       durationSecs: t.meta.durationSecs,
       chapterNames: starts.map((s) => t.meta.chapters.find((c) => Math.abs(c.startSecs - s) < 0.5)?.title ?? null),
+      chapterStarts: starts,
+      // Tracks that go onto the disc (bitmap subtitles are skipped by the engine).
+      audioTracks: t.meta.audio
+        .filter((a) => t.audio.has(a.index))
+        .map((a) => ({ source: a.index, label: a.title ? `${a.languageName} – ${a.title}` : a.languageName })),
+      subtitleTracks: t.meta.subtitles
+        .filter((s) => t.subs.has(s.index) && s.kind === "text")
+        .map((s) => ({ source: s.index, label: s.title ? `${s.languageName} – ${s.title}` : s.languageName })),
     };
   });
 }

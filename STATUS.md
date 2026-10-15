@@ -580,6 +580,23 @@ convertx-gui.exe D:\out\Film\VIDEO_TS        # opens the burn dialog for an exis
 
 Newest first. Every change to the project adds an entry here (rule in `CLAUDE.md`).
 
+### 2026-10-15 — Save fix, settings menus, chapter thumbnails, background shading
+- "Speichern …" in the menu editor did nothing: the capability lacked `dialog:allow-save` and
+  the rejected `save()` was not caught. Added the permission, `.json` suffix, and visible
+  success/error messages (`flash`) for save, load and file dialogs; Rust round-trip test.
+- Custom layouts: menu role `settings` (VTSM, after the root menus), actions `setAudio {source}`
+  / `setSubtitle {source|null}` (source = ffprobe stream index, mapped to the DVD stream in the
+  build; only in a title's root/settings menus; validated against the selected tracks).
+- Background `gradientOverlay` (`none`, `bottomDark`, `vignette`, `dim`) in
+  `encoder::custom_menu_args` (gradient rendered once via `geq` + `loop`).
+- Draft: chapter pages with moving thumbnails starting at each chapter (6 per page), an
+  "Einstellungen" menu per title with several audio tracks or subtitles, `.gitattributes` (LF).
+- Verified: `cargo check --workspace` clean, unit tests 97 engine + 9 GUI green,
+  `npm run build` (tsc) clean, overlay filters run with real ffmpeg (manual test).
+  **Not yet run after this change:** the integration test suite (`cargo test --workspace`
+  incl. `tests/`), an end-to-end build of a settings menu, and the editor UI for the new
+  options.
+
 ### 2026-10-15 — Git repository; real burn verified by the user
 - `git init` (branch `main`, repo-local identity `malik <user@example.invalid>`), `.gitignore`
   (target, node_modules, dist, ffmpeg/ffprobe binaries > 100 MB, ISO images, work dirs,

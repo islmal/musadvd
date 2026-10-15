@@ -35,7 +35,7 @@ use crate::author::{
     self, command_count, ButtonAction, ClipSource, MenuButton, MenuSpec, Navigation, Rect, TvStandard, MAX_BUTTONS,
     MAX_CHAPTERS, MAX_PGC_COMMANDS,
 };
-use crate::encoder::{CustomMenuMedia, Fit, MenuBackground, MenuLayer};
+use crate::encoder::{BackgroundOverlay, CustomMenuMedia, Fit, MenuBackground, MenuLayer};
 use crate::menu::{self, IndexedImage, MenuPageFiles};
 
 pub const LAYOUT_VERSION: u32 = 1;
@@ -105,6 +105,8 @@ pub enum MenuRole {
     Title,
     /// Root menu of one title (its VTSM, "Menu" key).
     Root,
+    /// Audio/subtitle selection of one title (its VTSM, after its root menus).
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,7 +116,7 @@ pub struct CustomMenu {
     pub id: String,
     pub name: String,
     pub role: MenuRole,
-    /// Root menus: the 1-based title they belong to.
+    /// Root and settings menus: the 1-based title they belong to.
     #[serde(default)]
     pub title: Option<u32>,
     #[serde(default)]
@@ -138,11 +140,14 @@ pub struct Background {
     pub video: Option<VideoRef>,
     /// Gaussian blur sigma in pixels (0 = sharp, max. 50).
     pub blur: f32,
+    /// Shading over the background so texts stay legible.
+    #[serde(rename = "gradientOverlay")]
+    pub overlay: BackgroundOverlay,
 }
 
 impl Default for Background {
     fn default() -> Self {
-        Background { color: "#000000".into(), image: None, video: None, blur: 0.0 }
+        Background { color: "#000000".into(), image: None, video: None, blur: 0.0, overlay: BackgroundOverlay::None }
     }
 }
 
@@ -244,6 +249,11 @@ pub enum Action {
     PlayChapter { title: u32, chapter: u32 },
     Menu { menu: String },
     PlayAll,
+    /// Select the audio track with this source stream index (ffprobe index of the input) – the
+    /// build maps it to the DVD audio stream number. Root/settings menus only.
+    SetAudio { source: u32 },
+    /// Select the subtitle with this source stream index (`null` = subtitles off).
+    SetSubtitle { source: Option<u32> },
 }
 
 impl CustomLayout {
@@ -271,6 +281,10 @@ pub struct LayoutTitle {
     pub duration_secs: f64,
     /// Source file and default sample start (10 %).
     pub clip: ClipSource,
+    /// Source stream indices of the audio tracks on the disc, in DVD stream order.
+    pub audio_sources: Vec<u32>,
+    /// Source stream indices of the subtitles on the disc, in DVD stream order.
+    pub subtitle_sources: Vec<u32>,
 }
 
 /// All problems of a layout (German, for the UI).
@@ -353,8 +367,9 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
     for m in &layout.menus {
         let menu = |msg: String| format!("Menü „{}“: {msg}", m.name);
         match (m.role, m.title) {
-            (MenuRole::Root, Some(t)) if title_ok(t) => {}
+            (MenuRole::Root | MenuRole::Settings, Some(t)) if title_ok(t) => {}
             (MenuRole::Root, t) => errs.push(menu(format!("Root-Menü braucht einen gültigen Titel (ist {t:?})"))),
+            (MenuRole::Settings, t) => errs.push(menu(format!("Einstellungsmenü braucht einen gültigen Titel (ist {t:?})"))),
             (MenuRole::Title, _) => {}
         }
         if parse_color(&m.background.color).is_none() {
@@ -440,6 +455,24 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
                 Action::Menu { menu: target } if !layout.menus.iter().any(|x| &x.id == target) => {
                     errs.push(el(&format!("verweist auf ein unbekanntes Menü „{target}“")))
                 }
+                Action::SetAudio { .. } | Action::SetSubtitle { .. } => {
+                    // Streams belong to a titleset: only its own root/settings menus can set them.
+                    match m.title.filter(|&t| m.role != MenuRole::Title && title_ok(t)) {
+                        None => errs.push(el("Ton-/Untertitelwahl geht nur in Root- und Einstellungsmenüs eines Titels")),
+                        Some(t) => {
+                            let lt = &titles[t as usize - 1];
+                            match action {
+                                Action::SetAudio { source } if !lt.audio_sources.contains(source) => errs.push(el(&format!(
+                                    "Tonspur (Stream #{source}) ist bei Titel {t} nicht ausgewählt"
+                                ))),
+                                Action::SetSubtitle { source: Some(source) } if !lt.subtitle_sources.contains(source) => {
+                                    errs.push(el(&format!("Untertitel (Stream #{source}) ist bei Titel {t} nicht ausgewählt")))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
             if let Some(r) = button_rect(e, c, tv) {
@@ -456,7 +489,7 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
         }
     }
     if errs.is_empty() {
-        if let Err(e) = plan_navigation(layout, titles.len()) {
+        if let Err(e) = plan_navigation(layout, titles) {
             errs.extend(e.0);
         }
     }
@@ -502,14 +535,18 @@ const ROUTER_ENTER: u32 = 2000;
 const DISPATCH_MENU: u32 = 100;
 
 /// Computes placements, button commands, dispatchers and the router for `titles` titles.
-pub fn plan_navigation(layout: &CustomLayout, titles: usize) -> Result<NavigationPlan, LayoutError> {
-    // 1. Visible menus: title menus in the VMGM, root menus in their title's VTSM.
+pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Result<NavigationPlan, LayoutError> {
+    let titles = title_info.len();
+    // 1. Visible menus: title menus in the VMGM; root menus, then settings menus, in their
+    //    title's VTSM (`roots` holds both, in that order).
     let title_menus: Vec<usize> = (0..layout.menus.len()).filter(|&i| layout.menus[i].role == MenuRole::Title).collect();
     let mut roots: Vec<Vec<usize>> = vec![Vec::new(); titles];
-    for (i, m) in layout.menus.iter().enumerate() {
-        if let (MenuRole::Root, Some(t)) = (m.role, m.title) {
-            if let Some(list) = roots.get_mut(t as usize - 1) {
-                list.push(i);
+    for role in [MenuRole::Root, MenuRole::Settings] {
+        for (i, m) in layout.menus.iter().enumerate() {
+            if let (true, Some(t)) = (m.role == role, m.title) {
+                if let Some(list) = roots.get_mut(t as usize - 1) {
+                    list.push(i);
+                }
             }
         }
     }
@@ -518,7 +555,7 @@ pub fn plan_navigation(layout: &CustomLayout, titles: usize) -> Result<Navigatio
         // None = VMGM, Some(t) = VTSM of title t.
         match layout.menus[i].role {
             MenuRole::Title => None,
-            MenuRole::Root => layout.menus[i].title,
+            MenuRole::Root | MenuRole::Settings => layout.menus[i].title,
         }
     };
     let root_index = |i: usize| -> u32 {
@@ -632,6 +669,22 @@ pub fn plan_navigation(layout: &CustomLayout, titles: usize) -> Result<Navigatio
                     format!("g1 = 0; jump title 1 chapter {chapter};")
                 }
                 Action::PlayChapter { title, chapter } => format!("g1 = 0; {}", enter_titleset(*title, *chapter, from)),
+                Action::SetAudio { source } | Action::SetSubtitle { source: Some(source) } => {
+                    let Placement::Vtsm { title, pgc, .. } = placement[mi] else { unreachable!("validated: VTSM menus only") };
+                    let lt = &title_info[title as usize - 1];
+                    if matches!(action, Action::SetAudio { .. }) {
+                        let n = lt.audio_sources.iter().position(|s| s == source).unwrap_or(0);
+                        format!("audio = {n}; jump menu {pgc};")
+                    } else {
+                        // Bit 6 switches the subpicture display on.
+                        let n = lt.subtitle_sources.iter().position(|s| s == source).unwrap_or(0);
+                        format!("subtitle = {}; jump menu {pgc};", n + 64)
+                    }
+                }
+                Action::SetSubtitle { source: None } => {
+                    let Placement::Vtsm { pgc, .. } = placement[mi] else { unreachable!("validated: VTSM menus only") };
+                    format!("subtitle = 0; jump menu {pgc};")
+                }
                 Action::Menu { menu } => {
                     let target = by_id[menu.as_str()];
                     match (placement[target], from) {
@@ -969,7 +1022,7 @@ fn render_custom_page(
         video_slots: vec![],
         motion_secs: moving.then_some(secs),
         audio,
-        custom: Some(CustomMenuMedia { background, layers }),
+        custom: Some(CustomMenuMedia { background, overlay: menu.background.overlay, layers }),
     };
     Ok(PageOutput { files, buttons, motion: moving, warnings })
 }
@@ -984,7 +1037,7 @@ pub fn build_custom_menus(
     default_secs: f64,
 ) -> Result<CustomMenus, LayoutError> {
     validate(layout, titles, tv)?;
-    let nav = plan_navigation(layout, titles.len())?;
+    let nav = plan_navigation(layout, titles)?;
     let rendered: Vec<PageOutput> = layout
         .menus
         .par_iter()
@@ -1066,6 +1119,8 @@ mod tests {
                 chapters: 4,
                 duration_secs: 600.0,
                 clip: ClipSource { path: format!("film{i}.mkv").into(), start_secs: 60.0, has_audio: true },
+                audio_sources: vec![1, 2],
+                subtitle_sources: vec![3],
             })
             .collect()
     }
@@ -1201,7 +1256,7 @@ mod tests {
             ]),
             menu("extra1", MenuRole::Root, Some(1), vec![]),
         ]);
-        let nav = plan_navigation(&l, 2).unwrap();
+        let nav = plan_navigation(&l, &titles(2)).unwrap();
         assert_eq!(nav.placement[0], Placement::Vmgm(1));
         assert_eq!(nav.placement[1], Placement::Vmgm(2));
         // Title 1 has a dispatcher (chapter 3 and its 2nd root menu are entered from the VMGM).
@@ -1256,8 +1311,56 @@ mod tests {
                 ..text((j % 30) as f64 * 20.0, 100.0 + (j / 30) as f64 * 10.0, "m", Some(Action::Menu { menu: format!("r{j}") }))
             });
         }
-        let err = plan_navigation(&l, 1).unwrap_err();
+        let err = plan_navigation(&l, &ts).unwrap_err();
         assert!(err.0[0].contains("128"), "{err:?}");
+    }
+
+    #[test]
+    fn settings_menus_and_stream_selection() {
+        let l = layout(vec![
+            menu("main", MenuRole::Title, None, vec![text(10.0, 10.0, "Einstellungen", Some(Action::Menu { menu: "set1".into() }))]),
+            menu("root1", MenuRole::Root, Some(1), vec![text(10.0, 10.0, "Einstellungen", Some(Action::Menu { menu: "set1".into() }))]),
+            menu("set1", MenuRole::Settings, Some(1), vec![
+                text(10.0, 10.0, "Englisch", Some(Action::SetAudio { source: 2 })),
+                text(10.0, 70.0, "Deutsch", Some(Action::SetAudio { source: 1 })),
+                text(10.0, 130.0, "UT an", Some(Action::SetSubtitle { source: Some(3) })),
+                text(10.0, 190.0, "UT aus", Some(Action::SetSubtitle { source: None })),
+                text(10.0, 250.0, "Zurück", Some(Action::Menu { menu: "root1".into() })),
+            ]),
+        ]);
+        validate(&l, &titles(1), TvStandard::Pal).unwrap();
+        let nav = plan_navigation(&l, &titles(1)).unwrap();
+        // Settings come after the root menus; the VMGM enters them through the dispatcher.
+        assert_eq!(nav.placement[1], Placement::Vtsm { title: 1, pgc: 2, index: 1 });
+        assert_eq!(nav.placement[2], Placement::Vtsm { title: 1, pgc: 3, index: 2 });
+        assert_eq!(nav.dispatchers[0].as_deref(), Some("if (g2 eq 102) jump menu 3; jump menu 2;"));
+        assert_eq!(nav.commands[0][0].as_deref(), Some("g2 = 102; jump titleset 1 menu;"));
+        assert_eq!(nav.commands[1][0].as_deref(), Some("jump menu 3;"));
+        // Source stream 2 is DVD audio stream 1 (second track), subtitle source 3 is stream 0.
+        let c = |e: usize| nav.commands[2][e].clone().unwrap();
+        assert_eq!(c(0), "audio = 1; jump menu 3;");
+        assert_eq!(c(1), "audio = 0; jump menu 3;");
+        assert_eq!(c(2), "subtitle = 64; jump menu 3;");
+        assert_eq!(c(3), "subtitle = 0; jump menu 3;");
+        assert_eq!(c(4), "jump menu 2;");
+
+        // Stream selection only in a title's own VTSM menus, and only for selected streams.
+        let bad = layout(vec![
+            menu("main", MenuRole::Title, None, vec![text(10.0, 10.0, "Ton", Some(Action::SetAudio { source: 1 }))]),
+            menu("set1", MenuRole::Settings, Some(1), vec![text(10.0, 10.0, "Ton 9", Some(Action::SetAudio { source: 9 }))]),
+            menu("set2", MenuRole::Settings, None, vec![]),
+        ]);
+        let err = validate(&bad, &titles(1), TvStandard::Pal).unwrap_err().0.join("\n");
+        assert!(err.contains("nur in Root- und Einstellungsmenüs"), "{err}");
+        assert!(err.contains("Stream #9"), "{err}");
+        assert!(err.contains("Einstellungsmenü braucht"), "{err}");
+
+        // JSON names.
+        let json = r#"{"type": "setSubtitle", "source": null}"#;
+        assert_eq!(serde_json::from_str::<Action>(json).unwrap(), Action::SetSubtitle { source: None });
+        let bg: Background = serde_json::from_str(r#"{"gradientOverlay": "bottomDark"}"#).unwrap();
+        assert_eq!(bg.overlay, BackgroundOverlay::BottomDark);
+        assert_eq!(serde_json::from_str::<MenuRole>(r#""settings""#).unwrap(), MenuRole::Settings);
     }
 
     #[test]

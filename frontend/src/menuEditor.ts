@@ -9,6 +9,8 @@ import { checkLayout, imagePreview, loadLayout, saveLayout, titleFrame } from ".
 import {
   FONTS,
   MAX_BUTTONS,
+  OVERLAY_LABELS,
+  type GradientOverlay,
   chapterLabel,
   draftLayout,
   madeForOtherTitles,
@@ -144,8 +146,25 @@ export function openMenuEditor(opts: EditorOptions) {
         return "▶ Alle abspielen";
       case "menu":
         return `→ ${L.menus.find((m) => m.id === a.menu)?.name ?? "(Menü fehlt)"}`;
+      case "setAudio":
+        return `♪ Tonspur: ${trackLabel("audio", menu()?.title, a.source)}`;
+      case "setSubtitle":
+        return a.source === null ? "Untertitel aus" : `Untertitel: ${trackLabel("subtitle", menu()?.title, a.source)}`;
     }
   }
+
+  /** Label of a selected track of `title` (source stream index). */
+  function trackLabel(kind: "audio" | "subtitle", title: number | null | undefined, source: number): string {
+    const t = title ? titles[title - 1] : undefined;
+    const list = kind === "audio" ? t?.audioTracks : t?.subtitleTracks;
+    return list?.find((x) => x.source === source)?.label ?? `Stream #${source} (nicht ausgewählt)`;
+  }
+
+  const ROLE_LABELS: Record<CustomMenu["role"], string> = {
+    title: "Titelmenü (Hauptmenü)",
+    root: "Root-Menü eines Titels",
+    settings: "Einstellungen eines Titels (Ton/Untertitel)",
+  };
 
   // ---- DOM skeleton -----------------------------------------------------------------------------
   const menusPane = el("aside", { class: "ed-menus", "aria-label": "Menüs" });
@@ -236,7 +255,7 @@ export function openMenuEditor(opts: EditorOptions) {
         el(
           "span",
           { class: "ed-menu-sub" },
-          m.role === "title" ? "Titelmenü" : `Root-Menü · Titel ${m.title ?? "?"}`,
+          m.role === "title" ? "Titelmenü" : `${m.role === "root" ? "Root-Menü" : "Einstellungen"} · Titel ${m.title ?? "?"}`,
           ` · ${buttons} Button${buttons === 1 ? "" : "s"}`,
           incoming ? ` · ${incoming}× verlinkt` : "",
           isMoving(m) ? " · bewegt" : "",
@@ -252,6 +271,7 @@ export function openMenuEditor(opts: EditorOptions) {
         { class: "ed-menu-actions" },
         el("button", { class: "btn", type: "button", onclick: () => addMenu("title") }, "+ Titelmenü"),
         el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("root") }, "+ Root-Menü"),
+        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("settings") }, "+ Einstellungen"),
       ),
       m
         ? el(
@@ -523,18 +543,15 @@ export function openMenuEditor(opts: EditorOptions) {
         row(
           "Art",
           select(
-            [
-              ["title", "Titelmenü (Hauptmenü)"],
-              ["root", "Root-Menü eines Titels"],
-            ],
+            Object.entries(ROLE_LABELS) as [string, string][],
             m.role,
             (v) => {
-              m.role = v === "root" ? "root" : "title";
-              m.title = m.role === "root" ? m.title ?? 1 : null;
+              m.role = v === "root" || v === "settings" ? v : "title";
+              m.title = m.role === "title" ? null : (m.title ?? 1);
             },
           ),
         ),
-        m.role === "root"
+        m.role !== "title"
           ? row("Titel", select(titleOptions(), String(m.title ?? 1), (v) => (m.title = Number(v)), { disabled: titles.length === 0 }))
           : null,
         row(
@@ -575,6 +592,10 @@ export function openMenuEditor(opts: EditorOptions) {
           ),
         ),
         row("Farbe", bind(el("input", { type: "color", value: bg.color }) as HTMLInputElement, (v) => (bg.color = v.toUpperCase()), { live: true })),
+        row(
+          "Abdunkeln",
+          select(OVERLAY_LABELS, bg.gradientOverlay ?? "none", (v) => (bg.gradientOverlay = v as GradientOverlay)),
+        ),
         bg.image ? row("Bild", el("span", { class: "ed-path", title: bg.image }, bg.image.split(/[\\/]/).pop() ?? "")) : null,
         bg.video
           ? row("Titel", select(titleOptions(), String(bg.video.title), (v) => (bg.video = { ...bg.video!, title: Number(v) })))
@@ -644,6 +665,9 @@ export function openMenuEditor(opts: EditorOptions) {
   function actionControls(e: LayoutElement): HTMLElement[] {
     const a = e.action ?? null;
     const type = a?.type ?? "none";
+    // The title whose streams this menu may select (root/settings menus only).
+    const m0 = menu();
+    const streamTitle = m0.role !== "title" && m0.title ? titles[m0.title - 1] : undefined;
     const setAction = (next: Action | null) => {
       e.action = next;
       if (next && e.rotation !== 0) e.rotation = 0; // DVD hitboxes cannot rotate
@@ -658,6 +682,8 @@ export function openMenuEditor(opts: EditorOptions) {
             ["playChapter", "Kapitel abspielen"],
             ["menu", "Menü öffnen"],
             ["playAll", "Alle Titel abspielen"],
+            // Streams belong to a titleset: only in a title's root/settings menus.
+            ...(streamTitle ? ([["setAudio", "Tonspur wählen"], ["setSubtitle", "Untertitel wählen"]] as [string, string][]) : []),
           ],
           type,
           (v) => {
@@ -671,12 +697,46 @@ export function openMenuEditor(opts: EditorOptions) {
                     ? { type: "menu", menu: firstOther }
                     : v === "playAll"
                       ? { type: "playAll" }
-                      : null,
+                      : v === "setAudio"
+                        ? { type: "setAudio", source: streamTitle?.audioTracks?.[0]?.source ?? 0 }
+                        : v === "setSubtitle"
+                          ? { type: "setSubtitle", source: null }
+                          : null,
             );
           },
         ),
       ),
     ];
+    if (!streamTitle) {
+      out.push(el("p", { class: "ed-hint" }, "Ton- und Untertitelwahl gibt es nur in Root- und Einstellungsmenüs eines Titels."));
+    }
+    if (a?.type === "setAudio" && streamTitle) {
+      const tracks = streamTitle.audioTracks ?? [];
+      out.push(
+        row(
+          "Tonspur",
+          select(
+            tracks.map((x): [string, string] => [String(x.source), x.label]),
+            String(a.source),
+            (v) => setAction({ type: "setAudio", source: Number(v) }),
+            { disabled: tracks.length === 0 },
+          ),
+        ),
+      );
+    }
+    if (a?.type === "setSubtitle" && streamTitle) {
+      const subs = streamTitle.subtitleTracks ?? [];
+      out.push(
+        row(
+          "Untertitel",
+          select(
+            [["off", "Aus"], ...subs.map((x): [string, string] => [String(x.source), x.label])],
+            a.source === null ? "off" : String(a.source),
+            (v) => setAction({ type: "setSubtitle", source: v === "off" ? null : Number(v) }),
+          ),
+        ),
+      );
+    }
     if (a?.type === "playTitle" || a?.type === "playChapter") {
       out.push(
         row(
@@ -709,7 +769,10 @@ export function openMenuEditor(opts: EditorOptions) {
         row(
           "Ziel",
           select(
-            L.menus.map((m): [string, string] => [m.id, `${m.name}${m.role === "root" ? ` (Root, Titel ${m.title})` : ""}`]),
+            L.menus.map((m): [string, string] => [
+              m.id,
+              `${m.name}${m.role === "title" ? "" : ` (${m.role === "root" ? "Root" : "Einstellungen"}, Titel ${m.title})`}`,
+            ]),
             a.menu,
             (v) => setAction({ type: "menu", menu: v }),
           ),
@@ -862,6 +925,7 @@ export function openMenuEditor(opts: EditorOptions) {
   function renderStatus() {
     const tvCanvas = tv === "NTSC" ? 480 : 576;
     const notes: Child[] = [];
+    if (notice) notes.push(el("li", { class: notice.kind === "ok" ? "ok" : "error", role: "alert" }, notice.text));
     if (stale && history.length > 0) {
       notes.push(
         el(
@@ -953,10 +1017,11 @@ export function openMenuEditor(opts: EditorOptions) {
     [list[i], list[j]] = [list[j], list[i]];
     renderAll();
   }
-  function addMenu(role: "title" | "root") {
+  function addMenu(role: CustomMenu["role"]) {
     remember();
     const n = L.menus.filter((m) => m.role === role).length + 1;
-    const m = emptyMenu(role === "title" ? `Titelmenü ${n}` : `Root-Menü ${n}`, role, role === "root" ? 1 : null);
+    const name = role === "title" ? `Titelmenü ${n}` : role === "root" ? `Root-Menü ${n}` : `Einstellungen ${n}`;
+    const m = emptyMenu(name, role, role === "title" ? null : 1);
     L.menus.push(m);
     menuIdx = L.menus.length - 1;
     selId = null;
@@ -992,8 +1057,26 @@ export function openMenuEditor(opts: EditorOptions) {
   }
 
   async function chooseFile(filters: { name: string; extensions: string[] }[]): Promise<string | null> {
-    const p = await open({ multiple: false, directory: false, filters });
-    return typeof p === "string" ? p : null;
+    try {
+      const p = await open({ multiple: false, directory: false, filters });
+      return typeof p === "string" ? p : null;
+    } catch (e) {
+      flash(`Dateiauswahl fehlgeschlagen: ${e}`, "error");
+      return null;
+    }
+  }
+
+  /** A message in the status bar that is not replaced by the next validation (8 s). */
+  let notice: { text: string; kind: "ok" | "error" } | null = null;
+  let noticeTimer: number | undefined;
+  function flash(text: string, kind: "ok" | "error") {
+    notice = { text, kind };
+    window.clearTimeout(noticeTimer);
+    noticeTimer = window.setTimeout(() => {
+      notice = null;
+      if (open_) renderStatus();
+    }, 8000);
+    renderStatus();
   }
 
   async function newDraft() {
@@ -1013,20 +1096,28 @@ export function openMenuEditor(opts: EditorOptions) {
       menuIdx = 0;
       selId = null;
       renderAll();
+      flash(`Geladen: ${p}`, "ok");
     } catch (e) {
-      errors = [String(e)];
-      renderStatus();
+      flash(`Laden fehlgeschlagen: ${e}`, "error");
     }
   }
   async function saveFile() {
-    const p = await save({ filters: LAYOUT_FILTER, defaultPath: "menue-layout.json" });
-    if (typeof p !== "string") return;
+    let p: string | null;
     try {
-      await saveLayout(p, L);
-      dirty = false;
+      p = await save({ filters: LAYOUT_FILTER, defaultPath: "menue-layout.json" });
     } catch (e) {
-      errors = [String(e)];
-      renderStatus();
+      // e.g. the dialog is not permitted (capability) – never fail silently.
+      flash(`Speichern-Dialog konnte nicht geöffnet werden: ${e}`, "error");
+      return;
+    }
+    if (typeof p !== "string" || !p) return; // cancelled
+    const path = /\.json$/i.test(p) ? p : `${p}.json`;
+    try {
+      await saveLayout(path, L);
+      dirty = false;
+      flash(`Gespeichert: ${path}`, "ok");
+    } catch (e) {
+      flash(`Speichern fehlgeschlagen: ${e}`, "error");
     }
   }
 
@@ -1052,6 +1143,7 @@ export function openMenuEditor(opts: EditorOptions) {
     ro.disconnect();
     window.removeEventListener("keydown", onKey, true);
     window.clearTimeout(checkTimer);
+    window.clearTimeout(noticeTimer);
     root.remove();
     open_ = false;
   }

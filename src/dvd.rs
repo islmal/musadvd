@@ -984,6 +984,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 chapters: t.chapters.len(),
                 duration_secs: t.info.duration_secs,
                 clip: t.clip(),
+                audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
+                subtitle_sources: t.subtitles.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
             })
             .collect();
         let secs = opts.motion_duration.unwrap_or(crate::layout::DEFAULT_MENU_SECS);

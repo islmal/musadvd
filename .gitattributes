@@ -1,0 +1,10 @@
+# The sources are written with LF; keep them LF in every checkout (core.autocrlf would
+# otherwise turn them into CRLF on Windows – fatal for the MSYS2 build script).
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Binaries
+*.exe binary
+*.png binary
+*.ico binary
+*.icns binary
