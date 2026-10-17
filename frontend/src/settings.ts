@@ -230,8 +230,8 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
       ),
     ],
     output: () => [
-      note("Einstellungen für das erzeugte DVD-Video. Unterpunkte: TV Format, Enkodierung und Videobearbeitung."),
-      group("Aktuell", el("p", {}, `${draft.tv_standard} · ${draft.dvd_resolution} · Seitenverhältnis ${draft.aspect_ratio_policy} · Profil ${draft.encoding_profile}${draft.fast_encode ? " · schnell" : ""}`)),
+      note("Einstellungen für das erzeugte DVD-Video bzw. die Blu-ray. Unterpunkte: TV Format, Enkodierung und Videobearbeitung."),
+      group("Aktuell", el("p", {}, `${draft.tv_standard} · ${draft.dvd_resolution} · Blu-ray ${draft.bd_resolution}${draft.bd_single_video ? " (ein Video)" : ""} · Seitenverhältnis ${draft.aspect_ratio_policy} · Profil ${draft.encoding_profile}${draft.fast_encode ? " · schnell" : ""}`)),
     ],
     tv: () => [
       group(
@@ -247,6 +247,24 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
         ]),
         note("Menüs und Titel werden in der gewählten Norm erzeugt (NTSC: 720×480, 29,97 Bilder/s). Half D1 und SIF gelten nur für die Titel – Menüs bleiben in voller Auflösung. Diese Titel sind immer 4:3; Breitbild-Videos bekommen schwarze Balken."),
       ),
+      group(
+        "Blu-ray",
+        select("bd_resolution", "Blu-ray-Auflösung", [
+          ["1080p", "1080p (1920×1080)"],
+          ["720p", "720p (1280×720)"],
+        ]),
+        note("Blu-ray-Titel sind immer 16:9 mit quadratischen Pixeln (BT.709); 4:3-Videos bekommen seitliche Balken. Kinofilme (23,976/24 Bilder/s) behalten ihre Bildrate; sonst gilt die TV-Norm: 1080p mit 25 bzw. 29,97 Bildern/s (als 1080i markiert), 720p mit 50 bzw. 59,94 Bildern/s. Die Bildrate ist für die ganze Disc einheitlich."),
+        check(
+          "bd_single_video",
+          "Nur ein Video pro Blu-ray (keine Playlist)",
+          "Mehrere Videos werden sonst zu einer Playlist zusammengefasst, die nach dem Einlegen komplett abläuft. Ist die Option an, lässt sich die Blu-ray-Konvertierung nur mit einem Video starten.",
+        ),
+        check(
+          "bd_hw_encode",
+          "Hardware-Encoding (NVIDIA NVENC) für Blu-ray",
+          "Kodiert Blu-ray-Videos mit der NVIDIA-Grafikkarte statt mit x264 – deutlich schneller. Fällt automatisch auf x264 zurück, wenn NVENC nicht funktioniert (Treiber ≥ 610 nötig). 1080i-Bildraten (25 / 29,97 Bilder/s) bleiben bei x264.",
+        ),
+      ),
     ],
     encoding: () => [
       group(
@@ -260,7 +278,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
             ["MP_Medium", "MP – mittlere Laufzeit (bis 6.000 kbps)"],
             ["LP_Long", "LP – lange Laufzeit (bis 4.000 kbps)"],
           ],
-          "„Automatisch“ verteilt den Platz der Disc auf alle Videos (Bitrate 1.000–8.500 kbps). MP und LP begrenzen die Bitrate – kurze Projekte werden dann kleiner. Bei LP werden die Titel unter 3.000 kbps automatisch in Half D1 kodiert.",
+          "„Automatisch“ verteilt den Platz der Disc auf alle Videos (Bitrate 1.000–8.500 kbps, Blu-ray 4.000–35.000 kbps). MP und LP begrenzen die Bitrate – kurze Projekte werden dann kleiner (Blu-ray: SP bis 35.000, MP bis 20.000, LP bis 12.000 kbps). Bei LP werden DVD-Titel unter 3.000 kbps automatisch in Half D1 kodiert.",
         ),
         number(
           "target_size_mb",
@@ -268,7 +286,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           100,
           20000,
           "MB",
-          "Wird verwendet, wenn unten links als Medium „Benutzerdefiniert“ gewählt ist. DVD-5 = 4.300 MB, DVD-9 = 7.950 MB.",
+          "Wird verwendet, wenn unten links als Medium „Benutzerdefiniert“ gewählt ist (nur DVD). DVD-5 = 4.300 MB, DVD-9 = 7.950 MB, BD-25 = 22.900 MB, BD-50 = 45.800 MB.",
         ),
       ),
       group(
@@ -446,7 +464,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           "burn_speed",
           "Schreibgeschwindigkeit",
           [
-            ["auto", "Automatisch (DVD-5: maximal, DVD-9: 4x)"],
+            ["auto", "Automatisch (DVD-5/BD: maximal, DVD-9: 4x)"],
             ["max", "Maximal"],
             ["16", "16x"],
             ["12", "12x"],
@@ -455,10 +473,10 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
             ["4", "4x"],
             ["2.4", "2,4x"],
           ],
-          "Wird auf die nächste vom Laufwerk unterstützte Geschwindigkeit abgerundet. Im Brenndialog lässt sie sich pro Disc ändern.",
+          "Wird auf die nächste vom Laufwerk unterstützte Geschwindigkeit abgerundet; die Angabe gilt für das jeweilige Medium (bei Blu-ray: 1x = 36 Mbit/s, 4,5 MB/s). Im Brenndialog lässt sie sich pro Disc ändern.",
         ),
         check("verify_after_burn", "Disc nach dem Brennen überprüfen", "Liest die Disc vollständig zurück und vergleicht sie mit dem Image."),
-        check("keep_iso", "ISO-Datei behalten", "Das Image (UDF 1.02) bleibt neben dem DVD-Ordner liegen."),
+        check("keep_iso", "ISO-Datei behalten", "Das Image (DVD: UDF 1.02, Blu-ray: UDF 2.50) bleibt neben dem Projektordner liegen."),
       ),
       group(
         "Nach dem Brennen",

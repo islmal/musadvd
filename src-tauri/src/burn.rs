@@ -1,4 +1,4 @@
-//! Burning the finished VIDEO_TS to disc (after a successful conversion).
+//! Burning the finished VIDEO_TS / BDMV to disc (after a successful conversion).
 //!
 //! Commands: `list_drives`, `disc_needs`, `probe_media`, `start_burn`, `cancel_burn`,
 //! `startup_burn`, `open_folder`. Progress arrives as `burn-progress`
@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
+use convertx_rust::burner::layerbreak::Capacities;
 use convertx_rust::burner::{
-    burn_video_ts, default_iso_path as iso_path, media_problem, preferred_speed, speed_label,
-    speed_x, system_burner, BurnError, BurnJob, BurnOptions, BurnOutcome, BurnPhase, BurnProgress, DriveInfo, MediaInfo,
-    WriteSpeed, DVD_1X_SECTORS_PER_SEC,
+    burn_video_ts, default_iso_path as iso_path, is_bdmv_folder, media_problem, preferred_speed, speed_label, speed_x,
+    system_burner, BurnError, BurnJob, BurnOptions, BurnOutcome, BurnPhase, BurnProgress, DiscContent, DriveInfo, MediaInfo,
+    MediaType, WriteSpeed,
 };
 use convertx_rust::dvd::WORK_DIR;
 use convertx_rust::eta::{self, Eta, JobPhase};
@@ -35,28 +35,45 @@ pub async fn list_drives() -> Result<Vec<DriveInfo>, String> {
     blocking(|| system_burner().list_drives().map_err(|e| e.to_string())).await
 }
 
-/// What the finished DVD needs from the disc.
+/// What the finished DVD / Blu-ray needs from the disc.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscNeeds {
     pub sectors: u64,
     pub size_gb: f64,
+    /// DVD-9 / BD-50 needed.
     pub dual_layer: bool,
+    /// The content is a Blu-ray (`BDMV`).
+    pub bluray: bool,
 }
 
 impl DiscNeeds {
     fn bytes(&self) -> f64 {
         self.sectors as f64 * 2048.0
     }
+
+    fn content(&self) -> DiscContent {
+        DiscContent { bluray: self.bluray, sectors: self.sectors, dual_layer: self.dual_layer }
+    }
+
+    fn medium(&self) -> eta::Medium {
+        self.content().medium()
+    }
+
+    /// "DVD-5", "DVD-9", "BD-25" or "BD-50".
+    fn disc_name(&self) -> &'static str {
+        match (self.bluray, self.dual_layer) {
+            (false, false) => "DVD-5",
+            (false, true) => "DVD-9",
+            (true, false) => "BD-25",
+            (true, true) => "BD-50",
+        }
+    }
 }
 
 fn needs(video_ts: &Path) -> Result<DiscNeeds, String> {
-    let plan = plan_disc(video_ts, "DVD_VIDEO", Capacities::DVD).map_err(|e| e.to_string())?;
-    Ok(DiscNeeds {
-        sectors: plan.image.total_sectors as u64,
-        size_gb: plan.image.size_bytes() as f64 / 1e9,
-        dual_layer: plan.layer_break.is_some(),
-    })
+    let c = DiscContent::of_folder(video_ts)?;
+    Ok(DiscNeeds { sectors: c.sectors, size_gb: c.bytes() / 1e9, dual_layer: c.dual_layer, bluray: c.bluray })
 }
 
 #[tauri::command]
@@ -93,19 +110,20 @@ pub struct MediaView {
 
 fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase: bool) -> MediaView {
     let option = |value: WriteSpeed, label: String| {
-        let x = speed_x(value, &media.speeds);
+        let x = speed_x(value, &media.speeds, media.media_type);
+        let medium = needs.medium();
         SpeedOption {
             value,
             label,
-            secs: eta::image_and_burn_secs(needs.bytes(), x, false, needs.dual_layer),
-            secs_verify: eta::image_and_burn_secs(needs.bytes(), x, true, needs.dual_layer),
+            secs: eta::image_and_burn_secs(medium, needs.bytes(), x, false, needs.dual_layer),
+            secs_verify: eta::image_and_burn_secs(medium, needs.bytes(), x, true, needs.dual_layer),
         }
     };
     let mut speeds = vec![option(WriteSpeed::Max, "Maximal".into())];
-    speeds.extend(media.speeds.iter().map(|&s| option(WriteSpeed::Specific(s), speed_label(s))));
+    speeds.extend(media.speeds.iter().map(|&s| option(WriteSpeed::Specific(s), speed_label(s, media.media_type))));
     let default = preferred_speed(media.media_type, &media.speeds, speed_pref);
     let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
-    let problem = media_problem(&media, needs.sectors, needs.dual_layer);
+    let problem = media_problem(&media, &needs.content());
     let needs_erase = problem.is_none() && !media.blank;
     let mut warning = None;
     if needs_erase {
@@ -114,7 +132,7 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
         } else {
             format!("Die {} enthält Daten – sie wird beim Brennen gelöscht.", media.physical)
         });
-    } else if problem.is_none() && needs.dual_layer && !media.layer_break_supported {
+    } else if problem.is_none() && needs.dual_layer && !needs.bluray && !media.layer_break_supported {
         warning = Some(format!("{}: Der Layerwechsel wird vom Laufwerk festgelegt.", media.physical));
     }
     let room = capacity >= needs.sectors;
@@ -132,16 +150,21 @@ pub async fn probe_media(drive_id: String, video_ts: String, speed_pref: String,
     .await
 }
 
-/// A DVD folder passed on the command line (`VIDEO_TS` or the folder containing it): the GUI
-/// opens the burn dialog for it right away.
+/// A DVD or Blu-ray folder passed on the command line (`VIDEO_TS`, `BDMV` or the folder
+/// containing one of them): the GUI opens the burn dialog for it right away.
 #[tauri::command]
 pub fn startup_burn() -> Option<String> {
     std::env::args_os().skip(1).map(PathBuf::from).find_map(|p| {
-        [p.clone(), p.join("VIDEO_TS")]
+        [p.clone(), p.join("VIDEO_TS"), p.join("BDMV")]
             .into_iter()
-            .find(|d| d.join("VIDEO_TS.IFO").is_file())
+            .find(|d| is_disc_folder(d))
             .map(|d| d.to_string_lossy().into_owned())
     })
+}
+
+/// A finished `VIDEO_TS` or `BDMV` folder.
+fn is_disc_folder(d: &Path) -> bool {
+    d.join("VIDEO_TS.IFO").is_file() || is_bdmv_folder(d)
 }
 
 /// Shows a folder in the file manager (Explorer on Windows).
@@ -171,7 +194,7 @@ pub struct BurnRequest {
     /// A rewritable disc with old content may be erased.
     #[serde(default)]
     pub erase: bool,
-    /// After success: delete the DVD folder, image and work directory.
+    /// After success: delete the DVD / Blu-ray folder, image and work directory.
     #[serde(default)]
     pub delete_after: bool,
 }
@@ -199,14 +222,15 @@ pub struct BurnStatus {
 }
 
 /// Deletes what the conversion produced for this disc: the project folder – only when it holds
-/// nothing but `VIDEO_TS`/`AUDIO_TS` – and a left-over work directory next to it.
+/// nothing but `VIDEO_TS`/`AUDIO_TS` or `BDMV`/`CERTIFICATE` – and a left-over work directory
+/// next to it.
 fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
     let project = video_ts.parent().ok_or("kein Projektordner")?;
     let foreign: Vec<String> = std::fs::read_dir(project)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.eq_ignore_ascii_case("VIDEO_TS") && !n.eq_ignore_ascii_case("AUDIO_TS"))
+        .filter(|n| !["VIDEO_TS", "AUDIO_TS", "BDMV", "CERTIFICATE"].iter().any(|k| n.eq_ignore_ascii_case(k)))
         .collect();
     if !foreign.is_empty() {
         return Err(format!("{} enthält weitere Dateien ({}) und wurde nicht gelöscht", project.display(), foreign.join(", ")));
@@ -226,14 +250,16 @@ fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
 fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<BurnOutcome, BurnError> {
     let video_ts = PathBuf::from(&req.video_ts);
     let needs = needs(&video_ts).map_err(BurnError::Image)?;
-    let media_speeds = system_burner().probe_media(&req.drive_id).map(|m| m.speeds).unwrap_or_default();
-    let x = speed_x(req.speed, &media_speeds);
+    let media = system_burner().probe_media(&req.drive_id).ok();
+    let media_type = media.as_ref().map_or(if needs.bluray { MediaType::Bd25 } else { MediaType::Dvd5 }, |m| m.media_type);
+    let media_speeds = media.map(|m| m.speeds).unwrap_or_default();
+    let x = speed_x(req.speed, &media_speeds, media_type);
     let detail = format!(
         "{} bei {}{}",
-        if needs.dual_layer { "DVD-9" } else { "DVD-5" },
+        needs.disc_name(),
         match req.speed {
-            WriteSpeed::Max => format!("max. {}", speed_label((x * DVD_1X_SECTORS_PER_SEC).round() as u32)),
-            WriteSpeed::Specific(s) => speed_label(s),
+            WriteSpeed::Max => format!("max. {}", speed_label((x * media_type.sectors_per_sec_1x()).round() as u32, media_type)),
+            WriteSpeed::Specific(s) => speed_label(s, media_type),
         },
         if req.verify { ", mit Überprüfung" } else { "" }
     );
@@ -258,8 +284,8 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<B
 
 #[tauri::command]
 pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequest) -> Result<(), String> {
-    if !Path::new(&request.video_ts).join("VIDEO_TS.IFO").is_file() {
-        return Err("Kein fertiger VIDEO_TS-Ordner gefunden.".into());
+    if !is_disc_folder(Path::new(&request.video_ts)) {
+        return Err("Kein fertiger VIDEO_TS- oder BDMV-Ordner gefunden.".into());
     }
     if state.busy.swap(true, Ordering::SeqCst) {
         return Err("Es wird bereits gebrannt.".into());
@@ -267,12 +293,13 @@ pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequ
     state.cancel.store(false, Ordering::SeqCst);
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
+    let kind = if is_bdmv_folder(Path::new(&request.video_ts)) { "Blu-ray" } else { "DVD" };
     std::thread::spawn(move || {
         let mut done = match run_burn(&app, &request, &cancel) {
             Ok(outcome) => BurnDone {
                 ok: true,
                 cancelled: false,
-                message: if request.verify { "Die DVD wurde gebrannt und überprüft." } else { "Die DVD wurde gebrannt." }.into(),
+                message: format!("Die {kind} wurde gebrannt{}.", if request.verify { " und überprüft" } else { "" }),
                 iso: outcome.iso.map(|p| p.to_string_lossy().into_owned()),
             },
             Err(BurnError::Cancelled) => {
@@ -282,7 +309,7 @@ pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequ
         };
         if done.ok && request.delete_after {
             done.message.push_str(&match delete_dvd_output(Path::new(&request.video_ts)) {
-                Ok(()) => " DVD-Ordner und Arbeitsdateien wurden gelöscht.".to_string(),
+                Ok(()) => format!(" {kind}-Ordner und Arbeitsdateien wurden gelöscht."),
                 Err(e) => format!(" Hinweis: {e}."),
             });
         }
@@ -324,7 +351,7 @@ mod tests {
 
     #[test]
     fn auto_start_only_on_blank_media_with_room() {
-        let small = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false };
+        let small = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false };
         let v = media_view(media(true, false, MediaType::Dvd5, 2_295_104), &small, "auto", false);
         assert!(v.problem.is_none() && v.auto_ok && !v.needs_erase);
         assert_eq!(v.default_speed, WriteSpeed::Max);
@@ -348,11 +375,55 @@ mod tests {
         // Too small.
         assert!(media_view(media(true, false, MediaType::Dvd5, 900_000), &small, "auto", false).problem.is_some());
         // DVD-9 content on a single-layer disc.
-        let big = DiscNeeds { sectors: 3_000_000, size_gb: 6.1, dual_layer: true };
+        let big = DiscNeeds { sectors: 3_000_000, size_gb: 6.1, dual_layer: true, bluray: false };
         assert!(media_view(media(true, false, MediaType::Dvd5, 2_295_104), &big, "auto", false).problem.is_some());
         let v = media_view(media(true, false, MediaType::Dvd9, 4_173_824), &big, "auto", false);
         assert!(v.auto_ok);
         assert_eq!(v.default_speed, WriteSpeed::Specific(2_705), "DVD-9 burns at 4x");
+    }
+
+    #[test]
+    fn blu_ray_media_and_speeds() {
+        let bd25 = DiscNeeds { sectors: 10_000_000, size_gb: 20.5, dual_layer: false, bluray: true };
+        let bd50 = DiscNeeds { sectors: 20_000_000, size_gb: 41.0, dual_layer: true, bluray: true };
+        let bd_media = |t: MediaType, sectors: u64| MediaInfo {
+            physical: "BD-R".into(),
+            speeds: vec![26_341, 13_170, 8_780],
+            ..media(true, false, t, sectors)
+        };
+        let v = media_view(bd_media(MediaType::Bd25, 12_219_392), &bd25, "auto", false);
+        assert!(v.problem.is_none() && v.auto_ok && v.warning.is_none(), "{:?}", v.problem);
+        assert_eq!(v.default_speed, WriteSpeed::Max);
+        // Labels count in BD x (4.5 MB/s), not DVD x.
+        assert_eq!(v.speeds.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Maximal", "12x", "6x", "4x"]);
+        assert!(v.speeds[3].secs > v.speeds[1].secs && v.speeds[1].secs_verify > v.speeds[1].secs);
+        // Burning 20 GB at BD 6x takes a quarter of an hour, not the 100 minutes a DVD 6x would.
+        assert!((600.0..1500.0).contains(&v.speeds[2].secs), "{}", v.speeds[2].secs);
+        assert_eq!(media_view(bd_media(MediaType::Bd25, 12_219_392), &bd25, "6", false).default_speed, WriteSpeed::Specific(13_170));
+        // BD-50 content on BD-25, BD content on a DVD, DVD content on a BD.
+        assert!(media_view(bd_media(MediaType::Bd25, 12_219_392), &bd50, "auto", false).problem.unwrap().contains("BD-50"));
+        assert!(media_view(bd_media(MediaType::Bd50, 24_438_784), &bd50, "auto", false).auto_ok);
+        assert!(media_view(media(true, false, MediaType::Dvd5, 2_295_104), &bd25, "auto", false).problem.is_some());
+        let dvd = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false };
+        assert!(media_view(bd_media(MediaType::Bd25, 12_219_392), &dvd, "auto", false).problem.is_some());
+        assert_eq!((bd25.disc_name(), bd50.disc_name(), dvd.disc_name()), ("BD-25", "BD-50", "DVD-5"));
+    }
+
+    #[test]
+    fn delete_blu_ray_folders_only() {
+        let dir = std::env::temp_dir().join(format!("cx_delete_bd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bdmv = dir.join("Film").join("BDMV");
+        std::fs::create_dir_all(&bdmv).unwrap();
+        std::fs::create_dir_all(dir.join("Film").join("CERTIFICATE")).unwrap();
+        std::fs::write(bdmv.join("index.bdmv"), b"x").unwrap();
+        assert!(is_disc_folder(&bdmv));
+        std::fs::write(dir.join("Film").join("notes.txt"), b"x").unwrap();
+        assert!(delete_dvd_output(&bdmv).unwrap_err().contains("notes.txt"));
+        std::fs::remove_file(dir.join("Film").join("notes.txt")).unwrap();
+        delete_dvd_output(&bdmv).unwrap();
+        assert!(!dir.join("Film").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -43,12 +43,14 @@ const ISO_DIRS: u32 = 68;
 const ANCHOR: u32 = 256;
 const PARTITION_START: u32 = 257;
 /// Longest extent a UDF short_ad can describe (30-bit length, sector aligned).
-const MAX_EXTENT: u64 = (1 << 30) - SECTOR;
+pub(crate) const MAX_EXTENT: u64 = (1 << 30) - SECTOR;
 
 #[derive(Debug)]
 pub enum ImageError {
     Io { path: PathBuf, error: std::io::Error },
     NotDvdVideo(String),
+    /// The folder is no (complete) `BDMV` structure.
+    NotBluray(String),
     Cancelled,
 }
 
@@ -57,6 +59,7 @@ impl fmt::Display for ImageError {
         match self {
             ImageError::Io { path, error } => write!(f, "{}: {error}", path.display()),
             ImageError::NotDvdVideo(m) => write!(f, "keine gültige VIDEO_TS-Struktur: {m}"),
+            ImageError::NotBluray(m) => write!(f, "keine gültige BDMV-Struktur: {m}"),
             ImageError::Cancelled => write!(f, "abgebrochen"),
         }
     }
@@ -64,7 +67,7 @@ impl fmt::Display for ImageError {
 
 impl std::error::Error for ImageError {}
 
-fn io(path: &Path) -> impl FnOnce(std::io::Error) -> ImageError + '_ {
+pub(crate) fn io(path: &Path) -> impl FnOnce(std::io::Error) -> ImageError + '_ {
     move |error| ImageError::Io { path: path.to_path_buf(), error }
 }
 
@@ -240,13 +243,13 @@ pub fn crc_itu(data: &[u8]) -> u16 {
     crc
 }
 
-fn put16(b: &mut [u8], at: usize, v: u16) {
+pub(crate) fn put16(b: &mut [u8], at: usize, v: u16) {
     b[at..at + 2].copy_from_slice(&v.to_le_bytes());
 }
-fn put32(b: &mut [u8], at: usize, v: u32) {
+pub(crate) fn put32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
-fn put64(b: &mut [u8], at: usize, v: u64) {
+pub(crate) fn put64(b: &mut [u8], at: usize, v: u64) {
     b[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 /// ISO 9660 both-byte-order 16 bit.
@@ -262,8 +265,13 @@ fn both32(b: &mut [u8], at: usize, v: u32) {
 
 /// Fills the 16-byte descriptor tag at the start of `d` (`len` = descriptor length).
 fn tag(d: &mut [u8], id: u16, location: u32, len: usize) {
+    tag_v(d, id, location, len, 2); // UDF 1.02 / ECMA-167 2nd edition
+}
+
+/// [`tag`] with an explicit descriptor version (3 = ECMA-167 3rd edition, UDF 2.xx).
+pub(crate) fn tag_v(d: &mut [u8], id: u16, location: u32, len: usize, version: u16) {
     put16(d, 0, id);
-    put16(d, 2, 2); // descriptor version (UDF 1.02 / ECMA-167 2nd edition)
+    put16(d, 2, version);
     d[5] = 0;
     put16(d, 6, 0); // tag serial number
     let crc = crc_itu(&d[16..len]);
@@ -304,7 +312,7 @@ impl Timestamp {
         Timestamp { year, month, day, hour: (rem / 3600) as u8, minute: (rem / 60 % 60) as u8, second: (rem % 60) as u8 }
     }
 
-    fn udf(&self, b: &mut [u8], at: usize) {
+    pub(crate) fn udf(&self, b: &mut [u8], at: usize) {
         put16(b, at, 0x1000); // type 1 (local time), offset 0
         put16(b, at + 2, self.year as u16);
         b[at + 4] = self.month;
@@ -334,7 +342,7 @@ impl Timestamp {
 }
 
 /// UDF dstring of `len` bytes (8-bit compressed unicode, last byte = used length).
-fn dstring(b: &mut [u8], at: usize, len: usize, text: &str) {
+pub(crate) fn dstring(b: &mut [u8], at: usize, len: usize, text: &str) {
     if text.is_empty() {
         return;
     }
@@ -345,26 +353,26 @@ fn dstring(b: &mut [u8], at: usize, len: usize, text: &str) {
 }
 
 /// charspec "OSTA Compressed Unicode".
-fn charspec(b: &mut [u8], at: usize) {
+pub(crate) fn charspec(b: &mut [u8], at: usize) {
     b[at] = 0;
     let s = b"OSTA Compressed Unicode";
     b[at + 1..at + 1 + s.len()].copy_from_slice(s);
 }
 
 /// EntityID with identifier and suffix.
-fn regid(b: &mut [u8], at: usize, ident: &str, suffix: &[u8]) {
+pub(crate) fn regid(b: &mut [u8], at: usize, ident: &str, suffix: &[u8]) {
     b[at] = 0;
     b[at + 1..at + 1 + ident.len()].copy_from_slice(ident.as_bytes());
     b[at + 24..at + 24 + suffix.len()].copy_from_slice(suffix);
 }
 
 const UDF_REV: [u8; 2] = [0x02, 0x01]; // 0x0102 little endian
-const IMPL_ID: &str = "*convertx-rust";
+pub(crate) const IMPL_ID: &str = "*convertx-rust";
 
 fn domain_regid(b: &mut [u8], at: usize) {
     regid(b, at, "*OSTA UDF Compliant", &[UDF_REV[0], UDF_REV[1], 0]);
 }
-fn impl_regid(b: &mut [u8], at: usize) {
+pub(crate) fn impl_regid(b: &mut [u8], at: usize) {
     regid(b, at, IMPL_ID, &[]);
 }
 
@@ -454,7 +462,7 @@ fn file_entry(dir: bool, links: u16, size: u64, extents: &[(u32, u64)], unique: 
 }
 
 /// Splits a file into short_ad extents (each < 1 GiB).
-fn extents(first_block: u32, size: u64) -> Vec<(u32, u64)> {
+pub(crate) fn extents(first_block: u32, size: u64) -> Vec<(u32, u64)> {
     if size == 0 {
         return vec![];
     }
@@ -475,14 +483,14 @@ fn extents(first_block: u32, size: u64) -> Vec<(u32, u64)> {
 // ---------------------------------------------------------------------------
 
 /// Writes sectors sequentially and checks that every structure lands where it was planned.
-struct SectorWriter<W: Write> {
-    out: W,
-    sector: u32,
-    path: PathBuf,
+pub(crate) struct SectorWriter<W: Write> {
+    pub(crate) out: W,
+    pub(crate) sector: u32,
+    pub(crate) path: PathBuf,
 }
 
 impl<W: Write> SectorWriter<W> {
-    fn zeros_until(&mut self, target: u32) -> Result<(), ImageError> {
+    pub(crate) fn zeros_until(&mut self, target: u32) -> Result<(), ImageError> {
         assert!(target >= self.sector, "layout went backwards: at {} want {target}", self.sector);
         let zero = [0u8; SECTOR as usize];
         while self.sector < target {
@@ -493,7 +501,7 @@ impl<W: Write> SectorWriter<W> {
     }
 
     /// Writes `data` at sector `at`, padded to whole sectors.
-    fn put(&mut self, at: u32, data: &[u8]) -> Result<(), ImageError> {
+    pub(crate) fn put(&mut self, at: u32, data: &[u8]) -> Result<(), ImageError> {
         self.zeros_until(at)?;
         self.out.write_all(data).map_err(io(&self.path))?;
         let rem = data.len() as u64 % SECTOR;

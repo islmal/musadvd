@@ -20,7 +20,7 @@ struct Cli {
 enum Command {
     /// Parse a ConvertX template .ini and print its pages and buttons.
     Template { path: PathBuf },
-    /// Calculate the video bitrate for a DVD5/DVD9 target.
+    /// Calculate the video bitrate for a DVD5/DVD9/BD25/BD50 target.
     Bitrate {
         #[arg(long, value_enum, default_value = "dvd5")]
         disc: Disc,
@@ -63,8 +63,10 @@ enum Command {
         input: Vec<PathBuf>,
         #[arg(long, value_enum, default_value = "dvd5")]
         disc: Disc,
-        /// Template .ini (sub menus are taken from sibling templates if it has none).
-        #[arg(long, required_unless_present = "layout")]
+        /// Template .ini (sub menus are taken from sibling templates if it has none). Required
+        /// for DVDs unless --layout is given; Blu-rays have no ConvertX templates (menu-less unless
+        /// --layout is given).
+        #[arg(long)]
         template: Option<PathBuf>,
         /// Custom menu layout (JSON from the menu editor) instead of a template.
         #[arg(long, value_name = "JSON", conflicts_with = "template")]
@@ -117,11 +119,15 @@ enum Command {
         /// TV standard of titles and menus.
         #[arg(long, value_enum, default_value = "pal")]
         tv: Tv,
-        /// Frame size of the titles (menus stay Full D1); half-d1/sif titles are always 4:3.
-        #[arg(long, value_enum, default_value = "full-d1")]
-        resolution: Res,
+        /// Frame size of the titles (DVD: full-d1 (default), half-d1, sif – menus stay Full D1,
+        /// half-d1/sif titles are always 4:3; Blu-ray: hd1080 (default), hd720).
+        #[arg(long, value_enum)]
+        resolution: Option<Res>,
+        /// Blu-ray: allow only one video (no playlist of several videos).
+        #[arg(long)]
+        single_video: bool,
         /// Upper limit of the video bitrate: auto/sp ≤ 8500, mp ≤ 6000, lp ≤ 4000 kbps (lp
-        /// switches to Half D1 below 3000 kbps).
+        /// switches to Half D1 below 3000 kbps); on Blu-ray 35,000 / 20,000 / 12,000 kbps.
         #[arg(long, value_enum, default_value = "auto")]
         encoding_profile: Profile,
         /// Name of the DVD folder inside --output (default: menu title / first video's name).
@@ -134,6 +140,9 @@ enum Command {
         /// QSV; falls back to the CPU).
         #[arg(long)]
         hw_decode: bool,
+        /// Blu-ray: do not use NVIDIA NVENC for H.264 (always x264).
+        #[arg(long)]
+        no_hw_encode: bool,
     },
     /// List DVD writers and the disc in each drive.
     Drives,
@@ -147,10 +156,10 @@ enum Command {
         #[arg(long, default_value = "DVD_VIDEO")]
         label: String,
     },
-    /// Burn a VIDEO_TS folder to DVD (disc image, write, optional read-back verification).
-    /// Ctrl+C cancels.
+    /// Burn a VIDEO_TS or BDMV folder to DVD / Blu-ray (disc image, write, optional read-back
+    /// verification). Ctrl+C cancels.
     Burn {
-        /// The VIDEO_TS folder or the project folder containing it.
+        /// The VIDEO_TS or BDMV folder, or the project folder containing it.
         video_ts: PathBuf,
         /// Drive: id, drive letter ("F:") or part of the name. Default: the only DVD writer.
         #[arg(long)]
@@ -189,6 +198,8 @@ enum Res {
     FullD1,
     HalfD1,
     Sif,
+    Hd1080,
+    Hd720,
 }
 
 impl From<Res> for Resolution {
@@ -197,6 +208,8 @@ impl From<Res> for Resolution {
             Res::FullD1 => Resolution::FullD1,
             Res::HalfD1 => Resolution::HalfD1,
             Res::Sif => Resolution::Sif,
+            Res::Hd1080 => Resolution::Hd1080,
+            Res::Hd720 => Resolution::Hd720,
         }
     }
 }
@@ -251,6 +264,8 @@ fn parse_title(s: &str) -> Result<TitleSpec, String> {
 enum Disc {
     Dvd5,
     Dvd9,
+    Bd25,
+    Bd50,
 }
 
 impl From<Disc> for DiscType {
@@ -258,6 +273,8 @@ impl From<Disc> for DiscType {
         match d {
             Disc::Dvd5 => DiscType::Dvd5,
             Disc::Dvd9 => DiscType::Dvd9,
+            Disc::Bd25 => DiscType::Bd25,
+            Disc::Bd50 => DiscType::Bd50,
         }
     }
 }
@@ -288,10 +305,10 @@ fn burn(
     eject: bool,
     keep_iso: Option<Option<PathBuf>>,
 ) -> ExitCode {
-    use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
+    use convertx_rust::burner::layerbreak::Capacities;
     use convertx_rust::burner::{
-        burn_video_ts, default_iso_path, media_problem, preferred_speed, speed_label, speed_x, system_burner, BurnError,
-        BurnJob, BurnOptions, BurnPhase, BurnUpdate, WriteSpeed, DVD_1X_SECTORS_PER_SEC,
+        burn_video_ts, default_iso_path, is_bdmv_folder, media_problem, preferred_speed, speed_label, speed_x, system_burner,
+        BurnError, BurnJob, BurnOptions, BurnPhase, BurnUpdate, DiscContent, WriteSpeed,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -301,21 +318,27 @@ fn burn(
         eprintln!("error: {msg}");
         ExitCode::FAILURE
     };
-    let Some(video_ts) =
-        [video_ts.clone(), video_ts.join("VIDEO_TS")].into_iter().find(|d| d.join("VIDEO_TS.IFO").is_file())
+    let Some(video_ts) = [video_ts.clone(), video_ts.join("VIDEO_TS"), video_ts.join("BDMV")]
+        .into_iter()
+        .find(|d| d.join("VIDEO_TS.IFO").is_file() || is_bdmv_folder(d))
     else {
-        return fail(format!("{}: kein fertiger VIDEO_TS-Ordner (VIDEO_TS.IFO fehlt)", video_ts.display()));
+        return fail(format!("{}: kein fertiger VIDEO_TS- oder BDMV-Ordner (VIDEO_TS.IFO bzw. index.bdmv fehlt)", video_ts.display()));
     };
     let project = video_ts.parent().unwrap_or(&video_ts);
     let label =
         label.unwrap_or_else(|| project.file_name().map_or("DVD_VIDEO".into(), |n| n.to_string_lossy().into_owned()));
-    let plan = match plan_disc(&video_ts, "DVD_VIDEO", Capacities::DVD) {
-        Ok(p) => p,
-        Err(e) => return fail(e.to_string()),
+    let content = match DiscContent::of_folder(&video_ts) {
+        Ok(c) => c,
+        Err(e) => return fail(e),
     };
-    let sectors = plan.image.total_sectors as u64;
-    let bytes = plan.image.size_bytes() as f64;
-    let dual_layer = plan.layer_break.is_some();
+    let bytes = content.bytes();
+    let dual_layer = content.dual_layer;
+    let disc_name = match (content.bluray, dual_layer) {
+        (false, false) => "DVD-5",
+        (false, true) => "DVD-9",
+        (true, false) => "BD-25",
+        (true, true) => "BD-50",
+    };
 
     // Drive and medium.
     let burner = system_burner();
@@ -346,34 +369,34 @@ fn burn(
     };
     let d = match candidates[..] {
         [d] => d,
-        _ if drives.is_empty() => return fail("Kein DVD-Brenner gefunden.".into()),
+        _ if drives.is_empty() => return fail("Kein DVD-/Blu-ray-Brenner gefunden.".into()),
         [] => return fail(format!("Laufwerk '{}' nicht gefunden. Vorhanden:\n{}", drive.unwrap_or_default(), list())),
-        _ => return fail(format!("Mehrere DVD-Brenner – bitte mit --drive wählen:\n{}", list())),
+        _ => return fail(format!("Mehrere Brenner – bitte mit --drive wählen:\n{}", list())),
     };
     let media = match burner.probe_media(&d.id) {
         Ok(m) => m,
         Err(e) => return fail(format!("{}: Disc nicht lesbar: {e}", d.name)),
     };
-    if let Some(problem) = media_problem(&media, sectors, dual_layer) {
+    if let Some(problem) = media_problem(&media, &content) {
         return fail(problem);
     }
     if !media.blank && !erase {
         return fail(format!("Die {} enthält Daten – zum Löschen/Überschreiben --erase angeben.", media.physical));
     }
-    if dual_layer && !media.layer_break_supported {
+    if dual_layer && !content.bluray && !media.layer_break_supported {
         eprintln!("warning: {}: Der Layerwechsel wird vom Laufwerk festgelegt.", media.physical);
     }
     let speed = preferred_speed(media.media_type, &media.speeds, &speed);
-    let x = speed_x(speed, &media.speeds);
+    let x = speed_x(speed, &media.speeds, media.media_type);
     println!(
         "{}: {} – {} ({:.2} GB) bei {}{}{}",
         d.name,
         media.physical,
-        if dual_layer { "DVD-9" } else { "DVD-5" },
+        disc_name,
         bytes / 1e9,
         match speed {
-            WriteSpeed::Max => format!("max. {}", speed_label((x * DVD_1X_SECTORS_PER_SEC).round() as u32)),
-            WriteSpeed::Specific(s) => speed_label(s),
+            WriteSpeed::Max => format!("max. {}", speed_label((x * media.media_type.sectors_per_sec_1x()).round() as u32, media.media_type)),
+            WriteSpeed::Specific(s) => speed_label(s, media.media_type),
         },
         if verify { ", mit Überprüfung" } else { "" },
         if media.blank { "" } else { ", alte Daten werden gelöscht" }
@@ -440,7 +463,8 @@ fn burn(
     eprintln!();
     match result {
         Ok(outcome) => {
-            println!("{}", if verify { "Die DVD wurde gebrannt und überprüft." } else { "Die DVD wurde gebrannt." });
+            let kind = if content.bluray { "Blu-ray" } else { "DVD" };
+            println!("Die {kind} wurde gebrannt{}.", if verify { " und überprüft" } else { "" });
             if let Some(iso) = outcome.iso {
                 println!("  Disc-Image: {}", iso.display());
             }
@@ -473,7 +497,7 @@ fn main() -> ExitCode {
                         match burner.probe_media(&d.id) {
                             Ok(m) if !m.present => println!("  keine Disc eingelegt"),
                             Ok(m) => {
-                                let speeds: Vec<String> = m.speeds.iter().map(|&s| speed_label(s)).collect();
+                                let speeds: Vec<String> = m.speeds.iter().map(|&s| speed_label(s, m.media_type)).collect();
                                 println!(
                                     "  {} ({:?}), {}{}, frei {:.2} GB, Geschwindigkeiten: {}",
                                     m.physical,
@@ -564,6 +588,8 @@ fn main() -> ExitCode {
             match result {
                 Ok(p) => {
                     println!("disc:      {:?} ({} MB)", p.disc, p.disc.target_mb());
+                    let l = p.disc.limits();
+                    println!("limits:    video {}-{} kbps, video + audio <= {} kbps", l.min_video_kbps, l.max_video_kbps, l.max_total_kbps);
                     println!("video:     {} kbps (raw {:.0})", p.video_kbps, p.raw_video_kbps);
                     println!("audio:     {} kbps", p.audio_kbps);
                     println!("estimated: {:.0} MB", p.estimated_mb);
@@ -644,13 +670,20 @@ fn main() -> ExitCode {
             motion_silent,
             jobs,
             hw_decode,
+            no_hw_encode,
             menu_audio,
             tv,
             resolution,
+            single_video,
             encoding_profile,
             project_name,
             layout,
         } => {
+            let disc = DiscType::from(disc);
+            if !disc.is_bluray() && template.is_none() && layout.is_none() {
+                eprintln!("error: --template oder --layout angeben (nur Blu-rays kommen ohne Menü aus)");
+                return ExitCode::FAILURE;
+            }
             let custom_layout = match layout.as_deref().map(convertx_rust::layout::CustomLayout::load) {
                 Some(Err(e)) => {
                     eprintln!("error: {e}");
@@ -661,7 +694,7 @@ fn main() -> ExitCode {
             };
             let opts = BuildOptions {
                 inputs: input,
-                disc: disc.into(),
+                disc,
                 template: template.unwrap_or_default(),
                 custom_layout,
                 output,
@@ -688,12 +721,14 @@ fn main() -> ExitCode {
                     Tv::Pal => TvStandard::Pal,
                     Tv::Ntsc => TvStandard::Ntsc,
                 },
-                resolution: resolution.into(),
+                resolution: resolution.map_or(if disc.is_bluray() { Resolution::Hd1080 } else { Resolution::FullD1 }, Into::into),
+                bd_single_video: single_video,
                 encoding_profile: encoding_profile.into(),
                 project_name,
                 selections: vec![],
                 parallel_jobs: jobs.map(usize::from),
                 hw_decode,
+                bd_hw_encode: !no_hw_encode,
                 ..Default::default()
             };
             let runtime = match tokio::runtime::Runtime::new() {
@@ -739,14 +774,20 @@ fn main() -> ExitCode {
             match runtime.block_on(dvd::build_dvd(&opts, &mut on_event)) {
                 Ok(r) => {
                     eprintln!();
-                    println!("DVD fertig: {}", r.video_ts.display());
-                    println!(
-                        "  Größe {:.0} MB von {} MB ({:.1}%), {} Menüseite(n)",
-                        r.size_mb,
-                        r.target_mb,
-                        r.size_mb / r.target_mb as f64 * 100.0,
-                        r.menu_pages
-                    );
+                    if opts.disc.is_bluray() {
+                        println!("Blu-ray fertig: {}", r.video_ts.display());
+                        let menus = if r.menu_pages == 0 { "ohne Menü (Autoplay)".to_string() } else { format!("{} Menü(s)", r.menu_pages) };
+                        println!("  Größe {:.0} MB von {} MB ({:.1}%), {menus}", r.size_mb, r.target_mb, r.size_mb / r.target_mb as f64 * 100.0);
+                    } else {
+                        println!("DVD fertig: {}", r.video_ts.display());
+                        println!(
+                            "  Größe {:.0} MB von {} MB ({:.1}%), {} Menüseite(n)",
+                            r.size_mb,
+                            r.target_mb,
+                            r.size_mb / r.target_mb as f64 * 100.0,
+                            r.menu_pages
+                        );
+                    }
                     if r.motion_pages > 0 {
                         println!("  davon {} Motion-Menü(s)", r.motion_pages);
                     }

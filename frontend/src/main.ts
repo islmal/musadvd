@@ -2,7 +2,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openSettings } from "./settings";
 import { openBurner } from "./burn";
 import { openMenuEditor } from "./menuEditor";
-import { isButton, isMoving, madeForOtherTitles, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
+import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   checkLayout,
@@ -52,7 +52,7 @@ interface Title {
 
 type Tab = "audio" | "subtitles" | "chapters" | "template";
 
-type DiscChoice = "dvd5" | "dvd9" | "custom";
+type DiscChoice = "dvd5" | "dvd9" | "bd25" | "bd50" | "custom";
 
 const state = {
   titles: [] as Title[],
@@ -85,18 +85,45 @@ let nextId = 1;
 const SETTINGS_KEY = "convertx-gui-settings";
 const LAYOUT_KEY = "convertx-menu-layout";
 
+/** DVD and Blu-ray menus are designed separately (4:3 TV frame vs 16:9 HD frame). */
+type Medium = "dvd" | "bd";
+type MenuSlot = { layout: CustomLayout | null; key: string | null; mode: "template" | "custom" };
+const mediumOf = (d: DiscChoice): Medium => (d === "bd25" || d === "bd50" ? "bd" : "dvd");
+const slots: Record<Medium, MenuSlot> = {
+  dvd: { layout: null, key: null, mode: "template" },
+  bd: { layout: null, key: null, mode: "template" },
+};
+/** localStorage key suffix of a medium's layout (the DVD keys predate the Blu-ray ones). */
+const slotKey = (m: Medium) => (m === "bd" ? `${LAYOUT_KEY}-bd` : LAYOUT_KEY);
+
+/** Files the live menu state under `from` and loads the one of `to` (called on disc changes). */
+function switchMedium(from: Medium, to: Medium) {
+  if (from === to) return;
+  slots[from] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
+  const next = slots[to];
+  state.customLayout = next.layout;
+  state.customLayoutKey = next.key;
+  state.menuMode = next.mode;
+  state.layoutErrors = [];
+}
+
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
-    if (s.disc === "dvd5" || s.disc === "dvd9" || s.disc === "custom") state.disc = s.disc;
+    if (["dvd5", "dvd9", "bd25", "bd50", "custom"].includes(s.disc)) state.disc = s.disc;
     state.twoPass = !!s.twoPass;
     state.motion = !!s.motion;
     if (typeof s.template === "string") state.template = s.template;
     if (typeof s.output === "string") state.output = s.output;
-    if (s.menuMode === "custom") state.menuMode = "custom";
-    const layout = localStorage.getItem(LAYOUT_KEY);
-    if (layout) state.customLayout = JSON.parse(layout) as CustomLayout;
-    state.customLayoutKey = localStorage.getItem(`${LAYOUT_KEY}-titles`);
+    slots.dvd.mode = s.menuMode === "custom" ? "custom" : "template";
+    slots.bd.mode = s.menuModeBd === "custom" ? "custom" : "template";
+    for (const m of ["dvd", "bd"] as const) {
+      const layout = localStorage.getItem(slotKey(m));
+      if (layout) slots[m].layout = JSON.parse(layout) as CustomLayout;
+      slots[m].key = localStorage.getItem(`${slotKey(m)}-titles`);
+    }
+    const live = slots[mediumOf(state.disc)];
+    [state.menuMode, state.customLayout, state.customLayoutKey] = [live.mode, live.layout, live.key];
   } catch {
     /* storage unavailable: defaults */
   }
@@ -105,12 +132,19 @@ function loadSettings() {
 function saveSettings() {
   try {
     // The heading is project-specific and therefore not remembered between sessions.
-    const { disc, twoPass, motion, template, output, menuMode } = state;
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ disc, twoPass, motion, template, output, menuMode }));
-    if (state.customLayout) localStorage.setItem(LAYOUT_KEY, JSON.stringify(state.customLayout));
-    else localStorage.removeItem(LAYOUT_KEY);
-    if (state.customLayout && state.customLayoutKey !== null) localStorage.setItem(`${LAYOUT_KEY}-titles`, state.customLayoutKey);
-    else localStorage.removeItem(`${LAYOUT_KEY}-titles`);
+    const { disc, twoPass, motion, template, output } = state;
+    slots[mediumOf(disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({ disc, twoPass, motion, template, output, menuMode: slots.dvd.mode, menuModeBd: slots.bd.mode }),
+    );
+    for (const m of ["dvd", "bd"] as const) {
+      const { layout, key } = slots[m];
+      if (layout) localStorage.setItem(slotKey(m), JSON.stringify(layout));
+      else localStorage.removeItem(slotKey(m));
+      if (layout && key !== null) localStorage.setItem(`${slotKey(m)}-titles`, key);
+      else localStorage.removeItem(`${slotKey(m)}-titles`);
+    }
   } catch {
     /* ignore */
   }
@@ -172,6 +206,18 @@ function currentDisc(): Disc {
   if (state.disc === "custom") return { custom: state.settings?.target_size_mb ?? 4300 };
   return state.disc;
 }
+
+/** A Blu-ray target: no menus, one autoplaying playlist. */
+const isBluray = () => state.disc === "bd25" || state.disc === "bd50";
+
+/** The frame menus are designed for: `PAL` / `NTSC`, or `BD1080` / `BD720` on a Blu-ray. */
+function frameName(): string {
+  if (isBluray()) return state.settings?.bd_resolution === "720p" ? "BD720" : "BD1080";
+  return state.settings?.tv_standard ?? "PAL";
+}
+
+/** The setting "only one video per Blu-ray" is on and violated. */
+const singleVideoViolated = () => isBluray() && !!state.settings?.bd_single_video && state.titles.length > 1;
 
 function updateCustomDiscLabel() {
   const mb = state.settings?.target_size_mb ?? 4300;
@@ -276,6 +322,7 @@ async function runCalc() {
       })),
       motionMenu: usesMotion(),
       motionDuration: null,
+      bdMenuSecs: isBluray() && state.menuMode === "custom" && state.customLayout ? menuClipSecs(state.customLayout, 20) : [],
     });
     if (seq !== calcSeq) return; // a newer calculation is on its way
     state.calc = result;
@@ -330,7 +377,12 @@ function renderTitleList() {
         h("div", { class: "title-audio" }, audioSummary + subsSummary),
         h(
           "div",
-          { class: "quality", title: "Videoqualität: grün über 2.500 kbps, gelb 1.200–2.500 kbps, rot unter 1.200 kbps" },
+          {
+            class: "quality",
+            title: isBluray()
+              ? "Videoqualität: grün über 15.000 kbps, gelb 8.000–15.000 kbps, rot unter 8.000 kbps"
+              : "Videoqualität: grün über 2.500 kbps, gelb 1.200–2.500 kbps, rot unter 1.200 kbps",
+          },
           h("div", { class: "quality-bar" }, h("div", { class: `quality-value ${qualityClass}`, style: `width:${quality}%` })),
           h("span", { class: "quality-text" }, calc ? `${fmtNum(calc.videoKbps)} kbps` : "…"),
         ),
@@ -357,20 +409,39 @@ function renderFooter() {
     fill.style.width = `${Math.min(100, calc.fillPercent)}%`;
     fill.className = `fill-value ${calc.fits ? (calc.fillPercent > 97 ? "full" : "ok") : "over"}`;
     const base = `${fmtNum(calc.estimatedMb)} / ${fmtNum(calc.targetMb)} MB (${fmtNum(calc.fillPercent)} %)`;
-    text.textContent = calc.fits
-      ? `${base} · Video ${fmtNum(calc.videoKbps)} kbps${calc.clamp === "max" ? " (Maximum)" : ""}`
-      : `${base} – passt nicht! DVD-9 wählen oder Tonspuren abwählen.`;
+    const hint =
+      state.disc === "bd25"
+        ? "BD-50 wählen oder Tonspuren abwählen."
+        : state.disc === "bd50"
+          ? "Videos kürzen oder Tonspuren abwählen."
+          : "DVD-9 wählen oder Tonspuren abwählen.";
+    text.textContent = singleVideoViolated()
+      ? "Nur ein Video pro Blu-ray erlaubt (Einstellung „Nur ein Video pro Blu-ray“)."
+      : calc.fits
+        ? `${base} · Video ${fmtNum(calc.videoKbps)} kbps${calc.clamp === "max" ? " (Maximum)" : ""}`
+        : `${base} – passt nicht! ${hint}`;
   }
+  // A Blu-ray without editor layout has no menu (autoplay).
   const menusReady =
     state.menuMode === "template"
-      ? !!state.template
+      ? isBluray() || !!state.template
       : !!state.customLayout && state.layoutErrors.length === 0 && !layoutIsStale();
   const canConvert =
-    state.titles.length > 0 && state.probing === 0 && !state.converting && menusReady && !!state.output.trim() && !!calc?.fits;
+    state.titles.length > 0 &&
+    state.probing === 0 &&
+    !state.converting &&
+    menusReady &&
+    !singleVideoViolated() &&
+    !!state.output.trim() &&
+    !!calc?.fits;
   const motionToggle = document.getElementById("motion-menu") as HTMLInputElement | null;
   if (motionToggle) {
-    motionToggle.disabled = state.menuMode === "custom";
-    motionToggle.title = state.menuMode === "custom" ? "Beim eigenen Menü bestimmen Videos/Ton im Layout, ob ein Menü sich bewegt" : "";
+    motionToggle.disabled = state.menuMode === "custom" || isBluray();
+    motionToggle.title = isBluray()
+      ? "Blu-ray hat kein Menü"
+      : state.menuMode === "custom"
+        ? "Beim eigenen Menü bestimmen Videos/Ton im Layout, ob ein Menü sich bewegt"
+        : "";
   }
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
 }
@@ -637,8 +708,7 @@ async function refreshLayoutCheck() {
     return;
   }
   const seq = ++layoutCheckSeq;
-  const tv = state.settings?.tv_standard ?? "PAL";
-  const errors = await checkLayout(state.customLayout, editorTitles(), tv).catch((e) => [String(e)]);
+  const errors = await checkLayout(state.customLayout, editorTitles(), frameName()).catch((e) => [String(e)]);
   if (seq !== layoutCheckSeq) return;
   const changed = JSON.stringify(errors) !== JSON.stringify(state.layoutErrors);
   state.layoutErrors = errors;
@@ -652,8 +722,8 @@ function openEditor() {
   openMenuEditor({
     layout: state.customLayout,
     titles: editorTitles(),
-    tv: state.settings?.tv_standard ?? "PAL",
-    heading: state.menuTitle.trim() || state.titles[0]?.label || "DVD",
+    tv: frameName(),
+    heading: state.menuTitle.trim() || state.titles[0]?.label || (isBluray() ? "Blu-ray" : "DVD"),
     layoutTitlesKey: state.customLayoutKey,
     onApply: (layout) => {
       state.customLayout = layout;
@@ -734,7 +804,7 @@ function renderCustomMenuTab(): HTMLElement {
 function renderTemplateTab() {
   const outer = h("div", { class: "template-tab" });
   const modes: ["template" | "custom", string][] = [
-    ["template", "ConvertX-Vorlage"],
+    ["template", isBluray() ? "Ohne Menü (Autoplay)" : "ConvertX-Vorlage"],
     ["custom", "Eigenes Menü (Editor)"],
   ];
   outer.append(
@@ -762,7 +832,13 @@ function renderTemplateTab() {
       ),
     ),
   );
-  outer.append(state.menuMode === "custom" ? renderCustomMenuTab() : renderTemplateChoice());
+  if (state.menuMode === "custom") outer.append(renderCustomMenuTab());
+  else if (isBluray()) {
+    outer.append(
+      h("div", { class: "empty" }, "Blu-ray: ohne Menü (Autoplay)"),
+      h("p", { class: "hint" }, "Alle Videos laufen nach dem Einlegen der Disc als eine Playlist ab, mit Kapiteln an den Kapitelmarken jedes Videos. ConvertX-Vorlagen gibt es für die Blu-ray nicht – „Eigenes Menü (Editor)“ erzeugt echte Blu-ray-Menüs (HDMV)."),
+    );
+  } else outer.append(renderTemplateChoice());
   return outer;
 }
 
@@ -988,7 +1064,7 @@ function onDone(d: ConversionDone) {
   if (lastDvd) void openBurner(lastDvd.videoTs, lastDvd.projectName, state.settings, true);
 }
 
-/** The last successfully built DVD (for "Auf DVD brennen"). */
+/** The last successfully built DVD or Blu-ray (for "Auf Disc brennen"). */
 let lastDvd: { videoTs: string; projectName: string | null } | null = null;
 
 /** Backend confirmed the cancel: tools stopped, work directory removed. */
@@ -1050,7 +1126,7 @@ async function convert() {
         chapters: [...t.chapters].sort((a, b) => a - b),
       })),
       disc: currentDisc(),
-      template: state.menuMode === "template" ? state.template : "",
+      template: state.menuMode === "template" && !isBluray() ? state.template : "",
       output: state.output.trim(),
       twoPass: state.twoPass,
       motionMenu: state.motion,
@@ -1094,6 +1170,7 @@ async function init() {
       state.settings = saved;
       updateCustomDiscLabel();
       status("Einstellungen gespeichert.");
+      void refreshLayoutCheck();
       scheduleCalc();
     });
   });
@@ -1101,9 +1178,13 @@ async function init() {
   const disc = $("disc") as HTMLSelectElement;
   disc.value = state.disc;
   disc.addEventListener("change", () => {
+    const from = mediumOf(state.disc);
     state.disc = disc.value as DiscChoice;
+    switchMedium(from, mediumOf(state.disc));
     saveSettings();
+    void refreshLayoutCheck();
     scheduleCalc();
+    renderAll();
   });
   const twoPass = $("two-pass") as HTMLInputElement;
   twoPass.checked = state.twoPass;

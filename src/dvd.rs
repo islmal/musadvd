@@ -72,11 +72,16 @@ impl fmt::Display for BuildError {
             BuildError::DoesNotFit { disc, plan } => write!(
                 f,
                 "content does not fit on {disc:?}: even at the minimum of {} kbps it needs {:.0} MB of {} MB \
-                 (would need {:.0} kbps). Use a DVD9, fewer audio tracks or shorter inputs.",
-                calculator::MIN_VIDEO_KBPS,
+                 (would need {:.0} kbps). Use {}, fewer audio tracks or shorter inputs.",
+                disc.limits().min_video_kbps,
                 plan.estimated_mb,
                 disc.target_mb(),
-                plan.raw_video_kbps
+                plan.raw_video_kbps,
+                match disc {
+                    DiscType::Dvd5 => "a DVD9",
+                    DiscType::Bd25 => "a BD-50",
+                    _ => "a larger disc",
+                }
             ),
         }
     }
@@ -85,7 +90,7 @@ impl fmt::Display for BuildError {
 impl std::error::Error for BuildError {}
 
 /// Attaches the affected path to I/O errors.
-trait AtPath<T> {
+pub(crate) trait AtPath<T> {
     fn at(self, path: &Path) -> Result<T, BuildError>;
 }
 
@@ -143,7 +148,7 @@ impl CancelToken {
         }
     }
 
-    fn check(&self) -> Result<(), BuildError> {
+    pub(crate) fn check(&self) -> Result<(), BuildError> {
         if self.is_cancelled() {
             Err(BuildError::Cancelled)
         } else {
@@ -154,7 +159,7 @@ impl CancelToken {
 
 /// Runs `fut`, giving up as soon as `cancel` fires. Dropping `fut` kills its child process
 /// (all tools are started with `kill_on_drop`).
-async fn cancellable<T, E: Into<BuildError>>(
+pub(crate) async fn cancellable<T, E: Into<BuildError>>(
     cancel: &CancelToken,
     fut: impl Future<Output = Result<T, E>>,
 ) -> Result<T, BuildError> {
@@ -209,7 +214,7 @@ pub fn unique_dir(parent: &Path, name: &str) -> PathBuf {
 
 /// Deletes the previous DVD output. Retries briefly: right after a build, virus scanners or the
 /// Windows Explorer may still hold the freshly written VOBs open (os error 32).
-async fn remove_old_output(dir: &Path) -> Result<(), BuildError> {
+pub(crate) async fn remove_old_output(dir: &Path) -> Result<(), BuildError> {
     let mut attempt = 0;
     loop {
         match std::fs::remove_dir_all(dir) {
@@ -315,6 +320,8 @@ pub struct BuildOptions {
     /// Decode the sources on the GPU when a working hardware decoder is found (falls back to
     /// the CPU otherwise).
     pub hw_decode: bool,
+    /// Blu-ray: encode H.264 with NVIDIA NVENC when it works (1080i rates and failures use x264).
+    pub bd_hw_encode: bool,
     /// 2-pass video encoding (ConvertX's "2-pass encoding" checkbox): slower, more exact size.
     pub two_pass: bool,
     /// Draft encoding without trellis quantisation: about 40 % faster, slightly lower quality.
@@ -354,6 +361,8 @@ pub struct BuildOptions {
     /// Name of the output folder (`<output>/<name>/VIDEO_TS`); `None` = menu heading, which in
     /// turn defaults to the first video's name.
     pub project_name: Option<String>,
+    /// Blu-ray: reject projects with more than one video (no playlist).
+    pub bd_single_video: bool,
     /// Lets another thread cancel the build.
     pub cancel: CancelToken,
     /// Menus from the menu editor instead of the ConvertX template (`template` is unused then).
@@ -430,7 +439,7 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
     let subs_kbit: f64 =
         titles.iter().map(|t| (t.subtitle_streams as u32 * SUBTITLE_KBPS) as f64 * t.duration_secs).sum();
     let overhead = disc.default_mux_overhead_kbit() + menu_mb * 8192.0 + subs_kbit;
-    calculator::calculate_capped(disc, total_secs, avg_audio_kbps(titles), overhead, profile.max_video_kbps())
+    calculator::calculate_capped(disc, total_secs, avg_audio_kbps(titles), overhead, profile.max_video_kbps_for(disc))
 }
 
 /// Title frame size actually used: the chosen one, except that LP turns Full D1 into Half D1
@@ -635,7 +644,7 @@ fn find_page_source(main: &Template, main_path: &Path, style: &str) -> Option<(T
 }
 
 /// Removes the `\\?\` prefix `canonicalize` adds on Windows.
-fn display_path(p: PathBuf) -> PathBuf {
+pub(crate) fn display_path(p: PathBuf) -> PathBuf {
     match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
         Some(s) if !s.starts_with("UNC\\") => PathBuf::from(s),
         _ => p,
@@ -646,7 +655,7 @@ fn has_video_graphics(page: &Page) -> bool {
     page.graphics.iter().any(|g| g.gfx_type.eq_ignore_ascii_case("GT_VIDEO"))
 }
 
-fn file_mb(path: &Path) -> f64 {
+pub(crate) fn file_mb(path: &Path) -> f64 {
     std::fs::metadata(path).map_or(0.0, |m| m.len() as f64 / 1024.0 / 1024.0)
 }
 
@@ -676,32 +685,32 @@ type JobMsg = (usize, f64, Option<(f64, f64)>);
 
 /// Lets a running job report its own progress (0..1) to the caller.
 #[derive(Clone)]
-struct JobProgress {
+pub(crate) struct JobProgress {
     index: usize,
     tx: mpsc::UnboundedSender<JobMsg>,
 }
 
 impl JobProgress {
-    fn report(&self, fraction: f64) {
+    pub(crate) fn report(&self, fraction: f64) {
         // The receiver only disappears when the whole build is aborted.
         let _ = self.tx.send((self.index, fraction, None));
     }
 
     /// Progress with encoder telemetry for the remaining-time estimate.
-    fn report_frames(&self, fraction: f64, frames_done: f64, fps: f64) {
+    pub(crate) fn report_frames(&self, fraction: f64, frames_done: f64, fps: f64) {
         let _ = self.tx.send((self.index, fraction, Some((frames_done, fps))));
     }
 }
 
-enum JobEvent {
+pub(crate) enum JobEvent {
     Progress { index: usize, fraction: f64, telemetry: Option<(f64, f64)> },
     Finished { index: usize, finished: usize, total: usize },
 }
 
-type JobFuture<T> = Pin<Box<dyn Future<Output = Result<T, BuildError>> + Send>>;
-type Job<T> = Box<dyn FnOnce(JobProgress) -> JobFuture<T> + Send>;
+pub(crate) type JobFuture<T> = Pin<Box<dyn Future<Output = Result<T, BuildError>> + Send>>;
+pub(crate) type Job<T> = Box<dyn FnOnce(JobProgress) -> JobFuture<T> + Send>;
 
-fn job<T, F, Fut>(f: F) -> Job<T>
+pub(crate) fn job<T, F, Fut>(f: F) -> Job<T>
 where
     F: FnOnce(JobProgress) -> Fut + Send + 'static,
     Fut: Future<Output = Result<T, BuildError>> + Send + 'static,
@@ -714,7 +723,7 @@ where
 /// Progress and completion arrive in `on_event`, which runs on the caller's task only, so the
 /// caller's (non-thread-safe) logger never sees concurrent calls. The first error aborts all
 /// other jobs; their ffmpeg/spumux children are killed (`kill_on_drop`).
-async fn run_limited<T: Send + 'static>(
+pub(crate) async fn run_limited<T: Send + 'static>(
     limit: usize,
     jobs: Vec<Job<T>>,
     cancel: &CancelToken,
@@ -835,7 +844,7 @@ async fn encode_title(
 
 /// Audio and subtitle streams (indices into `info.audio` / `info.subtitles`) of one title, plus
 /// warnings: the user's choice in `sel` wins over the language filters of `opts`.
-fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &BuildOptions, label: &str) -> (Vec<usize>, Vec<usize>, Vec<String>) {
+pub(crate) fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &BuildOptions, label: &str) -> (Vec<usize>, Vec<usize>, Vec<String>) {
     let mut notes = Vec::new();
     let mut audio: Vec<usize> = (0..info.audio.len())
         .filter(|&a| match &sel.audio {
@@ -897,7 +906,7 @@ fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &BuildOptions, 
 /// When `opts.cancel` fires, all running tools are stopped, the work directory is removed and
 /// [`BuildError::Cancelled`] is returned.
 pub async fn build_dvd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) -> Result<BuildReport, BuildError> {
-    let result = build_dvd_inner(opts, log).await;
+    let result = if opts.disc.is_bluray() { crate::bd::build_bd(opts, log).await } else { build_dvd_inner(opts, log).await };
     if matches!(result, Err(BuildError::Cancelled)) {
         log(Event::Step("Abgebrochen – Arbeitsordner wird gelöscht".into()));
         if let Ok(out) = std::fs::canonicalize(&opts.output) {
@@ -924,6 +933,12 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     }
     if opts.inputs.len() > MAX_TITLES {
         return Err(BuildError::Author(AuthorError::TooManyTitles(opts.inputs.len())));
+    }
+    if opts.resolution.is_hd() {
+        return Err(BuildError::Template(format!(
+            "Die Auflösung {} gibt es nur für Blu-ray – für eine DVD bitte Full D1, Half D1 oder SIF wählen",
+            opts.resolution.label()
+        )));
     }
 
     // 0. Tools and directories --------------------------------------------------------------
@@ -1433,7 +1448,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     let expected_bytes =
         (plan.video_kbps + avg_audio) as f64 * 1000.0 / 8.0 * total_secs + menu_mb * 1024.0 * 1024.0;
     let dual_layer = expected_bytes > SINGLE_LAYER_BYTES;
-    let burn_estimate = Some(eta::image_and_burn_secs(expected_bytes, eta::default_speed_x(dual_layer), true, dual_layer));
+    let burn_estimate = Some(eta::image_and_burn_secs(eta::Medium::Dvd, expected_bytes, eta::default_speed_x(eta::Medium::Dvd, dual_layer), true, dual_layer));
     let authoring_estimate = eta::authoring_secs(expected_bytes);
     let mut last_eta = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let encode_start = std::time::Instant::now();
@@ -1532,7 +1547,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 .sum()
         })
         .unwrap_or(expected_bytes);
-    let burn_estimate = Some(eta::image_and_burn_secs(vob_bytes, eta::default_speed_x(dual_layer), true, dual_layer));
+    let burn_estimate = Some(eta::image_and_burn_secs(eta::Medium::Dvd, vob_bytes, eta::default_speed_x(eta::Medium::Dvd, dual_layer), true, dual_layer));
     log(Event::Eta(Eta::new(JobPhase::Authoring, None, Some(eta::authoring_secs(vob_bytes)), burn_estimate)));
     log(Event::Step("dvdauthor erstellt VIDEO_TS".into()));
     cancel.check()?;

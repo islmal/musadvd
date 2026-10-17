@@ -4,7 +4,7 @@
 //! - `probe_file`         analyse a dropped video (ffprobe via `probe.rs`)
 //! - `list_templates`     ConvertX menu templates found on this machine
 //! - `template_preview`   template thumbnail as data URL
-//! - `calculate_project`  bitrate and disc fill level for DVD5/DVD9
+//! - `calculate_project`  bitrate and disc fill level for DVD5/DVD9/BD-25/BD-50
 //! - `start_conversion`   run the full pipeline in the background; progress arrives as
 //!                        `convert-event` events, the result as one `convert-done` event
 //! - `default_output_dir` suggestion for the output folder
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use convertx_rust::calculator::{Clamp, DiscType, EncodingProfile, Quality, DVD_MAX_TOTAL_KBPS, MAX_VIDEO_KBPS, MIN_VIDEO_KBPS};
+use convertx_rust::calculator::{Clamp, DiscType, EncodingProfile, Quality};
 use convertx_rust::config::{AppSettings, UNSUPPORTED_CHOICES};
 use convertx_rust::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
 use convertx_rust::encoder::{ac3_settings, Aspect};
@@ -386,15 +386,20 @@ struct ProjectSettings {
     titles: Vec<TitleLoad>,
     motion_menu: bool,
     motion_duration: Option<f64>,
+    /// Blu-ray menus from the editor: clip length of every menu in seconds (1 for stills).
+    #[serde(default)]
+    bd_menu_secs: Vec<f64>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TitleCalc {
     video_kbps: u32,
-    /// Bar length: 0..100 between the minimum (1000) and maximum (8500) video bitrate.
+    /// Bar length: 0..100 between the minimum and maximum video bitrate of the disc (DVD
+    /// 1000-8500, BD 4000-35,000).
     quality_percent: f64,
-    /// Bar colour: `good` (> 2500 kbps), `medium` (1200-2500), `poor` (< 1200).
+    /// Bar colour: `good`, `medium`, `poor` (DVD: > 2500 / 1200-2500 / < 1200 kbps, BD: > 15,000
+    /// / 8000-15,000 / < 8000).
     quality: Quality,
 }
 
@@ -414,8 +419,9 @@ struct CalculationResult {
     titles: Vec<TitleCalc>,
 }
 
-fn quality(kbps: u32) -> f64 {
-    ((kbps as f64 - MIN_VIDEO_KBPS as f64) / (MAX_VIDEO_KBPS - MIN_VIDEO_KBPS) as f64 * 100.0).clamp(0.0, 100.0)
+fn quality(kbps: u32, disc: DiscType) -> f64 {
+    let l = disc.limits();
+    ((kbps as f64 - l.min_video_kbps as f64) / (l.max_video_kbps - l.min_video_kbps) as f64 * 100.0).clamp(0.0, 100.0)
 }
 
 /// Live estimate with the encoding profile from the global settings.
@@ -424,13 +430,17 @@ fn calculate_project(state: State<'_, AppState>, settings: ProjectSettings) -> R
     project_calculation(settings, state.settings().profile())
 }
 
+/// Size of an encoded Blu-ray menu clip per second.
+const BD_MENU_MB_PER_SEC: f64 = 1.1;
+
 fn project_calculation(settings: ProjectSettings, profile: EncodingProfile) -> Result<CalculationResult, String> {
     let target_mb = settings.disc.target_mb();
-    let menu_mb = dvd::estimate_menu_mb(
-        settings.titles.len(),
-        settings.motion_menu,
-        settings.motion_duration.unwrap_or(DEFAULT_MOTION_SECS),
-    );
+    // A Blu-ray has menus only from the editor (8 Mbit/s H.264 + AC-3 + muxing ≈ 1.1 MB/s).
+    let menu_mb = if settings.disc.is_bluray() {
+        settings.bd_menu_secs.iter().sum::<f64>() * BD_MENU_MB_PER_SEC
+    } else {
+        dvd::estimate_menu_mb(settings.titles.len(), settings.motion_menu, settings.motion_duration.unwrap_or(DEFAULT_MOTION_SECS))
+    };
     if settings.titles.is_empty() {
         return Ok(CalculationResult {
             target_mb,
@@ -450,8 +460,8 @@ fn project_calculation(settings: ProjectSettings, profile: EncodingProfile) -> R
         .titles
         .iter()
         .map(|t| {
-            let v = plan.video_kbps.min(DVD_MAX_TOTAL_KBPS.saturating_sub(t.audio_kbps));
-            TitleCalc { video_kbps: v, quality_percent: quality(v), quality: Quality::of(v) }
+            let v = plan.video_kbps.min(settings.disc.limits().max_total_kbps.saturating_sub(t.audio_kbps));
+            TitleCalc { video_kbps: v, quality_percent: quality(v, settings.disc), quality: Quality::for_disc(v, settings.disc) }
         })
         .collect();
     Ok(CalculationResult {
@@ -591,7 +601,12 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                     }
                     Ok(r) => ConversionDone {
                         ok: true,
-                        message: format!("DVD fertig: {:.0} MB von {} MB", r.size_mb, r.target_mb),
+                        message: format!(
+                            "{} fertig: {:.0} MB von {} MB",
+                            if opts.disc.is_bluray() { "Blu-ray" } else { "DVD" },
+                            r.size_mb,
+                            r.target_mb
+                        ),
                         video_ts: Some(r.video_ts.to_string_lossy().into_owned()),
                         project_name: r.project_dir.file_name().map(|n| n.to_string_lossy().into_owned()),
                         size_mb: Some(r.size_mb),
@@ -656,6 +671,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use convertx_rust::calculator::MAX_VIDEO_KBPS;
 
     #[test]
     fn calculation_for_two_titles() {
@@ -667,6 +683,7 @@ mod tests {
             ],
             motion_menu: false,
             motion_duration: None,
+            bd_menu_secs: vec![],
         }, EncodingProfile::Auto)
         .unwrap();
         assert_eq!(r.target_mb, 4300);
@@ -684,6 +701,7 @@ mod tests {
             titles: vec![TitleLoad { duration_secs: 8.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0 }],
             motion_menu: true,
             motion_duration: Some(25.0),
+            bd_menu_secs: vec![],
         }, EncodingProfile::Auto)
         .unwrap();
         assert_eq!(r.clamp, "min");
@@ -700,6 +718,7 @@ mod tests {
             titles: vec![TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0 }],
             motion_menu: false,
             motion_duration: None,
+            bd_menu_secs: vec![],
         };
         let auto = project_calculation(project(), EncodingProfile::Auto).unwrap();
         let lp = project_calculation(project(), EncodingProfile::Lp).unwrap();
@@ -709,8 +728,37 @@ mod tests {
     }
 
     #[test]
+    fn blu_ray_calculation_uses_bd_limits() {
+        let project = |disc| ProjectSettings {
+            disc,
+            titles: vec![TitleLoad { duration_secs: 2.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0 }],
+            motion_menu: true,
+            motion_duration: Some(25.0),
+            bd_menu_secs: vec![],
+        };
+        let r = project_calculation(project(DiscType::Bd25), EncodingProfile::Auto).unwrap();
+        assert_eq!(r.target_mb, 22_900);
+        assert_eq!((r.menu_mb, r.clamp.as_str()), (0.0, "none"), "no menus without an editor layout");
+        // Menus from the editor: a still (1 s) and a 20 s loop.
+        let with_menus = ProjectSettings { bd_menu_secs: vec![1.0, 20.0], ..project(DiscType::Bd25) };
+        let m = project_calculation(with_menus, EncodingProfile::Auto).unwrap();
+        assert!((m.menu_mb - 21.0 * BD_MENU_MB_PER_SEC).abs() < 1e-9);
+        assert!(r.fits && (20_000..35_000).contains(&r.video_kbps), "{}", r.video_kbps);
+        assert_eq!(r.titles[0].quality, Quality::Good);
+        assert!(r.titles[0].quality_percent > 50.0 && r.titles[0].quality_percent < 100.0);
+        // The profile ceilings are the BD ones.
+        let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp).unwrap();
+        assert_eq!((lp.video_kbps, lp.clamp.as_str()), (12_000, "max"));
+        // A 12 h project does not fit a BD-25 even at 4000 kbps and is rated poor.
+        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 12.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0 }], ..project(DiscType::Bd25) };
+        let r = project_calculation(long, EncodingProfile::Auto).unwrap();
+        assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
+        assert_eq!((r.titles[0].quality, r.titles[0].quality_percent), (Quality::Poor, 0.0));
+    }
+
+    #[test]
     fn empty_project() {
-        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None }, EncodingProfile::Auto).unwrap();
+        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None, bd_menu_secs: vec![] }, EncodingProfile::Auto).unwrap();
         assert_eq!(r.target_mb, 7950);
         assert!(r.fits);
     }

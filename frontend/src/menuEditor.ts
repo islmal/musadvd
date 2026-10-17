@@ -1,4 +1,4 @@
-// Menu editor: WYSIWYG design of custom DVD menus (title menus and root menus) on the TV frame.
+// Menu editor: WYSIWYG design of custom DVD / Blu-ray menus (title, root and settings menus).
 //
 // Layout: menu manager (left) – stage with drag & drop / resize (centre) – properties (right).
 // The stage is the TV frame in storage pixels (720x576 PAL / 720x480 NTSC) shown at 4:3, so
@@ -8,7 +8,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { checkLayout, imagePreview, loadLayout, saveLayout, textLines, titleFrame } from "./api";
 import {
   FONTS,
-  MAX_BUTTONS,
+  maxButtons,
   OVERLAY_LABELS,
   type GradientOverlay,
   chapterLabel,
@@ -16,8 +16,10 @@ import {
   madeForOtherTitles,
   emptyMenu,
   isButton,
+  isBdFrame,
   isMoving,
   newId,
+  pixelAspectOf,
   text as newText,
   type Action,
   type CustomLayout,
@@ -151,7 +153,7 @@ export function openMenuEditor(opts: EditorOptions) {
   }
 
   /** Width of a canvas pixel on the 4:3 TV screen relative to its height (PAL 16/15). */
-  const pixelAspect = () => (4 / 3) * (H() / W());
+  const pixelAspect = () => pixelAspectOf(tv, L.canvas);
 
   /**
    * Size and position of a square-pixel picture of `iw`×`ih` fitted into a `bw`×`bh` box of
@@ -224,8 +226,9 @@ export function openMenuEditor(opts: EditorOptions) {
     const pad = 24;
     const vw = viewport.clientWidth - pad;
     const vh = viewport.clientHeight - pad;
-    const dispH = Math.max(100, Math.min(vh, (vw * 3) / 4));
-    const dispW = (dispH * 4) / 3;
+    const aspect = isBdFrame(tv) ? 16 / 9 : 4 / 3;
+    const dispH = Math.max(100, Math.min(vh, vw / aspect));
+    const dispW = dispH * aspect;
     scaleX = dispW / W();
     scaleY = dispH / H();
     stage.style.width = `${W()}px`;
@@ -345,7 +348,7 @@ export function openMenuEditor(opts: EditorOptions) {
         }),
         "Sicherer Bereich",
       ),
-      el("span", { class: `ed-counter${buttons > MAX_BUTTONS ? " bad" : ""}` }, `${buttons}/${MAX_BUTTONS} Buttons`),
+      el("span", { class: `ed-counter${buttons > maxButtons(tv) ? " bad" : ""}` }, `${buttons}/${maxButtons(tv)} Buttons`),
     );
   }
 
@@ -1029,7 +1032,7 @@ export function openMenuEditor(opts: EditorOptions) {
         ),
       );
     }
-    if (H() !== tvCanvas) {
+    if (!isBdFrame(tv) && H() !== tvCanvas) {
       notes.push(el("li", { class: "warn" }, `Layout für 720×${H()} entworfen – wird für ${tv} auf 720×${tvCanvas} skaliert.`));
     }
     if (errors.length === 0) {

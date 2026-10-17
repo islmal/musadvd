@@ -28,6 +28,28 @@ pub fn supported(codec: &str) -> bool {
     matches!(codec, "hdmv_pgs_subtitle" | "dvd_subtitle")
 }
 
+/// A `.sup` stream with one empty display set (presentation composition with no objects, then
+/// END) for a canvas of `width`×`height`: a Blu-ray subtitle track without any picture.
+pub fn empty_pgs(width: u16, height: u16) -> Vec<u8> {
+    let seg = |kind: u8, payload: &[u8]| {
+        let mut s = b"PG".to_vec();
+        s.extend([0u8; 8]); // PTS and DTS 0
+        s.push(kind);
+        s.extend((payload.len() as u16).to_be_bytes());
+        s.extend_from_slice(payload);
+        s
+    };
+    let mut pcs = Vec::new();
+    pcs.extend(width.to_be_bytes());
+    pcs.extend(height.to_be_bytes());
+    // Frame rate code 0x10 (24 fps), composition number 1, epoch start, no palette update,
+    // palette 0, zero objects.
+    pcs.extend([0x10, 0, 1, 0x80, 0, 0, 0]);
+    let mut out = seg(0x16, &pcs);
+    out.extend(seg(0x80, &[]));
+    out
+}
+
 #[derive(Debug)]
 pub enum SubpicError {
     /// The subtitle data could not be parsed.
@@ -760,6 +782,14 @@ mod tests {
             p.extend(y.to_be_bytes());
         }
         p
+    }
+
+    #[test]
+    fn empty_pgs_has_no_pictures() {
+        let sup = empty_pgs(1920, 1080);
+        assert_eq!(sup.len(), 13 + 11 + 13);
+        let d = decode_pgs(&sup).unwrap();
+        assert_eq!((d.canvas, d.pictures.len()), ((1920, 1080), 0));
     }
 
     #[test]

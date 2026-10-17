@@ -55,6 +55,27 @@ pub enum TvStandard {
     Ntsc,
 }
 
+/// The frame a menu is drawn on: size in pixels and the shape of one pixel (width / height on the
+/// screen; 1.0 = square, as on Blu-ray).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pixel_aspect: f64,
+}
+
+impl From<TvStandard> for MenuFrame {
+    fn from(tv: TvStandard) -> Self {
+        MenuFrame { width: tv.width(), height: tv.height(), pixel_aspect: tv.menu_pixel_aspect() }
+    }
+}
+
+impl MenuFrame {
+    pub fn square(width: u32, height: u32) -> Self {
+        MenuFrame { width, height, pixel_aspect: 1.0 }
+    }
+}
+
 impl TvStandard {
     pub fn width(self) -> u32 {
         720
@@ -138,6 +159,10 @@ pub enum Resolution {
     HalfD1,
     /// 352×288 / 352×240.
     Sif,
+    /// 1920×1080 (Blu-ray only).
+    Hd1080,
+    /// 1280×720 (Blu-ray only).
+    Hd720,
 }
 
 impl Resolution {
@@ -147,7 +172,14 @@ impl Resolution {
             Resolution::FullD1 => tv.size(),
             Resolution::HalfD1 => (352, tv.height()),
             Resolution::Sif => (352, tv.height() / 2),
+            Resolution::Hd1080 => (1920, 1080),
+            Resolution::Hd720 => (1280, 720),
         }
+    }
+
+    /// Blu-ray frame sizes; they ignore the TV standard.
+    pub fn is_hd(self) -> bool {
+        matches!(self, Resolution::Hd1080 | Resolution::Hd720)
     }
 
     /// Name as in the settings ("Full D1", "Half D1", "SIF").
@@ -156,13 +188,15 @@ impl Resolution {
             Resolution::FullD1 => "Full D1",
             Resolution::HalfD1 => "Half D1",
             Resolution::Sif => "SIF",
+            Resolution::Hd1080 => "1080p",
+            Resolution::Hd720 => "720p",
         }
     }
 
     /// 16:9 titles. Conservative choice: DVD-Video defines the 16:9 aspect for the 720/704
     /// wide frames, so the 352 wide sizes are encoded as 4:3 (wide sources get letterboxed).
     pub fn allows_wide(self) -> bool {
-        self == Resolution::FullD1
+        matches!(self, Resolution::FullD1 | Resolution::Hd1080 | Resolution::Hd720)
     }
 }
 

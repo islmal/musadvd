@@ -148,6 +148,8 @@ pub struct Toolchain {
     pub ffprobe: PathBuf,
     pub dvdauthor: PathBuf,
     pub spumux: PathBuf,
+    /// tsMuxeR, only needed for Blu-ray output (DVD builds work without it).
+    pub tsmuxer: Option<PathBuf>,
     /// Broken candidates that were skipped during detection.
     pub notes: Vec<String>,
     /// Priority of every ffmpeg/spumux/dvdauthor process started by this toolchain.
@@ -225,6 +227,15 @@ async fn tool_works(path: &Path, version_check: bool) -> bool {
     }
 }
 
+/// tsMuxeR prints its banner when started without arguments; anything else is no tsMuxeR.
+async fn is_tsmuxer(path: &Path) -> bool {
+    let run = tool_command(path, ProcessPriority::Normal).stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+    match tokio::time::timeout(std::time::Duration::from_secs(20), run).await {
+        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).contains("tsMuxeR"),
+        _ => false,
+    }
+}
+
 /// First working candidate of `name`; skipped broken candidates are reported in `notes`.
 async fn locate(name: &str, version_check: bool, hint: &str, notes: &mut Vec<String>) -> Result<PathBuf, ToolError> {
     for candidate in tool_candidates(name) {
@@ -241,11 +252,24 @@ impl Toolchain {
         let mut notes = Vec::new();
         let ff_hint = "scoop install ffmpeg, or copy the real ffmpeg.exe/ffprobe.exe into bin/";
         let dvd_hint = "build it with tools/dvdauthor-win/build.sh";
+        let ffmpeg = locate("ffmpeg", true, ff_hint, &mut notes).await?;
+        let ffprobe = locate("ffprobe", true, ff_hint, &mut notes).await?;
+        let dvdauthor = locate("dvdauthor", false, dvd_hint, &mut notes).await?;
+        let spumux = locate("spumux", false, dvd_hint, &mut notes).await?;
+        let mut tsmuxer = None;
+        for candidate in tool_candidates("tsMuxeR") {
+            if is_tsmuxer(&candidate).await {
+                tsmuxer = Some(candidate);
+                break;
+            }
+            notes.push(format!("{} ignoriert: kein tsMuxeR", candidate.display()));
+        }
         Ok(Toolchain {
-            ffmpeg: locate("ffmpeg", true, ff_hint, &mut notes).await?,
-            ffprobe: locate("ffprobe", true, ff_hint, &mut notes).await?,
-            dvdauthor: locate("dvdauthor", false, dvd_hint, &mut notes).await?,
-            spumux: locate("spumux", false, dvd_hint, &mut notes).await?,
+            ffmpeg,
+            ffprobe,
+            dvdauthor,
+            spumux,
+            tsmuxer,
             notes,
             priority: ProcessPriority::Normal,
         })
@@ -277,6 +301,16 @@ impl Toolchain {
             .stdin(open(dir.join(input), false)?)
             .stdout(open(dir.join(output), true)?);
         run_capture(&tool, cmd).await
+    }
+
+    /// `tsMuxeR <meta> <out_dir>` in `dir` (meta file name relative to `dir`); returns its log.
+    pub async fn tsmuxer(&self, dir: &Path, meta: &str, out_dir: &str) -> Result<String, ToolError> {
+        let exe = self.tsmuxer.as_ref().ok_or_else(|| {
+            ToolError::NotFound("tsMuxeR nicht gefunden – bitte bin/tsMuxeR.exe bereitstellen (für Blu-ray-Ausgabe nötig)".into())
+        })?;
+        let mut cmd = self.command(exe);
+        cmd.args([meta, out_dir]).current_dir(dir).stdout(Stdio::piped());
+        run_capture("tsMuxeR", cmd).await
     }
 
     /// ffprobe with `args`; returns its stdout (e.g. JSON).
@@ -430,6 +464,26 @@ impl Toolchain {
         }
         None
     }
+
+    /// Checks that `h264_nvenc` works with the Blu-ray options (10 test frames); `Err` is a short
+    /// German reason for the log.
+    pub async fn probe_nvenc(&self) -> Result<(), String> {
+        let mut cmd = self.command(&self.ffmpeg);
+        cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=24000/1001"])
+            .args(["-frames:v", "10", "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc", "-profile:v", "high", "-level:v", "4.1"])
+            .args(crate::encoder::nvenc_bd_options())
+            .args(["-f", "null", "-"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await else {
+            return Err("NVENC-Test nicht ausführbar".into());
+        };
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(nvenc_failure_reason(&String::from_utf8_lossy(&out.stderr)))
+        }
+    }
 }
 
 /// Runs a command, returning its captured output (stderr, plus stdout if the caller piped it);
@@ -449,6 +503,18 @@ async fn run_capture(tool: &str, mut cmd: Command) -> Result<String, ToolError> 
     }
 }
 
+/// Maps an ffmpeg NVENC failure log to a short German reason.
+pub fn nvenc_failure_reason(log: &str) -> String {
+    let l = log.to_ascii_lowercase();
+    if l.contains("driver does not support") || l.contains("minimum required nvidia driver") {
+        "NVIDIA-Treiber zu alt (≥ 610 nötig)".into()
+    } else if l.contains("no capable devices") || l.contains("cannot load") {
+        "keine NVIDIA-GPU mit NVENC".into()
+    } else {
+        log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unbekannter Fehler").trim().into()
+    }
+}
+
 fn tail(s: &str, lines: usize) -> String {
     let v: Vec<&str> = s.lines().collect();
     v[v.len().saturating_sub(lines)..].join("\n")
@@ -463,6 +529,13 @@ mod tests {
     fn stray_quote_in_path() {
         let p = path_entries(std::ffi::OsStr::new(r#"C:\a;C:\Program Files\dotnet";C:\b; ;"C:\c d""#));
         assert_eq!(p, vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\Program Files\dotnet"), PathBuf::from(r"C:\b"), PathBuf::from(r"C:\c d")]);
+    }
+
+    #[test]
+    fn nvenc_reasons() {
+        assert!(nvenc_failure_reason("Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0").contains("Treiber"));
+        assert!(nvenc_failure_reason("OpenEncodeSessionEx failed: no capable devices found").contains("GPU"));
+        assert_eq!(nvenc_failure_reason("a\nsomething odd\n\n"), "something odd");
     }
 
     #[test]

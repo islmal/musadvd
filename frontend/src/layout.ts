@@ -174,9 +174,25 @@ export const FONTS = [
 ];
 
 export const MAX_BUTTONS = 36;
+/** Buttons per menu: 36 on a DVD, 255 on a Blu-ray. */
+export const maxButtons = (tv: string) => (isBdFrame(tv) ? 255 : MAX_BUTTONS);
+
+/** `tv` names the frame a layout is made for: `PAL`, `NTSC`, or `BD1080` / `BD720` (Blu-ray). */
+export const isBdFrame = (tv: string) => tv.startsWith("BD");
 
 export function canvasSize(tv: string): { width: number; height: number } {
+  if (isBdFrame(tv)) return { width: 1920, height: 1080 };
   return { width: 720, height: tv === "NTSC" ? 480 : 576 };
+}
+
+/** Width of a canvas pixel on the screen relative to its height: 1 on Blu-ray, else the 4:3 TV's. */
+export function pixelAspectOf(tv: string, canvas: { width: number; height: number }): number {
+  return isBdFrame(tv) ? 1 : (4 / 3) * (canvas.height / canvas.width);
+}
+
+/** Length of every menu clip in seconds (a still is 1 s): what a Blu-ray's menus add to its size. */
+export function menuClipSecs(layout: CustomLayout, motionSecs: number): number[] {
+  return layout.menus.map((m) => (isMoving(m) ? (m.durationSecs ?? motionSecs) : 1));
 }
 
 let counter = 0;
@@ -245,6 +261,7 @@ export function isMoving(m: CustomMenu): boolean {
  *   per track and subtitle (plus "Aus"), linked from the title's root menu.
  */
 export function draftLayout(titles: EditorTitle[], tv: string, heading: string): CustomLayout {
+  if (isBdFrame(tv)) return toBluray(draftLayout(titles, "PAL", heading), canvasSize(tv));
   const canvas = canvasSize(tv);
   const { width: W, height: H } = canvas;
   const sy = H / 576;
@@ -364,4 +381,28 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
   });
 
   return { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, menus };
+}
+
+/**
+ * A 720×576 draft on a 16:9 Blu-ray canvas: positions and sizes scale with the canvas, text
+ * sizes with its height, and video boxes become 16:9 (400×225) with the caption right below.
+ */
+function toBluray(draft: CustomLayout, canvas: { width: number; height: number }): CustomLayout {
+  const sx = canvas.width / draft.canvas.width;
+  const sy = canvas.height / draft.canvas.height;
+  for (const m of draft.menus) {
+    for (const e of m.elements) {
+      e.x = Math.round(e.x * sx);
+      e.y = Math.round(e.y * sy);
+      e.w = Math.round(e.w * sx);
+      e.h = Math.round(e.h * sy);
+      if (e.type === "text") e.size = Math.round(e.size * sy);
+      if (e.type === "video") [e.w, e.h] = [400, 225];
+    }
+    m.elements.forEach((e, i) => {
+      const caption = m.elements[i + 1];
+      if (e.type === "video" && caption?.type === "text" && caption.x === e.x) caption.y = e.y + e.h + 8;
+    });
+  }
+  return { ...draft, canvas };
 }

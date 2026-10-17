@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use base64::Engine as _;
-use convertx_rust::author::{ClipSource, TvStandard};
+use convertx_rust::author::{ClipSource, MenuFrame, TvStandard};
 use convertx_rust::layout::{self, Canvas, CustomLayout, Element, LayoutTitle};
 use serde::Deserialize;
 
@@ -45,11 +45,31 @@ fn layout_titles(titles: &[EditorTitle]) -> Vec<LayoutTitle> {
         .collect()
 }
 
+/// The frame a layout is checked / measured on: `PAL`, `NTSC`, or `BD1080` / `BD720` (Blu-ray,
+/// square pixels).
+enum Frame {
+    Tv(TvStandard),
+    Bd(MenuFrame),
+}
+
+fn frame_of(tv: &str) -> Frame {
+    match tv.to_ascii_uppercase().as_str() {
+        "BD720" => Frame::Bd(MenuFrame::square(1280, 720)),
+        s if s.starts_with("BD") => Frame::Bd(MenuFrame::square(1920, 1080)),
+        "NTSC" => Frame::Tv(TvStandard::Ntsc),
+        _ => Frame::Tv(TvStandard::Pal),
+    }
+}
+
 /// All problems of `layout` for these titles (empty = ready to build).
 #[tauri::command]
 pub fn check_layout(layout: CustomLayout, titles: Vec<EditorTitle>, tv: String) -> Vec<String> {
-    let tv = if tv.eq_ignore_ascii_case("NTSC") { TvStandard::Ntsc } else { TvStandard::Pal };
-    match layout::validate(&layout, &layout_titles(&titles), tv) {
+    let titles = layout_titles(&titles);
+    let result = match frame_of(&tv) {
+        Frame::Tv(tv) => layout::validate(&layout, &titles, tv),
+        Frame::Bd(frame) => layout::validate_bd(&layout, &titles, frame),
+    };
+    match result {
         Ok(()) => vec![],
         Err(e) => e.0,
     }
@@ -59,8 +79,11 @@ pub fn check_layout(layout: CustomLayout, titles: Vec<EditorTitle>, tv: String) 
 /// them); empty for other elements.
 #[tauri::command]
 pub fn text_lines(element: Element, canvas: Canvas, tv: String) -> Vec<String> {
-    let tv = if tv.eq_ignore_ascii_case("NTSC") { TvStandard::Ntsc } else { TvStandard::Pal };
-    layout::element_text_lines(&element, canvas, tv).unwrap_or_default()
+    let lines = match frame_of(&tv) {
+        Frame::Tv(tv) => layout::element_text_lines(&element, canvas, tv),
+        Frame::Bd(frame) => layout::element_text_lines(&element, canvas, frame),
+    };
+    lines.unwrap_or_default()
 }
 
 #[tauri::command]
@@ -102,6 +125,15 @@ pub fn image_preview(path: String) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn layout_with_canvas(w: u32, h: u32) -> CustomLayout {
+        CustomLayout::from_json(&format!(
+            r#"{{"canvas": {{"width": {w}, "height": {h}}}, "menus": [{{"id": "m", "name": "Haupt", "role": "title", "elements": [
+                {{"type": "text", "text": "K5", "x": 10, "y": 10, "w": 100, "h": 40,
+                 "action": {{"type": "playChapter", "title": 1, "chapter": 5}}}}]}}]}}"#
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn checks_against_project_titles() {
         let layout = CustomLayout::from_json(
@@ -124,6 +156,11 @@ mod tests {
         let errs = check_layout(layout, t(3), "PAL".into());
         assert!(errs[0].contains("Kapitel 5"), "{errs:?}");
         assert!(image_preview("x.txt".into()).is_err());
+        // Blu-ray: the 720×576 default canvas is not 16:9; chapters are checked the same way.
+        let errs = check_layout(layout_with_canvas(1920, 1080), t(3), "BD1080".into());
+        assert!(errs.iter().all(|e| !e.contains("16:9")) && errs[0].contains("Kapitel 5"), "{errs:?}");
+        let errs = check_layout(layout_with_canvas(720, 576), t(5), "BD720".into());
+        assert!(errs.iter().any(|e| e.contains("16:9")), "{errs:?}");
     }
 
     #[test]

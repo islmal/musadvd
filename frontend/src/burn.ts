@@ -193,7 +193,7 @@ export async function openBurner(
     try {
       drives = await listDrives();
       if (!drives.some((d) => d.id === driveId)) driveId = drives[0]?.id ?? "";
-      error.textContent = drives.length === 0 ? "Kein DVD-Brenner gefunden." : "";
+      error.textContent = drives.length === 0 ? "Kein DVD-/Blu-ray-Brenner gefunden." : "";
     } catch (e) {
       error.textContent = `Laufwerke: ${e}`;
     }
@@ -283,7 +283,7 @@ export async function openBurner(
     if (!driveId) return el("div", { class: "media-state bad" }, "Kein Laufwerk");
     if (!media) return el("div", { class: "media-state" }, probing ? "Disc wird geprüft …" : "—");
     const m = media.media;
-    const kind = m.media_type === "dvd9" ? "DVD-9" : m.media_type === "dvd5" ? "DVD-5" : "";
+    const kind = { dvd9: "DVD-9", dvd5: "DVD-5", bd25: "BD-25", bd50: "BD-50", unknown: "" }[m.media_type];
     const text = m.present
       ? `${m.physical}${kind ? ` (${kind})` : ""} · ${m.blank ? "leer" : "beschrieben"} · ${gb(
           m.blank ? m.free_sectors : m.total_sectors,
@@ -389,7 +389,7 @@ export async function openBurner(
         check("Nach dem Brennen überprüfen", verify, (v) => ((verify = v), render()), disabled),
         check("ISO-Datei behalten", keepIso, (v) => (keepIso = v), disabled || deleteAfter),
         check("Disc danach auswerfen", eject, (v) => (eject = v), disabled),
-        check("DVD-Ordner danach löschen", deleteAfter, (v) => ((deleteAfter = v), render()), disabled),
+        check(`${discKind()}-Ordner danach löschen`, deleteAfter, (v) => ((deleteAfter = v), render()), disabled),
         media?.needsErase && !autoErase
           ? check("Inhalt der Disc löschen", eraseConfirmed, (v) => ((eraseConfirmed = v), render()), disabled)
           : null,
@@ -455,20 +455,26 @@ export async function openBurner(
     );
   }
 
+  /** "Blu-ray" or "DVD": known from the folder name until the disc check has run. */
+  function discKind() {
+    return (needs?.bluray ?? /BDMV$/i.test(videoTs.replace(/[\\/]+$/, ""))) ? "Blu-ray" : "DVD";
+  }
+
   function render() {
+    const kind = discKind();
     const title = finished
       ? finished.ok
-        ? "DVD gebrannt"
+        ? `${kind} gebrannt`
         : finished.cancelled
           ? "Brennen abgebrochen"
           : "Brennen fehlgeschlagen"
       : burning
         ? current
           ? `[${current.eta.phaseNumber}/${current.eta.phaseCount}] ${current.eta.phaseLabel}`
-          : "DVD wird gebrannt"
-        : "Auf DVD brennen";
+          : `${kind} wird gebrannt`
+        : `Auf ${kind} brennen`;
     const info = needs
-      ? `Inhalt: ${needs.sizeGb.toFixed(2).replace(".", ",")} GB · ${needs.dualLayer ? "DVD-9 (Double Layer) nötig" : "passt auf eine DVD-5"}`
+      ? `Inhalt: ${needs.sizeGb.toFixed(2).replace(".", ",")} GB · ${needs.bluray ? (needs.dualLayer ? "BD-50 (Dual Layer) nötig" : "passt auf eine BD-25") : needs.dualLayer ? "DVD-9 (Double Layer) nötig" : "passt auf eine DVD-5"}`
       : "Inhalt wird geprüft …";
     const canBurn = !burning && !finished && !!media && !media.problem && !!driveId && eraseOk();
     const countdownBar =

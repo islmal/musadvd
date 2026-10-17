@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::author::{xml_escape, ClipSource, Resolution, TvStandard};
+use crate::bd::BdRate;
+use crate::author::{xml_escape, ClipSource, MenuFrame, Resolution, TvStandard};
 use crate::probe::{AudioStream, MediaInfo, SubtitleKind, SubtitleStream, VideoStream};
 use crate::subpic;
 use crate::tools::{FfmpegProgress, ToolError, Toolchain};
@@ -146,6 +147,30 @@ pub struct EncodeJob<'a> {
     pub hwaccel: Option<&'static str>,
 }
 
+/// 2-pass statistics files (`{stem}_2pass*.log|.mbtree|.temp`) in `dir`.
+fn passlog_files_in(dir: &Path, stem: &str) -> Vec<PathBuf> {
+    let prefix = format!("{stem}_2pass");
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name().is_some_and(|n| {
+                        let n = n.to_string_lossy();
+                        n.starts_with(&prefix) && (n.ends_with(".log") || n.ends_with(".mbtree") || n.ends_with(".temp"))
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn cleanup_passlogs_in(dir: &Path, stem: &str) -> std::io::Result<()> {
+    for f in passlog_files_in(dir, stem) {
+        std::fs::remove_file(f)?;
+    }
+    Ok(())
+}
+
 /// Font for text subtitles (copied into the work directory's `.spumux/`).
 pub const SUBTITLE_FONT: &str = "arial.ttf";
 
@@ -157,27 +182,12 @@ impl EncodeJob<'_> {
 
     /// 2-pass statistics files currently present in the work directory.
     pub fn passlog_files(&self) -> Vec<PathBuf> {
-        let prefix = format!("{}_2pass", self.stem);
-        std::fs::read_dir(&self.dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| {
-                        p.file_name().is_some_and(|n| {
-                            let n = n.to_string_lossy();
-                            n.starts_with(&prefix) && (n.ends_with(".log") || n.ends_with(".mbtree") || n.ends_with(".temp"))
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        passlog_files_in(&self.dir, &self.stem)
     }
 
     /// Deletes the 2-pass statistics files.
     pub fn cleanup_passlogs(&self) -> std::io::Result<()> {
-        for f in self.passlog_files() {
-            std::fs::remove_file(f)?;
-        }
-        Ok(())
+        cleanup_passlogs_in(&self.dir, &self.stem)
     }
 
     /// MPEG-2 video settings shared by all runs (codec, GOP, rate control, aspect).
@@ -249,11 +259,11 @@ impl EncodeJob<'_> {
         a
     }
     pub fn srt(&self, n: usize) -> String {
-        format!("{}_s{}.srt", self.stem, n + 1)
+        subtitle_file(&self.stem, n, "srt")
     }
     /// Raw PGS stream of subtitle `n`.
     pub fn sup(&self, n: usize) -> String {
-        format!("{}_s{}.sup", self.stem, n + 1)
+        subtitle_file(&self.stem, n, "sup")
     }
     /// spumux XML of subtitle stream `n`.
     pub fn subtitle_xml(&self, n: usize) -> String {
@@ -272,20 +282,8 @@ impl EncodeJob<'_> {
     /// speed, needed before the encode starts); `None` when no subtitle needs it (VobSub is read
     /// by ffprobe, see [`subpic::vobsub_probe_args`]).
     pub fn subtitle_args(&self) -> Option<Vec<OsString>> {
-        let mut a: Vec<OsString> = vec!["-y".into(), "-i".into(), self.info.path.clone().into_os_string()];
-        let mut any = false;
-        for (n, sub) in self.subtitles.iter().enumerate() {
-            let map = format!("0:{}", sub.index);
-            let (codec, format, file) = match (sub.kind, sub.codec.as_str()) {
-                (SubtitleKind::Text, _) => ("srt", "srt", self.srt(n)),
-                (_, "hdmv_pgs_subtitle") => ("copy", "sup", self.sup(n)),
-                _ => continue,
-            };
-            a.extend(["-map", &map, "-c:s", codec, "-vn", "-an", "-f", format].map(OsString::from));
-            a.push(self.dir.join(file).into_os_string());
-            any = true;
-        }
-        any.then_some(a)
+        let tracks: Vec<(usize, &SubtitleStream)> = self.subtitles.iter().copied().enumerate().collect();
+        extract_subtitle_args(&self.info.path, &tracks, &self.dir, &self.stem)
     }
 
     /// Where the source picture lies in the DVD frame (subpictures use the full 720-wide raster,
@@ -321,6 +319,31 @@ impl EncodeJob<'_> {
         a.push(output.into());
         a
     }
+}
+
+/// `{stem}_s{n+1}.{ext}`: file of subtitle track `n` of a title.
+pub fn subtitle_file(stem: &str, n: usize, ext: &str) -> String {
+    format!("{stem}_s{}.{ext}", n + 1)
+}
+
+/// ffmpeg arguments extracting text subtitles as SRT and PGS as raw `.sup` into `dir`
+/// (`tracks`: track number and stream; files named by [`subtitle_file`]). `None` if no stream
+/// needs extraction.
+pub fn extract_subtitle_args(input: &Path, tracks: &[(usize, &SubtitleStream)], dir: &Path, stem: &str) -> Option<Vec<OsString>> {
+    let mut a: Vec<OsString> = vec!["-y".into(), "-i".into(), input.as_os_str().to_owned()];
+    let mut any = false;
+    for &(n, sub) in tracks {
+        let map = format!("0:{}", sub.index);
+        let (codec, format) = match (sub.kind, sub.codec.as_str()) {
+            (SubtitleKind::Text, _) => ("srt", "srt"),
+            (_, "hdmv_pgs_subtitle") => ("copy", "sup"),
+            _ => continue,
+        };
+        a.extend(["-map", &map, "-c:s", codec, "-vn", "-an", "-f", format].map(OsString::from));
+        a.push(dir.join(subtitle_file(stem, n, format)).into_os_string());
+        any = true;
+    }
+    any.then_some(a)
 }
 
 /// Encodes `job` into `job.vob()` in the work directory: text subtitles are extracted first,
@@ -373,6 +396,213 @@ pub async fn run_encode(
         cleanup(job)?;
     }
     Ok(logs)
+}
+
+// ---------------------------------------------------------------------------
+// Blu-ray
+// ---------------------------------------------------------------------------
+
+/// Blu-ray NVENC options shared by the encode and the availability probe.
+pub fn nvenc_bd_options() -> [&'static str; 16] {
+    [
+        "-bluray-compat", "1", "-aud", "1", "-slices", "4", "-rc", "vbr", "-forced-idr", "1", "-strict_gop", "1",
+        "-spatial-aq", "1", "-rc-lookahead", "32",
+    ]
+}
+
+/// Peak video rate of the Blu-ray encodes (x264 VBV, kbit/s) and its buffer.
+pub const BD_MAXRATE_KBPS: u32 = 40_000;
+pub const BD_BUFSIZE_KBIT: u32 = 30_000;
+/// AC-3 bitrate of the silent filler tracks.
+pub const BD_SILENCE_KBPS: u32 = 192;
+
+/// Video filter chain of a Blu-ray title: deinterlace, project frame rate, scale into the HD
+/// frame in BT.709 keeping the display aspect (pillar/letterbox), square pixels.
+pub fn bd_video_filter(v: &VideoStream, rate: BdRate, resolution: Resolution) -> String {
+    let frame = resolution.frame_size(TvStandard::Pal);
+    let (w, h) = active_size(v.display_aspect, Aspect::Wide, frame);
+    let (fw, fh) = frame;
+    let mut f = Vec::new();
+    if v.is_interlaced() {
+        f.push("bwdif=mode=send_frame".to_string());
+    }
+    f.push(format!("fps={}", rate.ffmpeg()));
+    f.push(format!("scale={w}:{h}:flags=lanczos:out_color_matrix=bt709:out_range=tv"));
+    if (w, h) != (fw, fh) {
+        f.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:black"));
+    }
+    f.push("setsar=1".to_string());
+    f.push("format=yuv420p".to_string());
+    f.join(",")
+}
+
+/// H.264 encoder for Blu-ray titles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BdEncoder {
+    X264,
+    /// NVIDIA `h264_nvenc`; its "2-pass" is the single-run `-multipass fullres`.
+    Nvenc,
+}
+
+/// One title encoded as H.264 + AC-3 into `{stem}.mkv` for tsMuxeR.
+#[derive(Debug, Clone)]
+pub struct BdEncodeJob<'a> {
+    pub info: &'a MediaInfo,
+    /// Audio tracks of the whole project; `None` = silent AC-3 track (this title has fewer).
+    pub audio: Vec<Option<&'a AudioStream>>,
+    pub video_kbps: u32,
+    pub dir: PathBuf,
+    pub stem: String,
+    pub two_pass: bool,
+    /// `-preset veryfast` instead of `slow`.
+    pub fast: bool,
+    pub rate: BdRate,
+    pub resolution: Resolution,
+    pub hwaccel: Option<&'static str>,
+    pub encoder: BdEncoder,
+}
+
+impl BdEncodeJob<'_> {
+    pub fn mkv(&self) -> String {
+        format!("{}.mkv", self.stem)
+    }
+
+    /// x264 2-pass needs an analysis run; NVENC does it inside the single run.
+    pub fn x264_two_pass(&self) -> bool {
+        self.two_pass && self.encoder == BdEncoder::X264
+    }
+
+    pub fn passlog_prefix(&self) -> PathBuf {
+        self.dir.join(format!("{}_2pass", self.stem))
+    }
+
+    pub fn audio_kbps_total(&self) -> u32 {
+        self.audio.iter().map(|a| a.map_or(BD_SILENCE_KBPS, |a| ac3_settings(a.channels).0)).sum()
+    }
+
+    fn silence_count(&self) -> usize {
+        self.audio.iter().filter(|a| a.is_none()).count()
+    }
+
+    fn video_codec_args(&self) -> Vec<OsString> {
+        if self.encoder == BdEncoder::Nvenc {
+            return self.nvenc_args();
+        }
+        let mut x264 = String::from("slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1");
+        if self.rate.fake_interlaced {
+            x264.push_str(":fake-interlaced=1:pic-struct=1");
+        }
+        let preset = if self.fast { "veryfast" } else { "slow" };
+        let mut a: Vec<OsString> =
+            ["-c:v", "libx264", "-preset", preset, "-profile:v", "high", "-level:v", "4.1", "-bluray-compat", "1", "-b:v"]
+                .map(OsString::from)
+                .to_vec();
+        a.push(format!("{}k", self.video_kbps).into());
+        a.extend(["-maxrate".into(), format!("{BD_MAXRATE_KBPS}k").into(), "-bufsize".into(), format!("{BD_BUFSIZE_KBIT}k").into()]);
+        a.extend(["-g".into(), self.rate.keyint().to_string().into(), "-bf".into(), "3".into(), "-x264-params".into(), x264.into()]);
+        a.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(OsString::from));
+        a
+    }
+
+    fn nvenc_args(&self) -> Vec<OsString> {
+        let preset = if self.fast { "p3" } else { "p5" };
+        let mut a: Vec<OsString> = ["-c:v", "h264_nvenc", "-preset", preset, "-tune", "hq", "-profile:v", "high", "-level:v", "4.1"]
+            .map(OsString::from)
+            .to_vec();
+        a.extend(nvenc_bd_options().map(OsString::from));
+        a.extend(["-b:v".into(), format!("{}k", self.video_kbps).into()]);
+        a.extend(["-maxrate".into(), format!("{BD_MAXRATE_KBPS}k").into(), "-bufsize".into(), format!("{BD_BUFSIZE_KBIT}k").into()]);
+        a.extend(["-g".into(), self.rate.keyint().to_string().into(), "-bf".into(), "3".into()]);
+        if self.two_pass {
+            a.extend(["-multipass", "fullres"].map(OsString::from));
+        }
+        a.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(OsString::from));
+        a
+    }
+
+    /// Inputs and the video map/filter; `with_audio` adds the silence source when needed.
+    fn input_args(&self, with_audio: bool) -> Vec<OsString> {
+        let v = self.info.video.as_ref().expect("probed file has video");
+        let mut a: Vec<OsString> = vec!["-y".into()];
+        if let Some(hw) = self.hwaccel {
+            a.extend(["-hwaccel".into(), hw.into()]);
+        }
+        a.extend(["-i".into(), self.info.path.clone().into_os_string()]);
+        if with_audio && self.silence_count() > 0 {
+            a.extend(["-f", "lavfi", "-t"].map(OsString::from));
+            a.push(format!("{:.3}", self.info.duration_secs).into());
+            a.extend(["-i", "anullsrc=r=48000:cl=stereo"].map(OsString::from));
+        }
+        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), bd_video_filter(v, self.rate, self.resolution).into()]);
+        a
+    }
+
+    /// 2-pass analysis run: video only, statistics log, no real output.
+    pub fn first_pass_args(&self) -> Vec<OsString> {
+        let mut a = self.input_args(false);
+        a.extend(self.video_codec_args());
+        a.extend(["-pass", "1", "-passlogfile"].map(OsString::from));
+        a.push(self.passlog_prefix().into_os_string());
+        a.extend(["-an", "-sn", "-f", "rawvideo", NULL_DEVICE].map(OsString::from));
+        a
+    }
+
+    /// The transcoding run (1-pass, or the final run of a 2-pass encode) writing `output`.
+    pub fn encode_args(&self, output: impl Into<OsString>) -> Vec<OsString> {
+        let s = |x: &str| OsString::from(x);
+        let mut a = self.input_args(true);
+        a.extend(self.video_codec_args());
+        if self.x264_two_pass() {
+            a.extend([s("-pass"), s("2"), s("-passlogfile"), self.passlog_prefix().into_os_string()]);
+        }
+        for track in &self.audio {
+            a.extend([s("-map"), track.map_or_else(|| "1:a:0".into(), |t| format!("0:{}", t.index)).into()]);
+        }
+        if !self.audio.is_empty() {
+            a.extend([s("-c:a"), s("ac3"), s("-ar"), s("48000")]);
+        }
+        for (n, track) in self.audio.iter().enumerate() {
+            let (kbps, ch) = track.map_or((BD_SILENCE_KBPS, 2), |t| ac3_settings(t.channels));
+            // apad + -t: every audio track ends together with the video (concatenation in tsMuxeR).
+            a.extend([
+                format!("-b:a:{n}").into(),
+                format!("{kbps}k").into(),
+                format!("-ac:a:{n}").into(),
+                ch.to_string().into(),
+                format!("-filter:a:{n}").into(),
+                s("apad"),
+            ]);
+        }
+        a.extend([s("-t"), format!("{:.3}", self.info.duration_secs).into()]);
+        a.extend(["-map_chapters", "-1", "-sn", "-dn", "-f", "matroska"].map(s));
+        a.push(output.into());
+        a
+    }
+}
+
+/// Encodes `job` into `job.mkv()` in its directory (2-pass: analysis run first; statistics are
+/// removed before and after).
+pub async fn run_bd_encode(
+    tools: &Toolchain,
+    job: &BdEncodeJob<'_>,
+    mut progress: impl FnMut(EncodePhase, FfmpegProgress),
+) -> Result<(), ToolError> {
+    let duration = job.info.duration_secs;
+    let cleanup = || {
+        cleanup_passlogs_in(&job.dir, &job.stem).map_err(|error| ToolError::Io { tool: "2-pass log cleanup".into(), error })
+    };
+    let final_phase = if job.x264_two_pass() {
+        cleanup()?;
+        tools.ffmpeg_with(&job.first_pass_args(), duration, |p| progress(EncodePhase::Analysis, p)).await?;
+        EncodePhase::Final
+    } else {
+        EncodePhase::Single
+    };
+    tools.ffmpeg_with(&job.encode_args(job.dir.join(job.mkv())), duration, |p| progress(final_phase, p)).await?;
+    if job.x264_two_pass() {
+        cleanup()?;
+    }
+    Ok(())
 }
 
 /// Decodes bitmap subtitle `n` (PGS from its extracted `.sup`, VobSub via ffprobe), writes its
@@ -650,7 +880,12 @@ fn fit_filter(fit: Fit, w: u32, h: u32, pad_color: &str) -> String {
 /// is scaled by 1 / [`TvStandard::menu_pixel_aspect`] (`sideways`: the clip is rotated by
 /// 90°/270° afterwards, so its height becomes the horizontal).
 pub fn menu_pixels(tv: TvStandard, sideways: bool) -> String {
-    let f = 1.0 / tv.menu_pixel_aspect();
+    menu_pixels_for(tv.menu_pixel_aspect(), sideways)
+}
+
+/// [`menu_pixels`] for an arbitrary pixel aspect (1.0 = square pixels, as on Blu-ray).
+pub fn menu_pixels_for(pixel_aspect: f64, sideways: bool) -> String {
+    let f = 1.0 / pixel_aspect;
     if sideways {
         format!("scale=trunc(ih*dar/2)*2:trunc(ih*{f:.6}/2)*2,setsar=1")
     } else {
@@ -681,8 +916,57 @@ pub fn custom_menu_args(
     output: &Path,
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
-    let rate = tv.frame_rate();
-    let (fw, fh) = tv.size();
+    let frame = MenuFrame::from(tv);
+    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3");
+    a.extend(
+        [
+            "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
+            "-b:v", "5000k", "-maxrate", "8000k", "-c:a", "ac3", "-b:a", "192k",
+        ]
+        .map(OsString::from),
+    );
+    a.push(output.as_os_str().to_owned());
+    a
+}
+
+/// Blu-ray menu clip: the same graph on a square-pixel HD frame, encoded as H.264 + AC-3 (the
+/// settings of the title encodes, at a fixed 8 Mbit/s) for tsMuxeR.
+pub fn bd_custom_menu_args(
+    frame: &MenuFrame,
+    rate: BdRate,
+    media: &CustomMenuMedia,
+    duration_secs: f64,
+    audio: Option<&ClipSource>,
+    output: &Path,
+) -> Vec<OsString> {
+    let d = format!("{duration_secs:.3}");
+    let mut a = custom_menu_graph(frame, &rate.ffmpeg(), media, duration_secs, audio, "16/9");
+    let mut x264 = String::from("slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1");
+    if rate.fake_interlaced {
+        x264.push_str(":fake-interlaced=1:pic-struct=1");
+    }
+    a.extend(["-map", "[vout]", "-map", "[aout]", "-t", &d].map(OsString::from));
+    a.extend(["-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.1", "-bluray-compat", "1"].map(OsString::from));
+    a.extend(["-b:v", "8000k", "-maxrate", "15000k", "-bufsize", "15000k"].map(OsString::from));
+    a.extend(["-g".into(), rate.keyint().to_string().into(), "-bf".into(), "3".into(), "-x264-params".into(), x264.into()]);
+    a.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(OsString::from));
+    a.extend(["-c:a", "ac3", "-ar", "48000", "-b:a", "192k", "-f", "matroska"].map(OsString::from));
+    a.push(output.as_os_str().to_owned());
+    a
+}
+
+/// Inputs and `-filter_complex` of a custom menu (everything before the output options);
+/// the graph ends in `[vout]` and `[aout]`.
+fn custom_menu_graph(
+    frame: &MenuFrame,
+    rate: &str,
+    media: &CustomMenuMedia,
+    duration_secs: f64,
+    audio: Option<&ClipSource>,
+    dar: &str,
+) -> Vec<OsString> {
+    let d = format!("{duration_secs:.3}");
+    let (fw, fh) = (frame.width, frame.height);
     let mut a: Vec<OsString> = vec!["-y".into()];
     let still = |a: &mut Vec<OsString>, png: &Path| {
         a.extend(["-loop", "1", "-framerate", rate, "-t", &d, "-i"].map(OsString::from));
@@ -692,7 +976,7 @@ pub fn custom_menu_args(
         a.extend(["-stream_loop", "-1", "-ss", &format!("{:.3}", clip.start_secs), "-t", &d, "-i"].map(OsString::from));
         a.push(clip.path.as_os_str().to_owned());
     };
-    let square = menu_pixels(tv, false);
+    let square = menu_pixels_for(frame.pixel_aspect, false);
     let mut f: Vec<String> = Vec::new();
 
     // Input 0: background, then the shading over it.
@@ -755,7 +1039,7 @@ pub fn custom_menu_args(
                 // Fit into the unrotated box, then rotate into the layout box.
                 let (bw, bh) = if rotation % 180 == 90 { (*height, *width) } else { (*width, *height) };
                 // Stretch fills the box as it is; the other fits keep the picture's proportions.
-                let pixels = if *fit == Fit::Stretch { "setsar=1".to_string() } else { menu_pixels(tv, rotation % 180 == 90) };
+                let pixels = if *fit == Fit::Stretch { "setsar=1".to_string() } else { menu_pixels_for(frame.pixel_aspect, rotation % 180 == 90) };
                 let mut chain = format!("[{input}:v]fps={rate},{pixels},{}", fit_filter(*fit, bw, bh, "black"));
                 if let Some(r) = rotate_filter(*rotation) {
                     chain.push(',');
@@ -772,7 +1056,7 @@ pub fn custom_menu_args(
         }
         cur = format!("m{i}");
     }
-    f.push(format!("[{cur}]format=yuv420p,setdar=4/3[vout]"));
+    f.push(format!("[{cur}]format=yuv420p,setdar={dar}[vout]"));
 
     // Last input: the menu sound or silence.
     let audio_input = media.layers.len() + 1;
@@ -792,14 +1076,6 @@ pub fn custom_menu_args(
     }
 
     a.extend(["-filter_complex".into(), f.join(";").into()]);
-    a.extend(
-        [
-            "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
-            "-b:v", "5000k", "-maxrate", "8000k", "-c:a", "ac3", "-b:a", "192k",
-        ]
-        .map(OsString::from),
-    );
-    a.push(output.as_os_str().to_owned());
     a
 }
 
@@ -1093,5 +1369,149 @@ mod tests {
         assert!(x.contains(r#"movie-fps="25""#) && x.contains(r#"movie-height="574""#));
         let n = spumux_textsub_xml(TvStandard::Ntsc, "t_s1.srt", "arial.ttf");
         assert!(n.contains(r#"<subpictures format="NTSC">"#) && n.contains(r#"movie-height="478""#) && n.contains(r#"movie-fps="29.97""#));
+    }
+
+    fn strings(a: Vec<OsString>) -> String {
+        a.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
+    }
+
+    fn bd_info() -> MediaInfo {
+        MediaInfo {
+            path: "in.mkv".into(),
+            duration_secs: 60.0,
+            video: Some(video(1920, 1080, 16.0 / 9.0, "progressive")),
+            audio: vec![
+                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true },
+                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false },
+            ],
+            subtitles: vec![],
+            chapters: vec![],
+        }
+    }
+
+    fn bd_job(info: &MediaInfo) -> BdEncodeJob<'_> {
+        BdEncodeJob {
+            info,
+            audio: vec![Some(&info.audio[0]), Some(&info.audio[1]), None],
+            video_kbps: 20_000,
+            dir: PathBuf::from("w"),
+            stem: "title_01".into(),
+            two_pass: false,
+            fast: false,
+            rate: BdRate { fps: (24000, 1001), fake_interlaced: false },
+            encoder: BdEncoder::X264,
+            resolution: Resolution::Hd1080,
+            hwaccel: None,
+        }
+    }
+
+    #[test]
+    fn bd_filter_chain() {
+        let r = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        assert_eq!(
+            bd_video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), r, Resolution::Hd1080),
+            "fps=24000/1001,scale=1920:1080:flags=lanczos:out_color_matrix=bt709:out_range=tv,setsar=1,format=yuv420p"
+        );
+        // 4:3 sources are pillarboxed into the 16:9 frame; interlaced ones are deinterlaced first.
+        let f = bd_video_filter(&video(720, 576, 4.0 / 3.0, "tt"), BdRate { fps: (25, 1), fake_interlaced: true }, Resolution::Hd1080);
+        assert_eq!(
+            f,
+            "bwdif=mode=send_frame,fps=25,scale=1440:1080:flags=lanczos:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p"
+        );
+        // Scope films are letterboxed, 720p uses its own frame and doubled TV rate.
+        let f = bd_video_filter(&video(1920, 800, 2.4, "progressive"), BdRate { fps: (50, 1), fake_interlaced: false }, Resolution::Hd720);
+        assert!(f.starts_with("fps=50,scale=1280:534:") && f.contains("pad=1280:720:(ow-iw)/2:(oh-ih)/2:black"), "{f}");
+    }
+
+    #[test]
+    fn bd_x264_flags() {
+        let info = bd_info();
+        let job = bd_job(&info);
+        let a = strings(job.encode_args("out.mkv"));
+        assert!(
+            a.contains(
+                "-c:v libx264 -preset slow -profile:v high -level:v 4.1 -bluray-compat 1 -b:v 20000k -maxrate 40000k -bufsize 30000k \
+                 -g 24 -bf 3 -x264-params slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1 \
+                 -color_primaries bt709 -color_trc bt709 -colorspace bt709"
+            ),
+            "{a}"
+        );
+        assert!(!a.contains("fake-interlaced") && !a.contains("-pass"), "{a}");
+        // 1080 at a TV rate: progressive frames flagged as 1080i, one-second GOPs.
+        let tv = BdEncodeJob { rate: BdRate { fps: (30000, 1001), fake_interlaced: true }, ..job.clone() };
+        let a = strings(tv.encode_args("out.mkv"));
+        assert!(a.contains("-g 30 ") && a.contains("weightp=1:fake-interlaced=1:pic-struct=1"), "{a}");
+        // 720p50 is real progressive: no flag.
+        let hd = BdEncodeJob { rate: BdRate { fps: (50, 1), fake_interlaced: false }, resolution: Resolution::Hd720, ..job.clone() };
+        let a = strings(hd.encode_args("out.mkv"));
+        assert!(a.contains("-g 50 ") && !a.contains("fake-interlaced") && a.contains("scale=1280:720"), "{a}");
+        // Fast mode only changes the preset.
+        let fast = strings(BdEncodeJob { fast: true, ..job.clone() }.encode_args("out.mkv"));
+        assert_eq!(fast, strings(job.encode_args("out.mkv")).replace("-preset slow", "-preset veryfast"));
+        assert_eq!(job.mkv(), "title_01.mkv");
+    }
+
+    #[test]
+    fn bd_nvenc_args() {
+        let info = bd_info();
+        let job = BdEncodeJob { encoder: BdEncoder::Nvenc, ..bd_job(&info) };
+        let a = strings(job.encode_args("out.mkv"));
+        for want in ["-c:v h264_nvenc -preset p5 -tune hq", "-bluray-compat 1", "-aud 1", "-slices 4", "-rc vbr", "-strict_gop 1", "-maxrate 40000k", "-bf 3"] {
+            assert!(a.contains(want), "{want} in {a}");
+        }
+        assert!(!a.contains("x264") && !a.contains("-multipass") && !a.contains("-pass"), "{a}");
+        assert!(strings(BdEncodeJob { fast: true, ..job.clone() }.encode_args("o")).contains("-preset p3"));
+        // 2-pass is -multipass fullres inside one run: no analysis run, no passlog.
+        let two = BdEncodeJob { two_pass: true, ..job };
+        assert!(!two.x264_two_pass());
+        let a = strings(two.encode_args("out.mkv"));
+        assert!(a.contains("-multipass fullres") && !a.contains("-pass") && !a.contains("passlogfile"), "{a}");
+    }
+
+    #[test]
+    fn bd_audio_is_padded_and_silence_fills_missing_tracks() {
+        let info = bd_info();
+        let job = bd_job(&info);
+        let a = strings(job.encode_args("out.mkv"));
+        assert!(a.starts_with("-y -i in.mkv -f lavfi -t 60.000 -i anullsrc=r=48000:cl=stereo -map 0:0 -vf "), "{a}");
+        assert!(a.contains("-map 0:1 -map 0:2 -map 1:a:0 -c:a ac3 -ar 48000"), "{a}");
+        assert!(a.contains("-b:a:0 448k -ac:a:0 6 -filter:a:0 apad -b:a:1 192k -ac:a:1 2 -filter:a:1 apad -b:a:2 192k -ac:a:2 2 -filter:a:2 apad"), "{a}");
+        assert!(a.ends_with("-t 60.000 -map_chapters -1 -sn -dn -f matroska out.mkv"), "{a}");
+        assert_eq!(job.audio_kbps_total(), 448 + 192 + 192);
+        // No silent track: no extra input.
+        let plain = strings(BdEncodeJob { audio: vec![Some(&info.audio[1])], ..job.clone() }.encode_args("out.mkv"));
+        assert!(plain.starts_with("-y -i in.mkv -map 0:0") && !plain.contains("lavfi"), "{plain}");
+        // Hardware decoding only changes the input side.
+        let hw = strings(BdEncodeJob { hwaccel: Some("cuda"), ..job }.encode_args("out.mkv"));
+        assert!(hw.starts_with("-y -hwaccel cuda -i in.mkv"), "{hw}");
+    }
+
+    #[test]
+    fn bd_two_pass() {
+        let info = bd_info();
+        let job = BdEncodeJob { two_pass: true, ..bd_job(&info) };
+        let first = strings(job.first_pass_args());
+        assert!(first.contains("-pass 1 -passlogfile") && first.contains("title_01_2pass"), "{first}");
+        assert!(first.ends_with(&format!("-an -sn -f rawvideo {NULL_DEVICE}")) && !first.contains("lavfi") && !first.contains("-c:a"), "{first}");
+        let last = strings(job.encode_args("out.mkv"));
+        assert!(last.contains("-pass 2 -passlogfile") && last.contains("-c:a ac3"), "{last}");
+        // Same video settings in both runs.
+        let video = |s: &str| s[s.find("-c:v libx264").unwrap()..s.find("-pass").unwrap()].to_string();
+        assert_eq!(video(&first), video(&last));
+    }
+
+    #[test]
+    fn subtitle_extraction_by_track() {
+        let sub = |index, codec: &str, kind| SubtitleStream { index, codec: codec.into(), kind, language: None, title: None, forced: false, width: None, height: None };
+        let text = sub(3, "subrip", SubtitleKind::Text);
+        let pgs = sub(4, "hdmv_pgs_subtitle", SubtitleKind::Bitmap);
+        let vob = sub(5, "dvd_subtitle", SubtitleKind::Bitmap);
+        // Track numbers pick the file names (BD tracks may skip positions a title lacks).
+        let a = strings(extract_subtitle_args(Path::new("in.mkv"), &[(0, &text), (1, &pgs), (2, &vob)], Path::new("w"), "title_02").unwrap());
+        assert!(a.starts_with("-y -i in.mkv -map 0:3 -c:s srt -vn -an -f srt "), "{a}");
+        assert!(a.contains("title_02_s1.srt") && a.contains("-map 0:4 -c:s copy -vn -an -f sup ") && a.contains("title_02_s2.sup"), "{a}");
+        assert!(!a.contains("0:5"), "VobSub is not extracted: {a}");
+        assert!(extract_subtitle_args(Path::new("in.mkv"), &[(0, &vob)], Path::new("w"), "t").is_none());
+        assert_eq!(subtitle_file("title_01", 2, "sup"), "title_01_s3.sup");
     }
 }

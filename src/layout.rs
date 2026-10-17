@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::author::{
     self, command_count, ButtonAction, ClipSource, MenuButton, MenuSpec, Navigation, Rect, TvStandard, MAX_BUTTONS,
-    MAX_CHAPTERS, MAX_PGC_COMMANDS,
+    MAX_CHAPTERS, MAX_PGC_COMMANDS, MenuFrame,
 };
 use crate::encoder::{BackgroundOverlay, CustomMenuMedia, Fit, MenuBackground, MenuLayer};
 use crate::menu::{self, IndexedImage, MenuPageFiles};
@@ -330,8 +330,9 @@ pub fn parse_color(s: &str) -> Option<[u8; 3]> {
 }
 
 /// Button rectangle of `e` on the TV frame (even y, clipped).
-fn button_rect(e: &Element, canvas: Canvas, tv: TvStandard) -> Option<Rect> {
-    let (w, h) = tv.size();
+pub(crate) fn button_rect(e: &Element, canvas: Canvas, frame: impl Into<MenuFrame>) -> Option<Rect> {
+    let frame = frame.into();
+    let (w, h) = (frame.width, frame.height);
     Rect::from_template(
         e.x.round() as i32,
         e.y.round() as i32,
@@ -344,11 +345,20 @@ fn button_rect(e: &Element, canvas: Canvas, tv: TvStandard) -> Option<Rect> {
     )
 }
 
-fn overlaps(a: Rect, b: Rect) -> bool {
+/// Button rectangle on a Blu-ray frame: the element's box, rounded and clipped (no field rule).
+pub(crate) fn bd_button_rect(e: &Element, canvas: Canvas, frame: MenuFrame) -> Option<Rect> {
+    let (x, y, w, h) = frame_box(e, canvas, frame);
+    let clamp = |v: i64, max: u32| v.clamp(0, max as i64) as u32;
+    let (x0, y0) = (clamp(x, frame.width), clamp(y, frame.height));
+    let (x1, y1) = (clamp(x + w as i64, frame.width), clamp(y + h as i64, frame.height));
+    (x1 > x0 && y1 > y0).then_some(Rect { x0, y0, x1, y1 })
+}
+
+pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
     a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 }
 
-fn element_name(e: &Element, n: usize) -> String {
+pub(crate) fn element_name(e: &Element, n: usize) -> String {
     let kind = match &e.content {
         Content::Text { text, .. } => format!("Text „{}“", text.lines().next().unwrap_or("").chars().take(24).collect::<String>()),
         Content::Image { .. } => "Bild".into(),
@@ -358,7 +368,7 @@ fn element_name(e: &Element, n: usize) -> String {
 }
 
 /// (marked, activated) colours of a button.
-fn button_colors(layout: &CustomLayout, e: &Element) -> ([u8; 3], [u8; 3]) {
+pub(crate) fn button_colors(layout: &CustomLayout, e: &Element) -> ([u8; 3], [u8; 3]) {
     let (hl, sel) = match &e.highlight {
         Some(c) => (&c.color, &c.select_color),
         None => (&layout.highlight.color, &layout.highlight.select_color),
@@ -380,7 +390,7 @@ fn color_pairs(layout: &CustomLayout, menu: &CustomMenu) -> Vec<([u8; 3], [u8; 3
 
 /// The lines a text element shows on `tv` (see [`menu::text_lines`]); `None` for other
 /// elements. The menu editor displays exactly these.
-pub fn element_text_lines(e: &Element, canvas: Canvas, tv: TvStandard) -> Option<Vec<String>> {
+pub fn element_text_lines(e: &Element, canvas: Canvas, tv: impl Into<MenuFrame> + Copy) -> Option<Vec<String>> {
     let Content::Text { text, font, size, bold, italic, wrap, .. } = &e.content else { return None };
     let (_, _, w, h) = frame_box(e, canvas, tv);
     let (bw, bh) = if e.rotation % 180 == 90 { (h, w) } else { (w, h) };
@@ -390,10 +400,27 @@ pub fn element_text_lines(e: &Element, canvas: Canvas, tv: TvStandard) -> Option
 /// Checks the layout against the DVD limits and the project's titles. Navigation command
 /// counts are checked by [`plan_navigation`] (also called here).
 pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -> Result<(), LayoutError> {
+    validate_impl(layout, titles, tv.into(), false)
+}
+
+/// Blu-ray rules: 16:9 canvas, axis-aligned non-overlapping buttons, at most [`MAX_BD_BUTTONS`]
+/// per menu; no colour-pair or VM command limits (the navigation is planned by `bd_menu`).
+pub fn validate_bd(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame) -> Result<(), LayoutError> {
+    validate_impl(layout, titles, frame, true)
+}
+
+/// Buttons per Blu-ray menu (IG button ids are 16 bit; the ICS button count is limited to 255).
+pub const MAX_BD_BUTTONS: usize = 255;
+
+fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame, bd: bool) -> Result<(), LayoutError> {
+    let medium = if bd { "Blu-ray" } else { "DVD" };
     let mut errs = Vec::new();
     let c = layout.canvas;
     if c.width < 16 || c.height < 16 {
         errs.push("Arbeitsfläche ist zu klein".to_string());
+    }
+    if bd && (c.width as u64 * 9 != c.height as u64 * 16) {
+        errs.push(format!("Arbeitsfläche {}×{} ist nicht 16:9 (Blu-ray-Menüs sind 16:9)", c.width, c.height));
     }
     if layout.menus.is_empty() {
         errs.push("keine Menüs".to_string());
@@ -491,7 +518,7 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
             }
             let Some(action) = &e.action else { continue };
             if e.rotation != 0 {
-                errs.push(el("Buttons können nicht gedreht werden (DVD-Hitboxen sind achsenparallele Rechtecke)"));
+                errs.push(el(&format!("Buttons können nicht gedreht werden ({medium}-Hitboxen sind achsenparallele Rechtecke)")));
             }
             match action {
                 Action::PlayTitle { title } if !title_ok(*title) => errs.push(el(&format!("spielt Titel {title}, den es nicht gibt"))),
@@ -531,34 +558,37 @@ pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -
                 }
                 _ => {}
             }
-            if let Some(r) = button_rect(e, c, tv) {
+            if let Some(r) = if bd { bd_button_rect(e, c, frame) } else { button_rect(e, c, frame) } {
                 for (other, o) in &rects {
                     if overlaps(r, *o) {
-                        errs.push(el(&format!("überlappt mit {other} (DVD-Buttons dürfen sich nicht überdecken)")));
+                        errs.push(el(&format!("überlappt mit {other} ({medium}-Buttons dürfen sich nicht überdecken)")));
                     }
                 }
                 rects.push((element_name(e, n), r));
             }
         }
-        if rects.len() > MAX_BUTTONS {
-            errs.push(menu(format!("{} Buttons, eine DVD-Menüseite erlaubt höchstens {MAX_BUTTONS}", rects.len())));
+        let max_buttons = if bd { MAX_BD_BUTTONS } else { MAX_BUTTONS };
+        if rects.len() > max_buttons {
+            errs.push(menu(format!("{} Buttons, eine {medium}-Menüseite erlaubt höchstens {max_buttons}", rects.len())));
         }
         let pairs = color_pairs(layout, m);
-        if pairs.len() > MAX_COLOR_PAIRS {
+        if bd {
+            // Real alpha in the IG palette: any number of colours, but one 256-entry palette.
+        } else if pairs.len() > MAX_COLOR_PAIRS {
             errs.push(menu(format!(
                 "{} verschiedene Button-Farben – eine DVD-Menüseite kann höchstens {MAX_COLOR_PAIRS} Farbpaare (markiert/aktiviert) zeigen",
                 pairs.len()
             )));
         }
         // The pixel value of a pair is found from either colour, so colours cannot be shared.
-        let shared = pairs.iter().enumerate().any(|(i, a)| pairs[i + 1..].iter().any(|b| a.0 == b.0 || a.1 == b.1));
+        let shared = !bd && pairs.iter().enumerate().any(|(i, a)| pairs[i + 1..].iter().any(|b| a.0 == b.0 || a.1 == b.1));
         if shared {
             errs.push(menu(
                 "Buttons mit gleicher Markierungsfarbe brauchen auch die gleiche Aktivierungsfarbe (und umgekehrt)".into(),
             ));
         }
     }
-    if errs.is_empty() {
+    if errs.is_empty() && !bd {
         if let Err(e) = plan_navigation(layout, titles) {
             errs.extend(e.0);
         }
@@ -865,7 +895,7 @@ pub struct CustomMenus {
 /// Fits `img` into `w`x`h` frame pixels; `Contain` leaves transparent bars. Contain/cover keep
 /// the picture's proportions on the TV: the axis that ends up horizontal (the height when
 /// `sideways`, i.e. rotated by 90°/270° afterwards) is first scaled by 1 / `pixel_aspect`.
-fn fit_image(img: &RgbaImage, w: u32, h: u32, fit: Fit, pixel_aspect: f64, sideways: bool) -> RgbaImage {
+pub(crate) fn fit_image(img: &RgbaImage, w: u32, h: u32, fit: Fit, pixel_aspect: f64, sideways: bool) -> RgbaImage {
     let squeezed;
     let img = if fit == Fit::Stretch || (pixel_aspect - 1.0).abs() < 1e-6 {
         img
@@ -899,7 +929,7 @@ fn fit_image(img: &RgbaImage, w: u32, h: u32, fit: Fit, pixel_aspect: f64, sidew
     }
 }
 
-fn rotate(img: RgbaImage, rotation: u32) -> RgbaImage {
+pub(crate) fn rotate(img: RgbaImage, rotation: u32) -> RgbaImage {
     match rotation % 360 {
         90 => imageops::rotate90(&img),
         180 => imageops::rotate180(&img),
@@ -909,8 +939,9 @@ fn rotate(img: RgbaImage, rotation: u32) -> RgbaImage {
 }
 
 /// An element's box on the TV frame: `(x, y, w, h)`.
-fn frame_box(e: &Element, canvas: Canvas, tv: TvStandard) -> (i64, i64, u32, u32) {
-    let (fw, fh) = tv.size();
+pub(crate) fn frame_box(e: &Element, canvas: Canvas, frame: impl Into<MenuFrame>) -> (i64, i64, u32, u32) {
+    let frame = frame.into();
+    let (fw, fh) = (frame.width, frame.height);
     let (sx, sy) = (fw as f64 / canvas.width as f64, fh as f64 / canvas.height as f64);
     let x = (e.x * sx).round() as i64;
     let y = (e.y * sy).round() as i64;
@@ -920,11 +951,11 @@ fn frame_box(e: &Element, canvas: Canvas, tv: TvStandard) -> (i64, i64, u32, u32
 }
 
 /// Font size on the frame (texts scale with the canvas height).
-fn frame_font_size(size: f32, canvas: Canvas, tv: TvStandard) -> f32 {
-    size * tv.size().1 as f32 / canvas.height as f32
+pub(crate) fn frame_font_size(size: f32, canvas: Canvas, frame: impl Into<MenuFrame>) -> f32 {
+    size * frame.into().height as f32 / canvas.height as f32
 }
 
-fn clip_of(titles: &[LayoutTitle], title: u32, start: Option<f64>) -> ClipSource {
+pub(crate) fn clip_of(titles: &[LayoutTitle], title: u32, start: Option<f64>) -> ClipSource {
     let t = &titles[title as usize - 1];
     match start {
         Some(s) => ClipSource { start_secs: s.clamp(0.0, (t.duration_secs - 1.0).max(0.0)), ..t.clip.clone() },

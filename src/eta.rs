@@ -8,6 +8,35 @@ use serde::Serialize;
 
 /// Bytes per second at 1x DVD speed.
 pub const DVD_1X_BYTES_PER_SEC: f64 = 1_385_000.0;
+/// Bytes per second at 1x BD speed (36 Mbit/s).
+pub const BD_1X_BYTES_PER_SEC: f64 = 4_495_500.0;
+
+/// Kind of disc, for write speeds and times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Medium {
+    #[default]
+    Dvd,
+    Bd,
+}
+
+impl Medium {
+    /// Bytes per second at 1x.
+    pub fn bytes_per_sec_1x(self) -> f64 {
+        match self {
+            Medium::Dvd => DVD_1X_BYTES_PER_SEC,
+            Medium::Bd => BD_1X_BYTES_PER_SEC,
+        }
+    }
+
+    /// Average read rate of the verification: about 8x on DVD (CAV up to 16x), 6x on BD.
+    pub fn verify_bytes_per_sec(self) -> f64 {
+        self.bytes_per_sec_1x()
+            * match self {
+                Medium::Dvd => 8.0,
+                Medium::Bd => 6.0,
+            }
+    }
+}
 /// dvdauthor copies the title VOBs (measured ~300 MB/s on an SSD; conservative).
 const AUTHORING_BYTES_PER_SEC: f64 = 200e6;
 /// Image writer (sequential copy of the VIDEO_TS files).
@@ -180,28 +209,29 @@ pub fn effective_speed_x(speed_x: f64) -> f64 {
     }
 }
 
-/// Burning `bytes` at `speed_x` (e.g. 4x ≈ 5.54 MB/s), plus reading it back for verification.
-pub fn burn_secs(bytes: f64, speed_x: f64, verify: bool, dual_layer: bool) -> f64 {
-    let write = bytes / (effective_speed_x(speed_x.max(1.0)) * DVD_1X_BYTES_PER_SEC);
+/// Burning `bytes` at `speed_x` (e.g. DVD 4x ≈ 5.54 MB/s), plus reading it back for
+/// verification. DVD drives read at about 8x on average (CAV up to 16x), BD drives at about 6x.
+pub fn burn_secs(medium: Medium, bytes: f64, speed_x: f64, verify: bool, dual_layer: bool) -> f64 {
+    let one_x = medium.bytes_per_sec_1x();
+    let write = bytes / (effective_speed_x(speed_x.max(1.0)) * one_x);
     let fixed = BURN_FIXED_SECS + if dual_layer { DUAL_LAYER_FIXED_SECS } else { 0.0 };
-    // DVD drives read at about 8x on average (CAV up to 16x).
-    let read = if verify { bytes / (8.0 * DVD_1X_BYTES_PER_SEC) } else { 0.0 };
+    let read = if verify { bytes / medium.verify_bytes_per_sec() } else { 0.0 };
     write + fixed + read
 }
 
 /// Default speed in x for the job estimate before a drive is known: DVD-5 at max (16x),
-/// DVD-9 at 4x.
-pub fn default_speed_x(dual_layer: bool) -> f64 {
-    if dual_layer {
-        4.0
-    } else {
-        16.0
+/// DVD-9 at 4x; BD-25 at 6x, BD-50 at 4x.
+pub fn default_speed_x(medium: Medium, dual_layer: bool) -> f64 {
+    match (medium, dual_layer) {
+        (_, true) => 4.0,
+        (Medium::Dvd, false) => 16.0,
+        (Medium::Bd, false) => 6.0,
     }
 }
 
-/// Time from a finished VIDEO_TS of `bytes` to a burnt (and verified) disc.
-pub fn image_and_burn_secs(bytes: f64, speed_x: f64, verify: bool, dual_layer: bool) -> f64 {
-    image_secs(bytes) + burn_secs(bytes, speed_x, verify, dual_layer)
+/// Time from a finished VIDEO_TS / BDMV of `bytes` to a burnt (and verified) disc.
+pub fn image_and_burn_secs(medium: Medium, bytes: f64, speed_x: f64, verify: bool, dual_layer: bool) -> f64 {
+    image_secs(bytes) + burn_secs(medium, bytes, speed_x, verify, dual_layer)
 }
 
 /// Remaining time by extrapolating the elapsed time of a phase over its fraction done.
@@ -246,15 +276,19 @@ mod tests {
     fn burn_estimates() {
         // Full DVD-5 (4.37 GB) at 8x without verification: ~395 s writing + 45 s fixed.
         let dvd5 = 4.37e9;
-        let t = burn_secs(dvd5, 8.0, false, false);
+        let t = burn_secs(Medium::Dvd, dvd5, 8.0, false, false);
         assert!((t - (dvd5 / 11.08e6 + 45.0)).abs() < 1.0, "{t}");
         // DVD-9 (7.95 GB) at 4x: ~24 min writing, plus DL closing.
-        let t = burn_secs(7.95e9, 4.0, false, true);
+        let t = burn_secs(Medium::Dvd, 7.95e9, 4.0, false, true);
         assert!((1530.0..1560.0).contains(&t), "{t}");
         // Verification adds a full read.
-        assert!(burn_secs(dvd5, 8.0, true, false) > burn_secs(dvd5, 8.0, false, false) + 300.0);
-        assert_eq!(default_speed_x(false), 16.0);
-        assert_eq!(default_speed_x(true), 4.0);
+        assert!(burn_secs(Medium::Dvd, dvd5, 8.0, true, false) > burn_secs(Medium::Dvd, dvd5, 8.0, false, false) + 300.0);
+        assert_eq!(default_speed_x(Medium::Dvd, false), 16.0);
+        assert_eq!(default_speed_x(Medium::Dvd, true), 4.0);
+        // A full BD-25 (23.3 GB) at 6x ≈ 27 MB/s: ~14 min writing + 45 s fixed.
+        let bd = burn_secs(Medium::Bd, 23.3e9, 6.0, false, false);
+        assert!((bd - (23.3e9 / (6.0 * 4_495_500.0) + 45.0)).abs() < 1.0, "{bd}");
+        assert_eq!(default_speed_x(Medium::Bd, false), 6.0);
     }
 
     #[test]

@@ -166,13 +166,19 @@ fn probe(rec: &IDiscRecorder2) -> Result<(MediaInfo, IDiscFormat2Data), BurnErro
                 | IMAPI_MEDIA_TYPE_DVDDASHR_DUALLAYER
                 | IMAPI_MEDIA_TYPE_DVDRAM
         );
+        let bd_writable = matches!(physical, IMAPI_MEDIA_TYPE_BDR | IMAPI_MEDIA_TYPE_BDRE);
+        let total_sectors = format.TotalSectorsOnMedia().unwrap_or(0).max(0) as u64;
         let dual = matches!(
             physical,
             IMAPI_MEDIA_TYPE_DVDPLUSR_DUALLAYER | IMAPI_MEDIA_TYPE_DVDDASHR_DUALLAYER | IMAPI_MEDIA_TYPE_DVDPLUSRW_DUALLAYER
         );
         let rewritable = matches!(
             physical,
-            IMAPI_MEDIA_TYPE_DVDPLUSRW | IMAPI_MEDIA_TYPE_DVDDASHRW | IMAPI_MEDIA_TYPE_DVDPLUSRW_DUALLAYER | IMAPI_MEDIA_TYPE_DVDRAM
+            IMAPI_MEDIA_TYPE_DVDPLUSRW
+                | IMAPI_MEDIA_TYPE_DVDDASHRW
+                | IMAPI_MEDIA_TYPE_DVDPLUSRW_DUALLAYER
+                | IMAPI_MEDIA_TYPE_DVDRAM
+                | IMAPI_MEDIA_TYPE_BDRE
         );
         let unusable = state & IMAPI_FORMAT2_DATA_MEDIA_STATE_UNSUPPORTED_MASK.0 != 0;
         let blank = state & IMAPI_FORMAT2_DATA_MEDIA_STATE_BLANK.0 != 0;
@@ -189,7 +195,9 @@ fn probe(rec: &IDiscRecorder2) -> Result<(MediaInfo, IDiscFormat2Data), BurnErro
         speeds.dedup();
         let info = MediaInfo {
             present: true,
-            media_type: if !dvd_writable && physical != IMAPI_MEDIA_TYPE_DVDROM {
+            media_type: if bd_writable {
+                super::bd_media_type(total_sectors)
+            } else if !dvd_writable && physical != IMAPI_MEDIA_TYPE_DVDROM {
                 MediaType::Unknown
             } else if dual {
                 MediaType::Dvd9
@@ -199,9 +207,9 @@ fn probe(rec: &IDiscRecorder2) -> Result<(MediaInfo, IDiscFormat2Data), BurnErro
             physical: physical_name(physical).to_string(),
             blank,
             rewritable,
-            writable: supported && dvd_writable && !unusable,
+            writable: supported && (dvd_writable || bd_writable) && !unusable,
             free_sectors: format.FreeSectorsOnMedia().unwrap_or(0).max(0) as u64,
-            total_sectors: format.TotalSectorsOnMedia().unwrap_or(0).max(0) as u64,
+            total_sectors,
             speeds,
             layer_break_supported: physical == IMAPI_MEDIA_TYPE_DVDPLUSR_DUALLAYER,
         };

@@ -1,7 +1,7 @@
 # STATUS — convertx-rust
 
 > Single source of truth for handing this project to another contributor (human or AI).
-> State as of **2026-10-15** (incl. menu editor, fast encoding, CLI `burn`, shared burn flow, IMAPI write events, Half D1/SIF + SP/MP/LP, bitmap subtitles, audit fixes). Everything marked ✅ was built **and** exercised (tests or real
+> State as of **2026-10-17** (incl. **Blu-ray menus from the menu editor (HDMV + IGS, VLC-verified)**, **NVENC for Blu-ray (verified on RTX 4070 SUPER, driver 617.42)**, **Blu-ray output**, menu editor, fast encoding, CLI `burn`, shared burn flow, IMAPI write events, Half D1/SIF + SP/MP/LP, bitmap subtitles, audit fixes). Everything marked ✅ was built **and** exercised (tests or real
 > runs); 🟡 is implemented but not verified end-to-end; ⛔ is not implemented.
 >
 > The project is a **git repository** since 2026-10-15 (branch `main`; the initial commit is
@@ -28,7 +28,8 @@
 **What it is.** `convertx-rust` is a clean-room Rust reimplementation of the workflow of
 *VSO ConvertXToDVD 7*: drop arbitrary videos (MKV, MP4, AVI, MOV, TS …) in, get a standards-
 compliant **DVD-Video** (`VIDEO_TS`) with ConvertX-style menus out, and optionally burn it to
-disc. It consists of:
+disc. Since 2026-10-15 it also writes a **Blu-ray** (`BDMV` + `CERTIFICATE`, H.264 + AC-3) for
+BD-25/BD-50 – menu-less autoplay, or (since 2026-10-17) with HDMV menus designed in the menu editor – and burns it. It consists of:
 
 - a **Rust engine library** (`convertx_rust`, `src/`) that does probing, bitrate planning,
   menu rendering – from the *original ConvertX template INIs* **or** from a custom JSON layout
@@ -38,10 +39,13 @@ disc. It consists of:
 - a **desktop GUI** (`convertx-gui`, Tauri 2 + vanilla TypeScript, `src-tauri/` + `frontend/`),
   German UI.
 
-**Scope reality check (important for the next contributor).** The mission statement this file
-was requested with mentions Blu-ray/`BDMV`, H.264 output and LPCM. **None of those exist.**
-The output format is **DVD-Video only**: MPEG-2 video + AC-3 audio + DVD subpictures. H.264,
-HEVC etc. are supported as *input* only. See [§6](#6-roadmap--immediate-next-steps).
+**Scope reality check (important for the next contributor).** Two output formats exist:
+**DVD-Video** (MPEG-2 + AC-3 + DVD subpictures, menus) and, since 2026-10-15, **Blu-ray**
+(H.264 High@4.1 + AC-3 + PGS subtitles; **menu-less autoplay** (all videos in one playlist) or
+**HDMV/IGS menus from the menu editor**; authored by tsMuxeR plus our own navigation files; see
+[§2.8](#28-blu-ray-subsystem)). **Not implemented:** BD-J, Blu-ray pop-up menus, ConvertX templates on Blu-ray, LPCM/DTS/TrueHD output, HEVC/UHD, AVCHD on DVD,
+a custom size for BD, multi-session. HEVC etc. are supported as *input* only. See
+[§6](#6-roadmap--immediate-next-steps).
 
 **Core philosophy (as actually practised):**
 
@@ -50,9 +54,10 @@ HEVC etc. are supported as *input* only. See [§6](#6-roadmap--immediate-next-st
   The custom layout path (menu editor) needs no ConvertX files at all.
 - **Few black boxes, and only proven ones.** Heavy codecs are delegated to the `ffmpeg` CLI;
   DVD IFO/VOB structure to `dvdauthor`, subpicture muxing to `spumux` (both self-built static
-  Windows binaries). Everything else is our own Rust: template parser, menu compositor,
+  Windows binaries), Blu-ray BDMV/m2ts muxing to `tsMuxeR` (official release). Everything else is
+  our own Rust: template parser, menu compositor,
   subpicture masks, navigation/command generation, bitrate model, **UDF 1.02 + ISO 9660 image
-  writer**, **dual-layer break calculation**, **IMAPI2 burner**. No mkisofs/genisoimage/libcdio.
+  writer**, **UDF 2.50 (metadata partition) image writer for Blu-ray**, **dual-layer break calculation**, **IMAPI2 burner**. No mkisofs/genisoimage/libcdio.
 - **Deterministic authoring.** All addresses of the disc image are planned before writing
   (`plan_image`), the layer break is computed on exact sector addresses, DVD file order is
   fixed, menus are rendered from data, not screenshots.
@@ -76,7 +81,8 @@ C:\convertx-rust
 ├─ tests/                integration tests (real ffmpeg/dvdauthor/templates; skip if missing)
 ├─ src-tauri/            Tauri 2 desktop app (Rust side: commands + events)
 ├─ frontend/             GUI (index.html, src/*.ts, styles.css) – built by Vite into dist/
-├─ bin/                  dvdauthor.exe, spumux.exe (self-built, tracked), ffmpeg.exe, ffprobe.exe
+├─ bin/                  dvdauthor.exe, spumux.exe (self-built, tracked), tsMuxeR.exe (+ licence, tracked),
+│                        ffmpeg.exe, ffprobe.exe
 │                        (user-supplied, ~220 MB each, git-ignored: copy them in after cloning)
 ├─ tools/dvdauthor-win/  build script + shims to rebuild dvdauthor/spumux natively (MSYS2)
 ├─ package.json          Vite 7 / TypeScript 5.9 / Tauri CLI 2.12
@@ -180,7 +186,9 @@ auto-start after a 20 s countdown when a suitable blank disc is present).
   `MAX_PGC_COMMANDS = 128`, no `jumppad`. Playback options: auto-start, play sequentially,
   loop, return to title menu after a title, skip root menu, no title menu for a single title.
 - Limits enforced: 99 titles, 99 chapters, 36 buttons/page, 8 audio, 32 subpicture streams.
-- **Blu-ray (`BDMV`) authoring does not exist.**
+- **Blu-ray (`BDMV`) authoring is a separate path** (`bd.rs`, `bd_author.rs`, tsMuxeR, see
+  [§2.8](#28-blu-ray-subsystem)); `dvd::build_dvd` hands BD discs over to `bd::build_bd` before any
+  DVD logic runs.
 
 ### 2.5 Menu subsystem
 
@@ -286,7 +294,8 @@ auto-start after a 20 s countdown when a suitable blank disc is present).
   `xorriso -outdev … -list_speeds -toc`, burn with `growisofs -dvd-compat [-speed]
   [-use-the-force-luke=break:L0] -Z dev=iso` or `xorriso -as cdrecord -dao`, RW blanking
   with `xorriso -blank as_needed`, verification via the device node.
-- **Speeds:** IMAPI reports sectors/s; 1x DVD = 1,385,000 B/s ≈ 676.27 sectors/s. Default:
+- **Speeds:** IMAPI reports sectors/s; 1x DVD = 1,385,000 B/s ≈ 676.27 sectors/s, 1x BD =
+  4,495,500 B/s ≈ 2,195.07 sectors/s (the speed list stays in "x" and is read per medium). Default:
   DVD-5 = max, DVD-9 = fastest offered speed in 2.3x–4.1x (else slowest). Setting
   `burn_speed` (`auto|max|16|12|8|6|4|2.4`) maps to the nearest supported speed ≤ wish.
 - **Auto-start safety:** the 20 s countdown only runs for a blank disc (or a rewritable one
@@ -304,58 +313,170 @@ auto-start after a 20 s countdown when a suitable blank disc is present).
 - In a running phase the elapsed time is extrapolated over the fraction done; phases without
   progress (finalizing) count down from their estimate.
 
+### 2.8 Blu-ray subsystem
+
+Choosing **BD-25 / BD-50** (`DiscType::Bd25/Bd50`, JSON `"bd25"/"bd50"`, targets 22,900 / 45,800
+MiB, mux overhead 6 %) switches the whole pipeline; the DVD path is untouched. Without a custom layout the disc is
+**menu-less**: it autoplays one playlist made of all videos (this section's diagram). With a layout
+from the menu editor see **Blu-ray menus** at the end of this section.
+
+```text
+ inputs ─ probe + select_streams (as for DVD; only SRT-like text and PGS subtitles survive) ─
+ harmonised tracks (audio k exists if any title has it; missing → silent AC-3 192k; subtitle
+ track k = kind/language of the first title that has it, else an invisible SRT / empty PGS)
+   │  one project frame rate (bd::bd_frame_rate)
+   ▼  bitrate_plan (menu 0 MB, BD limits 4000–35,000 kbps, total ≤ 48,000)
+ [2/5] per title (parallel): subtitle extraction (SRT / PGS .sup) + placeholders → ffmpeg
+        libx264 (or h264_nvenc, see below) High@4.1 -bluray-compat + AC-3 (apad, -t) → <work>/title_NN.mkv
+ [3/5] bd.meta (bd_author) → tsMuxeR (concatenation "a.mkv"+"b.mkv", --custom-chapters at every
+        chapter of every title with absolute times) → <work>/BD/BDMV → <project>/BDMV, plus an
+        empty <project>/CERTIFICATE/BACKUP (tsMuxeR 2.7 writes no CERTIFICATE folder)
+ burn: burner::burn_video_ts → burner::udf250 (own UDF 2.50 writer, no ISO 9660 bridge,
+        no layer break) → IMAPI2 (BD-R / BD-RE)
+```
+
+- **Frame rate** (`bd::bd_frame_rate`): all sources film (23.976 / 24 ± 0.01) → keep it (mixed
+  film rates → 24000/1001), progressive. Otherwise the TV rate: 1080 → 25 / 29.97 with x264
+  `fake-interlaced=1:pic-struct=1` (flagged 1080i, because 1080p25/29.97 do not exist on a BD),
+  720 → 50 / 59.94 progressive (frames doubled by the `fps` filter). One rate for the whole
+  project, because tsMuxeR's concatenation needs identical SPS. GOP = 1 s.
+- **Picture:** always 16:9, square pixels, BT.709; 4:3 sources are pillarboxed; `Resolution::Hd1080`
+  / `Hd720` (settings `bd_resolution`, CLI `--resolution hd1080|hd720`). A DVD with an HD resolution
+  or a BD with a DVD resolution fails with a German message before any work is done.
+- **Encoder choice** (`bd.rs`, `encoder::BdEncoder`): with `BuildOptions::bd_hw_encode` (setting
+  `bd_hw_encode`, **default on**; CLI `--no-hw-encode` turns it off) the build probes
+  `Toolchain::probe_nvenc` once (10 test frames, the BD options, 30 s timeout) and encodes with
+  `h264_nvenc` (`-preset p5`/`p3` fast, `-tune hq`, High@4.1, `-bluray-compat 1 -aud 1 -slices 4
+  -rc vbr -forced-idr 1 -strict_gop 1 -spatial-aq 1 -rc-lookahead 32`, `-bf 3`, same
+  maxrate/bufsize/GOP). Otherwise x264, with a warning carrying the reason (`nvenc_failure_reason`:
+  driver too old, no NVENC GPU, or the last log line). **1080i rates (`fake_interlaced`) always use
+  x264** (NVENC has no `fake-interlaced`; Step explains it). 2-pass with NVENC = `-multipass
+  fullres` in the single run (no analysis run, no passlog; `BdEncodeJob::x264_two_pass()`; the ETA
+  counts 1 pass). Parallel NVENC encodes are capped at `NVENC_MAX_JOBS = 4` (measured 2026-10-17: 4 titles take 45–47 s at 1 or 4 jobs, so the cap is not a limit; value kept).
+  DVD encoding is untouched (MPEG-2 stays software). Needs NVIDIA driver ≥ 610 for ffmpeg 9.0.1.
+- **Encoder profile ceilings** on BD: Auto/SP 35,000, MP 20,000, LP 12,000 kbps
+  (`EncodingProfile::max_video_kbps_for(disc)`); the LP → Half D1 switch never applies.
+- **`--single-video` / `bd_single_video`:** more than one input is rejected before any work.
+- **Tools:** `Toolchain::tsmuxer` is optional (DVD builds do not need it); a BD build without it
+  fails naming `bin/tsMuxeR.exe`.
+- **UDF 2.50 writer** (`burner/udf250.rs`): VRS `BEA01/NSR03/TEA01`, descriptor tag version 3,
+  domain identifier `*OSTA UDF Compliant` revision 0x0250, LVD with a type 1 (physical) and a type 2
+  **metadata partition map** (`*UDF Metadata Partition`, duplicate-metadata flag, allocation and
+  alignment unit 32). Physical partition at sector 512: Metadata File EFE (type 250, block 0) and
+  Mirror File EFE (type 251, block 1), copy 1 at block 32, file data (each file on a 32-block
+  boundary, long_ads with partition reference 0, extents < 1 GiB), copy 2 behind the data. Everything
+  else (FSD, every directory/file EFE, FIDs) lives in the metadata partition (reference 1). Generic
+  tree of any depth (sorted names, empty directories kept); only `BDMV` and `CERTIFICATE` of the
+  project folder go onto the disc. Planned first (`plan_bd_image`), then written
+  (`write_bd_image`), cancellable, via `<name>.iso.part`.
+- **Burner:** `MediaType::{Bd25, Bd50}` (`bd_media_type(total sectors)`: > 12,219,392 → BD-50),
+  BD-RE counts as rewritable and is overwritten like DVD+RW; `DiscContent` decides which kind of
+  media a folder needs (`media_problem`); BD estimates use 1x = 4,495,500 B/s.
+- **Blu-ray menus (HDMV / IGS, since 2026-10-17)** – `BuildOptions::custom_layout` on a BD disc
+  (CLI `--layout`, GUI "Eigenes Menü (Editor)" on a BD disc):
+  - *Layout:* the same `CustomLayout` JSON, designed on a **16:9 canvas (1920×1080)** with square
+    pixels (`layout::validate_bd(layout, titles, MenuFrame)`: 16:9 canvas, buttons axis-aligned and
+    non-overlapping, ≤ 255 buttons per menu, any number of colours; no VM-command limit).
+    DVD and BD layouts are separate (frontend keeps one slot per medium). `MenuFrame {width,
+    height, pixel_aspect}` (in `author.rs`, `From<TvStandard>`) replaced the TV-only parameters of the
+    shared render helpers; DVD output is unchanged (all earlier tests green).
+  - *Disc structure:* playlist/clip `i` = menu `i` (layout order), then one playlist per title
+    (`bd_menu::title_playlist`). Movie objects: 0 First Play, 1 Top Menu, `2+i` menu `i`, then one
+    per title; `index.bdmv` lists the title objects. `hdmv.rs` writes `index.bdmv` / `MovieObject.bdmv`
+    (layout checked against tsMuxeR's own files) and overwrites tsMuxeR's after all runs.
+  - *Menus:* background, static elements and video layers are rendered into the video (ffmpeg
+    graph shared with the DVD menus, `encoder::bd_custom_menu_args`: x264 High@4.1 8 Mbit/s + AC-3);
+    buttons are an **IGS** stream (`igs.rs`: ICS with one BOG per button, neighbours from
+    `author::compute_navigation`, PDS with real alpha (≤ 255 colours, 16 alpha steps), ODS with RLE
+    and fragmentation; selected + activated object per button cropped to the button rect, *normal*
+    = nothing (the normal look is in the video); object budget 16 MiB). A **still** menu is a 1 s clip
+    whose PlayItem has `still_mode` = infinite and `default_selected_button` = first; a **motion**
+    menu (video background/elements or sound) loops: its object is `SetButtonPage(1); PlayPL(menu);
+    GOTO 1` and the ICS has `default_selected_button` = 0xFFFF so the selection (PSR10) survives each loop.
+  - *Muxing trick (`bd_patch.rs`):* tsMuxeR only copies PGS segment types and silently drops
+    unknown ones (zero packets on the PID). So the IGS goes in as `S_HDMV/PGS` with the ICS labelled
+    as a PCS (0x16); after the run `patch_menu` rewrites TS PID 0x1200 → 0x1400 in every packet,
+    segment type 0x16 → 0x18 at the start of the ICS PES, the PMT stream type 0x90 → 0x91 + PID (+ CRC32),
+    the CLPI program-info entry, and the MPLS STN entry (PG count 1→0, IG count 0→1, PID, coding type);
+    still menus get `still_mode` = 1. Menus are muxed one run each (`--mplsOffset=N --m2tsOffset=N`,
+    offsets accumulate in the shared `BD` folder), then the titles (one run each).
+  - *Navigation (`bd_menu::plan`):* `GPR1` chapter mark the next title object starts at, `GPR2`
+    play-all flag, `GPR6` scratch. Buttons: play title = `GPR1=0; GPR2=0; JumpObject(title)`, chapter
+    k = `GPR1=k-1`, play all = `GPR2=1`, menu = `JumpObject(menu)`. A title object is
+    `PlayPL_at_mark(pl, GPR1); GPR1=0;` then the DVD-equivalent of `dispatcher_commands`
+    (sequential / play-all next, loop, return to the first title menu that plays it, or to the title's
+    own menu). Audio button = `SetStream` with the audio number (the display flag is rewritten by every
+    `SetStream`, so it is re-derived from PSR2 first); subtitle button = `SetStream(0xC000|n)`,
+    off = `SetStream(0)`. Numbers are the position in the harmonised disc track list (1-based). First Play:
+    first title menu, or title 1 with auto-start. "Menu" / Top Menu key → first title menu. Root and
+    settings menus are ordinary menus (no popup menu).
+  - *Sizes:* menu clips count in the bitrate plan with their real muxed size; the GUI estimates
+    1.1 MB per clip second (`bdMenuSecs`).
+- **Deviations from the plan file** (decided while implementing): the Metadata (Mirror) File
+  Location fields of the partition map point at the two EFEs (blocks 0/1 of the physical
+  partition) – only the *bitmap* location is 0xFFFFFFFF – because readers need them; `CERTIFICATE`
+  is created by us; the BD capacities live in `udf250` (`BD25_SECTORS`, `BD50_SECTORS`), not as
+  `Capacities` constants (`layerbreak.rs` is unchanged).
+
 ---
 
 ## 3. Implemented modules & current status
 
-Line counts as of this writing (total ≈ 15,600 lines incl. tests and frontend).
+Line counts as of this writing (total ≈ 23,900 lines incl. tests and frontend).
 
 ### 3.1 Engine (`src/`)
 
 | File | Lines | Responsibility | Status / completed | Pending |
 |---|---:|---|---|---|
-| `lib.rs` | 13 | Module list | ✅ | — |
+| `lib.rs` | 21 | Module list | ✅ | — |
 | `template.rs` | 621 | ConvertX template INI parser (pages, buttons, backgrounds, colour schemes, texts) | ✅ all "Open Style" templates parse | Other template styles only smoke-tested via the folder listing |
-| `calculator.rs` | 354 | Bitrate model: `video = (target·8192 − audio·t − overhead)/t`, clamp 1000–8500 kbps and to 9800 − audio; `calculate_capped` (profile ceiling); `EncodingProfile {Auto, Sp, Mp, Lp}` with `max_video_kbps` (8500/8500/6000/4000), `LP_HALF_D1_BELOW_KBPS` = 3000; `DiscType {Dvd5 4300 MB, Dvd9 7950 MB, Custom}`; `Quality` good > 2500 / medium / poor < 1200 | ✅ | SP behaves like Auto (both fill the disc up to 8500 kbps) |
-| `subpic.rs` | 979 | **Bitmap subtitles:** PGS decoder (`decode_pgs`: PCS/WDS/PDS/ODS/END, epochs, fragmented objects, crop, forced flag, BT.709/601 palette, `decode_pgs_rle`), VobSub decoder (`decode_vobsub`: SPU control sequences, 2-bit interlaced RLE, `.idx` palette/size, no-palette fallback), ffprobe hex-dump parsing (`vobsub_probe_args`, `parse_vobsub_probe`, `parse_hexdump`), `Target` (canvas → frame mapping incl. letterbox and cropped videos), `quantize` (transparent + 3 colours, crop), `render` (palette PNGs + spumux XML, overlap trimming, minimum duration) | ✅ unit-tested with handcrafted segments/SPUs; ✅ real VobSub (ConvertX DVD from D:) and PGS fixtures end to end | PGS only as raw stream copy (no PGS in AVI/MP4 tested); semi-transparency is reduced to on/off |
+| `calculator.rs` | 437 | Bitrate model: `video = (target·8192 − audio·t − overhead)/t`, clamp 1000–8500 kbps and to 9800 − audio (per disc via `DiscType::limits()`: BD 4000–35,000 and 48,000 − audio); `calculate_capped` (profile ceiling); `EncodingProfile {Auto, Sp, Mp, Lp}` with `max_video_kbps` (8500/8500/6000/4000) and `max_video_kbps_for(disc)` (BD 35,000/35,000/20,000/12,000), `LP_HALF_D1_BELOW_KBPS` = 3000; `DiscType {Dvd5 4300 MB, Dvd9 7950 MB, Bd25 22,900 MB, Bd50 45,800 MB, Custom}` (`is_bluray`, `limits() -> DiscLimits`, mux overhead 2 % DVD / 6 % BD); `Quality` good > 2500 / medium / poor < 1200 (`Quality::for_disc`: BD 15,000 / 8000) | ✅ (BD limits, ceilings, quality unit-tested) | SP behaves like Auto (both fill the disc up to 8500 kbps) |
+| `subpic.rs` | 1009 | **Bitmap subtitles:** PGS decoder (`decode_pgs`: PCS/WDS/PDS/ODS/END, epochs, fragmented objects, crop, forced flag, BT.709/601 palette, `decode_pgs_rle`), VobSub decoder (`decode_vobsub`: SPU control sequences, 2-bit interlaced RLE, `.idx` palette/size, no-palette fallback), ffprobe hex-dump parsing (`vobsub_probe_args`, `parse_vobsub_probe`, `parse_hexdump`), `Target` (canvas → frame mapping incl. letterbox and cropped videos), `quantize` (transparent + 3 colours, crop), `render` (palette PNGs + spumux XML, overlap trimming, minimum duration), `empty_pgs` (a `.sup` with one empty display set: placeholder PGS track for Blu-ray) | ✅ unit-tested with handcrafted segments/SPUs; ✅ real VobSub (ConvertX DVD from D:) and PGS fixtures end to end | PGS only as raw stream copy (no PGS in AVI/MP4 tested); semi-transparency is reduced to on/off |
 | `probe.rs` | 422 | ffprobe JSON → `MediaInfo` (video, audio, subtitles with kind text/bitmap, chapters), ISO 639 helpers | ✅ | — |
-| `tools.rs` | 518 | Tool lookup (`bin/` next to exe → `./bin` → `PATH`, candidates verified with `-version`; tolerant of a stray `"` in PATH), `tool_command` (no window, priority, kill-on-drop), **`blocking_tool_command`** (std variant: no window, stdin closed – for the Unix burner and `open_folder`), `ffmpeg`/`ffmpeg_with` (telemetry), `ffprobe_output`, `ffmpeg_spumux_pipeline`, `spumux`, `dvdauthor`, `probe_hwaccel` | ✅ | — |
-| `encoder.rs` | 1097 | ffmpeg argument builders (custom menus: `menu_pixels` – square pixels, then the 4:3 menu pixel shape): `EncodeJob` (filters, codec, 2-pass, **fast mode without trellis**, **title resolution**, direct DVD PS output, `subtitles` in DVD order: SRT + PGS `.sup` extraction, hwaccel), `active_size(source, aspect, frame)`, `video_filter(…, resolution)`, `run_encode` (+ `bitmap_subtitle_xml`: decode/render on blocking threads), thumbnails, `motion_menu_args`, `menu_still_args`, **`custom_menu_args`** (dynamic layer graph: `MenuBackground`, `MenuLayer`, `Fit`, `CustomMenuMedia`), `spumux_textsub_xml`, `MenuAudio` | ✅ (fast-mode and Half D1/SIF filter args unit-tested; bitmap path via `tests/bitmap_subs.rs`) | The ~40 % speed-up of fast mode is the roadmap estimate, not measured here |
+| `tools.rs` | 591 | Tool lookup (`bin/` next to exe → `./bin` → `PATH`, candidates verified with `-version`; tolerant of a stray `"` in PATH), `tool_command` (no window, priority, kill-on-drop), **`blocking_tool_command`** (std variant: no window, stdin closed – for the Unix burner and `open_folder`), `ffmpeg`/`ffmpeg_with` (telemetry), `ffprobe_output`, `ffmpeg_spumux_pipeline`, `spumux`, `dvdauthor`, `probe_hwaccel`, **`probe_nvenc`** + `nvenc_failure_reason`, optional **`tsmuxer`** (found like the others, verified by running it without arguments and looking for its banner; `Toolchain::tsmuxer(dir, meta, out)`; `None` = DVD builds still work) | ✅ | — |
+| `encoder.rs` | 1517 | ffmpeg argument builders (custom menus: `menu_pixels` – square pixels, then the 4:3 menu pixel shape): `EncodeJob` (filters, codec, 2-pass, **fast mode without trellis**, **title resolution**, direct DVD PS output, `subtitles` in DVD order: SRT + PGS `.sup` extraction, hwaccel), `active_size(source, aspect, frame)`, `video_filter(…, resolution)`, `run_encode` (+ `bitmap_subtitle_xml`: decode/render on blocking threads), thumbnails, **`BdEncodeJob`** (H.264 `-bluray-compat` High@4.1 + AC-3 into Matroska: `bd_video_filter` bwdif → fps → lanczos/BT.709 scale → pad → `setsar=1`, x264 `slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1`, `fake-interlaced` only for 1080 TV rates, 1 s GOP, silent AC-3 filler tracks, `apad` + `-t`, 2-pass, fast = `veryfast`) with **`BdEncoder::{X264,Nvenc}`** (`nvenc_args`, `nvenc_bd_options`; no analysis run for NVENC) and `run_bd_encode`, `extract_subtitle_args` / `subtitle_file` (SRT + PGS extraction shared with `EncodeJob`), `motion_menu_args`, `menu_still_args`, **`custom_menu_args`** (dynamic layer graph: `MenuBackground`, `MenuLayer`, `Fit`, `CustomMenuMedia`; the graph is `custom_menu_graph(frame, rate, …)`, `menu_pixels_for(pixel_aspect)`) and **`bd_custom_menu_args`** (the same graph on a square-pixel HD frame, x264 High@4.1 8 Mbit/s + AC-3 into Matroska), `spumux_textsub_xml`, `MenuAudio` | ✅ (fast-mode, Half D1/SIF and all BD argument builders unit-tested; NVENC args unit-tested, ✅ real NVENC build (tsMuxeR, libbluray); BD encodes run in `tests/bluray.rs`; bitmap path via `tests/bitmap_subs.rs`) | The ~40 % speed-up of fast mode is the roadmap estimate, not measured here |
 | `menu.rs` | 1369 | Page rendering (backgrounds, texts, masks, motion layers/slots), pagination, parallel rendering, `RenderOptions`, `MenuPageFiles` (+ `custom` media); crate helpers `text_coverage`, `blit`, `blend_coverage` for custom layouts | ✅ PAL + NTSC, still + motion | Half-D1/SIF menus n/a |
-| `layout.rs` | 1337 | **Custom menu layouts** (menu editor JSON): model, `validate`, `plan_navigation` (dispatchers, router, register scheme), `build_custom_menus` (layers, masks, spumux XML, `MenuSpec`s) | ✅ unit tests + real builds (PAL/NTSC) accepted by dvdauthor | Navigation not yet tried on a real DVD player/VM; text lines are cut with "…" (no word wrap) |
-| `author.rs` | 1358 | `TvStandard` (+ `menu_pixel_aspect`), **`Resolution`** (`frame_size`, `label`, `allows_wide`), `PlaybackOptions`, `MenuLinks`, `ButtonAction` (incl. `Commands` for ready-made command strings) → DVD VM commands, dispatcher PGCs, command-only menu PGCs (`MenuSpec::commands`), per-menu `pre`, `DvdLayout::title_pre`, `dvdauthor_xml`, `spumux_xml`, `TitleSpec`, limits | ✅ verified with real dvdauthor | No seamless-branching/angles |
-| `dvd.rs` | 1847 | Orchestrator `build_dvd`: planning, stream selection (`select_streams`: user choice / language filter / preferred language first / DVD limits / unsupported bitmaps skipped; unit-tested), menus (template path **or** `BuildOptions::custom_layout` → `MenuStage`), thumbnails, menu encoding, bitrate (`bitrate_plan(…, profile)`), `effective_resolution` (LP → Half D1; reduced sizes force 4:3), title encoding (parallel, telemetry), dvdauthor, project folder, work-dir handling (`pub const WORK_DIR` = dir name and marker file, also used by the GUI), cancel, `Event` stream (`phase`, `step`, `progress`, `warning`, `eta`), `BuildOptions` (incl. `resolution`, `encoding_profile`), `BuildReport` (incl. `resolution`) | ✅ | Pipeline order is Menus → Videos (bitrate needs the real menu size) |
-| `eta.rs` | 292 | `JobPhase` (5 phases), `Eta` event payload, `FrameEta`, throughput/burn formulas, `format_remaining` | ✅ unit-tested; plausibility-checked on real builds | Early estimate is pessimistic during ffmpeg start-up |
-| `config.rs` | 493 | `AppSettings` JSON (`%APPDATA%\convertx-rust\settings.json`), `sanitized()`, `apply_to(BuildOptions)` (incl. `dvd_resolution` → `Resolution`, `encoding_profile` → `profile()`); menu, TV, encoding (incl. `fast_encode`), chapters, languages, **burn** settings; `max_concurrent_encodes` defaults to `dvd::default_jobs()` (half the logical CPUs) | ✅ backward compatible (missing fields → defaults) | `UNSUPPORTED_CHOICES` is empty now |
-| `main.rs` | 783 | CLI: `template`, `bitrate`, `render-menu`, `build-dvd` (`--template` **or** `--layout <JSON>`, `--two-pass --fast --resolution full-d1\|half-d1\|sif --encoding-profile auto\|sp\|mp\|lp --motion-menu --motion-duration --motion-silent --menu-audio --tv pal\|ntsc --project-name --jobs --keep-work --hw-decode` …), `drives`, `make-iso`, **`burn`** (`--drive --speed --label --no-verify --erase --no-eject --keep-iso [DATEI]`, Ctrl+C cancels, progress + remaining time, exit 130 on cancel; the flow itself is `burner::burn_video_ts`) | ✅ except `burn`: ✅ argument errors, missing VIDEO_TS and unknown drive (automated, `tests/burn_flow.rs`); 🟡 media checks and a real write via the CLI never run | `build-dvd` has no Ctrl+C handling (process just dies) |
-| `burner/mod.rs` | 574 | Types (`DriveInfo`, `MediaType`, `WriteSpeed`, `MediaInfo`, `BurnPhase`, `BurnProgress`, `BurnOptions`, `BurnError` incl. `Image`), trait `OpticalBurner`, `system_burner()`, speed helpers, `BurnEta`, `create_disc_image`, `verify_against_image`, `media_problem`, `default_iso_path`, **`burn_video_ts`** (`BurnJob` → image, layer break hand-over, burn on a scoped progress thread, remaining time per `BurnUpdate`, image removal unless kept after success – a file at the ISO path is only removed when this run wrote it (an existing file survives a failed/cancelled image phase), cancel → `Cancelled`; used by GUI and CLI) | ✅ unit-tested; `burn_video_ts` with a fake burner (`tests/burn_flow.rs`) | — |
+| `layout.rs` | 1683 | **Custom menu layouts** (menu editor JSON): model, `validate` (DVD) / **`validate_bd`** (16:9, ≤ 255 buttons, no colour/VM limits; both through `validate_impl`), `plan_navigation` (DVD dispatchers, router, register scheme), `build_custom_menus` (layers, masks, spumux XML, `MenuSpec`s); render helpers (`frame_box`, `frame_font_size`, `button_rect`, `element_text_lines`) take `impl Into<MenuFrame>`, `bd_button_rect`, `fit_image`/`rotate`/`clip_of` are `pub(crate)` | ✅ unit tests + real builds (PAL/NTSC) accepted by dvdauthor | Navigation not yet tried on a real DVD player/VM; text lines are cut with "…" (no word wrap) |
+| `author.rs` | 1392 | `TvStandard` (+ `menu_pixel_aspect`), **`MenuFrame`** (size + pixel aspect of the frame a menu is drawn on), **`Resolution`** (`frame_size`, `label`, `allows_wide`, `is_hd`; `Hd1080` 1920×1080 / `Hd720` 1280×720 for Blu-ray), `PlaybackOptions`, `MenuLinks`, `ButtonAction` (incl. `Commands` for ready-made command strings) → DVD VM commands, dispatcher PGCs, command-only menu PGCs (`MenuSpec::commands`), per-menu `pre`, `DvdLayout::title_pre`, `dvdauthor_xml`, `spumux_xml`, `TitleSpec`, limits | ✅ verified with real dvdauthor | No seamless-branching/angles |
+| `dvd.rs` | 1862 | Orchestrator `build_dvd`: planning, stream selection (`select_streams`: user choice / language filter / preferred language first / DVD limits / unsupported bitmaps skipped; unit-tested), menus (template path **or** `BuildOptions::custom_layout` → `MenuStage`), thumbnails, menu encoding, bitrate (`bitrate_plan(…, profile)`), `effective_resolution` (LP → Half D1; reduced sizes force 4:3), title encoding (parallel, telemetry), dvdauthor, project folder, work-dir handling (`pub const WORK_DIR` = dir name and marker file, also used by the GUI), cancel, `Event` stream (`phase`, `step`, `progress`, `warning`, `eta`), `BuildOptions` (incl. `resolution`, `encoding_profile`), `BuildReport` (incl. `resolution`), `bd_single_video`; `build_dvd` hands BD discs to `bd::build_bd` and rejects HD resolutions for a DVD; helpers shared with `bd.rs` (`select_streams`, `run_limited`, `job`, `cancellable`, …) are `pub(crate)` | ✅ | Pipeline order is Menus → Videos (bitrate needs the real menu size) |
+| `bd.rs` | 830 | **Blu-ray orchestrator** `build_bd` (checks before any work → probe/select → harmonised tracks → one frame rate → menu stage (`build_menus`: validate_bd → `bd_menu::plan` → render → ffmpeg encode of every menu (parallel) → one tsMuxeR run per menu + `patch_menu`; real size enters the bitrate) or "no menu" → bitrate with BD limits → NVENC probe/choice (`NVENC_MAX_JOBS`) → parallel `encode_bd_title` (subtitle files / placeholders, `BdEncodeJob`, real duration via ffprobe) → `bd.meta` (menu-less) **or** one tsMuxeR run per title with `--mplsOffset/--m2tsOffset` + `write_navigation` (own `index.bdmv` / `MovieObject.bdmv` into `BDMV` and `BACKUP`) → project folder `BDMV` + `CERTIFICATE/BACKUP`), `BdRate`, `bd_frame_rate`, `harmonise` | ✅ unit-tested (every frame-rate branch, harmonising); ✅ real builds in `tests/bluray.rs` (menu-less and with a 3-menu layout); ✅ played in VLC (§5.2) | One frame rate per disc; DVB/XSUB/VobSub subtitles skipped; menus: HDMV only |
+| `bd_menu.rs` | 704 | **Blu-ray menus:** `traits` (moving / has buttons per menu), `plan` → `BdNav` (movie objects, title objects, per-button HDMV commands; register scheme and playback options in §2.8), `render_pages` → `BdPage` (PNG layers, `CustomMenuMedia`, audio, `IgMenu`: button rects, highlight images → shared palette with alpha → RLE objects, neighbours, 16 MiB budget check), `frame_rate_code` | ✅ unit-tested (object numbers, every button action, still/motion objects, every playback option, IG objects of a rendered page); ✅ VLC (§5.2) | Standalone players never tried; no popup menu / BD-J; sounds on buttons, animations, pages > 1 not used |
+| `igs.rs` | 293 | Interactive Graphics segment writer: `build_sup` (ICS as PCS-labelled segment for tsMuxeR, PDS, fragmented ODS, END), `rle_encode` (inverse of `subpic::decode_pgs_rle`), `rgb_to_ycrcb` (BT.709 limited) | ✅ unit-tested (RLE round trip, 14-bit runs, segment/field lengths, fragmentation); ✅ rendered by libbluray in VLC | One page, one BOG per button, no effects/sounds |
+| `hdmv.rs` | 208 | HDMV 12-byte command encoding (branch/play/jump/set/compare/`SetStream`/`SetButtonPage`, operands imm/GPR/PSR) and `index_bdmv` / `movie_object_bdmv` writers | ✅ unit-tested against bytes from tsMuxeR's own files; ✅ libbluray (VLC) parsed index + objects and executed every command used | Layouts compared with tsMuxeR's output and libbluray's source, not with a spec document |
+| `bd_patch.rs` | 254 | PGS→IG patch of a tsMuxeR menu clip: `patch_m2ts` (PID, ICS type, PMT type/PID + CRC32), `patch_clpi`, `patch_mpls` (STN counts/PID/coding type, `still_mode`), `patch_menu` (clip + BACKUP copies), `crc32_mpeg` | ✅ unit-tested (CRC check value, byte diffs of a real tsMuxeR playlist, synthetic TS/CLPI); ✅ real builds (ffprobe sees `id=0x1400`, ICS/PDS/ODS/END in the PES) | Depends on tsMuxeR 2.7.0's layout (one PES per segment, PMT on PID 0x100, one PlayItem per playlist) |
+| `bd_author.rs` | 252 | `BdProject` → tsMuxeR `bd.meta` (`meta_text`, per-title `title_meta_text(i, offset)`, `menu_meta_text(mkv, sup, offset)`: MUXOPT, V/A/S lines with `+` concatenation, `track=N`, languages as ISO 639-2/T, subtitle font parameters scaled to the frame), absolute chapter marks (≤ 999), `EMPTY_SRT` | ✅ unit-tested; ✅ accepted by tsMuxeR 2.7.0 | Text subtitles use tsMuxeR's own renderer (Arial 65 px at 1080p) |
+| `eta.rs` | 326 | `JobPhase` (5 phases), `Eta` event payload, `FrameEta`, throughput/burn formulas (`Medium {Dvd, Bd}`: BD 1x = 4,495,500 B/s, 6x verify read; `burn_secs` / `default_speed_x` / `image_and_burn_secs` take it), `format_remaining` | ✅ unit-tested; plausibility-checked on real builds | Early estimate is pessimistic during ffmpeg start-up |
+| `config.rs` | 531 | `AppSettings` JSON (`%APPDATA%\convertx-rust\settings.json`), `sanitized()`, `apply_to(BuildOptions)` (incl. `dvd_resolution` / `bd_resolution` → `Resolution` depending on `opts.disc` (set the disc first), `bd_single_video`, `encoding_profile` → `profile()`); menu, TV, encoding (incl. `fast_encode`, **`bd_hw_encode`** default true), chapters, languages, **burn** settings; `max_concurrent_encodes` defaults to `dvd::default_jobs()` (half the logical CPUs) | ✅ backward compatible (missing fields → defaults) | `UNSUPPORTED_CHOICES` is empty now |
+| `main.rs` | 824 | CLI: `template`, `bitrate`, `render-menu`, `build-dvd` (`--disc dvd5\|dvd9\|bd25\|bd50`, `--template` **or** `--layout <JSON>` (DVD, or Blu-ray menus), `--two-pass --fast --single-video --resolution full-d1\|half-d1\|sif\|hd1080\|hd720` (default Full D1 / 1080p)` --encoding-profile auto\|sp\|mp\|lp --motion-menu --motion-duration --motion-silent --menu-audio --tv pal\|ntsc --project-name --jobs --keep-work --hw-decode --no-hw-encode` …), `drives`, `make-iso`, **`burn`** (VIDEO_TS, BDMV or project folder; `--drive --speed --label --no-verify --erase --no-eject --keep-iso [DATEI]`, Ctrl+C cancels, progress + remaining time, exit 130 on cancel; the flow itself is `burner::burn_video_ts`) | ✅ except `burn`: ✅ argument errors, missing VIDEO_TS and unknown drive (automated, `tests/burn_flow.rs`); 🟡 media checks and a real write via the CLI never run | `build-dvd` has no Ctrl+C handling (process just dies) |
+| `burner/mod.rs` | 768 | Types (`DriveInfo`, `MediaType`, `WriteSpeed`, `MediaInfo`, `BurnPhase`, `BurnProgress`, `BurnOptions`, `BurnError` incl. `Image`), trait `OpticalBurner`, `system_burner()`, speed helpers, `BurnEta`, `create_disc_image`, `verify_against_image`, `media_problem(media, &DiscContent)`, `DiscContent` (`bluray`, sectors, `dual_layer`, `of_folder`), `is_bdmv_folder`, `bd_media_type`, `MediaType::{Bd25, Bd50}`, speed helpers per medium, `default_iso_path`, **`burn_video_ts`** (`BurnJob` → image (DVD: UDF 1.02 + layer break hand-over; BD: `udf250`, no layer break), burn on a scoped progress thread, remaining time per `BurnUpdate`, image removal unless kept after success – a file at the ISO path is only removed when this run wrote it (an existing file survives a failed/cancelled image phase), cancel → `Cancelled`; used by GUI and CLI) | ✅ unit-tested (incl. media/content cross cases, BD speeds); `burn_video_ts` with a fake burner for DVD and BD content (`tests/burn_flow.rs`) | — |
 | `burner/label.rs` | 58 | Volume label sanitiser | ✅ | — |
-| `burner/udf.rs` | 904 | UDF 1.02 + ISO 9660 bridge image planner/writer | ✅ mounted by Windows + validated with `isoinfo`/`udfinfo` | No multi-extent ISO 9660 files > 4 GiB (VOBs are ≤ 1 GiB, so irrelevant for DVD-Video) |
+| `burner/udf.rs` | 912 | UDF 1.02 + ISO 9660 bridge image planner/writer; low-level helpers (tags, dstrings, regids, `SectorWriter`, `extents`) are shared with `udf250` | ✅ mounted by Windows + validated with `isoinfo`/`udfinfo` | No multi-extent ISO 9660 files > 4 GiB (VOBs are ≤ 1 GiB, so irrelevant for DVD-Video) |
+| `burner/udf250.rs` | 835 | **UDF 2.50 writer for Blu-ray** (§2.8): `plan_entries` / `plan_bd_image` (generic tree, addresses aligned to 32), `write_bd_image`, `create_bd_image`, `is_dual_layer`, `BD25_SECTORS` / `BD50_SECTORS` | ✅ unit-tested (tags v3, FIDs, EFE layout, partition maps, 3 GiB file extents, mirror = copy, cancel); ✅ **mounted by Windows as UDF with every file byte-identical** and ✅ read by ffmpeg's libbluray (`tests/bluray.rs`) | `udfinfo` (WSL) not run; no ISO 9660 side; never burnt |
 | `burner/layerbreak.rs` | 289 | Cell-start parsing, layer-break choice, padding + `TT_SRPT` patch, `plan_disc` | ✅ logic + consistency tests | Seamless flags of cells are not considered; real DL media never burnt |
-| `burner/windows.rs` | 697 | IMAPI2 burner (see §2.6), incl. write-event sink `WriteEvents` + `EventConnection` (advise/unadvise around `Write`) | ✅ enumeration/probing verified on real hardware; ✅ write, finalize, eject, read-back verification and burn ETA **reported working by the user** on the Pioneer BDR-209M (2026-10-15, before the event sink); ✅ event mapping unit-tested and the sink advised on a real `MsftDiscFormat2Data`; 🟡 events during a real write, erase of RW media and the DL layer break never run | Whether IMAPI calls the vtable `Update` or `Invoke` is only known after a real burn (both are handled) |
+| `burner/windows.rs` | 705 | IMAPI2 burner (see §2.6), incl. write-event sink `WriteEvents` + `EventConnection` (advise/unadvise around `Write`), BD-R / BD-RE media (SL/DL by capacity, BD-RE overwritten like DVD+RW) | ✅ enumeration/probing verified on real hardware; ✅ write, finalize, eject, read-back verification and burn ETA **reported working by the user** on the Pioneer BDR-209M (2026-10-15, before the event sink); ✅ event mapping unit-tested and the sink advised on a real `MsftDiscFormat2Data`; 🟡 events during a real write, erase of RW media and the DL layer break never run; 🟡 BD-R/BD-RE probing and writing never run (no blank BD tried) | Whether IMAPI calls the vtable `Update` or `Invoke` is only known after a real burn (both are handled) |
 | `burner/unix.rs` | 259 | growisofs/xorriso burner; processes via `tools::blocking_tool_command` | 🟡 compiles for `x86_64-unknown-linux-gnu`; never run | Its unit tests only compile-checked |
 
 ### 3.2 Desktop app (`src-tauri/`, Tauri 2.12)
 
 | File | Lines | Responsibility | Status |
 |---|---:|---|---|
-| `src/main.rs` | 722 | Commands `probe_file`, `list_templates`, `template_preview`, `calculate_project` (uses the profile from the settings), `start_conversion` (with optional `customLayout`), `cancel_conversion`, `default_output_dir`, `startup_files`, `get_settings`, `save_settings`, `default_settings`, `settings_info`, `title_frame` (video frame as data URL for the editor); events `convert-event` (engine `Event`, incl. `eta`), `convert-done` (with `videoTs`, `projectName`), `convert-cancelled`. Conversion runs on its own thread + Tokio runtime. | ✅ |
-| `src/burn.rs` | 390 | Commands `list_drives`, `disc_needs`, `probe_media(driveId, videoTs, speedPref, autoErase)`, `start_burn`, `cancel_burn`, `startup_burn` (GUI started with a DVD folder argument opens the burn dialog), `open_folder`; events `burn-progress` (`BurnProgress` + `eta`), `burn-done`. Media view with problem/warning/needs-erase/auto-start rules and per-speed duration estimates; ISO at `<output>/<project>.iso` (numbered if taken); safe post-burn deletion (only folders containing nothing but `VIDEO_TS`/`AUDIO_TS`). | ✅ logic unit-tested; ✅ real burn reported working by the user |
-| `src/menu_editor.rs` | 142 | Commands `check_layout` (validation against the project's titles), `text_lines` (engine line breaks of a text element for the editor), `load_layout`, `save_layout`, `image_preview` (images only, ≤ 25 MB) | ✅ unit-tested |
+| `src/main.rs` | 770 | Commands `probe_file`, `list_templates`, `template_preview`, `calculate_project` (uses the profile from the settings and the disc's limits; BD menus from `bdMenuSecs` × 1.1 MB/s), `start_conversion` (with optional `customLayout`), `cancel_conversion`, `default_output_dir`, `startup_files`, `get_settings`, `save_settings`, `default_settings`, `settings_info`, `title_frame` (video frame as data URL for the editor); events `convert-event` (engine `Event`, incl. `eta`), `convert-done` (with `videoTs`, `projectName`), `convert-cancelled`. Conversion runs on its own thread + Tokio runtime. | ✅ |
+| `src/burn.rs` | 461 | Commands `list_drives`, `disc_needs`, `probe_media(driveId, videoTs, speedPref, autoErase)`, `start_burn`, `cancel_burn`, `startup_burn` (GUI started with a DVD folder argument opens the burn dialog), `open_folder`; events `burn-progress` (`BurnProgress` + `eta`), `burn-done`. Media view with problem/warning/needs-erase/auto-start rules and per-speed duration estimates; ISO at `<output>/<project>.iso` (numbered if taken); safe post-burn deletion (only folders containing nothing but `VIDEO_TS`/`AUDIO_TS` or `BDMV`/`CERTIFICATE`); `DiscNeeds` via `DiscContent::of_folder` (+ `bluray`), BD speed labels/estimates, `startup_burn` accepts a `BDMV` folder. | ✅ logic unit-tested; ✅ real burn reported working by the user |
+| `src/menu_editor.rs` | 179 | Commands `check_layout` (validation against the project's titles; frame name `PAL`/`NTSC`/`BD1080`/`BD720` selects DVD or Blu-ray rules), `text_lines` (engine line breaks of a text element for the editor, same frame names), `load_layout`, `save_layout`, `image_preview` (images only, ≤ 25 MB) | ✅ unit-tested |
 | `tauri.conf.json` | — | Window, CSP, NSIS bundle with `bin/*.exe` as resources | ✅ installer reported working by the user (2026-10-15; not built or checked in this session); release exe built with `--features tauri/custom-protocol` |
 
 ### 3.3 Frontend (`frontend/`, vanilla TS + Vite 7)
 
 | File | Lines | Responsibility | Status |
 |---|---:|---|---|
-| `index.html` | — | Shell, conversion overlay (5 phase chips, total/step bars, ETA line, log, cancel, "Auf DVD brennen …") | ✅ |
-| `src/main.ts` | 1192 | Title list (drag & drop), per-title audio/subtitle/chapter/label editing, menu tab with **"ConvertX-Vorlage" / "Eigenes Menü (Editor)"** switch (template picker with preview, or custom layout summary + live validation), `editorTitles()` (index, label, path, chapter count and source chapter names of the live project), layout↔videos binding (`customLayoutKey` in localStorage), disc fill gauge, convert/cancel (blocked while the layout is invalid or made for other videos), ETA display, opens burn dialog after success | ✅ screenshot-verified |
-| `src/menuEditor.ts` | 1281 | WYSIWYG menu editor (see §2.5): menu manager, 4:3 stage with drag/resize, properties, actions, validation, draft, load/save; "Zeilenumbruch" checkbox (new texts wrap; lines from the engine via `text_lines`), "Eigene Farben" per button, pictures/videos/backgrounds previewed with the TV's pixel shape (`fitOnScreen`); opens a fresh draft when the stored layout was made for other videos (old one reachable via undo); video badges and chapter pickers show the real title labels / chapter names | ✅ screenshot-verified (open, select, drag, add text, apply; 4-title project); 🟡 the 2026-10-15 additions (wrap checkbox, own colours, pixel-shape previews) only compiled (`tsc`), not clicked |
-| `src/layout.ts` | 367 | Layout types (mirror of `layout.rs`, incl. `wrap`, `highlight`), fonts list, `draftLayout` generator for the project's real titles (`EditorTitle.index`, labels, chapter counts, source chapter names), `titlesKey`, `madeForOtherTitles`, `chapterLabel`, helpers | ✅ 4-title draft passes `check_layout` and a full build with dvdauthor |
-| `src/settings.ts` | 615 | "Allgemeine Einstellungen" modal (tree: Allgemein, Ausgabe › TV Format/Enkodierung/Videobearbeitung, Menü Optionen, Kapitel, Untertitel, Audio, **Brennen**); Half D1/SIF and SP/MP/LP selectable with explanatory texts (bitrate ceilings, LP → Half D1, 4:3 only); "Schnelles Encoding (Entwurf)" checkbox under Enkodierung › Leistung; parallel-encodes hint names the default (half the cores) | ✅ compiles (`tsc`); 🟡 the new checkbox not clicked in the GUI |
-| `src/burn.ts` | 556 | Burn dialog: drive list, media indicator, label (live sanitised), speed list with "(empfohlen)" + duration estimate, checkboxes (verify, keep ISO, eject, delete after, erase confirmation), 20 s countdown, phases Image/Formatieren/Schreiben/Abschließen/Überprüfen, live ETA "[4/5]/[5/5]", two-click cancel, opens Explorer when closed without burning (unless quiet) | ✅ UI verified without disc; ✅ burning reported working by the user |
+| `index.html` | — | Shell, disc picker with BD-25 / BD-50, conversion overlay (5 phase chips, total/step bars, ETA line, log, cancel, "Auf Disc brennen …") | ✅ |
+| `src/main.ts` | 1273 | Title list (drag & drop), per-title audio/subtitle/chapter/label editing, menu tab with **"ConvertX-Vorlage" / "Eigenes Menü (Editor)"** switch (template picker with preview, or custom layout summary + live validation), `editorTitles()` (index, label, path, chapter count and source chapter names of the live project), layout↔videos binding (`customLayoutKey` in localStorage), disc picker incl. **BD-25 / BD-50** (quality tooltip, "BD-50 wählen" hint, on a BD the menu tab offers "Ohne Menü (Autoplay)" / "Eigenes Menü (Editor)"; **one menu slot per medium** (`slots`, `switchMedium`; localStorage `convertx-menu-layout` for DVD, `…-bd` for BD), `frameName()` = `PAL`/`NTSC`/`BD1080`/`BD720`, an invalid BD layout blocks converting, template motion toggle off, single-video check), disc fill gauge, convert/cancel (blocked while the layout is invalid or made for other videos), ETA display, opens burn dialog after success | ✅ screenshot-verified |
+| `src/menuEditor.ts` | 1284 | WYSIWYG menu editor (see §2.5): menu manager, 4:3 stage (16:9 with square pixels on a Blu-ray, `isBdFrame`, 255-button counter) with drag/resize, properties, actions, validation, draft, load/save; "Zeilenumbruch" checkbox (new texts wrap; lines from the engine via `text_lines`), "Eigene Farben" per button, pictures/videos/backgrounds previewed with the TV's pixel shape (`fitOnScreen`); opens a fresh draft when the stored layout was made for other videos (old one reachable via undo); video badges and chapter pickers show the real title labels / chapter names | ✅ screenshot-verified (open, select, drag, add text, apply; 4-title project); 🟡 the 2026-10-15 additions (wrap checkbox, own colours, pixel-shape previews) only compiled (`tsc`), not clicked |
+| `src/layout.ts` | 408 | `isBdFrame`, `canvasSize` (BD: 1920×1080), `pixelAspectOf`, `menuClipSecs`, `maxButtons`, `toBluray` (a DVD-geometry draft scaled to the 16:9 canvas, 400×225 video boxes); layout types (mirror of `layout.rs`, incl. `wrap`, `highlight`), fonts list, `draftLayout` generator for the project's real titles (`EditorTitle.index`, labels, chapter counts, source chapter names), `titlesKey`, `madeForOtherTitles`, `chapterLabel`, helpers | ✅ 4-title draft passes `check_layout` and a full build with dvdauthor |
+| `src/settings.ts` | 633 | "Allgemeine Einstellungen" modal (tree: Allgemein, Ausgabe › TV Format/Enkodierung/Videobearbeitung, Menü Optionen, Kapitel, Untertitel, Audio, **Brennen**); Half D1/SIF and SP/MP/LP selectable with explanatory texts (bitrate ceilings, LP → Half D1, 4:3 only); "Schnelles Encoding (Entwurf)" checkbox under Enkodierung › Leistung; group **Blu-ray** under TV Format (`bd_resolution` 1080p/720p, frame-rate note, `bd_single_video`, **`bd_hw_encode`** checkbox), BD ceilings in the profile hint, speed hint per medium; parallel-encodes hint names the default (half the cores) | ✅ compiles (`tsc`); 🟡 the new checkboxes (fast encoding, NVENC) not clicked in the GUI |
+| `src/burn.ts` | 562 | Burn dialog: drive list, media indicator, label (live sanitised), speed list with "(empfohlen)" + duration estimate, checkboxes (verify, keep ISO, eject, delete after, erase confirmation), 20 s countdown, phases Image/Formatieren/Schreiben/Abschließen/Überprüfen, live ETA "[4/5]/[5/5]", two-click cancel, opens Explorer when closed without burning (unless quiet); media labels BD-25/BD-50, "Blu-ray"/"DVD" wording, needs text "BD-50 (Dual Layer) nötig" / "passt auf eine BD-25" | ✅ UI verified without disc; ✅ burning reported working by the user |
 | `src/label.ts` | 23 | Volume-label rules (same as Rust; cross-checked with identical cases) | ✅ |
-| `src/api.ts` | 345 | Typed `invoke`/`listen` wrappers and DTOs (+ editor commands) | ✅ |
+| `src/api.ts` | 353 | Typed `invoke`/`listen` wrappers and DTOs (+ editor commands) | ✅ |
 | `src/styles.css` | 1588 | Light/dark theme tokens, layout, menu editor | ✅ |
 
 ### 3.4 Native tool build (`tools/dvdauthor-win/`)
@@ -372,8 +493,9 @@ in MSYS2 (MinGW-w64) with shims `wincompat.h`, `include/langinfo.h`, `include/ne
 
 | Tool | Version in use | Required | Notes |
 |---|---|---|---|
-| `ffmpeg` / `ffprobe` | 9.0.1 full build (gyan.dev), in `bin/` | yes | Must be the real binaries (scoop shims without `.shim` are rejected by the `-version` check). Needs `mpeg2video`, `ac3`, `dvd` muxer, `lavfi`; `libx264` only for tests. |
+| `ffmpeg` / `ffprobe` | 9.0.1 full build (gyan.dev), in `bin/` | yes | **NVENC (optional, Blu-ray) needs NVIDIA driver ≥ 610**; the dev machine had 591.86 (`h264_nvenc` failed: "required nvenc API 13.1, found 13.0", build fell back to x264) and now has 617.42, where it works. Must be the real binaries (scoop shims without `.shim` are rejected by the `-version` check). Needs `mpeg2video`, `ac3`, `dvd` muxer, `lavfi`, `bwdif`; **`libx264`** for Blu-ray output (and tests). The `bluray` protocol (libbluray) is only used by a test. |
 | `dvdauthor` / `spumux` | self-built from ldo/dvdauthor `fe8fe35`, static, in `bin/` | yes | Rebuild with `tools/dvdauthor-win/build.sh`. A WSL dvdauthor exists on the dev machine but is unused. |
+| `tsMuxeR` | 2.7.0 (justdan96/tsMuxer, Apache-2.0), `bin/tsMuxeR.exe` tracked in git, licence in `bin/tsMuxeR-LICENSE.txt` | for Blu-ray only | Optional: DVD builds work without it; a BD build without it fails naming `bin/tsMuxeR.exe`. Bundled by the installer glob `../bin/*.exe`; the licence is listed in `tauri.conf.json`. Writes `BDMV` only (no `CERTIFICATE`). |
 | IMAPI2 (Windows) | Windows 11 built-in | for burning | COM, CLSIDs `MsftDiscMaster2`/`MsftDiscRecorder2`/`MsftDiscFormat2Data`/`MsftDiscFormat2Erase`. |
 | growisofs / xorriso | — | Unix burning only | Optional fallback. |
 | mkisofs / genisoimage / libcdio | — | **no** | Replaced by our own UDF/ISO writer. `genisoimage` + `udftools` were installed in the dev machine's WSL **only to validate** images (`isoinfo`, `udfinfo`). |
@@ -414,21 +536,21 @@ npm: `@tauri-apps/api` 2.12.3, `@tauri-apps/plugin-dialog` 2.8.2, `@tauri-apps/c
 
 ## 5. Completed milestones & verified tests
 
-### 5.1 Test suite (2026-10-15: **167 tests** – last full `cargo test --workspace` run: 166 green after the menu-editor polish; after the audit fixes `--lib --bins` (113 + 10 + 0) and `--test burn_flow` (9) were re-run, all green, the other integration tests were not)
+### 5.1 Test suite (2026-10-17: **227 tests** – last full `cargo test --workspace` run, after the Blu-ray menu work: all 227 green)
 
-`cargo test --workspace` → engine unit tests 113, GUI unit tests 10, integration tests 45:
+`cargo test --workspace` → engine unit tests 158, GUI unit tests 13, integration tests 56 (CLI binary 0, doc tests 0):
 
 | Test file | Tests | What it proves (real tools unless noted) |
 |---|---|---|
-| unit (`src/**`) | 112 | Word wrap (spaces, long words, `\n`, height cut with "…"), button colour pairs (limit 3, shared colours rejected, one pixel value per pair in both masks), pictures fitted with the TV pixel shape (contain, rotated, stretch), Bitmap subtitles (PGS RLE + display sets, SPU RLE + control sequences, VobSub pictures with/without palette, `.idx` header, hex dump/JSON, canvas mapping, quantising, spumux XML), Frame sizes and Half D1/SIF filter chains (letterbox in the reduced frame), profile ceilings (`calculate_capped`), LP → Half D1 rule, settings → `Resolution`/`EncodingProfile`, IMAPI write-event mapping (actions → phases, LBA fraction relative to the start, clamping, no report without sector count) and advising the event sink on a real IMAPI format object, fast-encoding args (no `-trellis` in 1-pass/analysis/final runs, everything else identical), parallelism default = `default_jobs()`, custom layouts (settings menus and stream selection, background shading graph, JSON round trip, DVD-limit validation, cross-domain navigation commands, dispatcher command limit, layer/mask/spec rendering, NTSC scaling), custom menu filter graph, parsers, bitrate model, filters/args, XML generation, label rules, CRC/tags/dstrings/extents of the UDF writer, layer-break choice + `TT_SRPT` patch, speed mapping, `BurnEta`, `FrameEta`, config sanitising, ffmpeg progress parsing, verify mismatch detection, IMAPI drive enumeration (real drive, read-only) |
-| GUI unit (`src-tauri`) | 10 | Live estimate follows the profile (LP caps at 4000 kbps), Layout save/load round trip and error path, layout check against project titles, media-view rules (auto-start only on suitable media, RW erase rules, DVD-9 needs DL, speed estimates), ISO path numbering, safe post-burn deletion, project calculation |
+| unit (`src/**`) | 158 | **Blu-ray menus:** IGS RLE round trip / 14-bit runs / segment and field lengths / fragmentation / colour conversion, HDMV command bytes (compared with tsMuxeR's files) and `index.bdmv`/`MovieObject.bdmv` layouts, PGS→IG patch (CRC-32 check value, byte-exact diff of a real tsMuxeR playlist, CLPI stream entry, TS packets), `bd_menu` (object numbering, every button action, still vs motion menu objects, auto-start, title-end behaviour for default / loop / sequential / sequential+loop / own menu, rendering a page into IG objects), per-title and menu meta files (`--mplsOffset`); **Blu-ray:** disc limits/targets/overhead/quality/profile ceilings, every branch of `bd_frame_rate`, harmonising of tracks, BD filter chain (pillarbox, bwdif, 720p), NVENC args (options, no x264 params, `p3` fast, `-multipass fullres` only for 2-pass and no analysis run), NVENC failure-reason mapping, `bd_hw_encode` default/backward compatibility, x264 flags (`fake-interlaced` only for 1080 TV rates, GOP, fast preset), audio padding/filler tracks, 2-pass, SRT/PGS extraction by track, `bd.meta` text, chapter marks, language codes, `empty_pgs`, UDF 2.50 (tags v3, FIDs, EFE layout, metadata partition map, 3 GiB extent split, alignment, written image structure incl. identical mirror, cancel), media/content cross cases, `bd_media_type`, BD speeds/ETA, `bd_resolution` settings; Word wrap (spaces, long words, `\n`, height cut with "…"), button colour pairs (limit 3, shared colours rejected, one pixel value per pair in both masks), pictures fitted with the TV pixel shape (contain, rotated, stretch), Bitmap subtitles (PGS RLE + display sets, SPU RLE + control sequences, VobSub pictures with/without palette, `.idx` header, hex dump/JSON, canvas mapping, quantising, spumux XML), Frame sizes and Half D1/SIF filter chains (letterbox in the reduced frame), profile ceilings (`calculate_capped`), LP → Half D1 rule, settings → `Resolution`/`EncodingProfile`, IMAPI write-event mapping (actions → phases, LBA fraction relative to the start, clamping, no report without sector count) and advising the event sink on a real IMAPI format object, fast-encoding args (no `-trellis` in 1-pass/analysis/final runs, everything else identical), parallelism default = `default_jobs()`, custom layouts (settings menus and stream selection, background shading graph, JSON round trip, DVD-limit validation, cross-domain navigation commands, dispatcher command limit, layer/mask/spec rendering, NTSC scaling), custom menu filter graph, parsers, bitrate model, filters/args, XML generation, label rules, CRC/tags/dstrings/extents of the UDF writer, layer-break choice + `TT_SRPT` patch, speed mapping, `BurnEta`, `FrameEta`, config sanitising, ffmpeg progress parsing, verify mismatch detection, IMAPI drive enumeration (real drive, read-only) |
+| GUI unit (`src-tauri`) | 13 | Live estimate follows the profile (LP caps at 4000 kbps), Blu-ray estimate (BD limits, no menus without a layout, 1.1 MB per menu second with one, BD ceilings, quality), Blu-ray frame names in `check_layout` (16:9 rule, chapter check), BD media/speed views (BD-25 content on BD-50 fine, BD-50 on BD-25 rejected, BD labels), `BDMV` deletion rules, Layout save/load round trip and error path, layout check against project titles, media-view rules (auto-start only on suitable media, RW erase rules, DVD-9 needs DL, speed estimates), ISO path numbering, safe post-burn deletion, project calculation |
 | `build_dvd.rs` | 1 | Two clips (16:9 5.1 + stereo, German SRT with umlauts, chapters) → full DVD-5 with sub-menus; stream codecs in VOBs |
 | `two_pass.rs` | 5 | 1-pass/2-pass args, real encodes produce a DVD program stream (MPEG-2 720×576 + AC-3), no `.m2v`/`.ac3`/pass logs left |
 | `motion_menu.rs` | 7 | Motion layers/slots on the real template, overlay pipeline produces DVD MPEG, full build with looping menus, sound start per chapter page |
 | `ntsc.rs` | 2 | NTSC 720×480 @ 29.97 for titles, still and motion menus, masks, subtitles; menu sound per video |
 | `playback_options.rs` | 3 | Auto start / sequential / loop; single title without title/root menu |
 | `custom_menu.rs` | 5 | **Button colours and word wrap on the disc:** 3 colour pairs → spumux "PNG had 4 colors", the PCI button colour table of the VMGM menu maps pixel values 1/2/3 to the 3 pairs (VMGM PGC palette read from the IFO, ±3 per channel), each button's mask in its own colour, the wrapped heading drawn in 3 line bands; Settings menu with `setAudio`/`setSubtitle` (2 audio tracks, SRT subtitle), chapter video buttons from each chapter start, vignette/bottomDark/dim shading → real build accepted by dvdauthor; custom layout → full DVD with real ffmpeg/spumux/dvdauthor: blurred image background, video button, rotated image, sound, video background; dispatcher (`if (g2 eq 102) jump menu 3`), chapter dispatcher, VMGM router, `g2 = 0` resets accepted by dvdauthor; menu VOB has MPEG-2 + AC-3 + subpicture, ~3 s loop; mask uses only layout colours; NTSC canvas → 720×480; invalid chapter fails before encoding |
-| `burn_flow.rs` | 9 | `burn_video_ts` with a fake `OpticalBurner` on a real small DVD: complete image reaches the burner, options/speed passed through, image removed (or kept with `keep_iso`), phase order and remaining time (0 at Done), layer break handed over on a forced dual-layer plan, backend error and cancel (during image and during write) leave no `.iso`/`.iso.part`, a cancelled image phase keeps an existing file at the ISO path; CLI `burn`: `--speed 99` → exit 2, missing VIDEO_TS → exit 1, unknown drive → exit 1 without writing (lists the real drives read-only; skip with `CONVERTX_SKIP_DRIVE_TESTS`) |
+| `burn_flow.rs` | 13 | `burn_video_ts` with a fake `OpticalBurner` on a real small DVD: complete image reaches the burner, options/speed passed through, image removed (or kept with `keep_iso`), phase order and remaining time (0 at Done), layer break handed over on a forced dual-layer plan, backend error and cancel (during image and during write) leave no `.iso`/`.iso.part`, a cancelled image phase keeps an existing file at the ISO path; **Blu-ray folder (synthetic, no tools needed):** the UDF 2.50 image reaches the burner complete, `layer_break == None`, image removed/kept (`BEA01`/`NSR03`, no ISO 9660), failure/cancel leave no `.iso`/`.iso.part`, an existing file survives a cancelled image, `DiscContent` recognition; CLI `burn`: `--speed 99` → exit 2, missing VIDEO_TS → exit 1, unknown drive → exit 1 without writing (lists the real drives read-only; skip with `CONVERTX_SKIP_DRIVE_TESTS`) |
 | `process_hygiene.rs` | 1 | No `Command::new(` in `src/` or `src-tauri/src/` outside `src/tools.rs` (guard for the no-console-window rule) |
 | `cancel.rs` | 1 | Cancel during encoding kills tools and removes the work dir |
 | `disc_image.rs` | 2 | ISO of a real DVD **mounted by Windows** (`Mount-DiskImage`): FS = UDF, label correct, every file byte-identical; layer-break plan on injected small capacities lands on a cell start, %16, L0 ≥ L1; forced padding + patched `TT_SRPT` keeps title→VTS addresses consistent and mounts correctly |
@@ -436,11 +558,38 @@ npm: `@tauri-apps/api` 2.12.3, `@tauri-apps/plugin-dialog` 2.8.2, `@tauri-apps/c
 | `render_menu.rs` | 2 | Single and paginated menu rendering on the real template |
 | `bitmap_subs.rs` | 2 | PGS: a `.sup` written by the test (white box with black border, forced second picture) muxed into MKV by ffmpeg → spumux XML times 1.00–2.50 / 3.00–3.60 + `force`, "2 subtitles added", 2 subpicture packets in the VOB at +1 s/+3 s, overlay pixel at the mapped box centre white like ffmpeg's rendering of the source; VobSub: DVD built from an SRT used as the input of a second build (VOB without palette) → all 3 subtitles with the same timing |
 | `resolution.rs` | 3 | Real builds: Half D1 PAL from a 16:9 source → title VOB 352×576 4:3 + warning, dvdauthor `aspect="4:3"`, menus 720×576; SIF NTSC + MP → 352×240, 6000 kbps ceiling; LP on a 13 MB custom target → bitrate < 3000 kbps → Half D1 352×576 |
+| `bluray.rs` | 7 | **(new, `mod menus`)** Two clips + a 3-menu layout (title / root / settings) at 720p: playlists/clips 00000–00004 (and BACKUP copies), each menu clip H.264 1280 wide with a **0x1400 stream** whose PES start with ICS (0x18) … PDS (0x14) / ODS (0x15) … END (0x80) and no 0x1200 left, CLPI says 0x91/0x1400 and MPLS has 0 PG / 1 IG with still mode, titles keep their PGS track and chapter marks, `index.bdmv` (First Play 0, Top Menu 1, titles → objects 5, 6), `MovieObject.bdmv` with 7 objects (= BACKUP copy), an invalid (4:3) layout fails with the 16:9 message; **earlier tests:** | Two clips (16:9 25 fps with 5.1 + stereo AC-3, SRT, chapters 0/6 s; 4:3 with one stereo track) → `BD25`/PAL/1080p → `BDMV/index.bdmv`, `MovieObject.bdmv`, `PLAYLIST/00000.mpls`, `CLIPINF`, one `STREAM/00000.m2ts`, `CERTIFICATE`; ffprobe: h264 High level 41 1920×1080 25 fps, 2 AC-3 (6 + 2 channels), 1 PGS, 18 s; the second audio track is audible during A and **silent (< −80 dB) during B**; the playlist has **3 marks** (= 2 + 1 chapters, tsMuxeR adds none), 6 s / 12 s apart; 720p NTSC single clip → 1280×720 at 60000/1001; `--single-video` with two inputs, FullD1 on a BD, HD on a DVD fail before anything is created; the build's **UDF 2.50 image**: LVD domain revision 0x0250, two partition maps (type 1, type 2 metadata), **mounted by Windows as `UDF` with every BDMV/CERTIFICATE file byte-identical**, and (separate 200 s project) **read by ffmpeg's `bluray:` protocol (libbluray/libudfread)** both as folder and as image |
 
 Integration tests **skip with a message** (not fail) when ffmpeg/dvdauthor/spumux or the
 ConvertX templates are missing.
 
-### 5.2 Verified outside the test suite (manual runs, 2026-10-14/15)
+### 5.2 Verified outside the test suite (manual runs, 2026-10-14/15/17)
+
+- ✅ **Blu-ray menus in VLC 3.0.23 (libbluray, 2026-10-17):** (1) *spike:* hand-built 2-button ICS +
+  1 s clip + title through tsMuxeR (`--mplsOffset/--m2tsOffset`), patched: libbluray printed
+  "First play: 1, Top menu: 1, HDMV Titles: 1", "Still image (infinite)", ES 0x91 on PID 5120; the menu
+  showed, Down moved the highlight, Enter played the title playlist. tsMuxeR copies the segments
+  byte-identically as PCS-labelled PGS and rejects/drops a real ICS type. (2) *full CLI build*
+  (`build-dvd --disc bd25 --layout … --resolution hd720`, two 25 fps clips of 3 s and 20 s with
+  2 audio tracks + SRT + chapters every 6 s, a still menu, a motion menu (blurred video background,
+  video element, title audio, 6 s) and a settings menu): First Play shows the still main menu with the first
+  button highlighted (glyph-shaped yellow highlight); the motion menu plays background + video and
+  **keeps the selected button across its 6 s loop**; "Film 1" plays and playback **returns to the main
+  menu** at the title's end; "Film 2 ab Kapitel 2" starts at 8.2 s (chapter mark 1 + 2 s); **Play all** runs
+  title 1 then title 2 (2.8 s into it after 6 s) and returns to the menu afterwards; the settings
+  menu opens; **"Untertitel an"** then playing title 2 shows the subtitle "Untertitel EINS".
+  Not checked audibly: the audio-switch buttons (`SetStream` audio), "Untertitel aus", "Zurück" from the
+  settings menu, auto-start, sequential/loop playback options (only unit-tested).
+- ✅ **GUI, Blu-ray menu path (release exe, 2026-10-17):** BD-25 selected, one video (`t2.mkv`) added through
+  the file dialog → tab Menüvorlage shows "Ohne Menü (Autoplay)" / "Eigenes Menü (Editor)"; with the editor
+  mode and no layout "Konvertieren" is disabled; "Menü gestalten …" opens the editor on a **16:9 stage** with
+  the BD draft (3 menus: Hauptmenü, t2 – Menü, t2 – Einstellungen), counter "2/255 Buttons", "✓ Layout ist
+  gültig (3 Menüs)"; "Übernehmen" shows the summary card ("Passt zu den aktuellen Videos"), "Konvertieren"
+  enabled and the size gauge rises. Not done there: dragging/editing on the BD stage, switching DVD ↔ BD
+  and back (slot logic is unit-untested frontend code, only compiled), a conversion started from the GUI.
+- ✅ ffprobe on a patched menu clip lists the IG stream as `id=0x1400`, codec unknown (as for any IG
+  stream). ffmpeg's `bluray:` protocol cannot open the menu discs because libbluray hides playlists
+  under 3 minutes (same limit as in §5.3 for the UDF check) – VLC (libbluray with navigation) was used.
 
 - ✅ **Real disc burn (user report, 2026-10-15):** the user burned a disc with the GUI on the
   Pioneer BD-RW BDR-209M (drive F:) and reported that writing via IMAPI2, finalizing, ejecting,
@@ -478,7 +627,45 @@ ConvertX templates are missing.
   DVD folder → "Laufwerk 'Z:' nicht gefunden" with the drive list (`--drive F:`), exit 1, no
   `.iso` left behind. The happy path was **not** run because a blank DVD+R DL was in F:.
 
+- ✅ **tsMuxeR experiment (2026-10-15, plan step 5):** two tiny MKVs concatenated with
+  `"a.mkv"+"b.mkv"` → one m2ts (18.05 s = sum), one `00000.mpls`; `--custom-chapters` with two
+  times → exactly two playlist marks (their PTS start at 600 s: tsMuxeR's 10-minute offset, the
+  differences are the chapter distances); an **SRT placeholder** (`1 / 00:00:00,000 --> 00:00:00,040 / " "`)
+  for the title without subtitles and a **PGS placeholder** (`subpic::empty_pgs`, one empty display
+  set) next to a real `.sup` (taken from the m2ts) were both accepted – no fallback to dropping
+  subtitle tracks was needed. Track numbering in the meta file: video `track=1`, audio `track=2+k`.
+  tsMuxeR 2.7.0 creates `BDMV` only, no `CERTIFICATE`.
+- ✅ **CLI Blu-ray build (2026-10-15):** `build-dvd --disc bd25 --input a.mkv b.mkv --fast`
+  (12 s 720p 5.1 + stereo + SRT, 6 s 4:3): 1080p25 "als 1080i markiert", one playlist, filler
+  track/placeholder messages in the report, 52 MB, ~26 s.
+
 ### 5.3 Never exercised
+
+- 🟡 **Blu-ray menus on anything but VLC/libbluray:** a standalone player (stricter IG timing: the
+  ICS/ODS/PDS PTS are all 0 = clip start, DTS 0; real discs use a decoding lead), a real BD burn with
+  menus, the Windows 10/11 players. The patched files follow libbluray's parsers and tsMuxeR's own
+  output, not a BD-ROM spec document. The audio-switch button, auto-start and the sequential/loop options
+  were not played (unit-tested commands only). Menu clips are encoded with x264 `veryfast` at a fixed
+  8 Mbit/s whatever the frame rate/1080i flag (not checked against the BD buffer model on hardware).
+- 🟡 In the **running GUI**: editing on the 16:9 stage (drag/resize, text sizes vs the build), switching
+  DVD ↔ BD with separate layouts, and a build started from the GUI with a BD layout (the engine path was run via
+  the CLI and `tests/bluray.rs`; the GUI only up to "Übernehmen", see §5.2).
+
+- 🟡 **NVENC with players / more titles:** the NVENC stream was verified with ffprobe, tsMuxeR and
+  libbluray (2026-10-17, driver 617.42), but never on a standalone player. libbluray prints
+  "no timestamp for SPN 0" for the NVENC m2ts (not compared against an x264 build). The 4-title
+  parallel test showed no speed-up from `--jobs 4` over 1 (47 s vs 45 s); 5–8 concurrent NVENC
+  sessions and the GeForce session limit were not tried.
+- 🟡 **Blu-ray on real hardware:** writing a BD-R/BD-RE with IMAPI2 (media probe, BD-RE overwrite,
+  speeds in BD x), reading the disc back (verification), playback on a standalone player /
+  VLC, burn ETA accuracy for BD. Needs a blank BD-R and the user's go.
+- 🟡 Blu-ray with a **real PGS source subtitle** (only the SRT path and the placeholder PGS ran;
+  the extraction code is the DVD one), Blu-ray input with subtitles of different kinds per
+  title (text vs. PGS → placeholder + warning), 2-pass and hardware decoding for BD,
+  interlaced and anamorphic sources, film-rate (23.976) projects end to end (only unit-tested),
+  projects longer than a few minutes except the 200 s flat test clip, and a BD-50 build.
+- 🟡 `udfinfo` (WSL) on a BD image; the BD image on the Unix burner (`unix.rs` compiles for
+  Linux but has no BD media detection).
 
 - 🟡 Erasing DVD-RW / overwriting DVD+RW.
 - 🟡 Setting the layer break on a real DVD+R DL (SEND DVD STRUCTURE 0x20).
@@ -544,7 +731,15 @@ ConvertX templates are missing.
 11. ~~Custom menus: word wrap, per-button highlight colours, square-pixel previews~~ – done
     2026-10-15 (M7). Still open: test the navigation and highlights on a real player (or a
     DVD VM such as libdvdnav); click the new editor controls in the GUI.
-- [planned] Blu-ray output (BD-25/BD-50, H.264, tsMuxeR, own UDF 2.50 writer, menu-less autoplay) → docs/plans/2026-10-15-bluray-support.md
+12. ~~Blu-ray output~~ – done 2026-10-15 (BD-25/BD-50, H.264, tsMuxeR, own UDF 2.50 writer,
+    menu-less autoplay; §2.8). Still open: a real BD burn + playback test (needs a blank BD-R and
+    the user's go), a real PGS source, measuring x264 `slow` speed (the fast switch uses `veryfast`).
+    BD menus: ~~HDMV/IGS from the menu editor~~ done 2026-10-17 (§2.8); open: a standalone player,
+    IG timing with a decoding lead, button sounds/animation, multi-page menus, a pop-up menu.
+13. **Blu-ray polish ideas:** show the harmonised track layout in the GUI before converting
+    (today a title with fewer tracks silently gets filler tracks – only the build report says so);
+    per-title text-subtitle styling; DTS/E-AC-3 pass-through instead of AC-3 re-encoding.
+- 🟡 Try NVENC BDs on a standalone player; more than 4 concurrent sessions (§5.3).
 
 Agreed order of the remaining work (2026-10-15 audit; details in the review plan):
 M1 shared burn flow + fake-burner tests + process hygiene (**done**) → M2 IMAPI write events
@@ -556,11 +751,30 @@ proposed) → M6 installer (#8; dropped – works per user) → M7 custom-menu p
 
 ### 6.2 Not implemented at all (out of current scope)
 
-- ⛔ Blu-ray / `BDMV` / AVCHD authoring, H.264 or HEVC output.
-- ⛔ LPCM / MP2 / DTS audio output (AC-3 only).
+- ⛔ BD-J, Blu-ray pop-up menus, ConvertX templates on Blu-ray, AVCHD on DVD, HEVC/UHD output, custom size for BD, multi-session. (NVENC H.264 for Blu-ray exists, §2.8.) (Plain autoplay Blu-ray with H.264 exists, §2.8.)
+- ⛔ LPCM / MP2 / DTS / TrueHD / E-AC-3 audio output (AC-3 only, also on Blu-ray).
 - ⛔ Multi-angle, seamless branching, DVD-Audio, CSS, region coding.
 
 ### 6.3 Known limitations, edge cases & caveats
+
+- **Blu-ray:** one frame rate for the whole disc (a 24p film next to a 25p video makes both 1080p25
+  flagged-interlaced); the BD spec has no 1080p25/29.97, hence `fake-interlaced`. Titles with fewer
+  audio/subtitle tracks than others get silent AC-3 / empty subtitle tracks (position-wise), a
+  subtitle of another kind (text vs. PGS) at the same position is dropped with a warning.
+  VobSub/DVB/XSUB/teletext subtitles are skipped with a warning. Text subtitles are rendered by
+  tsMuxeR (Arial, fixed size/position). Chapter marks and subtitles depend on `apad` + `-t`
+  keeping every stream of a title the same length. Playlist marks start at tsMuxeR's 600 s offset.
+  Without a layout the disc has no menu: playback starts the playlist at once. **With a layout** (menus):
+  HDMV only; DVD and BD layouts are separate (a 4:3 layout cannot be converted sensibly); the IGS is
+  muxed as a disguised PGS track and patched afterwards, which depends on tsMuxeR 2.7.0's output
+  layout; every `SetStream` call rewrites the PG display flag (the audio buttons re-read PSR2 first);
+  a motion menu restarts its clip after each loop (the IG epoch restarts with it); the Top Menu / Menu
+  key leads to the first title menu (there is no per-title popup menu); menu clips are re-encoded, so
+  the bitrate plan reserves their real size; never tested on a standalone player. The work directory's `title_NN.mkv`
+  files are as large as the final disc (kept with `--keep-work`). Hardware H.264 encoders are not
+  used (no reliable BD-compatible HRD). `Custom(mb)` stays DVD-only. The image of a BD has no ISO 9660
+  side and aligns every file to 32 sectors (a few hundred KB of padding). Quality thresholds for
+  the traffic light are 15,000 / 8000 kbps on BD.
 
 - **Pipeline order:** menus are built before videos because the video bitrate is computed with
   the real encoded menu size. The 5-phase numbering follows the real order
@@ -637,6 +851,9 @@ exe that loads `http://localhost:5173` and shows "page not reachable".
 
 ```powershell
 convertx-rust build-dvd --input a.mkv b.mp4 --template "C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini" --output D:\out --motion-menu --hw-decode
+convertx-rust build-dvd --disc bd25 --input a.mkv b.mp4 --output D:\out --resolution hd1080 --fast   # Blu-ray: no --template needed, one autoplay playlist
+convertx-rust build-dvd --disc bd25 --input a.mkv b.mp4 --layout bd-menu.json --output D:\out --resolution hd720 --fast   # Blu-ray with menus (16:9 layout, canvas 1920x1080)
+convertx-rust burn D:\out\Film --keep-iso            # project folder, VIDEO_TS or BDMV
 convertx-rust drives
 convertx-rust make-iso D:\out\Film\VIDEO_TS D:\out\Film.iso --label "Mein Film"
 convertx-rust burn D:\out\Film --drive F: --speed 8 --keep-iso   # Ctrl+C cancels; exit 130
@@ -659,6 +876,10 @@ convertx-gui.exe D:\out\Film\VIDEO_TS        # opens the burn dialog for an exis
 
 ### Key facts that are easy to get wrong
 
+- A file ffmpeg still holds open shows **0 bytes** in Explorer / `Get-ChildItem` (NTFS updates the
+  directory entry on close). Measure with an open handle (`FileStream.Length`). "0 % CPU / 0 % GPU"
+  during a BD encode usually means x264 `slow` is simply CPU-bound (~0.45× real time for 1080p).
+
 - dvdauthor `TT_SRPT` VTS start sector = offset relative to `VIDEO_TS.IFO` in contiguous DVD
   order; VTS-internal addresses (`VTSM_VOBS` @0xC0, `VTSTT_VOBS` @0xC4, `C_ADT` @0xE0) are
   relative to the VTS IFO. `TT_SRPT` sector pointer at VMG IFO 0xC4; entries of 12 bytes from
@@ -675,6 +896,79 @@ convertx-gui.exe D:\out\Film\VIDEO_TS        # opens the burn dialog for an exis
 ## 8. Changelog
 
 Newest first. Every change to the project adds an entry here (rule in `CLAUDE.md`).
+
+### 2026-10-17 — Blu-ray menus from the menu editor (HDMV navigation + Interactive Graphics)
+
+- Plan `docs/plans/2026-10-17-bluray-menus.md` implemented (and deleted). New: `src/igs.rs`,
+  `src/hdmv.rs`, `src/bd_menu.rs`, `src/bd_patch.rs`, `examples/igs_spike.rs` (the spike, kept as a
+  hand-built reference disc generator). Changed: `author.rs` (`MenuFrame`), `layout.rs`
+  (`validate_bd`, frame-generic helpers), `encoder.rs` (`custom_menu_graph`, `bd_custom_menu_args`,
+  `menu_pixels_for`; DVD arguments unchanged), `bd.rs` (menu stage, per-menu / per-title tsMuxeR runs
+  with offsets, `write_navigation`, menu size in the bitrate plan), `bd_author.rs` (per-title and
+  menu meta), `main.rs` (CLI summary / help), `tests/bluray.rs` (`mod menus`), Tauri
+  `menu_editor.rs` (`BD1080`/`BD720` frame names) and `main.rs` (`bdMenuSecs`), frontend `main.ts`
+  (menu slot per medium, frame name, BD menu tab), `layout.ts` (16:9 canvas + `toBluray` draft),
+  `menuEditor.ts` (16:9 stage, square pixels, 255 buttons), `api.ts`.
+- Key findings: tsMuxeR drops IGS segments but copies PCS-labelled ones byte-identically → disguise +
+  patch (`bd_patch`); libbluray's `SetStream` writes the PG display flag from bit 14 of every call;
+  a compare skips the next command when false; libbluray (ffmpeg `bluray:`) hides playlists < 3 min.
+- **Verified:** `cargo test --workspace` **227/227** (was 208: +17 engine unit, +2 `tests/bluray.rs`);
+  `cargo check --workspace --all-targets` and `cargo check --lib --tests --target
+  x86_64-unknown-linux-gnu` clean; `npm run build` clean; VLC playback of a spike disc and of a full CLI
+  build (§5.2): menus render, navigation, chapter jump, play-all, title end → menu, motion-menu
+  selection across loops, subtitle switch. **Not verified:** standalone players, audible audio switch,
+  auto-start / sequential / loop options on a player, GUI editing on the 16:9 stage and a GUI-started BD menu build (§5.3).
+
+### 2026-10-17 — NVENC hardware H.264 encoding for Blu-ray (default on, x264 fallback)
+
+- `encoder.rs`: `BdEncoder`, `BdEncodeJob::{encoder, nvenc_args, x264_two_pass}`, `nvenc_bd_options`;
+  `run_bd_encode` skips the analysis run for NVENC. `tools.rs`: `probe_nvenc`,
+  `nvenc_failure_reason`. `bd.rs`: probe once per build, 1080i → x264, `NVENC_MAX_JOBS = 4`, ETA
+  passes, Step/warning. `dvd.rs`/`config.rs`: `bd_hw_encode` (settings default true). `main.rs`:
+  `--no-hw-encode`. Frontend: checkbox in the Blu-ray group (`settings.ts`, `api.ts`).
+  `tests/bluray.rs`: `hw_encode_uses_nvenc_or_falls_back`.
+- Background: the reported "stall" was not a deadlock – x264 `slow` at 100 % CPU (see §7).
+- **Verified:** `cargo test --workspace` 208/208 green; `tsc` clean. With driver 591.86 only the
+  fallback ran (warning "NVIDIA-Treiber zu alt", x264 result High@4.1). After the driver update
+  (617.42): `hw_encode_uses_nvenc_or_falls_back` passes on the NVENC branch; a real 2-min Handy
+  Manny clip through `build-dvd --disc bd25` used NVENC: ffprobe h264 High level 41 1920×1080
+  24000/1001 `has_b_frames=2`, tsMuxeR accepted it, libbluray read a 210 s build (h264 + ac3);
+  whole build 12 s vs 72 s with `--no-hw-encode` (x264 `slow`, ~6×). **Not verified:** standalone
+  players, >4 concurrent sessions (§5.3).
+
+### 2026-10-15 — Blu-ray output (BD-25 / BD-50): H.264, menu-less autoplay, own UDF 2.50 writer
+
+Implemented `docs/plans/2026-10-15-bluray-support.md` (the plan file is deleted; its decisions
+are in §2.8). Before that, the working tree of M4/M5/M7 was committed as a checkpoint
+(`0d4bea2`); `bin/tsMuxeR.exe` + `bin/tsMuxeR-LICENSE.txt` are staged, nothing else is committed.
+
+- **Engine:** `DiscType::{Bd25, Bd50}` with `limits()` (4000–35,000 kbps, ≤ 48,000 total, quality
+  15,000 / 8000), 6 % mux overhead, profile ceilings per disc (`calculator.rs`);
+  `Resolution::{Hd1080, Hd720}` (`author.rs`); new `bd.rs` (orchestrator `build_bd`,
+  `bd_frame_rate`, track harmonising), `bd_author.rs` (tsMuxeR meta file), `BdEncodeJob` +
+  `run_bd_encode` + shared `extract_subtitle_args` (`encoder.rs`), optional `Toolchain::tsmuxer`
+  (`tools.rs`), `subpic::empty_pgs`, `dvd::build_dvd` dispatch + `pub(crate)` helpers +
+  `bd_single_video` + HD-on-DVD check (`dvd.rs`), `eta::Medium`, settings `bd_resolution` /
+  `bd_single_video` (`config.rs`).
+- **Image/burn:** new `burner/udf250.rs` (UDF 2.50 with metadata partition, planned then
+  written); `udf.rs` helpers made `pub(crate)` (+ `tag_v`, `NotBluray`); `burner/mod.rs`:
+  `MediaType::{Bd25, Bd50}`, `DiscContent`, `is_bdmv_folder`, `bd_media_type`, BD branch in
+  `burn_video_ts` (no layer break), `media_problem(media, &content)`, speed helpers per medium,
+  `BurnEta` per medium; `windows.rs`: BD-R/BD-RE media.
+- **CLI/GUI:** `--disc bd25|bd50`, `--resolution hd1080|hd720` (default per disc),
+  `--single-video`, `--template` optional for BD, `burn` accepts BDMV/project folders, `bitrate`
+  prints the limits; Tauri `calculate_project`/`disc_needs`/`media_view`/delete rules/
+  `startup_burn`; frontend disc picker, BD tab text, settings group, burn dialog wording;
+  `tauri.conf.json` bundles the tsMuxeR licence.
+- **Tests:** +37 (engine units 113 → 139, GUI units 10 → 13, integration 45 → 53: new
+  `tests/bluray.rs` with 4, `burn_flow.rs` +4 Blu-ray tests and 2 adjusted messages), see §5.1.
+- **Verified:** `cargo test --workspace` 205/205 green; `cargo check --workspace --all-targets`
+  and `cargo check --lib --tests --target x86_64-unknown-linux-gnu` without warnings;
+  `npm run build`; the Windows mount of the UDF 2.50 image and libbluray reading it (§5.1);
+  the tsMuxeR experiment and a CLI build (§5.2). **Not verified:** any real BD burn/playback,
+  the GUI clicked through with the new controls (compiled only), see §5.3.
+- Plan deviations: see the last bullet of §2.8 (metadata file locations, `CERTIFICATE`,
+  capacity constants).
 
 ### 2026-10-15 — Audit fixes (ponytail audit, findings 1–4)
 

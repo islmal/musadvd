@@ -18,6 +18,8 @@ pub const MAX_VIDEO_KBPS: u32 = 8500;
 pub const DVD_MAX_TOTAL_KBPS: u32 = 9800;
 /// Default mux overhead as a fraction of the target size (VOB/pack headers, NAV packs).
 pub const DEFAULT_MUX_OVERHEAD_RATIO: f64 = 0.02;
+/// Blu-ray overhead (m2ts 192/184-byte packets, PES/PCR).
+pub const BD_MUX_OVERHEAD_RATIO: f64 = 0.06;
 /// Above this video bitrate the quality is rated good.
 pub const QUALITY_GOOD_KBPS: u32 = 2500;
 /// Below this video bitrate the quality is rated poor.
@@ -35,11 +37,33 @@ pub enum Quality {
     Poor,
 }
 
+/// Bitrate limits and quality thresholds of a disc format (kbps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscLimits {
+    pub min_video_kbps: u32,
+    pub max_video_kbps: u32,
+    /// Maximum combined video + audio bitrate.
+    pub max_total_kbps: u32,
+    pub good_kbps: u32,
+    pub poor_kbps: u32,
+}
+
 impl Quality {
+    /// Rating with the DVD thresholds.
     pub fn of(video_kbps: u32) -> Quality {
-        if video_kbps > QUALITY_GOOD_KBPS {
+        Quality::rate(video_kbps, QUALITY_GOOD_KBPS, QUALITY_POOR_KBPS)
+    }
+
+    /// Rating with the thresholds of `disc`.
+    pub fn for_disc(video_kbps: u32, disc: DiscType) -> Quality {
+        let l = disc.limits();
+        Quality::rate(video_kbps, l.good_kbps, l.poor_kbps)
+    }
+
+    fn rate(video_kbps: u32, good: u32, poor: u32) -> Quality {
+        if video_kbps > good {
             Quality::Good
-        } else if video_kbps >= QUALITY_POOR_KBPS {
+        } else if video_kbps >= poor {
             Quality::Medium
         } else {
             Quality::Poor
@@ -55,6 +79,10 @@ pub enum DiscType {
     Dvd5,
     /// Dual layer, usable target 7950 MB.
     Dvd9,
+    /// Blu-ray, single layer (BD-25), usable target 22,900 MiB.
+    Bd25,
+    /// Blu-ray, dual layer (BD-50), usable target 45,800 MiB.
+    Bd50,
     /// User-defined target size in MB (JSON: `{"custom": 4000}`).
     Custom(u32),
 }
@@ -64,7 +92,27 @@ impl DiscType {
         match self {
             DiscType::Dvd5 => 4300,
             DiscType::Dvd9 => 7950,
+            DiscType::Bd25 => 22_900,
+            DiscType::Bd50 => 45_800,
             DiscType::Custom(mb) => mb,
+        }
+    }
+
+    pub fn is_bluray(self) -> bool {
+        matches!(self, DiscType::Bd25 | DiscType::Bd50)
+    }
+
+    pub fn limits(self) -> DiscLimits {
+        if self.is_bluray() {
+            DiscLimits { min_video_kbps: 4000, max_video_kbps: 35_000, max_total_kbps: 48_000, good_kbps: 15_000, poor_kbps: 8000 }
+        } else {
+            DiscLimits {
+                min_video_kbps: MIN_VIDEO_KBPS,
+                max_video_kbps: MAX_VIDEO_KBPS,
+                max_total_kbps: DVD_MAX_TOTAL_KBPS,
+                good_kbps: QUALITY_GOOD_KBPS,
+                poor_kbps: QUALITY_POOR_KBPS,
+            }
         }
     }
 
@@ -75,7 +123,7 @@ impl DiscType {
 
     /// Default mux overhead in kbit for this disc.
     pub fn default_mux_overhead_kbit(self) -> f64 {
-        self.target_kbit() * DEFAULT_MUX_OVERHEAD_RATIO
+        self.target_kbit() * if self.is_bluray() { BD_MUX_OVERHEAD_RATIO } else { DEFAULT_MUX_OVERHEAD_RATIO }
     }
 }
 
@@ -101,10 +149,16 @@ pub const LP_HALF_D1_BELOW_KBPS: u32 = 3000;
 impl EncodingProfile {
     /// Highest video bitrate of the profile.
     pub fn max_video_kbps(self) -> u32 {
+        self.max_video_kbps_for(DiscType::Dvd5)
+    }
+
+    /// Highest video bitrate of the profile on `disc` (BD: 35,000 / 20,000 / 12,000).
+    pub fn max_video_kbps_for(self, disc: DiscType) -> u32 {
+        let bd = disc.is_bluray();
         match self {
-            EncodingProfile::Auto | EncodingProfile::Sp => MAX_VIDEO_KBPS,
-            EncodingProfile::Mp => 6000,
-            EncodingProfile::Lp => 4000,
+            EncodingProfile::Auto | EncodingProfile::Sp => disc.limits().max_video_kbps,
+            EncodingProfile::Mp => if bd { 20_000 } else { 6000 },
+            EncodingProfile::Lp => if bd { 12_000 } else { 4000 },
         }
     }
 
@@ -157,8 +211,8 @@ impl BitratePlan {
 pub enum CalcError {
     InvalidDuration(f64),
     InvalidOverhead(f64),
-    /// Audio leaves less than `MIN_VIDEO_KBPS` within the DVD total limit.
-    AudioTooHigh(u32),
+    /// Audio leaves less than the minimum video bitrate within the disc's total limit.
+    AudioTooHigh { audio_kbps: u32, limits: DiscLimits },
 }
 
 impl fmt::Display for CalcError {
@@ -166,9 +220,10 @@ impl fmt::Display for CalcError {
         match self {
             CalcError::InvalidDuration(d) => write!(f, "duration must be > 0 s (got {d})"),
             CalcError::InvalidOverhead(o) => write!(f, "mux overhead must be >= 0 kbit (got {o})"),
-            CalcError::AudioTooHigh(a) => write!(
+            CalcError::AudioTooHigh { audio_kbps, limits } => write!(
                 f,
-                "audio bitrate {a} kbps leaves less than {MIN_VIDEO_KBPS} kbps video within the {DVD_MAX_TOTAL_KBPS} kbps DVD limit"
+                "audio bitrate {audio_kbps} kbps leaves less than {} kbps video within the {} kbps disc limit",
+                limits.min_video_kbps, limits.max_total_kbps
             ),
         }
     }
@@ -188,7 +243,7 @@ pub fn calculate_with_overhead(
     audio_kbps: u32,
     mux_overhead_kbit: f64,
 ) -> Result<BitratePlan, CalcError> {
-    calculate_capped(disc, duration_secs, audio_kbps, mux_overhead_kbit, MAX_VIDEO_KBPS)
+    calculate_capped(disc, duration_secs, audio_kbps, mux_overhead_kbit, disc.limits().max_video_kbps)
 }
 
 /// Like [`calculate_with_overhead`] with a lower ceiling for the video bitrate (encoding
@@ -206,20 +261,19 @@ pub fn calculate_capped(
     if !mux_overhead_kbit.is_finite() || mux_overhead_kbit < 0.0 {
         return Err(CalcError::InvalidOverhead(mux_overhead_kbit));
     }
-    if DVD_MAX_TOTAL_KBPS.saturating_sub(audio_kbps) < MIN_VIDEO_KBPS {
-        return Err(CalcError::AudioTooHigh(audio_kbps));
-    }
-    let cap = max_video_kbps.clamp(MIN_VIDEO_KBPS, MAX_VIDEO_KBPS);
-    let max_video = cap.min(DVD_MAX_TOTAL_KBPS.saturating_sub(audio_kbps));
-    if max_video < MIN_VIDEO_KBPS {
-        return Err(CalcError::AudioTooHigh(audio_kbps));
+    let limits = disc.limits();
+    let min_video = limits.min_video_kbps;
+    let cap = max_video_kbps.clamp(min_video, limits.max_video_kbps);
+    let max_video = cap.min(limits.max_total_kbps.saturating_sub(audio_kbps));
+    if max_video < min_video {
+        return Err(CalcError::AudioTooHigh { audio_kbps, limits });
     }
 
     let raw = (disc.target_kbit() - audio_kbps as f64 * duration_secs - mux_overhead_kbit) / duration_secs;
 
     // Round down so the estimate never overshoots the target due to rounding.
-    let (video_kbps, clamp) = if raw < MIN_VIDEO_KBPS as f64 {
-        (MIN_VIDEO_KBPS, Clamp::Min)
+    let (video_kbps, clamp) = if raw < min_video as f64 {
+        (min_video, Clamp::Min)
     } else if raw > max_video as f64 {
         (max_video, Clamp::Max)
     } else {
@@ -314,6 +368,35 @@ mod tests {
     }
 
     #[test]
+    fn bluray_limits_and_targets() {
+        assert_eq!((DiscType::Bd25.target_mb(), DiscType::Bd50.target_mb()), (22_900, 45_800));
+        assert!(DiscType::Bd25.is_bluray() && !DiscType::Dvd9.is_bluray() && !DiscType::Custom(5).is_bluray());
+        assert_eq!(DiscType::Dvd5.limits().max_total_kbps, DVD_MAX_TOTAL_KBPS);
+        let l = DiscType::Bd50.limits();
+        assert_eq!((l.min_video_kbps, l.max_video_kbps, l.max_total_kbps, l.good_kbps, l.poor_kbps), (4000, 35_000, 48_000, 15_000, 8000));
+        // 6 % overhead on BD, 2 % on DVD.
+        assert!((DiscType::Bd25.default_mux_overhead_kbit() - 22_900.0 * 8192.0 * 0.06).abs() < 1e-6);
+        // 2 h on a BD-25 lands between the limits; 10 min hits the ceiling.
+        let p = calculate(DiscType::Bd25, 7200.0, 448).unwrap();
+        assert_eq!(p.clamp, Clamp::None);
+        assert!(p.fits() && (20_000..35_000).contains(&p.video_kbps), "{}", p.video_kbps);
+        assert_eq!(calculate(DiscType::Bd25, 600.0, 448).unwrap().video_kbps, 35_000);
+        // A 12 h project is clamped to the minimum and does not fit.
+        let long = calculate(DiscType::Bd25, 12.0 * 3600.0, 448).unwrap();
+        assert_eq!((long.clamp, long.video_kbps, long.fits()), (Clamp::Min, 4000, false));
+        assert!(matches!(calculate(DiscType::Bd25, 3600.0, 46_000), Err(CalcError::AudioTooHigh { .. })));
+        // Profile ceilings and quality per disc.
+        let ceil = |p: EncodingProfile| p.max_video_kbps_for(DiscType::Bd50);
+        assert_eq!((ceil(EncodingProfile::Auto), ceil(EncodingProfile::Sp), ceil(EncodingProfile::Mp), ceil(EncodingProfile::Lp)), (35_000, 35_000, 20_000, 12_000));
+        assert_eq!(EncodingProfile::Mp.max_video_kbps_for(DiscType::Dvd9), 6000);
+        assert_eq!(Quality::for_disc(15_001, DiscType::Bd25), Quality::Good);
+        assert_eq!(Quality::for_disc(8000, DiscType::Bd25), Quality::Medium);
+        assert_eq!(Quality::for_disc(7999, DiscType::Bd25), Quality::Poor);
+        assert_eq!(Quality::for_disc(3000, DiscType::Dvd5), Quality::of(3000));
+        assert_eq!(serde_json::from_str::<DiscType>(r#""bd50""#).unwrap(), DiscType::Bd50);
+    }
+
+    #[test]
     fn custom_target() {
         assert_eq!(DiscType::Custom(700).target_mb(), 700);
         let p = calculate(DiscType::Custom(700), 3600.0, 192).unwrap();
@@ -326,7 +409,7 @@ mod tests {
     fn rejects_bad_input() {
         assert!(matches!(calculate(DiscType::Dvd5, 0.0, 192), Err(CalcError::InvalidDuration(_))));
         assert!(matches!(calculate(DiscType::Dvd5, f64::NAN, 192), Err(CalcError::InvalidDuration(_))));
-        assert!(matches!(calculate(DiscType::Dvd5, 3600.0, 9000), Err(CalcError::AudioTooHigh(_))));
+        assert!(matches!(calculate(DiscType::Dvd5, 3600.0, 9000), Err(CalcError::AudioTooHigh { .. })));
         assert!(matches!(
             calculate_with_overhead(DiscType::Dvd5, 3600.0, 192, -1.0),
             Err(CalcError::InvalidOverhead(_))

@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
 use convertx_rust::burner::udf::plan_image;
+use convertx_rust::burner::udf250;
 use convertx_rust::burner::{
     burn_video_ts, BurnError, BurnJob, BurnOptions, BurnPhase, BurnProgress, BurnUpdate, DriveInfo, MediaInfo,
     OpticalBurner, WriteSpeed,
@@ -336,6 +337,120 @@ fn cancelled_image_keeps_an_existing_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ---- Blu-ray: a synthetic BDMV project (no external tools needed) ---------------------------------
+
+/// `<tmp>/Film/BDMV` with a few small files and a 3 MB "m2ts", plus `CERTIFICATE/BACKUP`.
+fn bd_fixture() -> &'static Path {
+    static BD: OnceLock<PathBuf> = OnceLock::new();
+    BD.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("cx_burnflow_bd_{}", std::process::id())).join("Film");
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["BDMV/PLAYLIST", "BDMV/CLIPINF", "BDMV/STREAM", "BDMV/BACKUP/PLAYLIST", "CERTIFICATE/BACKUP"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("BDMV/index.bdmv"), b"INDX0200").unwrap();
+        std::fs::write(root.join("BDMV/MovieObject.bdmv"), b"MOBJ0200").unwrap();
+        std::fs::write(root.join("BDMV/PLAYLIST/00000.mpls"), vec![1u8; 300]).unwrap();
+        std::fs::write(root.join("BDMV/CLIPINF/00000.clpi"), vec![2u8; 700]).unwrap();
+        std::fs::write(root.join("BDMV/STREAM/00000.m2ts"), (0..3_000_000u32).map(|i| (i % 253) as u8).collect::<Vec<u8>>()).unwrap();
+        root.join("BDMV")
+    })
+}
+
+fn bd_job(iso: PathBuf) -> BurnJob {
+    BurnJob { speed: WriteSpeed::Specific(13_170), media_speeds: vec![26_341, 13_170, 8_780], ..job(bd_fixture(), iso) }
+}
+
+#[test]
+fn blu_ray_image_reaches_the_burner_without_layer_break() {
+    let dir = scratch("bd_ok");
+    let iso = dir.join("disc.iso");
+    let burner = FakeBurner::new(Mode::Ok);
+    let updates = Mutex::new(Vec::<BurnUpdate>::new());
+    let outcome =
+        burn_video_ts(&burner, &bd_job(iso.clone()), &AtomicBool::new(false), |u| updates.lock().unwrap().push(u)).unwrap();
+    assert!(!outcome.dual_layer && outcome.iso.is_none());
+    no_image_left(&iso);
+
+    let seen = burner.seen().expect("burner was called");
+    let planned = udf250::plan_bd_image(bd_fixture().parent().unwrap(), "BRENNTEST").unwrap();
+    assert_eq!(seen.iso_size, planned.size_bytes(), "the burner got the complete UDF 2.50 image");
+    assert_eq!((seen.layer_break, seen.speed), (None, WriteSpeed::Specific(13_170)));
+    assert!(seen.verify && seen.eject && !seen.erase, "options passed through");
+    let updates = updates.into_inner().unwrap();
+    assert_eq!(updates[0].progress.message, "Disc-Image wird erstellt …");
+    assert!(updates[0].remaining_secs > 0.0 && updates.iter().all(|u| u.remaining_secs.is_finite()));
+    assert_eq!(updates.last().unwrap().remaining_secs, 0.0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn blu_ray_image_is_kept_on_request_and_is_udf_250() {
+    let dir = scratch("bd_keep");
+    let iso = dir.join("Film.iso");
+    let mut j = bd_job(iso.clone());
+    j.keep_iso = true;
+    let outcome = burn_video_ts(&FakeBurner::new(Mode::Ok), &j, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(outcome.iso.as_deref(), Some(iso.as_path()));
+    assert!(!iso.with_extension("iso.part").exists());
+    let img = std::fs::read(&iso).unwrap();
+    assert_eq!(&img[16 * 2048 + 1..16 * 2048 + 6], b"BEA01");
+    assert_eq!(&img[17 * 2048 + 1..17 * 2048 + 6], b"NSR03");
+    assert_eq!(&img[16 * 2048 + 1..16 * 2048 + 6], b"BEA01");
+    assert_eq!(img.len() % 2048, 0);
+    // No ISO 9660 bridge: sector 16 is not a primary volume descriptor.
+    assert_ne!(&img[16 * 2048 + 1..16 * 2048 + 6], b"CD001");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn blu_ray_failure_and_cancel_leave_no_image() {
+    let dir = scratch("bd_fail");
+    let iso = dir.join("disc.iso");
+    let mut j = bd_job(iso.clone());
+    j.keep_iso = true;
+    let err = burn_video_ts(&FakeBurner::new(Mode::Fail), &j, &AtomicBool::new(false), |_| {}).unwrap_err();
+    assert!(matches!(&err, BurnError::Backend(m) if m == "Schreibfehler"), "{err}");
+    no_image_left(&iso);
+
+    let cancel = AtomicBool::new(false);
+    let burner = FakeBurner::new(Mode::Ok);
+    let err = burn_video_ts(&burner, &bd_job(iso.clone()), &cancel, |u| {
+        if u.progress.phase == BurnPhase::Preparing && u.progress.fraction > 0.0 {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    })
+    .unwrap_err();
+    assert!(matches!(err, BurnError::Cancelled), "{err}");
+    assert!(burner.seen().is_none(), "nothing reaches the drive");
+    no_image_left(&iso);
+
+    // An existing file at the target survives a cancelled image (CLI `--keep-iso PATH`).
+    std::fs::write(&iso, b"older image").unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut j = bd_job(iso.clone());
+    j.keep_iso = true;
+    let err = burn_video_ts(&FakeBurner::new(Mode::Ok), &j, &cancel, |u| {
+        if u.progress.phase == BurnPhase::Preparing && u.progress.fraction > 0.0 {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    })
+    .unwrap_err();
+    assert!(matches!(err, BurnError::Cancelled), "{err}");
+    assert_eq!(std::fs::read(&iso).unwrap(), b"older image");
+    assert!(!iso.with_extension("iso.part").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn blu_ray_content_is_recognised() {
+    use convertx_rust::burner::{is_bdmv_folder, DiscContent};
+    assert!(is_bdmv_folder(bd_fixture()));
+    let c = DiscContent::of_folder(bd_fixture()).unwrap();
+    assert!(c.bluray && !c.dual_layer && c.sectors > 1500, "{c:?}");
+    assert!(!is_bdmv_folder(&bd_fixture().join("STREAM")));
+}
+
 // ---- CLI `burn`: error paths that stop before an image is written ---------------------------
 
 fn cli(args: &[&str]) -> (i32, String) {
@@ -352,7 +467,7 @@ fn cli_rejects_bad_arguments() {
     let missing = std::env::temp_dir().join("cx_burnflow_does_not_exist");
     let (code, err) = cli(&[missing.to_str().unwrap()]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("kein fertiger VIDEO_TS-Ordner"), "{err}");
+    assert!(err.contains("kein fertiger VIDEO_TS- oder BDMV-Ordner"), "{err}");
 }
 
 /// Lists the real drives (read-only); a drive name that matches nothing stops before probing
@@ -367,7 +482,7 @@ fn cli_unknown_drive_stops_before_writing() {
     let project = video_ts.parent().unwrap();
     let (code, err) = cli(&[project.to_str().unwrap(), "--drive", "KEIN_LAUFWERK_XYZ", "--keep-iso"]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("nicht gefunden") || err.contains("Kein DVD-Brenner gefunden"), "{err}");
+    assert!(err.contains("nicht gefunden") || err.contains("Brenner gefunden"), "{err}");
     let iso_dir = project.parent().unwrap();
     let images: Vec<_> = std::fs::read_dir(iso_dir)
         .unwrap()

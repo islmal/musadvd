@@ -20,6 +20,7 @@ use crate::tools::ProcessPriority;
 pub const TEXT_OVERFLOW_ACTIONS: &[&str] = &["reduce_font_size", "truncate"];
 pub const TV_STANDARDS: &[&str] = &["PAL", "NTSC"];
 pub const DVD_RESOLUTIONS: &[&str] = &["Full D1", "Half D1", "SIF"];
+pub const BD_RESOLUTIONS: &[&str] = &["1080p", "720p"];
 pub const ASPECT_POLICIES: &[&str] = &["Auto", "4:3", "16:9"];
 pub const ENCODING_PROFILES: &[&str] = &["Auto", "SP_Short", "MP_Medium", "LP_Long"];
 pub const PROCESS_PRIORITIES: &[&str] = &["Normal", "BelowNormal", "Idle"];
@@ -51,6 +52,10 @@ pub struct AppSettings {
     // Output & TV format
     pub tv_standard: String,
     pub dvd_resolution: String,
+    /// Frame size of Blu-ray titles (`1080p` or `720p`); used when the disc is a BD.
+    pub bd_resolution: String,
+    /// Blu-ray: only one video per disc (no playlist of several videos).
+    pub bd_single_video: bool,
     pub aspect_ratio_policy: String,
     // Encoding
     pub encoding_profile: String,
@@ -60,6 +65,8 @@ pub struct AppSettings {
     pub process_priority: String,
     /// Decode the sources on the GPU (CUDA/D3D11VA/QSV) when available.
     pub hw_decode: bool,
+    /// Blu-ray: encode with NVIDIA NVENC when available (falls back to x264).
+    pub bd_hw_encode: bool,
     /// Draft encoding without trellis quantisation (about 40 % faster, slightly lower quality).
     pub fast_encode: bool,
     // Automatic chapters
@@ -106,12 +113,15 @@ impl Default for AppSettings {
             menu_audio_file: String::new(),
             tv_standard: TV_STANDARDS[0].into(),
             dvd_resolution: DVD_RESOLUTIONS[0].into(),
+            bd_resolution: BD_RESOLUTIONS[0].into(),
+            bd_single_video: false,
             aspect_ratio_policy: ASPECT_POLICIES[0].into(),
             encoding_profile: ENCODING_PROFILES[0].into(),
             target_size_mb: DiscType::Dvd5.target_mb() as u64,
             max_concurrent_encodes: default_jobs(),
             process_priority: PROCESS_PRIORITIES[0].into(),
             hw_decode: false,
+            bd_hw_encode: true,
             fast_encode: false,
             auto_chapter_enabled: true,
             auto_chapter_interval_seconds: 300,
@@ -173,6 +183,7 @@ impl AppSettings {
             self.menu_audio = MENU_AUDIO_MODES[0].into();
         }
         self.dvd_resolution = choice(&self.dvd_resolution, DVD_RESOLUTIONS);
+        self.bd_resolution = choice(&self.bd_resolution, BD_RESOLUTIONS);
         self.aspect_ratio_policy = choice(&self.aspect_ratio_policy, ASPECT_POLICIES);
         self.encoding_profile = choice(&self.encoding_profile, ENCODING_PROFILES);
         self.process_priority = choice(&self.process_priority, PROCESS_PRIORITIES);
@@ -299,16 +310,23 @@ impl AppSettings {
         opts.preferred_subtitle_lang = lang(&self.default_subtitle_language);
         opts.force_first_subtitle = self.force_first_subtitle;
         opts.hw_decode = self.hw_decode;
+        opts.bd_hw_encode = self.bd_hw_encode;
         opts.fast_encode = self.fast_encode;
         if opts.project_name.is_none() && !self.default_volume_label.is_empty() {
             opts.project_name = Some(self.default_volume_label.clone());
         }
         opts.tv_standard = if self.tv_standard == "NTSC" { TvStandard::Ntsc } else { TvStandard::Pal };
-        opts.resolution = match self.dvd_resolution.as_str() {
-            "Half D1" => Resolution::HalfD1,
-            "SIF" => Resolution::Sif,
-            _ => Resolution::FullD1,
+        // `opts.disc` has to be set before the settings are applied.
+        opts.resolution = if opts.disc.is_bluray() {
+            if self.bd_resolution == "720p" { Resolution::Hd720 } else { Resolution::Hd1080 }
+        } else {
+            match self.dvd_resolution.as_str() {
+                "Half D1" => Resolution::HalfD1,
+                "SIF" => Resolution::Sif,
+                _ => Resolution::FullD1,
+            }
         };
+        opts.bd_single_video = self.bd_single_video;
         opts.encoding_profile = self.profile();
         opts.motion_audio = match self.menu_audio.as_str() {
             "silence" => MenuAudio::Silence,
@@ -454,6 +472,23 @@ mod tests {
         assert_eq!((o.resolution, o.encoding_profile), (Resolution::Sif, EncodingProfile::Mp));
         assert_eq!(AppSettings { encoding_profile: "SP_Short".into(), ..AppSettings::default() }.profile(), EncodingProfile::Sp);
     }
+
+    #[test]
+    fn blu_ray_resolution_follows_the_disc() {
+        let mut o = BuildOptions { disc: DiscType::Bd25, ..BuildOptions::default() };
+        AppSettings::default().apply_to(&mut o);
+        assert_eq!((o.resolution, o.bd_single_video), (Resolution::Hd1080, false));
+        let s = AppSettings { bd_resolution: "720p".into(), bd_single_video: true, dvd_resolution: "SIF".into(), ..AppSettings::default() };
+        s.apply_to(&mut o);
+        assert_eq!((o.resolution, o.bd_single_video), (Resolution::Hd720, true));
+        o.disc = DiscType::Dvd9;
+        s.apply_to(&mut o);
+        assert_eq!(o.resolution, Resolution::Sif, "DVD discs keep using the DVD resolution");
+        // Unknown choices fall back; old files without the new fields load with defaults.
+        assert_eq!(AppSettings { bd_resolution: "4k".into(), ..AppSettings::default() }.sanitized().bd_resolution, "1080p");
+        let old: AppSettings = serde_json::from_str(r#"{"dvd_resolution":"Half D1"}"#).unwrap();
+        assert_eq!((old.bd_resolution.as_str(), old.bd_single_video), ("1080p", false));
+    }
 }
 
 #[cfg(test)]
@@ -477,7 +512,10 @@ mod burn_settings_tests {
 
         let mut opts = BuildOptions::default();
         s.apply_to(&mut opts);
-        assert!(opts.hw_decode && opts.fast_encode);
+        assert!(opts.hw_decode && opts.fast_encode && opts.bd_hw_encode);
+        assert!(AppSettings::default().bd_hw_encode, "NVENC is on by default");
+        let old: AppSettings = serde_json::from_str(r#"{"hw_decode":true}"#).unwrap();
+        assert!(old.bd_hw_encode, "settings files without the field keep the default");
         assert_eq!(opts.project_name.as_deref(), Some("URLAUB_AM_MEER_2025_"), "default project name");
         // An explicit project name wins.
         let mut opts = BuildOptions { project_name: Some("Mein Film".into()), ..BuildOptions::default() };

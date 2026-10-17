@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Disc choice; `custom` uses the target size from the settings. */
-export type Disc = "dvd5" | "dvd9" | { custom: number };
+export type Disc = "dvd5" | "dvd9" | "bd25" | "bd50" | { custom: number };
 
 export interface VideoInfo {
   codec: string;
@@ -79,6 +79,8 @@ export interface ProjectSettings {
   titles: TitleLoad[];
   motionMenu: boolean;
   motionDuration: number | null;
+  /** Blu-ray menus from the editor: clip length of every menu in seconds. */
+  bdMenuSecs?: number[];
 }
 
 export interface CalculationResult {
@@ -187,6 +189,8 @@ export interface AppSettings {
   menu_audio_file: string;
   tv_standard: "PAL" | "NTSC";
   dvd_resolution: "Full D1" | "Half D1" | "SIF";
+  bd_resolution: "1080p" | "720p";
+  bd_single_video: boolean;
   aspect_ratio_policy: "Auto" | "4:3" | "16:9";
   encoding_profile: "Auto" | "SP_Short" | "MP_Medium" | "LP_Long";
   target_size_mb: number;
@@ -200,6 +204,7 @@ export interface AppSettings {
   default_subtitle_language: string;
   force_first_subtitle: boolean;
   hw_decode: boolean;
+  bd_hw_encode: boolean;
   fast_encode: boolean;
   burn_speed: "auto" | "max" | "16" | "12" | "8" | "6" | "4" | "2.4";
   verify_after_burn: boolean;
@@ -244,7 +249,7 @@ export interface DriveInfo {
   path: string;
 }
 
-export type MediaType = "dvd5" | "dvd9" | "unknown";
+export type MediaType = "dvd5" | "dvd9" | "bd25" | "bd50" | "unknown";
 /** `"max"` or `{ specific: sectorsPerSecond }`. */
 export type WriteSpeed = "max" | { specific: number };
 
@@ -282,7 +287,10 @@ export interface MediaView {
 export interface DiscNeeds {
   sectors: number;
   sizeGb: number;
+  /** DVD-9 / BD-50 needed. */
   dualLayer: boolean;
+  /** The content is a Blu-ray (BDMV). */
+  bluray: boolean;
 }
 
 export type BurnPhase = "preparing" | "formatting" | "writing" | "finalizing" | "verifying" | "done";
