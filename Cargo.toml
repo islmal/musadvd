@@ -41,10 +41,18 @@ md-5 = "0.10"
 # IMAPI2 (disc burning) via COM.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_Storage_Imapi",
+    "Win32_Storage_IscsiDisc",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     "Win32_System_Ole",
+    "Win32_System_Power",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
     "Win32_System_Variant",
 ] }
 windows-core = "0.62"

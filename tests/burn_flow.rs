@@ -172,7 +172,7 @@ fn job(video_ts: &Path, iso: PathBuf) -> BurnJob {
         label: "Brenntest".into(),
         speed: WriteSpeed::Specific(5410),
         media_speeds: vec![10_820, 5_410, 2_705],
-        options: BurnOptions { layer_break: None, verify: true, eject: true, erase: false },
+        options: BurnOptions { layer_break: None, verify: true, eject: true, erase: false, ..Default::default() },
         keep_iso: false,
         capacities: Capacities::DVD,
     }

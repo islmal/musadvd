@@ -2,7 +2,7 @@
 //! (Discovery test burn), a 2352-byte-per-sector `.bin`, or an image that is built on the fly.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::thread::JoinHandle;
 
@@ -17,6 +17,16 @@ const S: usize = SECTOR as usize;
 pub trait SectorSource: Send {
     fn sectors(&self) -> u64;
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()>;
+
+    /// Can be read again from the start (needed to verify a burn against the source).
+    fn rewindable(&self) -> bool {
+        true
+    }
+
+    /// The ring buffer inside the source, if it has one (its fill level is the main buffer).
+    fn ring_stats(&self) -> Option<RingStats> {
+        None
+    }
 }
 
 impl SectorSource for Box<dyn SectorSource> {
@@ -26,6 +36,51 @@ impl SectorSource for Box<dyn SectorSource> {
 
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
         (**self).read(lba, buf)
+    }
+
+    fn rewindable(&self) -> bool {
+        (**self).rewindable()
+    }
+
+    fn ring_stats(&self) -> Option<RingStats> {
+        (**self).ring_stats()
+    }
+}
+
+/// A source as a sequential byte stream (what a burner pulls), read in chunks of 128 sectors.
+pub struct SourceReader {
+    src: Box<dyn SectorSource>,
+    next: u64,
+    buf: Vec<u8>,
+    pos: usize,
+    len: usize,
+}
+
+impl SourceReader {
+    pub fn new(src: Box<dyn SectorSource>) -> Self {
+        SourceReader { src, next: 0, buf: vec![0; 128 * S], pos: 0, len: 0 }
+    }
+
+    /// Gives the source back (to verify against it).
+    pub fn into_source(self) -> Box<dyn SectorSource> {
+        self.src
+    }
+}
+
+impl Read for SourceReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.pos == self.len {
+            let n = (self.src.sectors().saturating_sub(self.next)).min(128) as usize;
+            if n == 0 {
+                return Ok(0);
+            }
+            self.src.read(self.next, &mut self.buf[..n * S])?;
+            (self.pos, self.len, self.next) = (0, n * S, self.next + n as u64);
+        }
+        let n = out.len().min(self.len - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
     }
 }
 
@@ -172,6 +227,10 @@ impl<R: Read + Send> SectorSource for ReadSource<R> {
         self.sectors
     }
 
+    fn rewindable(&self) -> bool {
+        false
+    }
+
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
         check(buf);
         if lba != self.next {
@@ -181,6 +240,44 @@ impl<R: Read + Send> SectorSource for ReadSource<R> {
         self.next += (buf.len() / S) as u64;
         Ok(())
     }
+}
+
+/// A source pumped through a ring buffer by its own thread (for a burner that pulls bytes). The
+/// thread returns the source when it has delivered everything, so it can be verified against
+/// afterwards; when the source fails it cancels the ring, so the consumer cannot take the short
+/// stream for a complete one.
+pub struct RingFeed {
+    pub reader: RingReader,
+    pub stats: RingStats,
+    pub producer: JoinHandle<Result<Box<dyn SectorSource>, String>>,
+}
+
+pub fn spawn_ring_feed(source: Box<dyn SectorSource>, ring_bytes: usize, low_pct: u32, high_pct: u32) -> RingFeed {
+    let (mut writer, reader, stats) = ring(ring_bytes, low_pct, high_pct);
+    let on_error = stats.clone();
+    let producer = std::thread::spawn(move || {
+        let mut src = SourceReader::new(source);
+        let mut chunk = vec![0u8; 1 << 20];
+        let result = loop {
+            match src.read(&mut chunk) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    if let Err(e) = writer.write_all(&chunk[..n]) {
+                        break Err(e.to_string());
+                    }
+                }
+                Err(e) => break Err(format!("Quelle nicht lesbar: {e}")),
+            }
+        };
+        match result {
+            Ok(()) => Ok(src.into_source()),
+            Err(e) => {
+                on_error.cancel();
+                Err(e)
+            }
+        }
+    });
+    RingFeed { reader, stats, producer }
 }
 
 /// An image produced by a thread while it is being consumed (build and burn without a temporary
@@ -220,6 +317,14 @@ impl StreamSource {
 impl SectorSource for StreamSource {
     fn sectors(&self) -> u64 {
         self.sectors
+    }
+
+    fn rewindable(&self) -> bool {
+        false
+    }
+
+    fn ring_stats(&self) -> Option<RingStats> {
+        Some(self.stats.clone())
     }
 
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -304,6 +409,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn source_reader_streams_every_byte_in_order() {
+        let disc = FakeDisc::pattern(300); // more than two chunks of 128 sectors
+        let expect = disc.data.clone();
+        let mut r = SourceReader::new(Box::new(disc));
+        let mut got = Vec::new();
+        let mut small = [0u8; 1000]; // odd read size across sector and chunk borders
+        loop {
+            let n = r.read(&mut small).unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&small[..n]);
+        }
+        assert_eq!(got, expect);
+        assert_eq!(r.into_source().sectors(), 300);
+    }
+
+    #[test]
+    fn ring_feed_delivers_and_hands_the_source_back() {
+        let disc = FakeDisc::pattern(40);
+        let expect = disc.data.clone();
+        let mut feed = spawn_ring_feed(Box::new(disc), 64 * 1024, 0, 100);
+        let mut got = Vec::new();
+        feed.reader.read_to_end(&mut got).unwrap();
+        assert_eq!(got, expect);
+        let src = feed.producer.join().unwrap().unwrap();
+        assert_eq!(src.sectors(), 40);
+        assert!(src.rewindable());
+    }
+
+    #[test]
+    fn ring_feed_cancels_the_ring_when_the_source_fails() {
+        let mut disc = FakeDisc::pattern(300);
+        disc.fail.insert(200, u32::MAX);
+        let mut feed = spawn_ring_feed(Box::new(disc), 1 << 20, 0, 100);
+        // (`read_to_end` would retry on Interrupted forever.)
+        let mut buf = vec![0u8; 4096];
+        let e = loop {
+            match feed.reader.read(&mut buf) {
+                Ok(0) => panic!("ended as if the image was complete"),
+                Ok(_) => {}
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted, "the consumer sees an abort, not a short end");
+        assert!(feed.producer.join().unwrap().err().unwrap().starts_with("Quelle nicht lesbar"));
+    }
+
+    #[test]
+    fn source_reader_passes_read_errors_on() {
+        let mut disc = FakeDisc::pattern(10);
+        disc.fail.insert(5, u32::MAX);
+        let mut r = SourceReader::new(Box::new(disc));
+        assert!(std::io::copy(&mut r, &mut std::io::sink()).is_err());
+    }
+
+    #[test]
+    fn sequential_sources_are_not_rewindable() {
+        assert!(ZeroSource(1).rewindable() && ZeroSource(1).ring_stats().is_none());
+        assert!(!ReadSource::new(&b""[..], 0).rewindable());
+        let s = StreamSource::spawn(1, 4096, 0, 100, |w| w.write_all(&[0; 2048]).map_err(|e| e.to_string()));
+        assert!(!s.rewindable() && s.ring_stats().is_some());
     }
 
     #[test]

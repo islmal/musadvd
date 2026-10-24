@@ -455,7 +455,7 @@ fn burn(
         label,
         speed,
         media_speeds: media.speeds.clone(),
-        options: BurnOptions { layer_break: None, verify, eject, erase: erase && !media.blank },
+        options: BurnOptions { layer_break: None, verify, eject, erase: erase && !media.blank, ..Default::default() },
         keep_iso: keep_iso.is_some(),
         capacities: Capacities::DVD,
     };

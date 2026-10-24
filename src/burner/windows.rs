@@ -19,9 +19,12 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
 use windows::Win32::System::Variant::{VariantClear, VARIANT, VT_BSTR, VT_DISPATCH, VT_I4};
 
+use super::power::{self, StandbyGuard, TrayLock};
+use super::ringbuf::RingStats;
+use super::source::{spawn_ring_feed, SectorSource, SourceReader};
 use super::{
-    verify_against_image, BurnError, BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo, MediaType, OpticalBurner,
-    WriteSpeed,
+    verify_against_image, verify_against_source, BurnError, BurnOptions, BurnPhase, BurnProgress, DriveInfo, MediaInfo,
+    MediaType, OpticalBurner, Telemetry, TelemetryHook, WriteSpeed,
 };
 
 const CLIENT_NAME: &str = "convertx-rust";
@@ -30,7 +33,7 @@ const NO_MEDIA: HRESULT = HRESULT(0xC0AA0202u32 as i32);
 /// RPC_E_CHANGED_MODE: COM already initialised as STA on this thread (fine for IMAPI2).
 const CHANGED_MODE: HRESULT = HRESULT(0x80010106u32 as i32);
 
-fn backend(e: windows::core::Error) -> BurnError {
+pub(super) fn backend(e: windows::core::Error) -> BurnError {
     if e.code() == NO_MEDIA {
         BurnError::NoMedia
     } else {
@@ -40,10 +43,10 @@ fn backend(e: windows::core::Error) -> BurnError {
 
 /// COM for the current thread, released on drop. `true`: initialised here as MTA; `false`: the
 /// thread already was an STA (no message loop of ours, so no COM events are delivered).
-struct Com(bool);
+pub(super) struct Com(bool);
 
 impl Com {
-    fn init() -> Result<Self, BurnError> {
+    pub(super) fn init() -> Result<Self, BurnError> {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr == CHANGED_MODE {
             return Ok(Com(false));
@@ -97,7 +100,7 @@ fn clear(mut vs: Vec<VARIANT>) {
     }
 }
 
-fn recorder(id: &str) -> Result<IDiscRecorder2, BurnError> {
+pub(super) fn recorder(id: &str) -> Result<IDiscRecorder2, BurnError> {
     unsafe {
         let r: IDiscRecorder2 = CoCreateInstance(&MsftDiscRecorder2, None, CLSCTX_ALL).map_err(backend)?;
         r.InitializeDiscRecorder(&BSTR::from(id)).map_err(backend)?;
@@ -244,10 +247,27 @@ fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnErro
     }
 }
 
-/// IStream over the image file that reports progress and aborts on cancel.
+/// Where the bytes of the image come from.
+enum Feed {
+    /// An image file: IMAPI may seek in it.
+    File(File),
+    /// A sequential stream (ring buffer behind a source): only position queries work.
+    Reader(Box<dyn Read + Send>),
+}
+
+impl Feed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Feed::File(f) => f.read(buf),
+            Feed::Reader(r) => r.read(buf),
+        }
+    }
+}
+
+/// IStream over the image that reports progress and aborts on cancel.
 #[implement(IStream)]
 struct ImageStream {
-    file: Mutex<File>,
+    feed: Mutex<Feed>,
     len: u64,
     pos: AtomicU64,
     reported: AtomicU64,
@@ -256,6 +276,8 @@ struct ImageStream {
     /// Set once IMAPI's write events arrive; until then (or without them) progress is derived
     /// from the data handed to IMAPI, which runs ahead of the real write position (buffering).
     events_seen: Arc<AtomicBool>,
+    ring: Option<RingStats>,
+    hook: Option<TelemetryHook>,
 }
 
 impl ImageStream {
@@ -275,27 +297,33 @@ impl ISequentialStream_Impl for ImageStream_Impl {
             return E_ABORT;
         }
         let buf = unsafe { std::slice::from_raw_parts_mut(pv as *mut u8, cb as usize) };
-        let mut file = self.file.lock().unwrap();
+        let mut feed = self.feed.lock().unwrap();
         let mut n = 0;
         while n < buf.len() {
-            match file.read(&mut buf[n..]) {
+            match feed.read(&mut buf[n..]) {
                 Ok(0) => break,
                 Ok(r) => n += r,
                 Err(_) => return E_ABORT,
             }
         }
+        drop(feed);
         if !pcbread.is_null() {
             unsafe { *pcbread = n as u32 };
         }
         let pos = self.pos.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
         // Report every ~8 MB and at the end.
         let last = self.reported.load(Ordering::Relaxed);
-        if self.events_seen.load(Ordering::Relaxed) {
+        let events = self.events_seen.load(Ordering::Relaxed);
+        if events {
         } else if pos >= self.len {
             self.send(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Disc wird abgeschlossen …"));
         } else if pos - last.min(pos) >= 8 << 20 || last == 0 {
             self.reported.store(pos, Ordering::Relaxed);
             self.send(BurnProgress::new(BurnPhase::Writing, pos as f64 / self.len as f64, "Daten werden geschrieben …"));
+        }
+        // Before the write events start, the data handed over is the best position there is.
+        if let (Some(hook), false) = (&self.hook, events) {
+            (hook.0)(Telemetry { lba: pos / 2048, ring_percent: self.ring.as_ref().map_or(0, RingStats::percent), device_percent: None });
         }
         S_OK
     }
@@ -307,14 +335,32 @@ impl ISequentialStream_Impl for ImageStream_Impl {
 
 impl IStream_Impl for ImageStream_Impl {
     fn Seek(&self, dlibmove: i64, dworigin: STREAM_SEEK, plibnewposition: *mut u64) -> windows::core::Result<()> {
-        let mut file = self.file.lock().unwrap();
-        let target = match dworigin {
-            STREAM_SEEK_SET => SeekFrom::Start(dlibmove as u64),
-            STREAM_SEEK_CUR => SeekFrom::Current(dlibmove),
-            STREAM_SEEK_END => SeekFrom::End(dlibmove),
-            _ => return Err(E_NOTIMPL.into()),
+        let mut feed = self.feed.lock().unwrap();
+        let pos = match &mut *feed {
+            Feed::File(file) => {
+                let target = match dworigin {
+                    STREAM_SEEK_SET => SeekFrom::Start(dlibmove as u64),
+                    STREAM_SEEK_CUR => SeekFrom::Current(dlibmove),
+                    STREAM_SEEK_END => SeekFrom::End(dlibmove),
+                    _ => return Err(E_NOTIMPL.into()),
+                };
+                file.seek(target).map_err(|_| windows::core::Error::from(E_ABORT))?
+            }
+            // A stream cannot go back: only "where am I" (and seeks to exactly there) succeed.
+            Feed::Reader(_) => {
+                let cur = self.pos.load(Ordering::Relaxed);
+                let target = match dworigin {
+                    STREAM_SEEK_SET => dlibmove,
+                    STREAM_SEEK_CUR => cur as i64 + dlibmove,
+                    STREAM_SEEK_END => self.len as i64 + dlibmove,
+                    _ => return Err(E_NOTIMPL.into()),
+                };
+                if target != cur as i64 {
+                    return Err(E_NOTIMPL.into());
+                }
+                cur
+            }
         };
-        let pos = file.seek(target).map_err(|_| windows::core::Error::from(E_ABORT))?;
         self.pos.store(pos, Ordering::Relaxed);
         if !plibnewposition.is_null() {
             unsafe { *plibnewposition = pos };
@@ -385,6 +431,8 @@ struct WriteEvents {
     last: Mutex<Option<(BurnPhase, u32)>>,
     /// Tells the image stream to stop reporting.
     seen: Arc<AtomicBool>,
+    ring: Option<RingStats>,
+    hook: Option<TelemetryHook>,
 }
 
 impl WriteEvents {
@@ -404,6 +452,13 @@ impl WriteEvents {
             else {
                 return;
             };
+            if let Some(hook) = &self.hook {
+                (hook.0)(Telemetry {
+                    lba: last.max(0) as u64,
+                    ring_percent: self.ring.as_ref().map_or(0, RingStats::percent),
+                    device_percent: None,
+                });
+            }
             write_update(action, start, count, last)
         };
         let Some(p) = p else { return };
@@ -476,7 +531,14 @@ struct EventConnection {
 impl EventConnection {
     /// Connects a sink to `format`; `None` when IMAPI does not offer the events (the stream's
     /// progress is used then). Events need an MTA thread (they arrive on IMAPI's threads).
-    fn advise(format: &IDiscFormat2Data, cancel: &AtomicBool, tx: Sender<BurnProgress>, seen: Arc<AtomicBool>) -> Option<Self> {
+    fn advise(
+        format: &IDiscFormat2Data,
+        cancel: &AtomicBool,
+        tx: Sender<BurnProgress>,
+        seen: Arc<AtomicBool>,
+        ring: Option<RingStats>,
+        hook: Option<TelemetryHook>,
+    ) -> Option<Self> {
         unsafe {
             let container: IConnectionPointContainer = format.cast().ok()?;
             let point = container.FindConnectionPoint(&DDiscFormat2DataEvents::IID).ok()?;
@@ -486,6 +548,8 @@ impl EventConnection {
                 tx: Mutex::new(tx),
                 last: Mutex::new(None),
                 seen,
+                ring,
+                hook,
             }
             .into();
             let cookie = point.Advise(&sink).ok()?;
@@ -551,107 +615,187 @@ impl OpticalBurner for ImapiBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
-        let com = Com::init()?;
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …"));
-        let rec = recorder(drive_id)?;
-        let (media, format) = probe(&rec)?;
         let file = File::open(iso_path)?;
         let len = file.metadata()?.len();
-        let sectors = len.div_ceil(2048);
-        if !media.present {
-            return Err(BurnError::NoMedia);
-        }
-        if !media.writable {
-            return Err(BurnError::Unsupported(format!("{} kann in diesem Laufwerk nicht beschrieben werden", media.physical)));
-        }
-        if !media.blank && !media.rewritable {
-            return Err(BurnError::Unsupported(format!("die {} ist nicht leer", media.physical)));
-        }
-        if !media.blank && !options.erase {
-            return Err(BurnError::Unsupported(format!("die {} enthält Daten und darf nicht gelöscht werden", media.physical)));
-        }
-        let (media, format) = if !media.blank && media.physical == "DVD-RW" {
-            // Sequential DVD-RW has to be blanked before it can take a new disc-at-once image.
-            let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "DVD-RW wird gelöscht …"));
-            erase(&rec)?;
-            probe(&rec)?
-        } else {
-            (media, format)
-        };
-        let free = if media.blank { media.free_sectors } else { media.total_sectors };
-        if free < sectors {
-            return Err(BurnError::NotEnoughSpace { needed: sectors, free });
-        }
-        unsafe {
-            // DVD+R DL: forcing the close fails at the end of the write on some drives
-            // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
-            if media.media_type != MediaType::Dvd9 {
-                format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(backend)?;
-            }
-            if !media.blank {
-                // Rewritable disc with old content: overwrite from the start.
-                format.SetForceOverwrite(VARIANT_TRUE).map_err(backend)?;
-            }
-            let sps = match speed {
-                WriteSpeed::Max => -1,
-                WriteSpeed::Specific(s) => s as i32,
-            };
-            format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(backend)?;
-        }
-        if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
-            if media.layer_break_supported {
-                set_layer_break(&rec, l0)?;
-            } else {
-                let _ = progress_tx.send(BurnProgress::new(
-                    BurnPhase::Preparing,
-                    0.0,
-                    format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
-                ));
-            }
-        }
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
-        // IMAPI's write events report the real position; the image stream reports until the
-        // first event arrives (or throughout, without events).
-        let events_seen = Arc::new(AtomicBool::new(false));
-        let events = if com.0 { EventConnection::advise(&format, cancel, progress_tx.clone(), events_seen.clone()) } else { None };
-        let stream: IStream = ImageStream {
-            file: Mutex::new(file),
-            len,
-            pos: AtomicU64::new(0),
-            reported: AtomicU64::new(0),
-            cancel: cancel as *const AtomicBool,
-            tx: Mutex::new(progress_tx.clone()),
-            events_seen,
-        }
-        .into();
-        let written = unsafe { format.Write(&stream) };
-        drop(events);
-        drop(stream);
-        if let Err(e) = written {
-            return Err(if cancel.load(Ordering::Relaxed) { BurnError::Cancelled } else { backend(e) });
-        }
-
-        if options.verify {
-            let letter = volume_paths(&rec).into_iter().next().unwrap_or_default();
-            let letter = letter.trim_end_matches('\\');
-            if letter.is_empty() {
-                return Err(BurnError::Backend("Überprüfung nicht möglich: Laufwerk hat keinen Laufwerksbuchstaben".into()));
-            }
-            let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Disc wird überprüft …"));
-            let mut device = File::open(format!(r"\\.\{letter}"))?;
-            let tx = progress_tx.clone();
-            verify_against_image(&mut device, iso_path, cancel, &mut |f| {
+        let feed = Feed::File(file);
+        let mut verify = |device: &mut File, tx: &Sender<BurnProgress>| {
+            verify_against_image(device, iso_path, cancel, &mut |f| {
                 let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Disc wird überprüft …"));
-            })?;
+            })
+        };
+        burn_feed(drive_id, feed, len, None, speed, options, cancel, progress_tx, &mut verify)
+    }
+
+    fn burn_source(
+        &self,
+        drive_id: &str,
+        source: Box<dyn SectorSource>,
+        speed: WriteSpeed,
+        options: &BurnOptions,
+        cancel: &AtomicBool,
+        progress_tx: Sender<BurnProgress>,
+    ) -> Result<(), BurnError> {
+        let sectors = source.sectors();
+        if options.verify && !source.rewindable() {
+            return Err(BurnError::Unsupported("Die Überprüfung braucht eine Quelle, die erneut gelesen werden kann".into()));
         }
-        if options.eject {
-            unsafe {
-                let _ = rec.EjectMedia();
+        // A source with a ring of its own (image built on the fly) is read directly; any other
+        // gets a producer thread and a ring buffer.
+        let (feed, stats, producer): (Feed, Option<RingStats>, Option<std::thread::JoinHandle<Result<Box<dyn SectorSource>, String>>>) =
+            if let Some(stats) = source.ring_stats() {
+                (Feed::Reader(Box::new(SourceReader::new(source))), Some(stats), None)
+            } else {
+                let mib = if options.ring_mib == 0 { 40 } else { options.ring_mib } as usize;
+                let f = spawn_ring_feed(source, mib << 20, options.recovery_low, options.recovery_high);
+                (Feed::Reader(Box::new(f.reader)), Some(f.stats), Some(f.producer))
+            };
+        let mut producer = producer;
+        let mut verify = |device: &mut File, tx: &Sender<BurnProgress>| {
+            let mut src = producer
+                .take()
+                .and_then(|h| h.join().ok())
+                .ok_or_else(|| BurnError::Image("Bildquelle nicht mehr verfügbar".into()))?
+                .map_err(BurnError::Image)?;
+            verify_against_source(device, &mut src, cancel, &mut |f| {
+                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Disc wird überprüft …"));
+            })
+        };
+        let result = burn_feed(drive_id, feed, sectors * 2048, stats.clone(), speed, options, cancel, progress_tx, &mut verify);
+        if let Some(h) = producer {
+            if result.is_err() {
+                stats.iter().for_each(RingStats::cancel);
+            }
+            // The producer's own error explains a failed burn better than the aborted stream.
+            if let Ok(Err(e)) = h.join() {
+                if result.is_err() && !cancel.load(Ordering::Relaxed) {
+                    return Err(BurnError::Image(e));
+                }
             }
         }
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Fertig"));
-        Ok(())
+        result
     }
+}
+
+type Verify<'a> = dyn FnMut(&mut File, &Sender<BurnProgress>) -> Result<(), BurnError> + 'a;
+
+/// Burns `len` bytes from `feed` (the common part of `burn_iso` and `burn_source`).
+#[allow(clippy::too_many_arguments)]
+fn burn_feed(
+    drive_id: &str,
+    feed: Feed,
+    len: u64,
+    ring: Option<RingStats>,
+    speed: WriteSpeed,
+    options: &BurnOptions,
+    cancel: &AtomicBool,
+    progress_tx: Sender<BurnProgress>,
+    verify: &mut Verify<'_>,
+) -> Result<(), BurnError> {
+    let com = Com::init()?;
+    let _standby = options.prevent_standby.then(StandbyGuard::new);
+    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …"));
+    let rec = recorder(drive_id)?;
+    let (media, format) = probe(&rec)?;
+    let sectors = len.div_ceil(2048);
+    if !media.present {
+        return Err(BurnError::NoMedia);
+    }
+    if !media.writable {
+        return Err(BurnError::Unsupported(format!("{} kann in diesem Laufwerk nicht beschrieben werden", media.physical)));
+    }
+    if !media.blank && !media.rewritable {
+        return Err(BurnError::Unsupported(format!("die {} ist nicht leer", media.physical)));
+    }
+    if !media.blank && !options.erase {
+        return Err(BurnError::Unsupported(format!("die {} enthält Daten und darf nicht gelöscht werden", media.physical)));
+    }
+    let (media, format) = if !media.blank && media.physical == "DVD-RW" {
+        // Sequential DVD-RW has to be blanked before it can take a new disc-at-once image.
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "DVD-RW wird gelöscht …"));
+        erase(&rec)?;
+        probe(&rec)?
+    } else {
+        (media, format)
+    };
+    let free = if media.blank { media.free_sectors } else { media.total_sectors };
+    if free < sectors {
+        return Err(BurnError::NotEnoughSpace { needed: sectors, free });
+    }
+    let letter = volume_paths(&rec).into_iter().next().unwrap_or_default();
+    let letter = letter.trim_end_matches('\\').to_string();
+    // Dropped before the disc is ejected.
+    let tray_lock = options.lock_tray.then(|| power::drive_letter(&letter).and_then(|l| TrayLock::acquire(l).ok())).flatten();
+    unsafe {
+        // DVD+R DL: forcing the close fails at the end of the write on some drives
+        // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
+        if media.media_type != MediaType::Dvd9 {
+            format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(backend)?;
+        }
+        if !media.blank {
+            // Rewritable disc with old content: overwrite from the start.
+            format.SetForceOverwrite(VARIANT_TRUE).map_err(backend)?;
+        }
+        let sps = match speed {
+            WriteSpeed::Max => -1,
+            WriteSpeed::Specific(s) => s as i32,
+        };
+        format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(backend)?;
+    }
+    if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
+        if media.layer_break_supported {
+            set_layer_break(&rec, l0)?;
+        } else {
+            let _ = progress_tx.send(BurnProgress::new(
+                BurnPhase::Preparing,
+                0.0,
+                format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
+            ));
+        }
+    }
+    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
+    // IMAPI's write events report the real position; the image stream reports until the
+    // first event arrives (or throughout, without events).
+    let events_seen = Arc::new(AtomicBool::new(false));
+    let events = if com.0 {
+        EventConnection::advise(&format, cancel, progress_tx.clone(), events_seen.clone(), ring.clone(), options.telemetry.clone())
+    } else {
+        None
+    };
+    let stream: IStream = ImageStream {
+        feed: Mutex::new(feed),
+        len,
+        pos: AtomicU64::new(0),
+        reported: AtomicU64::new(0),
+        cancel: cancel as *const AtomicBool,
+        tx: Mutex::new(progress_tx.clone()),
+        events_seen,
+        ring,
+        hook: options.telemetry.clone(),
+    }
+    .into();
+    let written = unsafe { format.Write(&stream) };
+    drop(events);
+    drop(stream);
+    if let Err(e) = written {
+        return Err(if cancel.load(Ordering::Relaxed) { BurnError::Cancelled } else { backend(e) });
+    }
+
+    if options.verify {
+        if letter.is_empty() {
+            return Err(BurnError::Backend("Überprüfung nicht möglich: Laufwerk hat keinen Laufwerksbuchstaben".into()));
+        }
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Disc wird überprüft …"));
+        let mut device = File::open(format!(r"\\.\{letter}"))?;
+        verify(&mut device, &progress_tx)?;
+    }
+    drop(tray_lock);
+    if options.eject {
+        unsafe {
+            let _ = rec.EjectMedia();
+        }
+    }
+    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Fertig"));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -691,7 +835,7 @@ mod tests {
         let format: IDiscFormat2Data = unsafe { CoCreateInstance(&MsftDiscFormat2Data, None, CLSCTX_ALL) }.expect("IMAPI2 available");
         let (tx, _rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(false);
-        let connection = EventConnection::advise(&format, &cancel, tx, Arc::new(AtomicBool::new(false)))
+        let connection = EventConnection::advise(&format, &cancel, tx, Arc::new(AtomicBool::new(false)), None, None)
             .expect("IMAPI offers DDiscFormat2DataEvents");
         drop(connection);
     }

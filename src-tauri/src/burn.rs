@@ -270,7 +270,7 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<B
         label: req.label.clone(),
         speed: req.speed,
         media_speeds,
-        options: BurnOptions { layer_break: None, verify: req.verify, eject: req.eject, erase: req.erase },
+        options: BurnOptions { layer_break: None, verify: req.verify, eject: req.eject, erase: req.erase, ..Default::default() },
         // Deleting the DVD afterwards takes the image with it.
         keep_iso: req.keep_iso && !req.delete_after,
         capacities: Capacities::DVD,

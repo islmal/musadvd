@@ -3,13 +3,16 @@
 //! elsewhere).
 
 pub mod builder;
+pub mod graph;
 pub mod isoread;
 pub mod label;
 pub mod layerbreak;
+pub mod power;
 pub mod reader;
 pub mod ringbuf;
 pub mod sidecar;
 pub mod source;
+pub mod spti;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod tools;
@@ -389,6 +392,37 @@ pub struct BurnOptions {
     pub eject: bool,
     /// A rewritable disc with old content may be erased/overwritten.
     pub erase: bool,
+    /// Ring buffer between the source and the burner in MiB (`burn_source`; 0 = 40).
+    pub ring_mib: u32,
+    /// Buffer recovery: pause below `recovery_low` % until `recovery_high` % (0 = off).
+    pub recovery_low: u32,
+    pub recovery_high: u32,
+    /// No standby while burning.
+    pub prevent_standby: bool,
+    /// Lock the tray while burning and verifying.
+    pub lock_tray: bool,
+    /// Receives the position and buffer levels while burning (graph telemetry).
+    pub telemetry: Option<TelemetryHook>,
+}
+
+/// A reading of the burn in progress (what the graph samples).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Telemetry {
+    /// Sector last written (IMAPI events) or handed to the burner.
+    pub lba: u64,
+    /// Fill level of our ring buffer; 0 without one.
+    pub ring_percent: u32,
+    /// Device buffer; `None` when the backend cannot tell (IMAPI).
+    pub device_percent: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct TelemetryHook(pub std::sync::Arc<dyn Fn(Telemetry) + Send + Sync>);
+
+impl fmt::Debug for TelemetryHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TelemetryHook")
+    }
 }
 
 #[derive(Debug)]
@@ -447,6 +481,21 @@ pub trait OpticalBurner: Send + Sync {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError>;
+
+    /// Burns the sectors of `source` (an image that is built on the fly, zeros, a `.bin`) through
+    /// a ring buffer of `options.ring_mib`. Verification re-reads the source, so it needs a
+    /// rewindable one. Backends that can only burn files report "nicht unterstützt".
+    fn burn_source(
+        &self,
+        _drive_id: &str,
+        _source: Box<dyn source::SectorSource>,
+        _speed: WriteSpeed,
+        _options: &BurnOptions,
+        _cancel: &AtomicBool,
+        _progress_tx: Sender<BurnProgress>,
+    ) -> Result<(), BurnError> {
+        Err(BurnError::Unsupported("Brennen aus Quellen (nur unter Windows)".into()))
+    }
 }
 
 /// The burner of this platform.
@@ -600,12 +649,21 @@ pub fn verify_against_image(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
 ) -> Result<(), BurnError> {
-    use source::SectorSource;
     let mut img = source::FileSource::open(image)?;
-    let mut disc = source::ReadSource::new(device, img.sectors());
+    verify_against_source(device, &mut img, cancel, progress)
+}
+
+/// [`verify_against_image`] against any source that can be read from the start.
+pub fn verify_against_source(
+    device: &mut (impl Read + Send),
+    image: &mut dyn source::SectorSource,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(f64),
+) -> Result<(), BurnError> {
+    let mut disc = source::ReadSource::new(device, image.sectors());
     // A sequential device cannot be read twice, so no retries here.
     let opts = verifier::VerifyOptions { sw_retries: 0, stop_at_first: true, chunk_sectors: 512, ..Default::default() };
-    match verifier::verify(&mut disc, &mut img, &opts, cancel, progress) {
+    match verifier::verify(&mut disc, image, &opts, cancel, progress) {
         Ok(r) if r.passed => Ok(()),
         Ok(r) => Err(BurnError::VerifyFailed { sector: r.unreadable.iter().chain(&r.miscompares).copied().min().unwrap_or(0) }),
         Err(verifier::VerifyError::Cancelled) => Err(BurnError::Cancelled),
