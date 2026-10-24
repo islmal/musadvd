@@ -187,8 +187,8 @@ pub fn read_disc_structure(bd: bool, address: u32, layer: u8, format: u8, alloc:
 /// write speed to `kbytes_per_sec` over the whole medium (`last_lba`), one second granularity.
 pub fn set_streaming() -> [u8; 12] {
     let mut c = cdb::<12>(0xB6);
-    c[8..10].copy_from_slice(&28u16.to_be_bytes());
-    c[10] = 0; // type: performance descriptor
+    c[8] = 0; // type: performance descriptor
+    c[9..11].copy_from_slice(&28u16.to_be_bytes());
     c
 }
 
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(read_buffer_capacity(12), [0x5C, 0, 0, 0, 0, 0, 0, 0, 12, 0]);
         assert_eq!(get_performance_write_speeds(32), [0xAC, 4, 0, 0, 0, 0, 0, 0, 0, 32, 3, 0]);
         assert_eq!(read_disc_structure(true, 0x01020304, 1, 0x11, 0x0204), [0xAD, 1, 1, 2, 3, 4, 1, 0x11, 2, 4, 0, 0]);
-        assert_eq!(set_streaming(), [0xB6, 0, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0]);
+        assert_eq!(set_streaming(), [0xB6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 0]);
         assert_eq!(send_disc_structure(0x20, 12), [0xBF, 0, 0, 0, 0, 0, 0, 0x20, 0, 12, 0, 0]);
     }
 

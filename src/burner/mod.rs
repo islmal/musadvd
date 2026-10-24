@@ -7,6 +7,7 @@ pub mod graph;
 pub mod isoread;
 pub mod label;
 pub mod layerbreak;
+pub mod mmcwrite;
 pub mod power;
 pub mod reader;
 pub mod ringbuf;

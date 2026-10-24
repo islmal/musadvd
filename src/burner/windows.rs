@@ -117,7 +117,7 @@ fn format_for(rec: &IDiscRecorder2) -> Result<IDiscFormat2Data, BurnError> {
     }
 }
 
-fn volume_paths(rec: &IDiscRecorder2) -> Vec<String> {
+pub(super) fn volume_paths(rec: &IDiscRecorder2) -> Vec<String> {
     unsafe {
         let Ok(sa) = rec.VolumePathNames() else { return vec![] };
         let vs = variants(sa);
