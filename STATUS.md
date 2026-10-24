@@ -1,7 +1,7 @@
 # STATUS — convertx-rust
 
 > Single source of truth for handing this project to another contributor (human or AI).
-> State as of **2026-10-24** (incl. **Burn Studio milestones M1 + M2 + M3a + M3b + M4 (M4: `burn-studio` window, Tauri commands/events `burn_studio.rs`, shared operations layer `burner/studio.rs`, CLI `read-disc`/`verify-disc`/`build-iso`/`iso-label`/`ifo-layerbreak`/`drive-info`, `--burn-studio` start flag — nothing of it ever ran against a real disc; M3b: direct MMC write engine `mmcwrite.rs`, opt-in, never run on a real drive; MMC command layer with IMAPI-Ex and SPTI transports, drive info, standby/tray guards, `burn_source` with ring buffer, graph telemetry + `.ibg`; settings, sidecars, ISO reader, label patcher, layer-break inspector, generic UDF/ISO/Joliet tree writer, builder, sources, ring buffer, reader, verifier; plan not finished, §6.1)**, **Blu-ray menus from the menu editor (HDMV + IGS, VLC-verified)**, **NVENC for Blu-ray (verified on RTX 4070 SUPER, driver 617.42)**, **Blu-ray output**, menu editor, fast encoding, CLI `burn`, shared burn flow, IMAPI write events, Half D1/SIF + SP/MP/LP, bitmap subtitles, audit fixes). Everything marked ✅ was built **and** exercised (tests or real
+> State as of **2026-10-24** (incl. **Burn Studio milestones M1 + M2 + M3a + M3b + M4 (M4: `burn-studio` window, Tauri commands/events `burn_studio.rs`, shared operations layer `burner/studio.rs`, CLI `read-disc`/`verify-disc`/`build-iso`/`iso-label`/`ifo-layerbreak`/`drive-info`, `--burn-studio` start flag — nothing of it ever ran against a real disc; M3b: direct MMC write engine `mmcwrite.rs`, opt-in, never run on a real drive; MMC command layer with IMAPI-Ex and SPTI transports, drive info, standby/tray guards, `burn_source` with ring buffer, graph telemetry + `.ibg`; settings, sidecars, ISO reader, label patcher, layer-break inspector, generic UDF/ISO/Joliet tree writer, builder, sources, ring buffer, reader, verifier; plan complete, hardware session open, §6.1)**, **Blu-ray menus from the menu editor (HDMV + IGS, VLC-verified)**, **NVENC for Blu-ray (verified on RTX 4070 SUPER, driver 617.42)**, **Blu-ray output**, menu editor, fast encoding, CLI `burn`, shared burn flow, IMAPI write events, Half D1/SIF + SP/MP/LP, bitmap subtitles, audit fixes). Everything marked ✅ was built **and** exercised (tests or real
 > runs); 🟡 is implemented but not verified end-to-end; ⛔ is not implemented.
 >
 > The project is a **git repository** since 2026-10-15 (branch `main`; the initial commit is
@@ -423,6 +423,30 @@ from the menu editor see **Blu-ray menus** at the end of this section.
   is created by us; the BD capacities live in `udf250` (`BD25_SECTORS`, `BD50_SECTORS`), not as
   `Capacities` constants (`layerbreak.rs` is unchanged).
 
+### 2.9 Burn Studio (ImgBurn replacement)
+
+A separate window (`burn-studio`, third Vite page `burnStudio.html`; start flag `--burn-studio`) with
+six modes (write image, write files/folders, build image, read disc, verify, Discovery) plus tools
+(label patcher, IFO layer-break inspector, drive/media info). The GUI and the CLI share one
+operations layer, `burner/studio.rs`; the Tauri side (`src-tauri/src/burn_studio.rs`) only wraps it
+in commands/events (one operation at a time, cancel flag, tray-lock holder thread).
+
+- **Data flow:** sources (`source.rs`: `FileSource`, `Bin2352Source`, `ReadSource`, `StreamSource` =
+  image built on the fly through the `ringbuf.rs` ring buffer with buffer-recovery hysteresis) ->
+  write backend -> graph telemetry (`graph.rs`, `.ibg`). Images come from `builder.rs` (`detect`
+  DVD-Video / Blu-ray / data -> `udf.rs`/`udf250.rs` generic tree writer; the DVD image stays
+  byte-identical, guarded by a golden MD5 test). Reading/verifying: `reader.rs` (retries, bad-sector
+  handling, split output) and `verifier.rs`; `isoread.rs` maps miscompared sectors to files.
+- **Backends (`io.backend`):** `imapi` (default; `burn_source` over IMAPI2) or `direct`
+  ("SPTI Direkt", opt-in; `mmcwrite.rs` sends the MMC write commands itself). The MMC command layer
+  with its two transports (IMAPI-Ex, SPTI), drive/media info and standby/tray guards lives in
+  `spti.rs` / `power.rs`.
+- **Sidecars/settings:** `.dvd` (layer break), `.cue`, `.mds` (layout unverified against
+  Alcohol/Daemon Tools); `BurnStudioSettings` in `config.rs` (`AppSettings.burn_studio`).
+- **Status:** covered by unit/CLI tests and one browser run with a mocked `invoke`; **no operation
+  ever ran against a real disc and the window never ran in real Tauri** - see §5.3 and the
+  hardware session in §6.1.
+
 ---
 
 ## 3. Implemented modules & current status
@@ -790,7 +814,7 @@ ConvertX templates are missing.
     (today a title with fewer tracks silently gets filler tracks – only the build report says so);
     per-title text-subtitle styling; DTS/E-AC-3 pass-through instead of AC-3 re-encoding.
 - 🟡 Try NVENC BDs on a standalone player; more than 4 concurrent sessions (§5.3).
-- [in progress] Burn Studio (ImgBurn replacement: window, 6 modes, tools, MMC layer, graph data) → docs/plans/2026-10-24-burn-studio.md. **Done: Step 0, M1, M2, M3a, M3b and M4** (M4 = `burn-studio` window, Tauri commands/events, operations layer `burner/studio.rs`, CLI subcommands; backend `direct` → `mmcwrite::burn_direct` is wired; 🟡 never run with a disc or in a real Tauri window). **Next: M5** (full verification, STATUS §2.9, remove the plan file), then the hardware session (read-only probes, read/verify of a pressed DVD, IMAPI write, direct engine). Known gaps of M4: no drag & drop into the file list, no per-file destination editing (`BuildInput.sources[].dest` is always empty), no batch mode ("eject and next disc" for reading), the ignored settings listed in §3.1. The plan file stays until M5; resume at the first unticked item of its checklist.
+- Burn Studio **hardware session** (needs the user's go and blank media; not part of any milestone): read-only probes (`drive-info`), read/verify of a pressed DVD, one IMAPI write of a small image, then the direct engine (`io.backend = direct`) on a rewritable disc, and the window in a real Tauri run (capability set, `--burn-studio`). Known gaps: no drag & drop into the file list, no per-file destination editing (`BuildInput.sources[].dest` is always empty), no batch mode, the ignored settings listed in §3.1. See §5.3.
 
 Agreed order of the remaining work (2026-10-15 audit; details in the review plan):
 M1 shared burn flow + fake-burner tests + process hygiene (**done**) → M2 IMAPI write events
@@ -952,6 +976,12 @@ convertx-gui.exe --burn-studio               # starts with the Burn Studio windo
 ## 8. Changelog
 
 Newest first. Every change to the project adds an entry here (rule in `CLAUDE.md`).
+
+### 2026-10-24 — Burn Studio, M5 (final verification, STATUS completion, plan file removed)
+
+- Burn Studio plan (`docs/plans/2026-10-24-burn-studio.md`: Step 0, M1, M2, M3a, M3b, M4, M5) is complete as far as it can be without hardware. Added §2.9, turned the §6.1 plan line into the hardware-session task, removed the plan file.
+- Files: `STATUS.md`; deleted `docs/plans/2026-10-24-burn-studio.md` (it was untracked).
+- Verified: `cargo test --workspace` 338/338, `cargo check --workspace --all-targets`, Linux `cargo check --target x86_64-unknown-linux-gnu`, `npm run build` all green. **Not verified:** everything listed in §5.3 for Burn Studio (real disc, real Tauri window, direct write engine on a drive).
 
 ### 2026-10-24 — Burn Studio, M4 (Tauri commands/events, operations layer, CLI subcommands, `burn-studio` window)
 
