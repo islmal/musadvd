@@ -743,6 +743,24 @@ void listen<CustomLayout>("editor-apply", ({ payload }) => {
   status("Eigenes Menü übernommen.");
 });
 
+// The Burn Studio is its own window ("burn-studio", burnStudio.html): created or focused.
+async function openStudio() {
+  const existing = await WebviewWindow.getByLabel("burn-studio");
+  if (existing) {
+    await existing.setFocus();
+    return;
+  }
+  const win = new WebviewWindow("burn-studio", {
+    url: "burnStudio.html",
+    title: "Brennstudio – ConvertX Rust",
+    width: 1180,
+    height: 800,
+    minWidth: 900,
+    minHeight: 620,
+  });
+  void win.once("tauri://error", (ev) => status(`Brennstudio konnte nicht geöffnet werden: ${String(ev.payload)}`));
+}
+
 async function openEditor() {
   const existing = await WebviewWindow.getByLabel("menu-editor");
   if (existing) {
@@ -1185,6 +1203,7 @@ async function init() {
     status(`Einstellungen konnten nicht geladen werden: ${e}`, "error");
   }
   updateCustomDiscLabel();
+  $("btn-studio").addEventListener("click", () => void openStudio());
   $("btn-settings").addEventListener("click", async () => {
     if (state.converting || !state.settings) return;
     const info = await settingsInfo();

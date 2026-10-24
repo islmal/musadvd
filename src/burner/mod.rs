@@ -14,6 +14,7 @@ pub mod ringbuf;
 pub mod sidecar;
 pub mod source;
 pub mod spti;
+pub mod studio;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod tools;

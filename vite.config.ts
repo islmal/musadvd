@@ -9,7 +9,8 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: true,
     target: "es2022",
-    // Second page (paths relative to the repo root, where npm runs vite): the menu editor window (frontend/editor.html).
-    rollupOptions: { input: { main: "frontend/index.html", editor: "frontend/editor.html" } },
+    // Further pages (paths relative to the repo root, where npm runs vite): the menu editor window
+    // (frontend/editor.html) and the Burn Studio window (frontend/burnStudio.html).
+    rollupOptions: { input: { main: "frontend/index.html", editor: "frontend/editor.html", studio: "frontend/burnStudio.html" } },
   },
 });

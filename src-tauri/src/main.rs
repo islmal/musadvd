@@ -14,6 +14,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod burn;
+mod burn_studio;
 mod menu_editor;
 
 use std::path::{Path, PathBuf};
@@ -637,12 +638,37 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .manage(burn::BurnState::default())
+        .manage(burn_studio::StudioState::default())
+        .setup(|app| {
+            // `--burn-studio`: start with the Burn Studio window only (the main window stays hidden).
+            if std::env::args().any(|a| a == "--burn-studio") {
+                tauri::WebviewWindowBuilder::new(app, "burn-studio", tauri::WebviewUrl::App("burnStudio.html".into()))
+                    .title("Brennstudio – ConvertX Rust")
+                    .inner_size(1180.0, 800.0)
+                    .min_inner_size(900.0, 620.0)
+                    .build()?;
+                if let Some(main) = app.get_webview_window("main") {
+                    main.hide()?;
+                }
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| {
             // The menu editor is a second window: it must not outlive the main one.
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 if let Some(ed) = window.app_handle().get_webview_window("menu-editor") {
                     let _ = ed.destroy();
                 }
+                if let Some(studio) = window.app_handle().get_webview_window("burn-studio") {
+                    let _ = studio.destroy();
+                }
+            // Started with `--burn-studio` the main window is hidden: closing the studio ends the app.
+            if window.label() == "burn-studio" && matches!(event, tauri::WindowEvent::Destroyed) {
+                let main_hidden = window.app_handle().get_webview_window("main").is_some_and(|m| !m.is_visible().unwrap_or(true));
+                if main_hidden {
+                    window.app_handle().exit(0);
+                }
+            }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -670,7 +696,28 @@ fn main() {
             menu_editor::text_lines,
             menu_editor::load_layout,
             menu_editor::save_layout,
-            menu_editor::image_preview
+            menu_editor::image_preview,
+            burn_studio::studio_cancel,
+            burn_studio::studio_drives,
+            burn_studio::studio_drive_info,
+            burn_studio::studio_eject,
+            burn_studio::studio_load,
+            burn_studio::studio_lock,
+            burn_studio::studio_build_plan,
+            burn_studio::studio_inspect,
+            burn_studio::studio_write_image,
+            burn_studio::studio_write_files,
+            burn_studio::studio_discovery,
+            burn_studio::studio_read,
+            burn_studio::studio_build,
+            burn_studio::studio_verify,
+            burn_studio::studio_label_read,
+            burn_studio::studio_label_patch,
+            burn_studio::studio_ifo_candidates,
+            burn_studio::studio_sidecar_write,
+            burn_studio::studio_graph_load,
+            burn_studio::studio_graph_folder,
+            burn_studio::studio_template_preview
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ConvertX GUI");

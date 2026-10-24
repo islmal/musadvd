@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod studio_cli;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use convertx_rust::author::{CommandContext, Domain, Resolution, TitleSpec, TvStandard};
 use convertx_rust::calculator::{self, Clamp, DiscType, EncodingProfile};
@@ -185,6 +187,18 @@ enum Command {
         #[arg(long, value_name = "DATEI", num_args = 0..=1)]
         keep_iso: Option<Option<PathBuf>>,
     },
+    /// Burn Studio: read a disc into an image (`.iso`, split parts, layout file, MD5).
+    ReadDisc(studio_cli::ReadDisc),
+    /// Burn Studio: compare a disc with an image, or check that it is readable.
+    VerifyDisc(studio_cli::VerifyDisc),
+    /// Burn Studio: build an image from files and folders (UDF 1.02 + ISO 9660 + Joliet, DVD-Video, Blu-ray).
+    BuildIso(studio_cli::BuildIso),
+    /// Burn Studio: print or change the volume label of an image.
+    IsoLabel(studio_cli::IsoLabel),
+    /// Burn Studio: list the possible layer breaks of a DVD-Video image or folder.
+    IfoLayerbreak(studio_cli::IfoLayerbreak),
+    /// Burn Studio: drive and media details (MMC).
+    DriveInfo(studio_cli::DriveInfoArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -483,6 +497,12 @@ fn main() -> ExitCode {
         Command::Burn { video_ts, drive, speed, label, no_verify, erase, no_eject, keep_iso } => {
             burn(video_ts, drive, speed, label, !no_verify, erase, !no_eject, keep_iso)
         }
+        Command::ReadDisc(a) => studio_cli::read_disc(a),
+        Command::VerifyDisc(a) => studio_cli::verify_disc(a),
+        Command::BuildIso(a) => studio_cli::build_iso(a),
+        Command::IsoLabel(a) => studio_cli::iso_label(a),
+        Command::IfoLayerbreak(a) => studio_cli::ifo_layerbreak(a),
+        Command::DriveInfo(a) => studio_cli::drive_info(a),
         Command::Drives => {
             use convertx_rust::burner::{speed_label, system_burner};
             let burner = system_burner();
