@@ -2,15 +2,20 @@
 //! bridge), dual-layer break, and the platform burners (IMAPI2 on Windows, growisofs/xorriso
 //! elsewhere).
 
+pub mod builder;
 pub mod isoread;
 pub mod label;
 pub mod layerbreak;
+pub mod reader;
+pub mod ringbuf;
 pub mod sidecar;
+pub mod source;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod tools;
 pub mod udf;
 pub mod udf250;
+pub mod verifier;
 #[cfg(unix)]
 pub mod unix;
 #[cfg(windows)]
@@ -587,41 +592,25 @@ pub fn burn_video_ts(
     }
 }
 
-/// Compares the first `len` bytes of `device` (raw disc) with `image`.
+/// Compares the raw disc `device` (read front to back) with `image`; the first difference or
+/// unreadable sector fails with its number.
 pub fn verify_against_image(
-    device: &mut impl Read,
+    device: &mut (impl Read + Send),
     image: &Path,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
 ) -> Result<(), BurnError> {
-    let mut img = std::fs::File::open(image)?;
-    let len = img.metadata()?.len();
-    const CHUNK: usize = 1 << 20; // multiple of the sector size
-    let (mut a, mut b) = (vec![0u8; CHUNK], vec![0u8; CHUNK]);
-    let mut done = 0u64;
-    while done < len {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(BurnError::Cancelled);
-        }
-        let n = (len - done).min(CHUNK as u64) as usize;
-        img.read_exact(&mut a[..n])?;
-        // Raw devices only read whole sectors.
-        let want = n.div_ceil(2048) * 2048;
-        let mut got = 0;
-        while got < want {
-            let r = device.read(&mut b[got..want])?;
-            if r == 0 {
-                return Err(BurnError::VerifyFailed { sector: (done + got as u64) / 2048 });
-            }
-            got += r;
-        }
-        if let Some(pos) = a[..n].iter().zip(&b[..n]).position(|(x, y)| x != y) {
-            return Err(BurnError::VerifyFailed { sector: (done + pos as u64) / 2048 });
-        }
-        done += n as u64;
-        progress(done as f64 / len as f64);
+    use source::SectorSource;
+    let mut img = source::FileSource::open(image)?;
+    let mut disc = source::ReadSource::new(device, img.sectors());
+    // A sequential device cannot be read twice, so no retries here.
+    let opts = verifier::VerifyOptions { sw_retries: 0, stop_at_first: true, chunk_sectors: 512, ..Default::default() };
+    match verifier::verify(&mut disc, &mut img, &opts, cancel, progress) {
+        Ok(r) if r.passed => Ok(()),
+        Ok(r) => Err(BurnError::VerifyFailed { sector: r.unreadable.iter().chain(&r.miscompares).copied().min().unwrap_or(0) }),
+        Err(verifier::VerifyError::Cancelled) => Err(BurnError::Cancelled),
+        Err(verifier::VerifyError::Image(e)) => Err(BurnError::Io(e)),
     }
-    Ok(())
 }
 
 #[cfg(test)]

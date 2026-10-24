@@ -481,8 +481,8 @@ mod tests {
         let src = dir.join("VIDEO_TS").join("VTS_01_1.VOB");
         let entries = |name: &str| {
             vec![
-                TreeEntry { path: "BDMV".into(), source: PathBuf::new(), size: 0, dir: true },
-                TreeEntry { path: format!("BDMV/{name}"), source: src.clone(), size: std::fs::metadata(&src).unwrap().len(), dir: false },
+                TreeEntry::dir("BDMV"),
+                TreeEntry::file(&format!("BDMV/{name}"), src.clone(), std::fs::metadata(&src).unwrap().len()),
             ]
         };
         let build = |label: &str, out: &str| {

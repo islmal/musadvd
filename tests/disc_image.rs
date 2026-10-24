@@ -237,3 +237,42 @@ fn golden_video_ts_image_hash() {
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(hash, "52152f47535751cef7fc68aae5889f00");
 }
+
+/// A data tree (deep folders, long and non-ASCII names, a duplicate) built by the Burn Studio
+/// builder: Windows mounts the image and every file reads back with its content.
+#[test]
+fn data_tree_mounts_with_long_names() {
+    use convertx_rust::burner::builder::{build_to_file, plan_build, BuildInput, Source};
+    use convertx_rust::burner::reader::Split;
+    use convertx_rust::config::StudioBuild;
+
+    let dir = std::env::temp_dir().join(format!("cx_data_tree_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    let files: [(&str, Vec<u8>); 5] = [
+        ("Ein sehr langer Dateiname mit Umlauten äöüß.txt", b"umlaut".to_vec()),
+        ("ordner/unterordner/tief/datei.bin", (0..100_000u32).map(|i| (i % 253) as u8).collect()),
+        ("ordner/kopie1.dat", vec![3u8; 70_000]),
+        ("kopie2.dat", vec![3u8; 70_000]),
+        ("leer.txt", vec![]),
+    ];
+    for (rel, data) in &files {
+        let p = src.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, data).unwrap();
+    }
+    let input = BuildInput { sources: vec![Source { path: src.clone(), dest: String::new() }], label: "Datentest".into(), ..Default::default() };
+    let plan = plan_build(&input, &StudioBuild::default()).unwrap();
+    let iso = dir.join("data.iso");
+    build_to_file(&plan, &iso, Split::None, false, "none", &AtomicBool::new(false), |_| {}).unwrap();
+
+    if let Some(m) = mount(&iso) {
+        assert_eq!(m.label, "DATENTEST");
+        assert_eq!(m.fs, "UDF");
+        for (rel, data) in &files {
+            let got = std::fs::read(m.root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            assert!(&got == data, "{rel} differs");
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

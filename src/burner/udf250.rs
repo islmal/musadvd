@@ -31,7 +31,8 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::udf::{charspec, dstring, extents, impl_regid, io, put16, put32, put64, regid, tag_v, ImageError, SectorWriter, Timestamp, IMPL_ID, SECTOR};
+pub use super::udf::{scan, TreeEntry};
+use super::udf::{charspec, dstring, extents, impl_regid, io, put16, put32, put64, regid, tag_v, ImageError, SectorWriter, Timestamp, Transform, IMPL_ID, SECTOR};
 
 /// Sectors of a BD-R/BD-RE single layer (12,219,392) and dual layer (24,438,784).
 pub const BD25_SECTORS: u64 = 12_219_392;
@@ -69,15 +70,6 @@ pub fn is_dual_layer(sectors: u64) -> bool {
 // Planning
 // ---------------------------------------------------------------------------
 
-/// One file or directory of the disc, with a `/`-separated path from the image root.
-#[derive(Debug, Clone)]
-pub struct TreeEntry {
-    pub path: String,
-    pub source: PathBuf,
-    pub size: u64,
-    pub dir: bool,
-}
-
 #[derive(Debug, Clone)]
 struct Node {
     name: String,
@@ -94,6 +86,7 @@ struct Node {
     data: u32,
     /// Directory: length of its FIDs in bytes.
     dir_bytes: u64,
+    transform: Option<Transform>,
 }
 
 /// A fully laid out Blu-ray image.
@@ -166,6 +159,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
         efe: 0,
         data: 0,
         dir_bytes: 0,
+        transform: None,
     }];
     let mut index: HashMap<String, usize> = HashMap::from([(String::new(), 0)]);
     for e in entries {
@@ -199,6 +193,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
                         efe: 0,
                         data: 0,
                         dir_bytes: 0,
+                        transform: None,
                     });
                     let n = nodes.len() - 1;
                     nodes[cur].children.push(n);
@@ -210,6 +205,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
         if !e.dir {
             nodes[cur].source = e.source.clone();
             nodes[cur].size = e.size;
+            nodes[cur].transform = e.transform;
             if extents(0, e.size).len() > MAX_EXTENTS {
                 return Err(bad(format!("{} ist zu groß", e.path)));
             }
@@ -265,23 +261,6 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
         partition_len,
         total_sectors: PARTITION_START + partition_len + 1,
     })
-}
-
-fn scan(dir: &Path, rel: &str, out: &mut Vec<TreeEntry>) -> Result<(), ImageError> {
-    out.push(TreeEntry { path: rel.to_string(), source: dir.to_path_buf(), size: 0, dir: true });
-    for entry in std::fs::read_dir(dir).map_err(io(dir))? {
-        let entry = entry.map_err(io(dir))?;
-        let path = entry.path();
-        let meta = std::fs::metadata(&path).map_err(io(&path))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel = format!("{rel}/{name}");
-        if meta.is_dir() {
-            scan(&path, &rel, out)?;
-        } else {
-            out.push(TreeEntry { path: rel, source: path, size: meta.len(), dir: false });
-        }
-    }
-    Ok(())
 }
 
 /// Plans the image of the disc folder `root` (the folder containing `BDMV`, and `CERTIFICATE`
@@ -424,10 +403,23 @@ pub fn write_bd_image(
     output: &Path,
     ts: &Timestamp,
     cancel: &AtomicBool,
-    mut progress: impl FnMut(f64),
+    progress: impl FnMut(f64),
 ) -> Result<(), ImageError> {
     let file = File::create(output).map_err(io(output))?;
-    let mut w = SectorWriter { out: BufWriter::with_capacity(4 << 20, file), sector: 0, path: output.to_path_buf() };
+    write_bd_to(plan, BufWriter::with_capacity(4 << 20, file), output, ts, cancel, progress)
+}
+
+/// Writes the planned image to any sink, strictly front to back (so it can feed a pipe).
+/// `path` only names the sink in error messages.
+pub fn write_bd_to<W: Write>(
+    plan: &BdImagePlan,
+    out: W,
+    path: &Path,
+    ts: &Timestamp,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(f64),
+) -> Result<(), ImageError> {
+    let mut w = SectorWriter { out, sector: 0, path: path.to_path_buf() };
     let n = plan.total_sectors;
     let p = PARTITION_START;
     let label = &plan.label;
@@ -585,7 +577,7 @@ pub fn write_bd_image(
         }
         w.zeros_until(p + f.data)?;
         let mut src = File::open(&f.source).map_err(io(&f.source))?;
-        let mut left = f.size;
+        let (mut left, mut offset) = (f.size, 0u64);
         while left > 0 {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ImageError::Cancelled);
@@ -598,14 +590,18 @@ pub fn write_bd_image(
                     error: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Datei wurde während des Schreibens kürzer"),
                 });
             }
-            w.out.write_all(&buf[..got]).map_err(io(output))?;
+            if let Some(transform) = f.transform {
+                transform(&mut buf[..got], offset);
+            }
+            w.out.write_all(&buf[..got]).map_err(io(path))?;
             left -= got as u64;
+            offset += got as u64;
             copied += got as u64;
             progress(copied as f64 / total_bytes as f64);
         }
         let rem = f.size % SECTOR;
         if rem != 0 {
-            w.out.write_all(&vec![0u8; (SECTOR - rem) as usize]).map_err(io(output))?;
+            w.out.write_all(&vec![0u8; (SECTOR - rem) as usize]).map_err(io(path))?;
         }
         w.sector += f.size.div_ceil(SECTOR) as u32;
     }
@@ -613,7 +609,7 @@ pub fn write_bd_image(
     // Closing anchor in the last sector.
     w.put(n - 1, &anchor(n - 1))?;
     debug_assert_eq!(w.sector, n);
-    w.out.flush().map_err(io(output))?;
+    w.out.flush().map_err(io(path))?;
     progress(1.0);
     Ok(())
 }
@@ -643,11 +639,11 @@ mod tests {
     use super::*;
 
     fn entry(path: &str, size: u64) -> TreeEntry {
-        TreeEntry { path: path.into(), source: PathBuf::from(path), size, dir: false }
+        TreeEntry::file(path, PathBuf::from(path), size)
     }
 
     fn dir(path: &str) -> TreeEntry {
-        TreeEntry { path: path.into(), source: PathBuf::new(), size: 0, dir: true }
+        TreeEntry::dir(path)
     }
 
     fn le16(d: &[u8], at: usize) -> u16 {

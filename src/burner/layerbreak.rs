@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::udf::{plan_image, ImageError, ImagePlan, SECTOR};
+use super::udf::{plan_image_with, ImageError, ImagePlan, SECTOR};
 
 /// Disc capacities in 2048-byte sectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,9 +167,29 @@ pub struct DiscPlan {
 /// Plans the image of `video_ts`; for DVD-9 sized content, including the layer break
 /// (inserting padding and patching VIDEO_TS.IFO/.BUP when necessary).
 pub fn plan_disc(video_ts: &Path, label: &str, caps: Capacities) -> Result<DiscPlan, PlanError> {
-    let plan = plan_image(video_ts, label, &HashMap::new(), &HashMap::new())?;
-    let cells = cell_starts(&plan)?;
-    let lb = choose_layer_break(plan.total_sectors, &cells, caps)?;
+    plan_disc_with(video_ts, label, caps, true, None)
+}
+
+/// [`plan_disc`] with optional `AUDIO_TS` and a layer break chosen by the user (`forced`, e.g. a
+/// candidate of the inspector) instead of the automatic one.
+pub fn plan_disc_with(
+    video_ts: &Path,
+    label: &str,
+    caps: Capacities,
+    audio_ts: bool,
+    forced: Option<LayerBreak>,
+) -> Result<DiscPlan, PlanError> {
+    let plan = plan_image_with(video_ts, label, &HashMap::new(), &HashMap::new(), audio_ts)?;
+    let lb = match forced {
+        Some(lb) => {
+            let pad = lb.padding.map_or(0, |p| p.1);
+            if !fits(lb.l0_sectors, plan.total_sectors + pad, caps) {
+                return Err(LayerBreakError::NoCell.into());
+            }
+            Some(lb)
+        }
+        None => choose_layer_break(plan.total_sectors, &cell_starts(&plan)?, caps)?,
+    };
     let Some(LayerBreak { padding: Some((vts, pad)), .. }) = lb else {
         return Ok(DiscPlan { image: plan, layer_break: lb });
     };
@@ -180,7 +200,7 @@ pub fn plan_disc(video_ts: &Path, label: &str, caps: Capacities) -> Result<DiscP
         patch_tt_srpt(&mut data, vts, pad)?;
         overrides.insert(name.to_string(), data);
     }
-    let padded = plan_image(video_ts, label, &HashMap::from([(vts, pad)]), &overrides)?;
+    let padded = plan_image_with(video_ts, label, &HashMap::from([(vts, pad)]), &overrides, audio_ts)?;
     debug_assert_eq!(padded.total_sectors, plan.total_sectors + pad);
     Ok(DiscPlan { image: padded, layer_break: lb })
 }

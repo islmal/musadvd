@@ -61,9 +61,14 @@ impl IsoEntry {
 
 pub struct IsoImage<R: Read + Seek> {
     r: R,
+    ucs: bool,
     root: IsoEntry,
     pub label: String,
     pub total_sectors: u32,
+}
+
+fn ucs2(b: &[u8]) -> String {
+    char::decode_utf16(b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]))).map(|r| r.unwrap_or('?')).collect()
 }
 
 fn le32(b: &[u8], at: usize) -> u32 {
@@ -71,7 +76,7 @@ fn le32(b: &[u8], at: usize) -> u32 {
 }
 
 /// One directory record at the start of `b`, `None` for the end-of-sector padding.
-fn record(b: &[u8]) -> Result<Option<(IsoEntry, bool, usize)>, IsoError> {
+fn record(b: &[u8], ucs: bool) -> Result<Option<(IsoEntry, bool, usize)>, IsoError> {
     let len = b[0] as usize;
     if len == 0 {
         return Ok(None);
@@ -80,7 +85,7 @@ fn record(b: &[u8]) -> Result<Option<(IsoEntry, bool, usize)>, IsoError> {
         return Err(IsoError::Corrupt("ungültiger Verzeichniseintrag"));
     }
     let raw = &b[33..33 + b[32] as usize];
-    let mut name = String::from_utf8_lossy(raw).into_owned();
+    let mut name = if ucs && raw.len() > 1 { ucs2(raw) } else { String::from_utf8_lossy(raw).into_owned() };
     if let Some(i) = name.rfind(';') {
         name.truncate(i);
     }
@@ -94,7 +99,16 @@ fn record(b: &[u8]) -> Result<Option<(IsoEntry, bool, usize)>, IsoError> {
 }
 
 impl<R: Read + Seek> IsoImage<R> {
-    pub fn open(mut r: R) -> Result<Self, IsoError> {
+    pub fn open(r: R) -> Result<Self, IsoError> {
+        Self::open_with(r, false)
+    }
+
+    /// Reads the Joliet tree (long Unicode names) instead of the primary one.
+    pub fn open_joliet(r: R) -> Result<Self, IsoError> {
+        Self::open_with(r, true)
+    }
+
+    fn open_with(mut r: R, joliet: bool) -> Result<Self, IsoError> {
         let end = r.seek(SeekFrom::End(0))?;
         let mut sector = vec![0u8; SECTOR as usize];
         // Descriptor set: 16.. until the primary descriptor or the terminator.
@@ -108,14 +122,14 @@ impl<R: Read + Seek> IsoImage<R> {
             if &sector[1..6] != b"CD001" || sector[0] == 255 {
                 return Err(IsoError::NotIso);
             }
-            if sector[0] == 1 {
+            if sector[0] == if joliet { 2 } else { 1 } {
                 break;
             }
             at += 1;
         }
-        let label = String::from_utf8_lossy(&sector[40..72]).trim_end().to_string();
-        let (root, _, _) = record(&sector[156..190])?.ok_or(IsoError::Corrupt("Wurzelverzeichnis fehlt"))?;
-        Ok(IsoImage { r, root, label, total_sectors: le32(&sector, 80) })
+        let label = if joliet { ucs2(&sector[40..72]) } else { String::from_utf8_lossy(&sector[40..72]).into_owned() };
+        let (root, _, _) = record(&sector[156..190], false)?.ok_or(IsoError::Corrupt("Wurzelverzeichnis fehlt"))?;
+        Ok(IsoImage { r, ucs: joliet, root, label: label.trim_end().to_string(), total_sectors: le32(&sector, 80) })
     }
 
     fn read_bytes(&mut self, lba: u32, len: u64) -> Result<Vec<u8>, IsoError> {
@@ -132,7 +146,7 @@ impl<R: Read + Seek> IsoImage<R> {
         let mut out: Vec<IsoEntry> = Vec::new();
         let (mut pos, mut continued) = (0usize, false);
         while pos < len as usize {
-            let Some((entry, more, rec_len)) = record(&data[pos..(pos / SECTOR as usize + 1) * SECTOR as usize])? else {
+            let Some((entry, more, rec_len)) = record(&data[pos..(pos / SECTOR as usize + 1) * SECTOR as usize], self.ucs)? else {
                 pos = (pos / SECTOR as usize + 1) * SECTOR as usize; // records do not cross sectors
                 continue;
             };
