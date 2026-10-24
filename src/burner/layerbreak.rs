@@ -65,7 +65,7 @@ impl std::fmt::Display for LayerBreakError {
 
 impl std::error::Error for LayerBreakError {}
 
-fn fits(l0: u32, total: u32, caps: Capacities) -> bool {
+pub(crate) fn fits(l0: u32, total: u32, caps: Capacities) -> bool {
     l0 % 16 == 0 && l0 >= total - l0 && l0 <= caps.layer && total - l0 <= caps.layer
 }
 

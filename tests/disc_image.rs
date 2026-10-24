@@ -208,3 +208,32 @@ fn check_lbas_planned(plan: &ImagePlan) {
         assert_eq!(vmg.lba + be32(&ifo, e + 8), vts_ifo.lba);
     }
 }
+
+/// Golden hash: the VIDEO_TS image layout is burnt by users, so refactors of the UDF writer
+/// must keep a synthetic disc byte-identical (value captured from the code before the refactor).
+#[test]
+fn golden_video_ts_image_hash() {
+    use md5::{Digest, Md5};
+    let dir = std::env::temp_dir().join(format!("cx_golden_{}", std::process::id()));
+    let video_ts = dir.join("VIDEO_TS");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&video_ts).unwrap();
+    let fill = |name: &str, len: usize, seed: u8| {
+        let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect();
+        std::fs::write(video_ts.join(name), data).unwrap();
+    };
+    fill("VIDEO_TS.IFO", 3000, 1);
+    fill("VIDEO_TS.BUP", 3000, 1);
+    fill("VIDEO_TS.VOB", 5000, 2);
+    fill("VTS_01_0.IFO", 4100, 3);
+    fill("VTS_01_0.BUP", 4100, 3);
+    fill("VTS_01_1.VOB", 20_000, 4);
+    fill("VTS_01_2.VOB", 2048, 5);
+    let plan = plan_image(&video_ts, "GOLDEN", &HashMap::new(), &HashMap::new()).unwrap();
+    let iso = dir.join("golden.iso");
+    let ts = Timestamp { year: 2026, month: 10, day: 24, hour: 12, minute: 0, second: 0 };
+    write_image(&plan, &iso, &ts, &AtomicBool::new(false), |_| {}).unwrap();
+    let hash = format!("{:x}", Md5::digest(std::fs::read(&iso).unwrap()));
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(hash, "52152f47535751cef7fc68aae5889f00");
+}

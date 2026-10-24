@@ -2,8 +2,13 @@
 //! bridge), dual-layer break, and the platform burners (IMAPI2 on Windows, growisofs/xorriso
 //! elsewhere).
 
+pub mod isoread;
 pub mod label;
 pub mod layerbreak;
+pub mod sidecar;
+#[cfg(test)]
+pub(crate) mod testutil;
+pub mod tools;
 pub mod udf;
 pub mod udf250;
 #[cfg(unix)]

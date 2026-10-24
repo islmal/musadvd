@@ -97,6 +97,8 @@ pub struct AppSettings {
     /// Default project folder and volume label (A-Z, 0-9, _; max. 32); empty = from the menu
     /// heading / first video.
     pub default_volume_label: String,
+    /// Settings of the Burn Studio window (ImgBurn replacement).
+    pub burn_studio: BurnStudioSettings,
 }
 
 impl Default for AppSettings {
@@ -137,9 +139,422 @@ impl Default for AppSettings {
             quiet_finish: false,
             auto_erase_rewritable: false,
             default_volume_label: String::new(),
+            burn_studio: BurnStudioSettings::default(),
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Burn Studio
+// ---------------------------------------------------------------------------------------------
+
+/// Choices of the Burn Studio string settings (first entry = default).
+pub const ON_COMPLETE: &[&str] = &["nothing", "shutdown", "standby", "hibernate", "close"];
+pub const SPLIT_MODES: &[&str] = &["none", "2gb", "4gb"];
+pub const LAYOUT_FILES: &[&str] = &["auto", "none", "dvd", "mds", "cue"];
+pub const READ_PRIORITIES: &[&str] = &["normal", "below", "idle"];
+pub const BUILD_FS: &[&str] = &["iso_joliet_udf102", "udf102", "udf250"];
+pub const PROMPT_MODES: &[&str] = &["ask", "always", "never"];
+pub const WRITE_MODES: &[&str] = &["auto", "dvd", "bd"];
+pub const WRITE_TYPES: &[&str] = &["dao", "incremental"];
+pub const LAYER_BREAK_MODES: &[&str] = &["auto", "user"];
+pub const OVERBURN_MODES: &[&str] = &["prompt", "overburn", "truncate"];
+pub const IO_BACKENDS: &[&str] = &["auto", "imapi", "direct"];
+pub const IO_TRANSPORTS: &[&str] = &["imapi_ex", "spti"];
+pub const DEVICE_SORTS: &[&str] = &["letter", "name"];
+pub const DEFAULT_GRAPH_TEMPLATE: &str = "%M_%F_%D_%T_%I_%S";
+
+/// Confirmations the user can switch off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioWarnings {
+    pub overburn: bool,
+    pub dvd_r_dl_layer_break: bool,
+    pub no_ifo_update: bool,
+    pub seamless_layer_break: bool,
+}
+
+impl Default for StudioWarnings {
+    fn default() -> Self {
+        StudioWarnings { overburn: true, dvd_r_dl_layer_break: true, no_ifo_update: true, seamless_layer_break: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioGeneral {
+    pub prevent_standby: bool,
+    /// See [`ON_COMPLETE`].
+    pub on_complete: String,
+    pub warnings: StudioWarnings,
+    pub md5_calculate: bool,
+    pub md5_compare: bool,
+    /// Layer break candidates: prefer cells that are not seamless / show interleaved ones.
+    pub lb_check_seamless: bool,
+    pub lb_show_interleaved: bool,
+}
+
+impl Default for StudioGeneral {
+    fn default() -> Self {
+        StudioGeneral {
+            prevent_standby: true,
+            on_complete: ON_COMPLETE[0].into(),
+            warnings: StudioWarnings::default(),
+            md5_calculate: false,
+            md5_compare: false,
+            lb_check_seamless: true,
+            lb_show_interleaved: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioRead {
+    pub split: String,
+    pub layout_file: String,
+    pub sw_retries: u32,
+    /// -1 = drive default.
+    pub hw_retries: i32,
+    pub ignore_read_errors: bool,
+    pub priority: String,
+    pub batch_eject_next: bool,
+}
+
+impl Default for StudioRead {
+    fn default() -> Self {
+        StudioRead {
+            split: SPLIT_MODES[0].into(),
+            layout_file: LAYOUT_FILES[0].into(),
+            sw_retries: 20,
+            hw_retries: -1,
+            ignore_read_errors: false,
+            priority: READ_PRIORITIES[0].into(),
+            batch_eject_next: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioFilter {
+    pub skip_hidden: bool,
+    pub skip_system: bool,
+    pub skip_reparse: bool,
+    pub skip_in_use: bool,
+}
+
+impl Default for StudioFilter {
+    fn default() -> Self {
+        StudioFilter { skip_hidden: true, skip_system: true, skip_reparse: true, skip_in_use: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioDvdBuild {
+    pub create_audio_ts: bool,
+    pub fix_vts_sectors: bool,
+    pub ifo_bup_ecc_padding: bool,
+    pub uppercase: bool,
+    pub read_dvd_text: bool,
+}
+
+impl Default for StudioDvdBuild {
+    fn default() -> Self {
+        StudioDvdBuild { create_audio_ts: true, fix_vts_sectors: true, ifo_bup_ecc_padding: false, uppercase: true, read_dvd_text: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioBdBuild {
+    pub create_certificate: bool,
+    pub reset_cpi: bool,
+    pub read_bdmt: bool,
+}
+
+impl Default for StudioBdBuild {
+    fn default() -> Self {
+        StudioBdBuild { create_certificate: true, reset_cpi: false, read_bdmt: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioBuild {
+    pub split: String,
+    pub layout_file: String,
+    /// 0 = automatic.
+    pub start_lba: u32,
+    pub min_sectors: u32,
+    /// See [`BUILD_FS`].
+    pub fs: String,
+    pub dedupe: bool,
+    pub filter: StudioFilter,
+    pub log_skipped: bool,
+    pub dvd: StudioDvdBuild,
+    pub bd: StudioBdBuild,
+    /// What to do when the content is recognised as DVD-Video / Blu-ray (see [`PROMPT_MODES`]).
+    pub prompts: String,
+}
+
+impl Default for StudioBuild {
+    fn default() -> Self {
+        StudioBuild {
+            split: SPLIT_MODES[0].into(),
+            layout_file: LAYOUT_FILES[0].into(),
+            start_lba: 0,
+            min_sectors: 600,
+            fs: BUILD_FS[0].into(),
+            dedupe: true,
+            filter: StudioFilter::default(),
+            log_skipped: true,
+            dvd: StudioDvdBuild::default(),
+            bd: StudioBdBuild::default(),
+            prompts: PROMPT_MODES[0].into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioWrite {
+    pub mode: String,
+    pub write_type: String,
+    /// 0 = drive default.
+    pub link_size: u32,
+    /// Book type changing is vendor specific and not implemented; the flag is only stored.
+    pub auto_book_type: bool,
+    pub opc: bool,
+    pub dvdpr_reserve_track: bool,
+    pub dvdpr_min_radius: bool,
+    pub dvdpr_dl_only_l0: bool,
+    pub fastwrite: bool,
+    pub bdr_verify_not_required: bool,
+    pub burn_proof: bool,
+    pub lock_volume: bool,
+    pub cycle_tray_before_verify: bool,
+    pub verify: bool,
+    pub layer_break: String,
+    pub user_l0_sectors: u32,
+    pub prefer_no_spare: bool,
+    pub sw_retries: u32,
+    pub overburn: String,
+    pub test_mode: bool,
+    pub copies: u32,
+    pub delete_image_after: bool,
+    pub eject_after: bool,
+}
+
+impl Default for StudioWrite {
+    fn default() -> Self {
+        StudioWrite {
+            mode: WRITE_MODES[0].into(),
+            write_type: WRITE_TYPES[0].into(),
+            link_size: 0,
+            auto_book_type: false,
+            opc: true,
+            dvdpr_reserve_track: false,
+            dvdpr_min_radius: false,
+            dvdpr_dl_only_l0: false,
+            fastwrite: false,
+            bdr_verify_not_required: false,
+            burn_proof: true,
+            lock_volume: true,
+            cycle_tray_before_verify: false,
+            verify: true,
+            layer_break: LAYER_BREAK_MODES[0].into(),
+            user_l0_sectors: 0,
+            prefer_no_spare: true,
+            sw_retries: 20,
+            overburn: OVERBURN_MODES[0].into(),
+            test_mode: false,
+            copies: 1,
+            delete_image_after: false,
+            eject_after: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioVerify {
+    pub ignore_non_user_data: bool,
+    pub ignore_miscompares: bool,
+    pub sw_retries: u32,
+    pub hw_retries: i32,
+}
+
+impl Default for StudioVerify {
+    fn default() -> Self {
+        StudioVerify { ignore_non_user_data: true, ignore_miscompares: false, sw_retries: 20, hw_retries: -1 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioGraph {
+    pub capture: bool,
+    pub capture_cpu: bool,
+    pub sample_ms: u32,
+    /// File name template, see `burner::graph::format_template`.
+    pub template: String,
+    /// Empty = `%APPDATA%\convertx-rust\graph`.
+    pub folder: String,
+}
+
+impl Default for StudioGraph {
+    fn default() -> Self {
+        StudioGraph { capture: true, capture_cpu: true, sample_ms: 100, template: DEFAULT_GRAPH_TEMPLATE.into(), folder: String::new() }
+    }
+}
+
+/// Per-operation flags (read, write, verify, erase).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerOperation {
+    pub read: bool,
+    pub write: bool,
+    pub verify: bool,
+    pub erase: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudioIo {
+    pub backend: String,
+    pub transport: String,
+    pub ring_mib: u32,
+    pub recovery_main_low: u32,
+    pub recovery_main_high: u32,
+    /// 0 = off.
+    pub recovery_device_low: u32,
+    /// KiB per transfer, 0 = automatic.
+    pub transfer_kib: u32,
+    pub buffered_io_read: bool,
+    pub buffered_io_write: bool,
+    pub lock_tray: PerOperation,
+    pub eject_after: PerOperation,
+    pub device_sort: String,
+}
+
+impl Default for StudioIo {
+    fn default() -> Self {
+        StudioIo {
+            backend: IO_BACKENDS[0].into(),
+            transport: IO_TRANSPORTS[0].into(),
+            ring_mib: 40,
+            recovery_main_low: 80,
+            recovery_main_high: 95,
+            recovery_device_low: 0,
+            transfer_kib: 0,
+            buffered_io_read: true,
+            buffered_io_write: false,
+            lock_tray: PerOperation { read: true, write: true, verify: true, erase: true },
+            eject_after: PerOperation { read: false, write: true, verify: false, erase: false },
+            device_sort: DEVICE_SORTS[0].into(),
+        }
+    }
+}
+
+/// Write speed wish for a medium (matched on media ID, then drive; first match wins).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpeedRule {
+    pub media_id: String,
+    /// Empty = any drive.
+    pub drive: String,
+    /// `max` or a speed in x.
+    pub speed: String,
+}
+
+impl Default for SpeedRule {
+    fn default() -> Self {
+        SpeedRule { media_id: String::new(), drive: String::new(), speed: "max".into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BurnStudioSettings {
+    pub general: StudioGeneral,
+    pub read: StudioRead,
+    pub build: StudioBuild,
+    pub write: StudioWrite,
+    pub verify: StudioVerify,
+    pub graph: StudioGraph,
+    pub io: StudioIo,
+    pub auto_speed: Vec<SpeedRule>,
+}
+
+impl BurnStudioSettings {
+    /// Clamps numbers and replaces unknown choices with the defaults.
+    pub fn sanitized(mut self) -> Self {
+        let g = &mut self.general;
+        g.on_complete = choice(&g.on_complete, ON_COMPLETE);
+
+        let r = &mut self.read;
+        r.split = choice(&r.split, SPLIT_MODES);
+        r.layout_file = choice(&r.layout_file, LAYOUT_FILES);
+        r.priority = choice(&r.priority, READ_PRIORITIES);
+        r.sw_retries = r.sw_retries.min(100);
+        r.hw_retries = r.hw_retries.clamp(-1, 100);
+
+        let b = &mut self.build;
+        b.split = choice(&b.split, SPLIT_MODES);
+        b.layout_file = choice(&b.layout_file, LAYOUT_FILES);
+        b.fs = choice(&b.fs, BUILD_FS);
+        b.prompts = choice(&b.prompts, PROMPT_MODES);
+        b.min_sectors = b.min_sectors.min(2_000_000);
+
+        let w = &mut self.write;
+        w.mode = choice(&w.mode, WRITE_MODES);
+        w.write_type = choice(&w.write_type, WRITE_TYPES);
+        w.layer_break = choice(&w.layer_break, LAYER_BREAK_MODES);
+        w.overburn = choice(&w.overburn, OVERBURN_MODES);
+        w.link_size = w.link_size.min(255);
+        w.sw_retries = w.sw_retries.min(100);
+        w.copies = w.copies.clamp(1, 99);
+        if w.layer_break == "user" && w.user_l0_sectors == 0 {
+            w.layer_break = LAYER_BREAK_MODES[0].into();
+        }
+
+        let v = &mut self.verify;
+        v.sw_retries = v.sw_retries.min(100);
+        v.hw_retries = v.hw_retries.clamp(-1, 100);
+
+        let gr = &mut self.graph;
+        gr.sample_ms = gr.sample_ms.clamp(50, 2000);
+        if gr.template.trim().is_empty() {
+            gr.template = DEFAULT_GRAPH_TEMPLATE.into();
+        }
+        gr.folder = gr.folder.trim().to_string();
+
+        let io = &mut self.io;
+        io.backend = choice(&io.backend, IO_BACKENDS);
+        io.transport = choice(&io.transport, IO_TRANSPORTS);
+        io.device_sort = choice(&io.device_sort, DEVICE_SORTS);
+        io.ring_mib = io.ring_mib.clamp(20, 512);
+        io.recovery_main_high = io.recovery_main_high.clamp(1, 100);
+        io.recovery_main_low = io.recovery_main_low.min(io.recovery_main_high);
+        io.recovery_device_low = io.recovery_device_low.min(100);
+        if !matches!(io.transfer_kib, 32 | 64) {
+            io.transfer_kib = 0;
+        }
+
+        for rule in &mut self.auto_speed {
+            rule.media_id = rule.media_id.trim().to_string();
+            rule.drive = rule.drive.trim().to_string();
+            let sp = rule.speed.trim().to_ascii_lowercase();
+            let valid = sp == "max" || sp.parse::<f32>().is_ok_and(|v| v > 0.0 && v <= 100.0);
+            rule.speed = if valid { sp } else { "max".into() };
+        }
+        self.auto_speed.retain(|r| !r.media_id.is_empty());
+        self
+    }
+}
+
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -203,6 +618,7 @@ impl AppSettings {
         } else {
             crate::burner::sanitize_volume_label(self.default_volume_label.trim())
         };
+        self.burn_studio = self.burn_studio.sanitized();
         self
     }
 
@@ -527,5 +943,59 @@ mod burn_settings_tests {
         assert_eq!(old.burn_speed, "auto");
         assert!(old.verify_after_burn && !old.delete_after_burn && !old.quiet_finish && !old.auto_erase_rewritable);
         assert!(!old.fast_encode, "full-quality encoding unless switched on");
+    }
+}
+
+#[cfg(test)]
+mod burn_studio_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_valid_and_round_trip() {
+        let d = BurnStudioSettings::default();
+        assert_eq!(d.clone().sanitized(), d);
+        assert_eq!((d.io.ring_mib, d.build.min_sectors, d.graph.sample_ms), (40, 600, 100));
+        let json = serde_json::to_string(&AppSettings::default()).unwrap();
+        assert_eq!(serde_json::from_str::<AppSettings>(&json).unwrap(), AppSettings::default());
+    }
+
+    #[test]
+    fn old_settings_without_burn_studio_load() {
+        let s: AppSettings = serde_json::from_str(r#"{"tv_standard":"NTSC"}"#).unwrap();
+        assert_eq!(s.burn_studio, BurnStudioSettings::default());
+        let s: AppSettings = serde_json::from_str(r#"{"burn_studio":{"write":{"copies":3}}}"#).unwrap();
+        assert_eq!((s.burn_studio.write.copies, s.burn_studio.write.verify), (3, true), "partial sections keep defaults");
+    }
+
+    #[test]
+    fn unknown_choices_and_numbers_are_corrected() {
+        let mut b = BurnStudioSettings::default();
+        b.general.on_complete = "explode".into();
+        b.write.overburn = "x".into();
+        b.write.copies = 0;
+        b.write.layer_break = "user".into(); // no sectors given
+        b.io.ring_mib = 1;
+        b.io.backend = "spti".into();
+        b.io.transfer_kib = 48;
+        b.io.recovery_main_low = 99;
+        b.io.recovery_main_high = 50;
+        b.graph.sample_ms = 5;
+        b.graph.template = " ".into();
+        b.read.hw_retries = -7;
+        b.auto_speed = vec![
+            SpeedRule { media_id: " RITEK-S04-66 ".into(), drive: String::new(), speed: "8".into() },
+            SpeedRule { media_id: "CMC MAG-M01-00".into(), drive: String::new(), speed: "schnell".into() },
+            SpeedRule { media_id: "  ".into(), drive: String::new(), speed: "4".into() },
+        ];
+        let s = b.sanitized();
+        assert_eq!((s.general.on_complete.as_str(), s.write.overburn.as_str()), ("nothing", "prompt"));
+        assert_eq!((s.write.copies, s.write.layer_break.as_str()), (1, "auto"));
+        assert_eq!((s.io.ring_mib, s.io.backend.as_str(), s.io.transfer_kib), (20, "auto", 0));
+        assert_eq!((s.io.recovery_main_low, s.io.recovery_main_high), (50, 50));
+        assert_eq!((s.graph.sample_ms, s.graph.template.as_str()), (50, DEFAULT_GRAPH_TEMPLATE));
+        assert_eq!(s.read.hw_retries, -1);
+        assert_eq!(s.auto_speed.len(), 2, "rule without media ID dropped");
+        assert_eq!((s.auto_speed[0].media_id.as_str(), s.auto_speed[0].speed.as_str()), ("RITEK-S04-66", "8"));
+        assert_eq!(s.auto_speed[1].speed, "max", "unparsable speed");
     }
 }

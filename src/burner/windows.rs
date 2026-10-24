@@ -583,7 +583,11 @@ impl OpticalBurner for ImapiBurner {
             return Err(BurnError::NotEnoughSpace { needed: sectors, free });
         }
         unsafe {
-            format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(backend)?;
+            // DVD+R DL: forcing the close fails at the end of the write on some drives
+            // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
+            if media.media_type != MediaType::Dvd9 {
+                format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(backend)?;
+            }
             if !media.blank {
                 // Rewritable disc with old content: overwrite from the start.
                 format.SetForceOverwrite(VARIANT_TRUE).map_err(backend)?;
