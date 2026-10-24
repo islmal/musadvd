@@ -30,7 +30,7 @@ use convertx_rust::probe::{self, language_name, SubtitleKind};
 use convertx_rust::template::Template;
 use convertx_rust::tools::Toolchain;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::OnceCell;
 
 /// Where ConvertXToDVD 7 installs its menu templates.
@@ -637,6 +637,14 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .manage(burn::BurnState::default())
+        .on_window_event(|window, event| {
+            // The menu editor is a second window: it must not outlive the main one.
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(ed) = window.app_handle().get_webview_window("menu-editor") {
+                    let _ = ed.destroy();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             probe_file,
             list_templates,

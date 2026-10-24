@@ -1179,11 +1179,6 @@ input.time {
 }
 
 /* Menu editor ------------------------------------------------------------------ */
-.ed-overlay {
-  z-index: 30;
-  padding: 0;
-}
-
 .ed {
   width: 100vw;
   height: 100vh;
@@ -1447,6 +1442,126 @@ input.time {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   z-index: 5;
+}
+
+.ed-el.in-group:not(.selected) {
+  outline: 1px dotted var(--muted, #888);
+}
+
+.ed-el.in-group.selected {
+  outline-style: dashed;
+}
+
+.ed-el.hover-outline {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ed-el.locate {
+  animation: ed-locate 1s ease-out;
+}
+
+@keyframes ed-locate {
+  0%,
+  60% {
+    box-shadow: 0 0 0 6px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.ed-marquee {
+  position: absolute;
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.ed-layers {
+  display: grid;
+  gap: 6px;
+}
+
+.ed-layers h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.ed-layer-list {
+  display: grid;
+  gap: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.ed-layer,
+.ed-layer-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ed-layer.indent {
+  margin-left: 16px;
+}
+
+.ed-layer:hover,
+.ed-layer-group:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.ed-layer.active,
+.ed-layer-group.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.ed-layer-icon {
+  width: 16px;
+  text-align: center;
+  flex: none;
+}
+
+.ed-layer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.ed-layer-action {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.ed-layer-fold {
+  background: none;
+  border: 0;
+  color: inherit;
+  padding: 0 2px;
+  cursor: pointer;
 }
 
 .ed-handle {

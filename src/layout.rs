@@ -204,6 +204,9 @@ pub struct Element {
     /// Button colours of this element; `None` = the layout's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight: Option<ButtonColors>,
+    /// Editor-only grouping (elements sharing an id move together); ignored by the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 fn default_font() -> String {
@@ -1287,6 +1290,7 @@ mod tests {
             opacity: 1.0,
             action,
             highlight: None,
+            group: None,
         }
     }
 
@@ -1679,5 +1683,17 @@ mod tests {
         assert_eq!(frame_box(e, l.canvas, TvStandard::Ntsc), (0, 240, 300, 42));
         assert_eq!(button_rect(e, l.canvas, TvStandard::Ntsc), Some(Rect { x0: 0, y0: 240, x1: 300, y1: 282 }));
         assert!((frame_font_size(36.0, l.canvas, TvStandard::Ntsc) - 30.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn group_field_roundtrips_and_is_optional() {
+        let json = r##"{"id":"a","type":"text","text":"x","x":0,"y":0,"w":10,"h":10,"group":"g1"}"##;
+        let e: Element = serde_json::from_str(json).unwrap();
+        assert_eq!(e.group.as_deref(), Some("g1"));
+        let again: Element = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(again.group.as_deref(), Some("g1"));
+        let plain: Element = serde_json::from_str(&json.replace(r#","group":"g1""#, "")).unwrap();
+        assert_eq!(plain.group, None);
+        assert!(!serde_json::to_string(&plain).unwrap().contains("group"));
     }
 }

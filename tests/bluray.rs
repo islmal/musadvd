@@ -400,6 +400,7 @@ mod menus {
             opacity: 1.0,
             action: Some(action),
             highlight: None,
+            group: None,
         }
     }
 

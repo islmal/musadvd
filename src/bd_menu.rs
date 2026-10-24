@@ -545,6 +545,7 @@ mod tests {
             rotation: 0,
             opacity: 1.0,
             highlight: None,
+            group: None,
             content: Content::Text {
                 text: "Play".into(),
                 font: "Arial".into(),

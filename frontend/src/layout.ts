@@ -29,6 +29,8 @@ interface ElementBase {
   action?: Action | null;
   /** Own button colours (marked / activated); null = the layout's. At most 3 pairs per menu. */
   highlight?: { color: string; selectColor: string } | null;
+  /** Editor-only grouping: elements sharing a value move together; ignored by the build. */
+  group?: string | null;
 }
 
 export interface TextElement extends ElementBase {

@@ -50,7 +50,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return e;
 }
 
-export interface EditorOptions {
+/** What the main window sends when the editor window asks for its data. */
+export interface EditorInit {
   layout: CustomLayout | null;
   titles: EditorTitle[];
   /** "PAL" or "NTSC". */
@@ -59,9 +60,14 @@ export interface EditorOptions {
   heading: string;
   /** `titlesKey` of the videos `layout` was made for (null = unknown). */
   layoutTitlesKey: string | null;
-  onApply: (layout: CustomLayout) => void;
 }
 
+export interface EditorOptions extends EditorInit {
+  /** Called with a validated copy of the layout; the editor stays open. */
+  onApply: (layout: CustomLayout) => void;
+  /** Called once the editor has shut down (the window wrapper closes the window). */
+  onClose: () => void;
+}
 
 const IMAGE_FILTER = [{ name: "Bilder", extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }];
 const AUDIO_FILTER = [{ name: "Audio", extensions: ["mp3", "wav", "flac", "m4a", "aac", "ac3", "ogg", "opus"] }];
@@ -73,19 +79,25 @@ const FIT_LABELS: [Fit, string][] = [
 ];
 const SNAP = 2;
 
-let open_ = false;
+let closeHook: ((force: boolean) => boolean) | null = null;
 
-/** Opens the menu editor as a full-window overlay. */
-export function openMenuEditor(opts: EditorOptions) {
-  if (open_) return;
-  open_ = true;
+/** For the window's close button: true = fine to close now, false = the discard confirm is showing. */
+export function requestClose(): boolean {
+  return closeHook ? closeHook(false) : true;
+}
+
+/** Mounts the menu editor into the document body (the editor window). */
+export function mountMenuEditor(opts: EditorOptions) {
   const { titles, tv } = opts;
   // A stored layout for other videos would show their titles: start from a draft for the
   // current ones instead (the old layout stays reachable with "Rückgängig").
   const stale = !!opts.layout && madeForOtherTitles(opts.layout, opts.layoutTitlesKey, titles);
   let L: CustomLayout = structuredClone(opts.layout && !stale ? opts.layout : draftLayout(titles, tv, opts.heading));
   let menuIdx = 0;
-  let selId: string | null = null;
+  let selIds: string[] = [];
+  let closed = false;
+  let clipboard: LayoutElement[] = [];
+  const collapsedGroups = new Set<string>();
   let errors: string[] = [];
   let dirty = false;
   let confirmClose = false;
@@ -95,7 +107,16 @@ export function openMenuEditor(opts: EditorOptions) {
 
   // ---- helpers --------------------------------------------------------------------------------
   const menu = (): CustomMenu => L.menus[Math.min(menuIdx, L.menus.length - 1)];
-  const selected = (): LayoutElement | undefined => menu()?.elements.find((e) => e.id === selId);
+  const isSel = (id: string) => selIds.includes(id);
+  /** Selected elements of the current menu in z-order. */
+  const selection = (): LayoutElement[] => menu()?.elements.filter((e) => isSel(e.id)) ?? [];
+  /** The selected element when exactly one is selected. */
+  const selected = (): LayoutElement | undefined => {
+    const s = selection();
+    return s.length === 1 ? s[0] : undefined;
+  };
+  /** All members of the element's group (just the element when ungrouped). */
+  const groupMembers = (e: LayoutElement): LayoutElement[] => (e.group ? menu().elements.filter((x) => x.group === e.group) : [e]);
   const W = () => L.canvas.width;
   const H = () => L.canvas.height;
   const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? "(fehlt)"}`;
@@ -116,7 +137,8 @@ export function openMenuEditor(opts: EditorOptions) {
     const last = history.pop();
     if (!last) return;
     L = JSON.parse(last);
-    if (!L.menus.some((m) => m.elements.some((e) => e.id === selId))) selId = null;
+    const alive = new Set(L.menus.flatMap((m) => m.elements.map((e) => e.id)));
+    selIds = selIds.filter((id) => alive.has(id));
     renderAll();
   }
 
@@ -206,6 +228,7 @@ export function openMenuEditor(opts: EditorOptions) {
   const stage = el("div", { class: "ed-stage" });
   const viewport = el("div", { class: "ed-viewport" }, stage);
   const toolbar = el("div", { class: "ed-toolbar" });
+  const layersBox = el("section", { class: "ed-layers", "aria-label": "Elemente" });
   const props = el("aside", { class: "ed-props", "aria-label": "Eigenschaften" });
   const status = el("footer", { class: "ed-status", role: "status" });
   const headerButtons = el("div", { class: "ed-header-actions" });
@@ -216,8 +239,7 @@ export function openMenuEditor(opts: EditorOptions) {
     el("div", { class: "ed-body" }, menusPane, el("section", { class: "ed-center" }, toolbar, viewport), props),
     status,
   );
-  const root = el("div", { class: "overlay ed-overlay" }, editor);
-  document.body.append(root);
+  document.body.append(editor);
 
   // ---- stage scaling (TV frame shown at 4:3) ----------------------------------------------------
   let scaleX = 1;
@@ -262,7 +284,7 @@ export function openMenuEditor(opts: EditorOptions) {
       el(
         "button",
         { class: "btn", type: "button", onclick: () => close(false) },
-        confirmClose ? "Änderungen verwerfen?" : "Abbrechen",
+        confirmClose ? "Änderungen verwerfen?" : "Schließen",
       ),
       el("button", { class: "btn primary", type: "button", onclick: () => void apply() }, "Übernehmen"),
     );
@@ -283,7 +305,7 @@ export function openMenuEditor(opts: EditorOptions) {
           type: "button",
           onclick: () => {
             menuIdx = i;
-            selId = null;
+            selIds = [];
             renderAll();
           },
         },
@@ -324,6 +346,7 @@ export function openMenuEditor(opts: EditorOptions) {
         { class: "ed-hint" },
         "Titelmenüs liegen im Hauptmenü der DVD (Taste „Title“); das erste erscheint beim Einlegen. Root-Menüs gehören zu einem Titel (Taste „Menu“ während der Wiedergabe).",
       ),
+      layersBox,
     ];
     menusPane.replaceChildren(...parts.filter((c): c is Node | string => !!c));
   }
@@ -411,7 +434,7 @@ export function openMenuEditor(opts: EditorOptions) {
     const node = el(
       "div",
       {
-        class: `ed-el${isButton(e) ? " is-button" : ""}${e.id === selId ? " selected" : ""}`,
+        class: `ed-el${isButton(e) ? " is-button" : ""}${e.group ? " in-group" : ""}${isSel(e.id) ? " selected" : ""}`,
         title: actionLabel(e.action),
         "data-id": e.id,
         style: `--ed-hl: ${e.highlight?.color ?? L.highlight.color}`,
@@ -419,12 +442,12 @@ export function openMenuEditor(opts: EditorOptions) {
       inner,
     );
     applyBox(node, e);
-    if (e.id === selId) {
+    if (isSel(e.id)) {
       for (const corner of ["nw", "ne", "sw", "se"]) {
         node.append(el("span", { class: `ed-handle ${corner}`, "data-handle": corner }));
       }
     }
-    node.addEventListener("pointerdown", (ev) => startDrag(ev, e, node));
+    node.addEventListener("pointerdown", (ev) => startDrag(ev, e));
     return node;
   }
 
@@ -461,58 +484,106 @@ export function openMenuEditor(opts: EditorOptions) {
     for (const e of m.elements) stage.append(renderElement(e));
     if (showSafe) stage.append(el("div", { class: "ed-safe", "aria-hidden": "true" }));
     layoutStage();
+    renderLayers();
   }
 
-  // ---- drag & resize ------------------------------------------------------------------------------
-  function startDrag(ev: PointerEvent, e: LayoutElement, node: HTMLElement) {
+  // ---- selection, drag & resize -------------------------------------------------------------------
+  function refreshSelection() {
+    renderStage();
+    renderProps();
+  }
+
+  /** Bounding box of a set of boxes. */
+  function unionBox(list: { x: number; y: number; w: number; h: number }[]) {
+    const x0 = Math.min(...list.map((b) => b.x));
+    const y0 = Math.min(...list.map((b) => b.y));
+    return { x: x0, y: y0, w: Math.max(...list.map((b) => b.x + b.w)) - x0, h: Math.max(...list.map((b) => b.y + b.h)) - y0 };
+  }
+
+  /** Moves `list` by (dx, dy), clamped on the selection's bounding box so relative spacing is kept. */
+  function shiftBy(list: LayoutElement[], dx: number, dy: number) {
+    const u = unionBox(list);
+    const ddx = Math.round(Math.max(-u.x, Math.min(dx, W() - u.w - u.x)));
+    const ddy = Math.round(Math.max(-u.y, Math.min(dy, H() - u.h - u.y)));
+    for (const e of list) {
+      e.x += ddx;
+      e.y += ddy;
+    }
+  }
+
+  function startDrag(ev: PointerEvent, e: LayoutElement) {
     if (ev.button !== 0) return;
     ev.stopPropagation();
     ev.preventDefault();
     const handle = (ev.target as HTMLElement).dataset.handle;
-    if (selId !== e.id) {
-      selId = e.id;
-      renderStage();
-      renderProps();
-      // Continue the drag on the re-rendered node.
-      const fresh = stage.querySelector<HTMLElement>(`[data-id="${e.id}"]`);
-      if (fresh) node = fresh;
+    // Plain click on an already-selected element: collapse the selection if it was not a drag.
+    let collapseTo: string[] | null = null;
+    if (!handle) {
+      const ids = (ev.altKey ? [e] : groupMembers(e)).map((x) => x.id);
+      if (ev.shiftKey) {
+        if (isSel(e.id)) {
+          selIds = selIds.filter((id) => !ids.includes(id));
+          refreshSelection();
+          return;
+        }
+        selIds = [...selIds, ...ids];
+        refreshSelection();
+      } else if (!isSel(e.id)) {
+        selIds = ids;
+        refreshSelection();
+      } else {
+        collapseTo = ids;
+      }
     }
-    const start = { x: ev.clientX, y: ev.clientY, ex: e.x, ey: e.y, ew: e.w, eh: e.h };
+    // The stage may have been re-rendered: continue on the fresh nodes.
+    const targets = selection().map((t) => ({ t, node: stage.querySelector<HTMLElement>(`[data-id="${t.id}"]`), x: t.x, y: t.y, w: t.w, h: t.h }));
+    const union = unionBox(targets.map((s0) => ({ x: s0.x, y: s0.y, w: s0.w, h: s0.h })));
+    const startX = ev.clientX;
+    const startY = ev.clientY;
     const before = JSON.stringify(L);
     let moved = false;
     const onMove = (mv: PointerEvent) => {
-      const dx = (mv.clientX - start.x) / scaleX;
-      const dy = (mv.clientY - start.y) / scaleY;
+      const dx = (mv.clientX - startX) / scaleX;
+      const dy = (mv.clientY - startY) / scaleY;
       if (!moved && Math.abs(dx) + Math.abs(dy) < 2) return;
       moved = true;
       if (!handle) {
-        e.x = snap(start.ex + dx);
-        e.y = snap(start.ey + dy);
-      } else {
-        let { ex: x, ey: y, ew: w, eh: h } = start;
-        if (handle.includes("e")) w = start.ew + dx;
-        if (handle.includes("s")) h = start.eh + dy;
+        // Snap the selection's top-left corner, clamp the union box inside the canvas.
+        const ddx = Math.max(-union.x, Math.min(snap(union.x + dx) - union.x, W() - union.w - union.x));
+        const ddy = Math.max(-union.y, Math.min(snap(union.y + dy) - union.y, H() - union.h - union.y));
+        for (const s0 of targets) {
+          s0.t.x = Math.round(s0.x + ddx);
+          s0.t.y = Math.round(s0.y + ddy);
+          clampBox(s0.t);
+          if (s0.node) applyBox(s0.node, s0.t);
+        }
+        return;
+      }
+      for (const s0 of targets) {
+        let { x, y, w, h } = s0;
+        if (handle.includes("e")) w = s0.w + dx;
+        if (handle.includes("s")) h = s0.h + dy;
         if (handle.includes("w")) {
-          x = start.ex + dx;
-          w = start.ew - dx;
+          x = s0.x + dx;
+          w = s0.w - dx;
         }
         if (handle.includes("n")) {
-          y = start.ey + dy;
-          h = start.eh - dy;
+          y = s0.y + dy;
+          h = s0.h - dy;
         }
         if (mv.shiftKey) {
-          // Keep the aspect ratio.
-          const r = start.ew / start.eh;
-          if (Math.abs(w - start.ew) > Math.abs(h - start.eh)) h = w / r;
+          // Keep each element's aspect ratio.
+          const r = s0.w / s0.h;
+          if (Math.abs(w - s0.w) > Math.abs(h - s0.h)) h = w / r;
           else w = h * r;
         }
-        e.x = snap(x);
-        e.y = snap(y);
-        e.w = snap(Math.max(8, w));
-        e.h = snap(Math.max(8, h));
+        s0.t.x = snap(x);
+        s0.t.y = snap(y);
+        s0.t.w = snap(Math.max(8, w));
+        s0.t.h = snap(Math.max(8, h));
+        clampBox(s0.t);
+        if (s0.node) applyBox(s0.node, s0.t);
       }
-      clampBox(e);
-      applyBox(node, e);
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
@@ -523,19 +594,163 @@ export function openMenuEditor(opts: EditorOptions) {
         renderProps();
         renderHeader();
         scheduleCheck();
+      } else if (collapseTo) {
+        selIds = collapseTo;
+        refreshSelection();
       }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   }
 
+  /** Drag on the empty stage draws a marquee; a click without movement clears the selection. */
   stage.addEventListener("pointerdown", (ev) => {
-    if (ev.target === stage || (ev.target as HTMLElement).classList.contains("ed-bg") || (ev.target as HTMLElement).classList.contains("ed-safe")) {
-      selId = null;
-      renderStage();
-      renderProps();
-    }
+    const t = ev.target as HTMLElement;
+    if (ev.button !== 0 || !(t === stage || t.classList.contains("ed-bg") || t.classList.contains("ed-safe"))) return;
+    ev.preventDefault();
+    const origin = stage.getBoundingClientRect();
+    const pos = (e: PointerEvent) => ({ x: (e.clientX - origin.left) / scaleX, y: (e.clientY - origin.top) / scaleY });
+    const a = pos(ev);
+    const box = el("div", { class: "ed-marquee" });
+    let moved = false;
+    const rectOf = (e: PointerEvent) => {
+      const b = pos(e);
+      return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
+    };
+    const onMove = (mv: PointerEvent) => {
+      const r = rectOf(mv);
+      if (!moved && (r.w + r.h) * Math.min(scaleX, scaleY) < 4) return;
+      if (!moved) stage.append(box);
+      moved = true;
+      Object.assign(box.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+    };
+    const onUp = (up: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      box.remove();
+      if (!moved) {
+        if (!up.shiftKey && selIds.length > 0) {
+          selIds = [];
+          refreshSelection();
+        }
+        return;
+      }
+      const r = rectOf(up);
+      const hit = new Set<string>();
+      for (const e of menu().elements) {
+        if (e.x < r.x + r.w && e.x + e.w > r.x && e.y < r.y + r.h && e.y + e.h > r.y) for (const g of groupMembers(e)) hit.add(g.id);
+      }
+      selIds = up.shiftKey ? [...new Set([...selIds, ...hit])] : [...hit];
+      refreshSelection();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   });
+
+  // ---- layer list -----------------------------------------------------------------------------------
+  function layerName(e: LayoutElement): string {
+    if (e.type === "text") {
+      const first = e.text.split("\n")[0].trim();
+      return first.length > 28 ? `${first.slice(0, 27)}…` : first || "(leerer Text)";
+    }
+    if (e.type === "image") return e.src.split(/[\\/]/).pop() ?? e.src;
+    return titles[e.title - 1]?.label ?? `Titel ${e.title} (fehlt)`;
+  }
+
+  /** Pulses the stage nodes of `ids` so the user sees where they are. */
+  function locate(ids: string[]) {
+    for (const id of ids) {
+      const node = stage.querySelector<HTMLElement>(`[data-id="${id}"]`);
+      if (!node) continue;
+      node.classList.add("locate");
+      window.setTimeout(() => node.classList.remove("locate"), 1000);
+    }
+  }
+
+  function pickFromList(ids: string[], ev: MouseEvent) {
+    if (ev.shiftKey) selIds = ids.every(isSel) ? selIds.filter((id) => !ids.includes(id)) : [...new Set([...selIds, ...ids])];
+    else selIds = ids;
+    refreshSelection();
+    locate(ids.filter(isSel));
+  }
+
+  const hoverStage = (ids: string[], on: boolean) => {
+    for (const id of ids) stage.querySelector(`[data-id="${id}"]`)?.classList.toggle("hover-outline", on);
+  };
+
+  function renderLayers() {
+    const m = menu();
+    if (!m) {
+      layersBox.replaceChildren();
+      return;
+    }
+    const groupOrder = [...new Set(m.elements.flatMap((e) => (e.group ? [e.group] : [])))];
+    const topFirst = [...m.elements].reverse();
+    const layerRow = (e: LayoutElement, indent: boolean) =>
+      el(
+        "button",
+        {
+          type: "button",
+          class: `ed-layer${isSel(e.id) ? " active" : ""}${indent ? " indent" : ""}`,
+          onclick: (ev: MouseEvent) => pickFromList([e.id], ev),
+          onpointerenter: () => hoverStage([e.id], true),
+          onpointerleave: () => hoverStage([e.id], false),
+        },
+        el("span", { class: "ed-layer-icon", "aria-hidden": "true" }, e.type === "text" ? "T" : e.type === "image" ? "🖼" : "▶"),
+        el("span", { class: "ed-layer-name" }, layerName(e)),
+        isButton(e) ? el("span", { class: "ed-layer-action" }, actionLabel(e.action)) : null,
+      );
+    const rows: HTMLElement[] = [];
+    const seen = new Set<string>();
+    for (const e of topFirst) {
+      if (!e.group) {
+        rows.push(layerRow(e, false));
+        continue;
+      }
+      if (seen.has(e.group)) continue;
+      seen.add(e.group);
+      const g = e.group;
+      const members = topFirst.filter((x) => x.group === g);
+      const ids = members.map((x) => x.id);
+      const folded = collapsedGroups.has(g);
+      rows.push(
+        el(
+          "div",
+          { class: `ed-layer-group${ids.every(isSel) ? " active" : ""}` },
+          el(
+            "button",
+            {
+              type: "button",
+              class: "ed-layer-fold",
+              title: folded ? "Aufklappen" : "Zuklappen",
+              onclick: () => {
+                if (folded) collapsedGroups.delete(g);
+                else collapsedGroups.add(g);
+                renderLayers();
+              },
+            },
+            folded ? "▸" : "▾",
+          ),
+          el(
+            "button",
+            {
+              type: "button",
+              class: "ed-layer-name",
+              onclick: (ev: MouseEvent) => pickFromList(ids, ev),
+              onpointerenter: () => hoverStage(ids, true),
+              onpointerleave: () => hoverStage(ids, false),
+            },
+            `Gruppe ${groupOrder.indexOf(g) + 1} (${members.length})`,
+          ),
+        ),
+      );
+      if (!folded) for (const x of members) rows.push(layerRow(x, true));
+    }
+    layersBox.replaceChildren(
+      el("h3", {}, "Elemente"),
+      rows.length ? el("div", { class: "ed-layer-list" }, ...rows) : el("p", { class: "ed-hint" }, "Noch keine Elemente."),
+    );
+  }
 
   // ---- properties -------------------------------------------------------------------------------
   const row = (label: string, ...control: Child[]) => el("label", { class: "ed-row" }, el("span", {}, label), ...control);
@@ -593,8 +808,37 @@ export function openMenuEditor(opts: EditorOptions) {
       props.replaceChildren();
       return;
     }
+    const sel = selection();
     const e = selected();
-    props.replaceChildren(...(e ? elementProps(m, e) : menuProps(m)));
+    props.replaceChildren(...(sel.length > 1 ? multiProps(sel) : e ? elementProps(m, e) : menuProps(m)));
+  }
+
+  function multiProps(sel: LayoutElement[]): HTMLElement[] {
+    const groups = new Set(sel.map((e) => e.group ?? null));
+    const oneGroup = groups.size === 1 && !groups.has(null);
+    return [
+      el("h3", {}, `${sel.length} Elemente ausgewählt`),
+      el(
+        "div",
+        { class: "ed-row-buttons" },
+        el("button", { class: "btn", type: "button", disabled: oneGroup, title: "Strg+G", onclick: groupSelection }, "Gruppieren"),
+        el("button", { class: "btn", type: "button", disabled: !sel.some((e) => e.group), title: "Strg+Umschalt+G", onclick: ungroupSelection }, "Gruppe auflösen"),
+        el("button", { class: "btn", type: "button", onclick: () => ((selIds = []), refreshSelection()) }, "Auswahl aufheben"),
+      ),
+      el(
+        "div",
+        { class: "ed-row-buttons" },
+        el("button", { class: "btn", type: "button", onclick: () => reorder(sel, 1) }, "Nach vorne"),
+        el("button", { class: "btn", type: "button", onclick: () => reorder(sel, -1) }, "Nach hinten"),
+        el("button", { class: "btn", type: "button", onclick: () => addCopies(sel) }, "Duplizieren"),
+        el("button", { class: "btn danger", type: "button", onclick: () => removeElements(sel) }, "Löschen"),
+      ),
+      el(
+        "p",
+        { class: "ed-hint" },
+        "Ziehen verschiebt alle, Eck-Griffe ändern alle Größen. Umschalt+Klick: Auswahl erweitern · Alt+Klick: nur ein Element (auch in einer Gruppe) · Ziehen auf leerer Fläche: Auswahlrahmen.",
+      ),
+    ];
   }
 
   function menuProps(m: CustomMenu): HTMLElement[] {
@@ -1011,10 +1255,10 @@ export function openMenuEditor(opts: EditorOptions) {
       el(
         "div",
         { class: "ed-row-buttons" },
-        el("button", { class: "btn", type: "button", disabled: index === m.elements.length - 1, onclick: () => reorder(e, 1) }, "Nach vorne"),
-        el("button", { class: "btn", type: "button", disabled: index === 0, onclick: () => reorder(e, -1) }, "Nach hinten"),
-        el("button", { class: "btn", type: "button", onclick: () => duplicate(e) }, "Duplizieren"),
-        el("button", { class: "btn danger", type: "button", onclick: () => removeElement(e) }, "Löschen"),
+        el("button", { class: "btn", type: "button", disabled: index === m.elements.length - 1, onclick: () => reorder([e], 1) }, "Nach vorne"),
+        el("button", { class: "btn", type: "button", disabled: index === 0, onclick: () => reorder([e], -1) }, "Nach hinten"),
+        el("button", { class: "btn", type: "button", onclick: () => addCopies([e]) }, "Duplizieren"),
+        el("button", { class: "btn danger", type: "button", onclick: () => removeElements([e]) }, "Löschen"),
       ),
     ];
   }
@@ -1041,7 +1285,7 @@ export function openMenuEditor(opts: EditorOptions) {
       for (const e of errors.slice(0, 8)) notes.push(el("li", { class: "error" }, e));
       if (errors.length > 8) notes.push(el("li", { class: "error" }, `… und ${errors.length - 8} weitere`));
     }
-    status.replaceChildren(el("ul", {}, ...notes), el("span", { class: "ed-keys" }, "Ziehen: verschieben · Ecken: Größe (Umschalt: Seitenverhältnis) · Pfeile: 1 px (Umschalt: 10) · Entf: löschen · Strg+D: duplizieren · Strg+Z: rückgängig"));
+    status.replaceChildren(el("ul", {}, ...notes), el("span", { class: "ed-keys" }, "Ziehen: verschieben · Ecken: Größe (Umschalt: Seitenverhältnis) · Umschalt+Klick: mehrere · Alt+Klick: einzeln · Pfeile: 1 px (Umschalt: 10) · Entf: löschen · Strg+D/C/X/V · Strg+G: gruppieren · Strg+Z: rückgängig"));
   }
 
   let checkTimer: number | undefined;
@@ -1068,7 +1312,7 @@ export function openMenuEditor(opts: EditorOptions) {
     remember();
     clampBox(e);
     menu().elements.push(e);
-    selId = e.id;
+    selIds = [e.id];
     renderAll();
   }
   function addText() {
@@ -1095,23 +1339,86 @@ export function openMenuEditor(opts: EditorOptions) {
       action: { type: "playTitle", title: 1 },
     });
   }
-  function removeElement(e: LayoutElement) {
+  function removeElements(list: LayoutElement[]) {
+    if (list.length === 0) return;
     remember();
-    menu().elements = menu().elements.filter((x) => x !== e);
-    selId = null;
+    menu().elements = menu().elements.filter((x) => !list.includes(x));
+    selIds = [];
+    pruneGroups();
     renderAll();
   }
-  function duplicate(e: LayoutElement) {
-    const copy = { ...structuredClone(e), id: newId("d"), x: e.x + 16, y: e.y + 16 };
-    addElement(copy);
-  }
-  function reorder(e: LayoutElement, dir: number) {
-    const list = menu().elements;
-    const i = list.indexOf(e);
-    const j = i + dir;
-    if (j < 0 || j >= list.length) return;
+  /** Copies of `src` (new ids, groups re-mapped to fresh ids), offset by 16 px, on top and selected. */
+  function addCopies(src: LayoutElement[]) {
+    if (src.length === 0) return;
     remember();
-    [list[i], list[j]] = [list[j], list[i]];
+    const gmap = new Map<string, string>();
+    const copies = src.map((e) => {
+      const c = structuredClone(e);
+      c.id = newId("d");
+      if (c.group) {
+        if (!gmap.has(c.group)) gmap.set(c.group, newId("g"));
+        c.group = gmap.get(c.group);
+      }
+      return c;
+    });
+    shiftBy(copies, 16, 16);
+    menu().elements.push(...copies);
+    selIds = copies.map((c) => c.id);
+    pruneGroups();
+    renderAll();
+  }
+  /** Moves the selected elements one step past the next unselected neighbour (towards `dir`). */
+  function reorder(list: LayoutElement[], dir: number) {
+    const before = JSON.stringify(L);
+    const all = menu().elements;
+    const picked = new Set(list);
+    let changed = false;
+    if (dir > 0) {
+      for (let i = all.length - 2; i >= 0; i--) {
+        if (picked.has(all[i]) && !picked.has(all[i + 1])) {
+          [all[i], all[i + 1]] = [all[i + 1], all[i]];
+          changed = true;
+        }
+      }
+    } else {
+      for (let i = 1; i < all.length; i++) {
+        if (picked.has(all[i]) && !picked.has(all[i - 1])) {
+          [all[i], all[i - 1]] = [all[i - 1], all[i]];
+          changed = true;
+        }
+      }
+    }
+    if (!changed) return;
+    history.push(before);
+    dirty = true;
+    renderAll();
+  }
+  /** Dissolves groups left with a single member. */
+  function pruneGroups() {
+    const count = new Map<string, number>();
+    for (const e of menu().elements) if (e.group) count.set(e.group, (count.get(e.group) ?? 0) + 1);
+    for (const e of menu().elements) if (e.group && (count.get(e.group) ?? 0) < 2) delete e.group;
+  }
+  function groupSelection() {
+    const sel = selection();
+    if (sel.length < 2) return;
+    remember();
+    const g = newId("g");
+    for (const e of sel) e.group = g;
+    // Members become one contiguous block at the topmost member's position.
+    const all = menu().elements;
+    const at = all.slice(0, Math.max(...sel.map((e) => all.indexOf(e)))).filter((x) => !sel.includes(x)).length;
+    const rest = all.filter((x) => !sel.includes(x));
+    rest.splice(at, 0, ...sel);
+    menu().elements = rest;
+    pruneGroups();
+    renderAll();
+  }
+  function ungroupSelection() {
+    const groups = new Set(selection().flatMap((e) => (e.group ? [e.group] : [])));
+    if (groups.size === 0) return;
+    remember();
+    for (const e of menu().elements) if (e.group && groups.has(e.group)) delete e.group;
     renderAll();
   }
   function addMenu(role: CustomMenu["role"]) {
@@ -1121,7 +1428,7 @@ export function openMenuEditor(opts: EditorOptions) {
     const m = emptyMenu(name, role, role === "title" ? null : 1);
     L.menus.push(m);
     menuIdx = L.menus.length - 1;
-    selId = null;
+    selIds = [];
     renderAll();
   }
   function moveMenu(dir: number) {
@@ -1149,7 +1456,7 @@ export function openMenuEditor(opts: EditorOptions) {
     L.menus.splice(menuIdx, 1);
     // Buttons that opened this menu lose their action.
     for (const m of L.menus) for (const e of m.elements) if (e.action?.type === "menu" && e.action.menu === gone) e.action = null;
-    selId = null;
+    selIds = [];
     renderAll();
   }
 
@@ -1171,7 +1478,7 @@ export function openMenuEditor(opts: EditorOptions) {
     window.clearTimeout(noticeTimer);
     noticeTimer = window.setTimeout(() => {
       notice = null;
-      if (open_) renderStatus();
+      if (!closed) renderStatus();
     }, 8000);
     renderStatus();
   }
@@ -1180,7 +1487,7 @@ export function openMenuEditor(opts: EditorOptions) {
     remember();
     L = draftLayout(titles, tv, opts.heading);
     menuIdx = 0;
-    selId = null;
+    selIds = [];
     renderAll();
   }
   async function loadFile() {
@@ -1191,7 +1498,7 @@ export function openMenuEditor(opts: EditorOptions) {
       remember();
       L = loaded;
       menuIdx = 0;
-      selId = null;
+      selIds = [];
       renderAll();
       flash(`Geladen: ${p}`, "ok");
     } catch (e) {
@@ -1224,58 +1531,77 @@ export function openMenuEditor(opts: EditorOptions) {
     renderStatus();
     if (result.length > 0) return;
     opts.onApply(structuredClone(L));
-    close(true);
+    dirty = false;
+    flash("Übernommen.", "ok");
+    renderHeader();
   }
 
-  function close(force: boolean) {
+  /** Returns true when the editor shut down, false while the "discard changes?" confirm is showing. */
+  function close(force: boolean): boolean {
     if (!force && dirty && !confirmClose) {
       confirmClose = true;
       renderHeader();
       window.setTimeout(() => {
         confirmClose = false;
-        if (open_) renderHeader();
+        if (!closed) renderHeader();
       }, 4000);
-      return;
+      return false;
     }
+    closed = true;
+    closeHook = null;
     ro.disconnect();
     window.removeEventListener("keydown", onKey, true);
     window.clearTimeout(checkTimer);
     window.clearTimeout(noticeTimer);
-    root.remove();
-    open_ = false;
+    editor.remove();
+    opts.onClose();
+    return true;
   }
+  closeHook = close;
 
   function onKey(ev: KeyboardEvent) {
-    const target = ev.target as HTMLElement;
-    const typing = target.matches("input, textarea, select");
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z" && !typing) {
+    if ((ev.target as HTMLElement).matches("input, textarea, select")) return;
+    const ctrl = ev.ctrlKey || ev.metaKey;
+    const key = ev.key.toLowerCase();
+    if (ctrl && key === "z") {
       ev.preventDefault();
       undo();
       return;
     }
-    const e = selected();
-    if (!e || typing) return;
+    if (ctrl && key === "v") {
+      ev.preventDefault();
+      addCopies(clipboard);
+      return;
+    }
+    const sel = selection();
+    if (sel.length === 0) return;
     const step = ev.shiftKey ? 10 : 1;
     const moves: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
     if (moves[ev.key]) {
       ev.preventDefault();
       remember();
-      e.x += moves[ev.key][0];
-      e.y += moves[ev.key][1];
-      clampBox(e);
+      shiftBy(sel, moves[ev.key][0], moves[ev.key][1]);
       renderStage();
       renderProps();
+      renderHeader();
       scheduleCheck();
     } else if (ev.key === "Delete" || ev.key === "Backspace") {
       ev.preventDefault();
-      removeElement(e);
-    } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "d") {
+      removeElements(sel);
+    } else if (ctrl && key === "d") {
       ev.preventDefault();
-      duplicate(e);
+      addCopies(sel);
+    } else if (ctrl && (key === "c" || key === "x")) {
+      ev.preventDefault();
+      clipboard = structuredClone(sel);
+      if (key === "x") removeElements(sel);
+    } else if (ctrl && key === "g") {
+      ev.preventDefault();
+      if (ev.shiftKey) ungroupSelection();
+      else groupSelection();
     } else if (ev.key === "Escape") {
-      selId = null;
-      renderStage();
-      renderProps();
+      selIds = [];
+      refreshSelection();
     }
   }
   window.addEventListener("keydown", onKey, true);

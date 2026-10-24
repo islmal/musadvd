@@ -1,7 +1,9 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openSettings } from "./settings";
 import { openBurner } from "./burn";
-import { openMenuEditor } from "./menuEditor";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import type { EditorInit } from "./menuEditor";
 import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -718,24 +720,44 @@ async function refreshLayoutCheck() {
   }
 }
 
-function openEditor() {
-  openMenuEditor({
+function editorInit(): EditorInit {
+  return {
     layout: state.customLayout,
     titles: editorTitles(),
     tv: frameName(),
     heading: state.menuTitle.trim() || state.titles[0]?.label || (isBluray() ? "Blu-ray" : "DVD"),
     layoutTitlesKey: state.customLayoutKey,
-    onApply: (layout) => {
-      state.customLayout = layout;
-      state.customLayoutKey = titlesKey(editorTitles());
-      state.menuMode = "custom";
-      saveSettings();
-      void refreshLayoutCheck();
-      scheduleCalc();
-      renderAll();
-      status("Eigenes Menü übernommen.");
-    },
+  };
+}
+
+// The editor lives in its own window ("menu-editor", editor.html) and talks via events.
+void listen("editor-ready", () => emitTo("menu-editor", "editor-init", editorInit()));
+void listen<CustomLayout>("editor-apply", ({ payload }) => {
+  state.customLayout = payload;
+  state.customLayoutKey = titlesKey(editorTitles());
+  state.menuMode = "custom";
+  saveSettings();
+  void refreshLayoutCheck();
+  scheduleCalc();
+  renderAll();
+  status("Eigenes Menü übernommen.");
+});
+
+async function openEditor() {
+  const existing = await WebviewWindow.getByLabel("menu-editor");
+  if (existing) {
+    await existing.setFocus();
+    return;
+  }
+  const win = new WebviewWindow("menu-editor", {
+    url: "editor.html",
+    title: "Menü-Editor – ConvertX Rust",
+    width: 1280,
+    height: 820,
+    minWidth: 960,
+    minHeight: 620,
   });
+  void win.once("tauri://error", (ev) => status(`Menü-Editor konnte nicht geöffnet werden: ${String(ev.payload)}`));
 }
 
 function renderCustomMenuTab(): HTMLElement {
