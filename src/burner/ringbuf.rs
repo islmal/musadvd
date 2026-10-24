@@ -147,7 +147,7 @@ impl RingStats {
         self.0.lock().recoveries
     }
 
-    /// Wakes and fails both ends with `Interrupted`.
+    /// Wakes and fails both ends with `ConnectionAborted` (not `Interrupted`: `write_all`/`read_exact` retry that forever).
     pub fn cancel(&self) {
         self.0.cancel.store(true, Ordering::SeqCst);
         self.0.changed.notify_all();
@@ -155,7 +155,7 @@ impl RingStats {
 }
 
 fn interrupted() -> io::Error {
-    io::Error::new(io::ErrorKind::Interrupted, "abgebrochen")
+    io::Error::new(io::ErrorKind::ConnectionAborted, "abgebrochen")
 }
 
 impl Write for RingWriter {
@@ -331,8 +331,10 @@ mod tests {
         let t = std::thread::spawn(move || r.read(&mut [0u8; 4]).unwrap_err().kind());
         std::thread::sleep(Duration::from_millis(100));
         stats2.cancel();
-        assert_eq!(t.join().unwrap(), io::ErrorKind::Interrupted);
-        assert_eq!(w.write(&[1]).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(t.join().unwrap(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(w.write(&[1]).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        // write_all must not retry an abort (it did, spinning forever, with Interrupted).
+        assert_eq!(w.write_all(&[1]).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
         assert_eq!(stats.percent(), 100);
     }
 }

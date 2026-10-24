@@ -624,6 +624,8 @@ ConvertX templates are missing.
 
 ### 5.2 Verified outside the test suite (manual runs, 2026-10-14/15/17/24)
 
+- ✅ **Burn Studio, write files to a DVD+R DL through IMAPI (2026-10-25, Pioneer BDR-209M, `F:`):** a DVD-Video folder (3,999,981 sectors, layer break 2,065,856) was built to a temp image and burned at 4x with verify on; the user reports the DVD-9 burned successfully ("hat funktioniert"). Required three fixes first (ring abort as `ConnectionAborted`, producer error not masking the burner error, exclusive access optional in `set_layer_break`, §8). Reported by the user, not independently checked by me: playback of the disc, the verify result text, whether the player sees a clean layer change. The normal CLI/GUI burn after authoring shares `burn_feed` but was not run.
+
 - ✅ **Burn Studio M4, window in a browser with a mocked Tauri (2026-10-24):** `vite` dev server + the built-in browser pane; a stand-in for `window.__TAURI_INTERNALS__` answered `invoke` with canned data (drive `PIONEER BD-RW BDR-209M (F:)`, a blank DVD+R with speeds 5540/11080/16620, a DVD-Video plan, one layer-break candidate) and fired `studio-progress`/`studio-graph`/`studio-done`. Seen working: home cards, menu bar and mode menu, drive bar with media text/media ID and the speed list (8x/16x/24x labels), "Image auf Disc schreiben" → progress 55 % / 6.0x / ring 79 % / "Laufwerkspuffer —" / remaining 1:30 → "Fertig", the graph tab drawing the four curves (screenshot), the build view with the fill gauge against a DVD-5, the settings dialog (tab "Schreiben": options only the direct engine honours greyed out with the reason). **Not a real window:** no Tauri command, capability, file dialog, drag & drop, window creation or `--burn-studio` start was exercised.
 - ✅ **Burn Studio M3a host probe (2026-10-24, `spti::tests::host_probe_reads_only`, Pioneer BDR-209M on `F:`, empty drive):** through `ImapiExTransport` INQUIRY answers `PIONEER` / `BD-RW   BDR-209M` / `1.33`, GET CONFIGURATION lists 21 profiles and reports the current profile 0 ("keine Disc"), TEST UNIT READY not ready; **`SptiTransport` opened `\\.\F:` read/write from a non-elevated process** and returned the same model (so on this machine "SPTI Direkt" needs no administrator). Only read commands were sent. Everything that needs a disc (capacity, disc information, physical format, media ID, write speeds) was not exercised.
 
@@ -741,7 +743,7 @@ ConvertX templates are missing.
   Linux but has no BD media detection).
 
 - 🟡 Erasing DVD-RW / overwriting DVD+RW.
-- 🟡 Setting the layer break on a real DVD+R DL (SEND DVD STRUCTURE 0x20).
+- 🟡 Setting the layer break on a real DVD+R DL (SEND DVD STRUCTURE 0x20): the Burn Studio write of a DVD-9 went through on the Pioneer BDR-209M (see §5.2, 2026-10-25), but it is not known whether the command was accepted or only skipped/ignored by the drive, and the layer-break position on the disc was never read back.
 - 🟡 The Unix burner at runtime.
 - ✅ **Button colours and word wrap (2026-10-15):** CLI build with a layout of 3 text buttons
   (default yellow/orange, green/dark green, blue/magenta) and a wrapped heading; a script read
@@ -976,6 +978,15 @@ convertx-gui.exe --burn-studio               # starts with the Burn Studio windo
 ## 8. Changelog
 
 Newest first. Every change to the project adds an entry here (rule in `CLAUDE.md`).
+
+### 2026-10-24 — Fix: Burn Studio hung forever at "Laufwerk wird vorbereitet" after a failed write start
+
+- First real run (write files, verify on, DVD+R DL, Pioneer BDR-209M): the UI stayed at "Vorbereiten" for minutes. Found with gdb attached to the running app: the ring producer thread spun at 100 % CPU in `RingWriter::write_all`, the write thread waited in `join` in `ImapiBurner::burn_source`. Cause: the ring reported cancel as `ErrorKind::Interrupted`, which `write_all`/`read_exact` retry forever; `burn_feed` had failed (real error still unknown, it was never shown), cancelled the ring and then joined the never-ending producer. Cancel is now `ErrorKind::ConnectionAborted`.
+- Second run: the write ended with just "Disc-Image: abgebrochen". Same root cause one level up: after a failed `burn_feed` the producer's own error (the ring abort/`BrokenPipe` it got *because* the burner failed) replaced the real error in `ImapiBurner::burn_source`. `spawn_ring_feed` now treats `ConnectionAborted`/`BrokenPipe` from the ring as the consumer's doing, not the source's, so the burner's real error is reported.
+- Third run (DVD+R DL, IMAPI): `IMAPI2: Die angeforderte Featureseite wird unterstützt, sie ist jedoch nicht als aktuell gekennzeichnet (0x80004005)` – the same error as the earlier ~94 % failure, so the "no forced close" change did **not** fix it (cause still open, §6.1). `windows.rs::burn_feed` now names the failing step (`step()`, `at()`: open drive, probe, layer break, speed, close, overwrite) and, for `Write`, how much of the data had been handed to IMAPI, to tell start-up from finalize failures on the next run. `cargo check --workspace --all-targets` clean; not run on a disc.
+- Fourth run: the new context named the step: **`Layerwechsel setzen`** – `set_layer_break` failed before its SEND DVD STRUCTURE (no "Layerwechsel konnte nicht gesetzt werden" text), i.e. in `IDiscRecorder2Ex` cast or `AcquireExclusiveAccess`, with the "feature not current" error; the disc stayed blank. Exclusive access is now optional (`set_layer_break` sends the command without it if refused). Rebuilt release exe 2026-10-25 00:03; **result: the DVD+R DL write then ran and finished (user report, §5.2).**
+- Files: `src/burner/ringbuf.rs` (error kind + `write_all` assertion in `cancel_and_dropped_reader_unblock_the_producer`), `src/burner/source.rs` (comment; `spawn_ring_feed` error handling), `src/burner/windows.rs` (error context).
+- Verified: `cargo test --lib burner::` 130/130 (full workspace run not repeated). **Not verified:** the actual burn; the error that made `burn_feed` fail is unknown until the next run shows it (§6.1).
 
 ### 2026-10-24 — Burn Studio, M5 (final verification, STATUS completion, plan file removed)
 

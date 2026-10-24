@@ -262,8 +262,11 @@ pub fn spawn_ring_feed(source: Box<dyn SectorSource>, ring_bytes: usize, low_pct
             match src.read(&mut chunk) {
                 Ok(0) => break Ok(()),
                 Ok(n) => {
-                    if let Err(e) = writer.write_all(&chunk[..n]) {
-                        break Err(e.to_string());
+                    match writer.write_all(&chunk[..n]) {
+                        Ok(()) => {}
+                        // The consumer cancelled or dropped the ring (its own failure or the user): not this source's error.
+                        Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe) => break Ok(()),
+                        Err(e) => break Err(e.to_string()),
                     }
                 }
                 Err(e) => break Err(format!("Quelle nicht lesbar: {e}")),
@@ -447,7 +450,7 @@ mod tests {
         let mut disc = FakeDisc::pattern(300);
         disc.fail.insert(200, u32::MAX);
         let mut feed = spawn_ring_feed(Box::new(disc), 1 << 20, 0, 100);
-        // (`read_to_end` would retry on Interrupted forever.)
+        // (`read_to_end` would retry on Interrupted, so the abort is ConnectionAborted.)
         let mut buf = vec![0u8; 4096];
         let e = loop {
             match feed.reader.read(&mut buf) {
@@ -456,7 +459,7 @@ mod tests {
                 Err(e) => break e,
             }
         };
-        assert_eq!(e.kind(), io::ErrorKind::Interrupted, "the consumer sees an abort, not a short end");
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted, "the consumer sees an abort, not a short end");
         assert!(feed.producer.join().unwrap().err().unwrap().starts_with("Quelle nicht lesbar"));
     }
 

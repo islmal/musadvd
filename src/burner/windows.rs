@@ -41,6 +41,22 @@ pub(super) fn backend(e: windows::core::Error) -> BurnError {
     }
 }
 
+/// An IMAPI error with the setup step it came from.
+fn step(name: &str, e: windows::core::Error) -> BurnError {
+    match backend(e) {
+        BurnError::Backend(m) => BurnError::Backend(format!("{m} - bei: {name}")),
+        other => other,
+    }
+}
+
+/// Adds the step to an error that already is a `BurnError::Backend`.
+fn at(name: &'static str) -> impl Fn(BurnError) -> BurnError {
+    move |e| match e {
+        BurnError::Backend(m) if !m.contains(" - bei: ") => BurnError::Backend(format!("{m} - bei: {name}")),
+        other => other,
+    }
+}
+
 /// COM for the current thread, released on drop. `true`: initialised here as MTA; `false`: the
 /// thread already was an STA (no message loop of ours, so no COM events are delivered).
 pub(super) struct Com(bool);
@@ -234,15 +250,18 @@ fn erase(rec: &IDiscRecorder2) -> Result<(), BurnError> {
 /// The DVD+R DL layer boundary (L0 data zone capacity) via SEND DVD STRUCTURE, format 20h.
 fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnError> {
     unsafe {
-        let ex: IDiscRecorder2Ex = rec.cast().map_err(backend)?;
-        rec.AcquireExclusiveAccess(VARIANT_FALSE, &BSTR::from(CLIENT_NAME)).map_err(backend)?;
+        let ex: IDiscRecorder2Ex = rec.cast().map_err(|e| step("IDiscRecorder2Ex", e))?;
+        // shortcut: some drives refuse exclusive access here ("feature not current"); the command is sent anyway, upgrade if that corrupts anything.
+        let exclusive = rec.AcquireExclusiveAccess(VARIANT_FALSE, &BSTR::from(CLIENT_NAME)).is_ok();
         let cdb = [0xBF, 0, 0, 0, 0, 0, 0, 0x20, 0, 12, 0, 0];
         let mut data = [0u8; 12];
         data[1] = 10; // data length (excluding the length field)
         data[8..12].copy_from_slice(&l0_sectors.to_be_bytes());
         let mut sense = [0u8; 18];
         let r = ex.SendCommandSendDataToDevice(&cdb, &mut sense, 30, &data);
-        let _ = rec.ReleaseExclusiveAccess();
+        if exclusive {
+            let _ = rec.ReleaseExclusiveAccess();
+        }
         r.map_err(|e| BurnError::Backend(format!("Layerwechsel konnte nicht gesetzt werden: {e} (Sense {:02X?})", &sense[..14])))
     }
 }
@@ -269,7 +288,7 @@ impl Feed {
 struct ImageStream {
     feed: Mutex<Feed>,
     len: u64,
-    pos: AtomicU64,
+    pos: Arc<AtomicU64>,
     reported: AtomicU64,
     cancel: *const AtomicBool,
     tx: Mutex<Sender<BurnProgress>>,
@@ -694,8 +713,8 @@ fn burn_feed(
     let com = Com::init()?;
     let _standby = options.prevent_standby.then(StandbyGuard::new);
     let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …"));
-    let rec = recorder(drive_id)?;
-    let (media, format) = probe(&rec)?;
+    let rec = recorder(drive_id).map_err(at("Laufwerk öffnen"))?;
+    let (media, format) = probe(&rec).map_err(at("Medium prüfen"))?;
     let sectors = len.div_ceil(2048);
     if !media.present {
         return Err(BurnError::NoMedia);
@@ -729,21 +748,21 @@ fn burn_feed(
         // DVD+R DL: forcing the close fails at the end of the write on some drives
         // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
         if media.media_type != MediaType::Dvd9 {
-            format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(backend)?;
+            format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(|e| step("Disc schließen setzen", e))?;
         }
         if !media.blank {
             // Rewritable disc with old content: overwrite from the start.
-            format.SetForceOverwrite(VARIANT_TRUE).map_err(backend)?;
+            format.SetForceOverwrite(VARIANT_TRUE).map_err(|e| step("Überschreiben setzen", e))?;
         }
         let sps = match speed {
             WriteSpeed::Max => -1,
             WriteSpeed::Specific(s) => s as i32,
         };
-        format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(backend)?;
+        format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(|e| step("Schreibgeschwindigkeit setzen", e))?;
     }
     if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
         if media.layer_break_supported {
-            set_layer_break(&rec, l0)?;
+            set_layer_break(&rec, l0).map_err(at("Layerwechsel setzen"))?;
         } else {
             let _ = progress_tx.send(BurnProgress::new(
                 BurnPhase::Preparing,
@@ -761,10 +780,11 @@ fn burn_feed(
     } else {
         None
     };
+    let pos = Arc::new(AtomicU64::new(0));
     let stream: IStream = ImageStream {
         feed: Mutex::new(feed),
         len,
-        pos: AtomicU64::new(0),
+        pos: pos.clone(),
         reported: AtomicU64::new(0),
         cancel: cancel as *const AtomicBool,
         tx: Mutex::new(progress_tx.clone()),
@@ -777,7 +797,15 @@ fn burn_feed(
     drop(events);
     drop(stream);
     if let Err(e) = written {
-        return Err(if cancel.load(Ordering::Relaxed) { BurnError::Cancelled } else { backend(e) });
+        if cancel.load(Ordering::Relaxed) {
+            return Err(BurnError::Cancelled);
+        }
+        // Where it broke (data handed to IMAPI runs a little ahead of the disc).
+        let at = pos.load(Ordering::Relaxed) as f64 * 100.0 / len.max(1) as f64;
+        return Err(match backend(e) {
+            BurnError::Backend(m) => BurnError::Backend(format!("{m} - beim Schreiben, {at:.1} % der Daten an IMAPI übergeben")),
+            other => other,
+        });
     }
 
     if options.verify {
