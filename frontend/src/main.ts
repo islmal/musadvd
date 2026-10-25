@@ -1,6 +1,7 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openSettings } from "./settings";
 import { openBurner } from "./burn";
+import { renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
@@ -23,9 +24,12 @@ import {
   startupBurn,
   templatePreview,
   type AppSettings,
+  type AudioChoice,
+  type AudioTrack,
   type BuildEvent,
   type CalculationResult,
   type ConversionDone,
+  type Crop,
   type Eta,
   formatRemaining,
   type Disc,
@@ -48,13 +52,18 @@ interface Title {
   /** ffprobe stream indices of enabled subtitles. */
   subs: Set<number>;
   label: string;
-  /** Chapter starts in seconds (first is 0). */
+  /** Chapter starts in seconds of the source file (first is 0). */
   chapters: number[];
+  /** Used section in seconds of the source (null = file start / end). */
+  trimStart: number | null;
+  trimEnd: number | null;
+  /** Picture edges cut away (source pixels). */
+  crop: Crop | null;
 }
 
-type Tab = "audio" | "subtitles" | "chapters" | "template";
+type Tab = "audio" | "subtitles" | "chapters" | "edit" | "template";
 
-type DiscChoice = "dvd5" | "dvd9" | "bd25" | "bd50" | "custom";
+type DiscChoice = "dvd5" | "dvd9" | "bd25" | "bd50" | "avchd5" | "avchd9" | "custom";
 
 const state = {
   titles: [] as Title[],
@@ -90,7 +99,7 @@ const LAYOUT_KEY = "convertx-menu-layout";
 /** DVD and Blu-ray menus are designed separately (4:3 TV frame vs 16:9 HD frame). */
 type Medium = "dvd" | "bd";
 type MenuSlot = { layout: CustomLayout | null; key: string | null; mode: "template" | "custom" };
-const mediumOf = (d: DiscChoice): Medium => (d === "bd25" || d === "bd50" ? "bd" : "dvd");
+const mediumOf = (d: DiscChoice): Medium => (["bd25", "bd50", "avchd5", "avchd9"].includes(d) ? "bd" : "dvd");
 const slots: Record<Medium, MenuSlot> = {
   dvd: { layout: null, key: null, mode: "template" },
   bd: { layout: null, key: null, mode: "template" },
@@ -112,7 +121,7 @@ function switchMedium(from: Medium, to: Medium) {
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
-    if (["dvd5", "dvd9", "bd25", "bd50", "custom"].includes(s.disc)) state.disc = s.disc;
+    if (["dvd5", "dvd9", "bd25", "bd50", "avchd5", "avchd9", "custom"].includes(s.disc)) state.disc = s.disc;
     state.twoPass = !!s.twoPass;
     state.motion = !!s.motion;
     if (typeof s.template === "string") state.template = s.template;
@@ -209,8 +218,38 @@ function currentDisc(): Disc {
   return state.disc;
 }
 
-/** A Blu-ray target: no menus, one autoplaying playlist. */
-const isBluray = () => state.disc === "bd25" || state.disc === "bd50";
+/** A target built like a Blu-ray (BDMV): BD-25/50 and AVCHD. Without editor menus it autoplays. */
+const isBluray = () => mediumOf(state.disc) === "bd";
+
+/** AVCHD ("BD5/BD9"): the Blu-ray structure on a DVD. */
+const isAvchd = () => state.disc === "avchd5" || state.disc === "avchd9";
+
+/** Disc format the audio plans are looked up by. */
+const planKey = (): "dvd" | "bluray" | "avchd" => (isAvchd() ? "avchd" : isBluray() ? "bluray" : "dvd");
+
+const isTrimmed = (t: Title) => t.trimStart !== null || t.trimEnd !== null;
+
+/** Runtime of the used section. */
+const effDuration = (t: Title) => (t.trimEnd ?? t.meta.durationSecs) - (t.trimStart ?? 0);
+
+/** Chapter starts relative to the used section (the engine counts from the section's start). */
+function effChapters(t: Title): number[] {
+  const all = [...t.chapters].sort((a, b) => a - b);
+  if (!isTrimmed(t)) return all;
+  const start = t.trimStart ?? 0;
+  const end = t.trimEnd ?? t.meta.durationSecs;
+  return [0, ...all.filter((c) => c - start > 0.5 && c < end - 1).map((c) => c - start)];
+}
+
+/** What happens to an audio track with the current disc and settings (copy, AC-3 or LPCM). */
+function audioChoice(t: Title, a: AudioTrack): AudioChoice {
+  const mode = state.settings?.audio_mode ?? "auto";
+  // Normalised and trimmed tracks are always re-encoded (the engine does the same).
+  const forced = mode === "auto" && (!!state.settings?.loudnorm || isTrimmed(t));
+  return a.plans[planKey()][forced ? "ac3" : mode];
+}
+
+const CODEC_NAMES = { ac3: "AC-3", dts: "DTS", lpcm: "LPCM" } as const;
 
 /** The frame menus are designed for: `PAL` / `NTSC`, or `BD1080` / `BD720` on a Blu-ray. */
 function frameName(): string {
@@ -227,7 +266,7 @@ function updateCustomDiscLabel() {
 }
 
 function audioKbps(t: Title): number {
-  return t.meta.audio.filter((a) => t.audio.has(a.index)).reduce((sum, a) => sum + a.ac3Kbps, 0);
+  return t.meta.audio.filter((a) => t.audio.has(a.index)).reduce((sum, a) => sum + audioChoice(t, a).kbps, 0);
 }
 
 function status(text: string, kind: "info" | "error" = "info") {
@@ -259,6 +298,9 @@ async function addFiles(paths: string[]) {
         subs: new Set(meta.subtitles.filter((s) => s.supported).map((s) => s.index)),
         label: meta.fileName.replace(/\.[^.]+$/, ""),
         chapters: meta.chapters.map((c) => c.startSecs),
+        trimStart: null,
+        trimEnd: null,
+        crop: null,
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
@@ -318,7 +360,7 @@ async function runCalc() {
     const result = await calculateProject({
       disc: currentDisc(),
       titles: state.titles.map((t) => ({
-        durationSecs: t.meta.durationSecs,
+        durationSecs: effDuration(t),
         audioKbps: audioKbps(t),
         subtitleStreams: t.subs.size,
       })),
@@ -351,7 +393,7 @@ function renderTitleList() {
     const audioSummary =
       t.meta.audio
         .filter((a) => t.audio.has(a.index))
-        .map((a) => `${a.languageName} ${a.dvdLayout}`)
+        .map((a) => `${a.languageName} ${audioChoice(t, a).layout}`)
         .join(", ") || "kein Ton";
     const subsSummary = t.subs.size > 0 ? ` · ${t.subs.size} Untertitel` : "";
     const quality = calc ? calc.qualityPercent : 0;
@@ -373,15 +415,19 @@ function renderTitleList() {
           "div",
           { class: "title-meta" },
           v ? `${v.width}×${v.height} · ${v.dvdAspect}${v.interlaced ? " · interlaced" : ""} · ` : "",
-          fmtTime(t.meta.durationSecs),
-          ` · ${t.chapters.length} Kapitel`,
+          fmtTime(effDuration(t)),
+          ` · ${effChapters(t).length} Kapitel`,
+          isTrimmed(t) ? " · geschnitten" : "",
+          t.crop ? " · zugeschnitten" : "",
         ),
         h("div", { class: "title-audio" }, audioSummary + subsSummary),
         h(
           "div",
           {
             class: "quality",
-            title: isBluray()
+            title: isAvchd()
+              ? "Videoqualität: grün über 10.000 kbps, gelb 5.000–10.000 kbps, rot unter 5.000 kbps"
+              : isBluray()
               ? "Videoqualität: grün über 15.000 kbps, gelb 8.000–15.000 kbps, rot unter 8.000 kbps"
               : "Videoqualität: grün über 2.500 kbps, gelb 1.200–2.500 kbps, rot unter 1.200 kbps",
           },
@@ -414,9 +460,11 @@ function renderFooter() {
     const hint =
       state.disc === "bd25"
         ? "BD-50 wählen oder Tonspuren abwählen."
-        : state.disc === "bd50"
+        : state.disc === "bd50" || state.disc === "avchd9"
           ? "Videos kürzen oder Tonspuren abwählen."
-          : "DVD-9 wählen oder Tonspuren abwählen.";
+          : state.disc === "avchd5"
+            ? "AVCHD (DVD-9) wählen oder Tonspuren abwählen."
+            : "DVD-9 wählen oder Tonspuren abwählen.";
     text.textContent = singleVideoViolated()
       ? "Nur ein Video pro Blu-ray erlaubt (Einstellung „Nur ein Video pro Blu-ray“)."
       : calc.fits
@@ -495,7 +543,27 @@ function renderTabs() {
   if (state.tab === "audio") body.append(renderAudioTab(t));
   if (state.tab === "subtitles") body.append(renderSubtitleTab(t));
   if (state.tab === "chapters") body.append(renderChapterTab(t));
+  if (state.tab === "edit") body.append(renderEditTab(t, editHooks));
 }
+
+/** Connects the "Schnitt & Bild" tab to the title list and the size estimate. */
+const editHooks = {
+  changed: () => {
+    renderTitleList();
+    renderFooter();
+    scheduleCalc();
+    if (state.menuMode === "custom") void refreshLayoutCheck();
+  },
+  /** Frame the picture is shown in: 16:9 on HD discs, otherwise the DVD aspect of the settings. */
+  targetAspect: (dar: number) => {
+    if (isBluray()) return 16 / 9;
+    const policy = state.settings?.aspect_ratio_policy ?? "Auto";
+    if (policy === "4:3") return 4 / 3;
+    if (policy === "16:9") return 16 / 9;
+    return dar >= (4 / 3 + 16 / 9) / 2 ? 16 / 9 : 4 / 3;
+  },
+  status,
+};
 
 function renderAudioTab(t: Title) {
   if (t.meta.audio.length === 0) return h("div", { class: "empty" }, "Dieses Video hat keine Tonspur.");
@@ -503,7 +571,11 @@ function renderAudioTab(t: Title) {
   return h(
     "div",
     { class: "track-list" },
-    h("p", { class: "hint" }, `Ausgewählte Spuren werden nach AC-3 umgewandelt (DVD: höchstens ${MAX_AUDIO} Spuren).`),
+    h(
+      "p",
+      { class: "hint" },
+      `Passende AC-3-/DTS-Spuren werden unverändert übernommen, alle anderen nach AC-3 umgewandelt (Einstellung „Audio-Modus“; DVD: höchstens ${MAX_AUDIO} Spuren).`,
+    ),
     ...t.meta.audio.map((a) => {
       const checked = t.audio.has(a.index);
       return h(
@@ -527,10 +599,16 @@ function renderAudioTab(t: Title) {
           a.title ? h("span", { class: "track-title" }, a.title) : null,
           a.default ? h("span", { class: "badge" }, "Standard") : null,
         ),
-        h("span", { class: "track-detail" }, `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → AC-3 ${a.dvdLayout} ${a.ac3Kbps} kbps`),
+        h("span", { class: "track-detail" }, audioDetail(t, a)),
       );
     }),
   );
+}
+
+function audioDetail(t: Title, a: AudioTrack): string {
+  const c = audioChoice(t, a);
+  const target = `${CODEC_NAMES[c.codec]} ${c.layout} ${fmtNum(c.kbps)} kbps`;
+  return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${c.copy ? `${target} (unverändert kopiert)` : target}`;
 }
 
 function renderSubtitleTab(t: Title) {
@@ -664,7 +742,12 @@ function renderChapterTab(t: Title) {
       h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Start"), h("th", {}, "Titel"), h("th", {}))),
       h("tbody", {}, ...rows),
     ),
-    h("p", { class: "hint" }, `${sorted.length} von höchstens 99 Kapiteln · Laufzeit ${fmtTime(t.meta.durationSecs)}`),
+    h(
+      "p",
+      { class: "hint" },
+      `${sorted.length} von höchstens 99 Kapiteln · Laufzeit ${fmtTime(t.meta.durationSecs)}`,
+      isTrimmed(t) ? ` · Zeiten der Quelldatei; im Ausschnitt (${fmtTime(t.trimStart ?? 0)}–${fmtTime(t.trimEnd ?? t.meta.durationSecs)}) bleiben ${effChapters(t).length}` : "",
+    ),
   );
 }
 
@@ -672,14 +755,14 @@ function renderChapterTab(t: Title) {
 function editorTitles(): EditorTitle[] {
   return state.titles.map((t, i) => {
     // Same chapter list the build uses (sorted starts), named like in the chapter tab.
-    const starts = [...t.chapters].sort((a, b) => a - b);
+    const starts = effChapters(t);
     return {
       index: i + 1,
       label: t.label.trim() || t.meta.fileName.replace(/\.[^.]+$/, ""),
       path: t.meta.path,
       chapters: Math.max(1, starts.length),
-      durationSecs: t.meta.durationSecs,
-      chapterNames: starts.map((s) => t.meta.chapters.find((c) => Math.abs(c.startSecs - s) < 0.5)?.title ?? null),
+      durationSecs: effDuration(t),
+      chapterNames: starts.map((s) => t.meta.chapters.find((c) => Math.abs(c.startSecs - s - (t.trimStart ?? 0)) < 0.5)?.title ?? null),
       chapterStarts: starts,
       // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
@@ -875,8 +958,8 @@ function renderTemplateTab() {
   if (state.menuMode === "custom") outer.append(renderCustomMenuTab());
   else if (isBluray()) {
     outer.append(
-      h("div", { class: "empty" }, "Blu-ray: ohne Menü (Autoplay)"),
-      h("p", { class: "hint" }, "Alle Videos laufen nach dem Einlegen der Disc als eine Playlist ab, mit Kapiteln an den Kapitelmarken jedes Videos. ConvertX-Vorlagen gibt es für die Blu-ray nicht – „Eigenes Menü (Editor)“ erzeugt echte Blu-ray-Menüs (HDMV)."),
+      h("div", { class: "empty" }, `${isAvchd() ? "AVCHD" : "Blu-ray"}: ohne Menü (Autoplay)`),
+      h("p", { class: "hint" }, "Jedes Video bekommt eine eigene Playlist (mit eigener Bildrate und den Kapiteln des Videos); nach dem Einlegen der Disc laufen sie nacheinander ab, zwischen zwei Videos gibt es eine kurze Pause. ConvertX-Vorlagen gibt es dafür nicht – „Eigenes Menü (Editor)“ erzeugt echte Menüs (HDMV)."),
     );
   } else outer.append(renderTemplateChoice());
   return outer;
@@ -1163,7 +1246,10 @@ async function convert() {
         audio: [...t.audio],
         subtitles: [...t.subs],
         label: t.label.trim() || null,
-        chapters: [...t.chapters].sort((a, b) => a - b),
+        chapters: effChapters(t),
+        startSecs: t.trimStart,
+        endSecs: t.trimEnd,
+        crop: t.crop,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" && !isBluray() ? state.template : "",

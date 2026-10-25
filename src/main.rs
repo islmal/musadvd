@@ -145,6 +145,13 @@ enum Command {
         /// Blu-ray: do not use NVIDIA NVENC for H.264 (always x264).
         #[arg(long)]
         no_hw_encode: bool,
+        /// Audio: auto copies compliant AC-3/DTS tracks, ac3 always re-encodes, lpcm writes
+        /// uncompressed audio (Blu-ray/AVCHD; DVD falls back to AC-3).
+        #[arg(long, value_enum, default_value = "auto")]
+        audio: AudioArg,
+        /// Normalise the loudness of all audio tracks (EBU R128, -23 LUFS).
+        #[arg(long)]
+        loudnorm: bool,
     },
     /// List DVD writers and the disc in each drive.
     Drives,
@@ -275,11 +282,32 @@ fn parse_title(s: &str) -> Result<TitleSpec, String> {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum AudioArg {
+    Auto,
+    Ac3,
+    Lpcm,
+}
+
+impl From<AudioArg> for convertx_rust::encoder::AudioMode {
+    fn from(a: AudioArg) -> Self {
+        match a {
+            AudioArg::Auto => Self::Auto,
+            AudioArg::Ac3 => Self::Ac3,
+            AudioArg::Lpcm => Self::Lpcm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum Disc {
     Dvd5,
     Dvd9,
     Bd25,
     Bd50,
+    /// Blu-ray structure (BDMV) on a DVD-5.
+    Avchd5,
+    /// Blu-ray structure (BDMV) on a dual-layer DVD.
+    Avchd9,
 }
 
 impl From<Disc> for DiscType {
@@ -289,6 +317,8 @@ impl From<Disc> for DiscType {
             Disc::Dvd9 => DiscType::Dvd9,
             Disc::Bd25 => DiscType::Bd25,
             Disc::Bd50 => DiscType::Bd50,
+            Disc::Avchd5 => DiscType::Avchd5,
+            Disc::Avchd9 => DiscType::Avchd9,
         }
     }
 }
@@ -472,12 +502,17 @@ fn burn(
         options: BurnOptions { layer_break: None, verify, eject, erase: erase && !media.blank, ..Default::default() },
         keep_iso: keep_iso.is_some(),
         capacities: Capacities::DVD,
+        media_type: Some(media.media_type),
     };
     let result = burn_video_ts(burner.as_ref(), &job, &cancel, |u| log.show(u));
     eprintln!();
     match result {
         Ok(outcome) => {
-            let kind = if content.bluray { "Blu-ray" } else { "DVD" };
+            let kind = match (content.bluray, media.media_type.is_bd()) {
+                (true, true) => "Blu-ray",
+                (true, false) => "AVCHD-Disc",
+                _ => "DVD",
+            };
             println!("Die {kind} wurde gebrannt{}.", if verify { " und überprüft" } else { "" });
             if let Some(iso) = outcome.iso {
                 println!("  Disc-Image: {}", iso.display());
@@ -691,6 +726,8 @@ fn main() -> ExitCode {
             jobs,
             hw_decode,
             no_hw_encode,
+            audio,
+            loudnorm,
             menu_audio,
             tv,
             resolution,
@@ -749,6 +786,8 @@ fn main() -> ExitCode {
                 parallel_jobs: jobs.map(usize::from),
                 hw_decode,
                 bd_hw_encode: !no_hw_encode,
+                audio_mode: audio.into(),
+                loudnorm,
                 ..Default::default()
             };
             let runtime = match tokio::runtime::Runtime::new() {
@@ -795,7 +834,7 @@ fn main() -> ExitCode {
                 Ok(r) => {
                     eprintln!();
                     if opts.disc.is_bluray() {
-                        println!("Blu-ray fertig: {}", r.video_ts.display());
+                        println!("{} fertig: {}", if opts.disc.is_avchd() { "AVCHD" } else { "Blu-ray" }, r.video_ts.display());
                         let menus = if r.menu_pages == 0 { "ohne Menü (Autoplay)".to_string() } else { format!("{} Menü(s)", r.menu_pages) };
                         println!("  Größe {:.0} MB von {} MB ({:.1}%), {menus}", r.size_mb, r.target_mb, r.size_mb / r.target_mb as f64 * 100.0);
                     } else {

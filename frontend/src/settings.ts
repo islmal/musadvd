@@ -455,6 +455,21 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
       group(
         "Audio",
         select("default_audio_language", "Bevorzugte Sprache", LANGUAGES, "Tonspuren in dieser Sprache werden zur ersten (Standard-)Tonspur der DVD."),
+        select(
+          "audio_mode",
+          "Audio-Modus",
+          [
+            ["auto", "Automatisch (AC-3/DTS kopieren)"],
+            ["ac3", "Immer AC-3"],
+            ["lpcm", "LPCM (unkomprimiert)"],
+          ],
+          "Automatisch: passende AC-3-/DTS-Spuren werden verlustfrei übernommen (DVD: AC-3 bis 448 kbps, DTS-Kern; Blu-ray: AC-3 bis 640 kbps, DTS/DTS-HD; AVCHD: AC-3), alles andere wird zu AC-3. LPCM gibt es für Blu-ray (bis 8 Kanäle, 24 Bit) und AVCHD (Stereo, 16 Bit); auf der DVD wird stattdessen AC-3 geschrieben. Geschnittene Videos und normalisierte Spuren werden immer neu kodiert.",
+        ),
+        check(
+          "loudnorm",
+          "Lautstärke normalisieren (EBU R128)",
+          "Gleicht die Lautstärke aller Tonspuren auf −23 LUFS an (zwei Durchläufe pro Spur: messen, dann anwenden). Die Spuren werden dabei neu kodiert.",
+        ),
       ),
     ],
     burn: () => [

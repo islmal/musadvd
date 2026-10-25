@@ -46,6 +46,10 @@ pub struct DiscLimits {
     pub max_total_kbps: u32,
     pub good_kbps: u32,
     pub poor_kbps: u32,
+    /// Video peak rate (VBV maxrate) and buffer size of H.264 encodes (kbit/s, kbit); the DVD
+    /// values are not used by the MPEG-2 encoder.
+    pub vbv_maxrate_kbps: u32,
+    pub vbv_bufsize_kbit: u32,
 }
 
 impl Quality {
@@ -83,6 +87,10 @@ pub enum DiscType {
     Bd25,
     /// Blu-ray, dual layer (BD-50), usable target 45,800 MiB.
     Bd50,
+    /// AVCHD ("BD5"): Blu-ray folder structure on a DVD-5, usable target 4300 MB.
+    Avchd5,
+    /// AVCHD ("BD9") on a dual-layer DVD, usable target 7950 MB.
+    Avchd9,
     /// User-defined target size in MB (JSON: `{"custom": 4000}`).
     Custom(u32),
 }
@@ -94,17 +102,48 @@ impl DiscType {
             DiscType::Dvd9 => 7950,
             DiscType::Bd25 => 22_900,
             DiscType::Bd50 => 45_800,
+            DiscType::Avchd5 => 4300,
+            DiscType::Avchd9 => 7950,
             DiscType::Custom(mb) => mb,
         }
     }
 
+    /// Uses the Blu-ray build pipeline (H.264 + tsMuxeR, BDMV folder): BD-25/50 and AVCHD.
     pub fn is_bluray(self) -> bool {
-        matches!(self, DiscType::Bd25 | DiscType::Bd50)
+        matches!(self, DiscType::Bd25 | DiscType::Bd50 | DiscType::Avchd5 | DiscType::Avchd9)
+    }
+
+    /// BDMV structure on DVD media.
+    pub fn is_avchd(self) -> bool {
+        matches!(self, DiscType::Avchd5 | DiscType::Avchd9)
+    }
+
+    /// Physical medium is a DVD (DVD-Video or AVCHD).
+    pub fn is_dvd_media(self) -> bool {
+        !matches!(self, DiscType::Bd25 | DiscType::Bd50)
     }
 
     pub fn limits(self) -> DiscLimits {
-        if self.is_bluray() {
-            DiscLimits { min_video_kbps: 4000, max_video_kbps: 35_000, max_total_kbps: 48_000, good_kbps: 15_000, poor_kbps: 8000 }
+        if self.is_avchd() {
+            DiscLimits {
+                min_video_kbps: 2000,
+                max_video_kbps: 15_000,
+                max_total_kbps: 18_000,
+                good_kbps: 10_000,
+                poor_kbps: 5000,
+                vbv_maxrate_kbps: 18_000,
+                vbv_bufsize_kbit: 18_000,
+            }
+        } else if self.is_bluray() {
+            DiscLimits {
+                min_video_kbps: 4000,
+                max_video_kbps: 35_000,
+                max_total_kbps: 48_000,
+                good_kbps: 15_000,
+                poor_kbps: 8000,
+                vbv_maxrate_kbps: 40_000,
+                vbv_bufsize_kbit: 30_000,
+            }
         } else {
             DiscLimits {
                 min_video_kbps: MIN_VIDEO_KBPS,
@@ -112,6 +151,8 @@ impl DiscType {
                 max_total_kbps: DVD_MAX_TOTAL_KBPS,
                 good_kbps: QUALITY_GOOD_KBPS,
                 poor_kbps: QUALITY_POOR_KBPS,
+                vbv_maxrate_kbps: 9800,
+                vbv_bufsize_kbit: 1835,
             }
         }
     }
@@ -152,13 +193,20 @@ impl EncodingProfile {
         self.max_video_kbps_for(DiscType::Dvd5)
     }
 
-    /// Highest video bitrate of the profile on `disc` (BD: 35,000 / 20,000 / 12,000).
+    /// Highest video bitrate of the profile on `disc` (BD: 35,000 / 20,000 / 12,000; AVCHD:
+    /// 15,000 / 10,000 / 6000).
     pub fn max_video_kbps_for(self, disc: DiscType) -> u32 {
-        let bd = disc.is_bluray();
+        let (mp, lp) = if disc.is_avchd() {
+            (10_000, 6000)
+        } else if disc.is_bluray() {
+            (20_000, 12_000)
+        } else {
+            (6000, 4000)
+        };
         match self {
             EncodingProfile::Auto | EncodingProfile::Sp => disc.limits().max_video_kbps,
-            EncodingProfile::Mp => if bd { 20_000 } else { 6000 },
-            EncodingProfile::Lp => if bd { 12_000 } else { 4000 },
+            EncodingProfile::Mp => mp,
+            EncodingProfile::Lp => lp,
         }
     }
 
@@ -394,6 +442,26 @@ mod tests {
         assert_eq!(Quality::for_disc(7999, DiscType::Bd25), Quality::Poor);
         assert_eq!(Quality::for_disc(3000, DiscType::Dvd5), Quality::of(3000));
         assert_eq!(serde_json::from_str::<DiscType>(r#""bd50""#).unwrap(), DiscType::Bd50);
+    }
+
+    #[test]
+    fn avchd_limits() {
+        let d = DiscType::Avchd5;
+        assert_eq!((d.target_mb(), DiscType::Avchd9.target_mb()), (4300, 7950));
+        assert!(d.is_bluray() && d.is_avchd() && d.is_dvd_media() && !DiscType::Bd25.is_dvd_media());
+        assert!(DiscType::Dvd5.is_dvd_media() && !DiscType::Dvd5.is_bluray());
+        let l = d.limits();
+        assert_eq!((l.min_video_kbps, l.max_video_kbps, l.max_total_kbps, l.good_kbps, l.poor_kbps), (2000, 15_000, 18_000, 10_000, 5000));
+        assert_eq!((l.vbv_maxrate_kbps, l.vbv_bufsize_kbit), (18_000, 18_000));
+        assert_eq!(DiscType::Bd25.limits().vbv_maxrate_kbps, 40_000);
+        let ceil = |p: EncodingProfile| p.max_video_kbps_for(d);
+        assert_eq!((ceil(EncodingProfile::Auto), ceil(EncodingProfile::Sp), ceil(EncodingProfile::Mp), ceil(EncodingProfile::Lp)), (15_000, 15_000, 10_000, 6000));
+        // 6 % overhead like BD; one hour fits at a high rate, 10 h is clamped to the minimum.
+        assert!((d.default_mux_overhead_kbit() - 4300.0 * 8192.0 * 0.06).abs() < 1e-6);
+        let p = calculate(d, 3600.0, 448).unwrap();
+        assert!(p.fits() && p.video_kbps > 5000 && p.video_kbps <= 15_000, "{}", p.video_kbps);
+        assert_eq!(calculate(d, 10.0 * 3600.0, 448).unwrap().clamp, Clamp::Min);
+        assert_eq!(serde_json::from_str::<DiscType>(r#""avchd9""#).unwrap(), DiscType::Avchd9);
     }
 
     #[test]

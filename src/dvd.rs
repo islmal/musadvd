@@ -25,7 +25,7 @@ use crate::author::{
     TitleSpec, TitlesetSpec, MAX_CHAPTERS, MAX_TITLES,
 };
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
-use crate::encoder::{self, ac3_settings, Aspect, EncodeJob, EncodePhase, MenuAudio};
+use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio};
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
 use crate::probe::{self, language_matches, language_name, MediaInfo, ProbeError, SubtitleKind};
 use crate::template::{Page, Template};
@@ -80,6 +80,7 @@ impl fmt::Display for BuildError {
                 match disc {
                     DiscType::Dvd5 => "a DVD9",
                     DiscType::Bd25 => "a BD-50",
+                    DiscType::Avchd5 => "an AVCHD DVD-9",
                     _ => "a larger disc",
                 }
             ),
@@ -345,6 +346,10 @@ pub struct BuildOptions {
     pub text_overflow: TextOverflow,
     pub aspect_policy: AspectPolicy,
     pub process_priority: ProcessPriority,
+    /// How audio tracks are written (copy compliant AC-3/DTS, always AC-3, LPCM).
+    pub audio_mode: AudioMode,
+    /// EBU R128 loudness normalisation of every audio track (forces a re-encode).
+    pub loudnorm: bool,
     /// Tracks in this language become the first (default) audio stream.
     pub preferred_audio_lang: Option<String>,
     /// Subtitles in this language become the first subtitle stream.
@@ -393,8 +398,13 @@ pub struct StreamSelection {
     pub subtitles: Option<Vec<u32>>,
     /// Menu label instead of the file name.
     pub label: Option<String>,
-    /// Chapter starts in seconds instead of the source chapters / interval grid.
+    /// Chapter starts in seconds (of the trimmed title) instead of the source chapters / grid.
     pub chapters: Option<Vec<f64>>,
+    /// Start / end of the used section in seconds of the source (`None` = file start / end).
+    pub start_secs: Option<f64>,
+    pub end_secs: Option<f64>,
+    /// Picture edges to cut away (source pixels).
+    pub crop: Option<probe::Crop>,
 }
 
 /// Coarse build stages, for progress displays.
@@ -536,6 +546,8 @@ struct TitlePlan {
     chapters: Vec<f64>,
     chapter_titles: Vec<Option<String>>,
     aspect: Aspect,
+    audio_mode: AudioMode,
+    loudnorm: bool,
     stem: String,
     thumbnail: Option<PathBuf>,
     chapter_thumbs: Vec<Option<PathBuf>>,
@@ -550,23 +562,25 @@ impl TitlePlan {
     fn clip_at(&self, start_secs: f64) -> ClipSource {
         ClipSource {
             path: self.info.path.clone(),
-            start_secs: start_secs.min((self.info.duration_secs - 1.0).max(0.0)),
+            // Positions inside the title; the file is read from the trimmed start on.
+            start_secs: self.info.trim_start() + start_secs.min((self.info.duration_secs - 1.0).max(0.0)),
             has_audio: !self.info.audio.is_empty(),
         }
     }
 
+    fn audio_outs(&self) -> Vec<AudioOut> {
+        self.audio.iter().map(|&i| plan_audio(&self.info.audio[i], AudioTarget::Dvd, self.audio_mode, self.loudnorm || self.info.trim.is_some())).collect()
+    }
+
     fn audio_kbps(&self) -> u32 {
-        self.audio.iter().map(|&i| ac3_settings(self.info.audio[i].channels).0).sum()
+        self.audio_outs().iter().map(|o| o.kbps()).sum()
     }
 
     fn audio_labels(&self) -> Vec<String> {
         self.audio
             .iter()
-            .map(|&i| {
-                let a = &self.info.audio[i];
-                let layout = if ac3_settings(a.channels).1 == 6 { "5.1" } else { "Stereo" };
-                format!("{} {layout}", language_name(a.language.as_deref()))
-            })
+            .zip(self.audio_outs())
+            .map(|(&i, out)| format!("{} {}", language_name(self.info.audio[i].language.as_deref()), out.layout_label()))
             .collect()
     }
 
@@ -796,9 +810,16 @@ async fn encode_title(
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>), BuildError> {
     let hwaccel = if hw_decode { tools.probe_hwaccel(&t.info.path).await } else { None };
+    let audio: Vec<_> = t.audio.iter().map(|&a| &t.info.audio[a]).collect();
+    let audio_filters = if t.loudnorm {
+        let tracks: Vec<_> = audio.iter().map(|a| Some(*a)).collect();
+        encoder::measure_loudnorm(tools, &t.info, &tracks).await?
+    } else {
+        Vec::new()
+    };
     let job = EncodeJob {
         info: &t.info,
-        audio: t.audio.iter().map(|&a| &t.info.audio[a]).collect(),
+        audio,
         subtitles: t.subtitles.iter().map(|&s| &t.info.subtitles[s]).collect(),
         video_kbps,
         aspect: t.aspect,
@@ -809,6 +830,8 @@ async fn encode_title(
         tv,
         resolution,
         hwaccel,
+        audio_mode: t.audio_mode,
+        audio_filters,
     };
     let frames_per_run = t.info.duration_secs * output_fps(tv);
     // Frames done count over both runs of a 2-pass encode; never let them go backwards (the
@@ -840,6 +863,16 @@ async fn encode_title(
         chapters: t.chapters.len(),
     };
     Ok((report, hwaccel))
+}
+
+/// Applies the user's trim and crop of one input to its probed `info` (errors carry the title).
+pub(crate) fn apply_selection(info: &mut MediaInfo, sel: &StreamSelection, label: &str) -> Result<(), BuildError> {
+    let fail = |e: String| BuildError::Template(format!("{label}: {e}"));
+    probe::apply_trim(info, sel.start_secs, sel.end_secs).map_err(fail)?;
+    if let Some(c) = sel.crop {
+        probe::apply_crop(info, c).map_err(fail)?;
+    }
+    Ok(())
 }
 
 /// Audio and subtitle streams (indices into `info.audio` / `info.subtitles`) of one title, plus
@@ -972,13 +1005,16 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     if tv == TvStandard::Ntsc {
         log(Event::Step("TV-Norm: NTSC (720x480, 29,97 Bilder/s)".into()));
     }
+    if opts.audio_mode == AudioMode::Lpcm {
+        warn(log, "LPCM wird für DVD-Video nicht zuverlässig geschrieben (ffmpegs DVD-Muxer) – die Tonspuren werden als AC-3 kodiert".into());
+    }
 
     // 1. Probe and select streams ------------------------------------------------------------
     log(Event::Phase(BuildPhase::Probe));
     let mut titles: Vec<TitlePlan> = Vec::new();
     for (i, input) in opts.inputs.iter().enumerate() {
         log(Event::Step(format!("Analysiere {}", input.display())));
-        let info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
+        let mut info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
         let sel = opts.selections.get(i).cloned().unwrap_or_default();
         let label = sel.label.clone().filter(|l| !l.trim().is_empty()).unwrap_or_else(|| {
             input.file_stem().map_or_else(|| format!("Titel {}", i + 1), |s| s.to_string_lossy().into_owned())
@@ -988,6 +1024,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         for note in notes {
             warn(log, note);
         }
+        apply_selection(&mut info, &sel, &label)?;
 
         let chapters = match &sel.chapters {
             Some(starts) => custom_chapters(starts, info.duration_secs),
@@ -1001,6 +1038,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             chapters: chapters.iter().map(|c| c.0).collect(),
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
+            audio_mode: opts.audio_mode,
+            loudnorm: opts.loudnorm,
             stem: format!("title_{:02}", i + 1),
             thumbnail: None,
             chapter_thumbs: Vec::new(),
@@ -1099,7 +1138,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             let jobs: Vec<Job<()>> = thumbs
                 .iter()
                 .map(|(i, _, at, path)| {
-                    let (tools, input, at, path) = (tools.clone(), titles[*i].info.path.clone(), *at, path.clone());
+                    let (tools, input, at, path) =
+                        (tools.clone(), titles[*i].info.path.clone(), *at + titles[*i].info.trim_start(), path.clone());
                     job(move |_| async move {
                         tools.ffmpeg(&encoder::thumbnail_args(&input, at, &path), 0.0, |_| {}).await?;
                         Ok(())
@@ -1511,6 +1551,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 label: t.label.clone(),
                 chapters: t.chapters.iter().map(|&c| chapter_mark(c)).collect(),
                 aspect: t.aspect.as_str().into(),
+                audio_formats: t.audio_outs().iter().map(|o| o.dvdauthor_format().to_string()).collect(),
                 audio_langs: t
                     .audio
                     .iter()
@@ -1618,6 +1659,7 @@ mod tests {
                 .into_iter()
                 .map(|(s, t)| Chapter { start_secs: s, end_secs: s + 1.0, title: t.map(str::to_string) })
                 .collect(),
+            trim: None,
         }
     }
 
@@ -1821,6 +1863,9 @@ mod tests {
             language: Some(lang.into()),
             title: None,
             default: false,
+            bit_rate: None,
+            sample_rate: None,
+            profile: None,
         };
         let s = |index: u32, codec: &str, kind: SubtitleKind| SubtitleStream {
             index,

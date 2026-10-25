@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::author::{PlaybackOptions, Resolution, TvStandard};
-use crate::encoder::MenuAudio;
+use crate::encoder::{AudioMode, MenuAudio};
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::menu::TextOverflow;
@@ -25,6 +25,8 @@ pub const ASPECT_POLICIES: &[&str] = &["Auto", "4:3", "16:9"];
 pub const ENCODING_PROFILES: &[&str] = &["Auto", "SP_Short", "MP_Medium", "LP_Long"];
 pub const PROCESS_PRIORITIES: &[&str] = &["Normal", "BelowNormal", "Idle"];
 pub const MENU_AUDIO_MODES: &[&str] = &["title", "silence", "file"];
+/// How audio tracks are written: copy compliant AC-3/DTS, always AC-3, LPCM.
+pub const AUDIO_MODES: &[&str] = &["auto", "ac3", "lpcm"];
 /// Write speed: `auto` = DVD-5 maximum, DVD-9 4x; otherwise maximum or a speed in x (mapped to
 /// the nearest speed the drive offers).
 pub const BURN_SPEEDS: &[&str] = &["auto", "max", "16", "12", "8", "6", "4", "2.4"];
@@ -80,6 +82,10 @@ pub struct AppSettings {
     pub default_audio_language: String,
     pub default_subtitle_language: String,
     pub force_first_subtitle: bool,
+    /// See [`AUDIO_MODES`].
+    pub audio_mode: String,
+    /// EBU R128 loudness normalisation of all audio tracks (forces a re-encode).
+    pub loudnorm: bool,
     // Burning
     /// See [`BURN_SPEEDS`].
     pub burn_speed: String,
@@ -132,6 +138,8 @@ impl Default for AppSettings {
             default_audio_language: "de".into(),
             default_subtitle_language: String::new(),
             force_first_subtitle: false,
+            audio_mode: AUDIO_MODES[0].into(),
+            loudnorm: false,
             burn_speed: BURN_SPEEDS[0].into(),
             verify_after_burn: true,
             keep_iso: false,
@@ -602,6 +610,7 @@ impl AppSettings {
         self.aspect_ratio_policy = choice(&self.aspect_ratio_policy, ASPECT_POLICIES);
         self.encoding_profile = choice(&self.encoding_profile, ENCODING_PROFILES);
         self.process_priority = choice(&self.process_priority, PROCESS_PRIORITIES);
+        self.audio_mode = choice(&self.audio_mode, AUDIO_MODES);
         self.target_size_mb = self.target_size_mb.clamp(100, 20_000);
         self.max_concurrent_encodes = self.max_concurrent_encodes.clamp(1, 64);
         self.auto_chapter_interval_seconds = self.auto_chapter_interval_seconds.clamp(30, 3600);
@@ -725,6 +734,12 @@ impl AppSettings {
         opts.preferred_audio_lang = lang(&self.default_audio_language);
         opts.preferred_subtitle_lang = lang(&self.default_subtitle_language);
         opts.force_first_subtitle = self.force_first_subtitle;
+        opts.audio_mode = match self.audio_mode.as_str() {
+            "ac3" => AudioMode::Ac3,
+            "lpcm" => AudioMode::Lpcm,
+            _ => AudioMode::Auto,
+        };
+        opts.loudnorm = self.loudnorm;
         opts.hw_decode = self.hw_decode;
         opts.bd_hw_encode = self.bd_hw_encode;
         opts.fast_encode = self.fast_encode;

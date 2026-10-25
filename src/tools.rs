@@ -352,6 +352,20 @@ impl Toolchain {
         cmd
     }
 
+    /// Runs ffmpeg with `args` at `-loglevel info` and returns everything it wrote to stderr (the
+    /// normal runs use `-loglevel error`, which hides reports such as loudnorm's measurement).
+    pub async fn ffmpeg_report(&self, args: &[OsString]) -> Result<String, ToolError> {
+        let mut cmd = self.command(&self.ffmpeg);
+        cmd.args(["-hide_banner", "-nostdin", "-nostats", "-loglevel", "info"]).args(args).stdout(Stdio::null()).stderr(Stdio::piped());
+        let out = cmd.output().await.map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
+        let log = String::from_utf8_lossy(&out.stderr).into_owned();
+        if out.status.success() {
+            Ok(log)
+        } else {
+            Err(ToolError::Failed { tool: "ffmpeg".into(), status: out.status.to_string(), log: tail(&log, 30) })
+        }
+    }
+
     /// Runs ffmpeg with `args`, reporting progress with frame/fps telemetry.
     pub async fn ffmpeg_with(
         &self,

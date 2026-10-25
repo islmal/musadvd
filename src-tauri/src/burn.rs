@@ -45,6 +45,8 @@ pub struct DiscNeeds {
     pub dual_layer: bool,
     /// The content is a Blu-ray (`BDMV`).
     pub bluray: bool,
+    /// A `BDMV` small enough for a DVD-9 (AVCHD): DVD media are fine.
+    pub fits_dvd: bool,
 }
 
 impl DiscNeeds {
@@ -53,27 +55,30 @@ impl DiscNeeds {
     }
 
     fn content(&self) -> DiscContent {
-        DiscContent { bluray: self.bluray, sectors: self.sectors, dual_layer: self.dual_layer }
+        DiscContent { bluray: self.bluray, sectors: self.sectors, dual_layer: self.dual_layer, fits_dvd: self.fits_dvd }
     }
 
     fn medium(&self) -> eta::Medium {
         self.content().medium()
     }
 
-    /// "DVD-5", "DVD-9", "BD-25" or "BD-50".
-    fn disc_name(&self) -> &'static str {
-        match (self.bluray, self.dual_layer) {
-            (false, false) => "DVD-5",
-            (false, true) => "DVD-9",
-            (true, false) => "BD-25",
-            (true, true) => "BD-50",
+    /// "DVD-5", "DVD-9", "BD-25" or "BD-50"; a BDMV on DVD media is "AVCHD (DVD-5/DVD-9)".
+    fn disc_name(&self, media: MediaType) -> &'static str {
+        let dual = self.content().needs_dual_layer_on(media);
+        match (self.bluray, media.is_bd(), dual) {
+            (false, _, false) => "DVD-5",
+            (false, _, true) => "DVD-9",
+            (true, true, false) => "BD-25",
+            (true, true, true) => "BD-50",
+            (true, false, false) => "AVCHD (DVD-5)",
+            (true, false, true) => "AVCHD (DVD-9)",
         }
     }
 }
 
 fn needs(video_ts: &Path) -> Result<DiscNeeds, String> {
     let c = DiscContent::of_folder(video_ts)?;
-    Ok(DiscNeeds { sectors: c.sectors, size_gb: c.bytes() / 1e9, dual_layer: c.dual_layer, bluray: c.bluray })
+    Ok(DiscNeeds { sectors: c.sectors, size_gb: c.bytes() / 1e9, dual_layer: c.dual_layer, bluray: c.bluray, fits_dvd: c.fits_dvd })
 }
 
 #[tauri::command]
@@ -111,12 +116,14 @@ pub struct MediaView {
 fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase: bool) -> MediaView {
     let option = |value: WriteSpeed, label: String| {
         let x = speed_x(value, &media.speeds, media.media_type);
-        let medium = needs.medium();
+        // A BDMV on DVD media (AVCHD) burns at DVD speed.
+        let medium = if needs.bluray && !media.media_type.is_bd() { eta::Medium::Dvd } else { needs.medium() };
+        let dual = needs.content().needs_dual_layer_on(media.media_type);
         SpeedOption {
             value,
             label,
-            secs: eta::image_and_burn_secs(medium, needs.bytes(), x, false, needs.dual_layer),
-            secs_verify: eta::image_and_burn_secs(medium, needs.bytes(), x, true, needs.dual_layer),
+            secs: eta::image_and_burn_secs(medium, needs.bytes(), x, false, dual),
+            secs_verify: eta::image_and_burn_secs(medium, needs.bytes(), x, true, dual),
         }
     };
     let mut speeds = vec![option(WriteSpeed::Max, "Maximal".into())];
@@ -132,7 +139,11 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
         } else {
             format!("Die {} enthält Daten – sie wird beim Brennen gelöscht.", media.physical)
         });
-    } else if problem.is_none() && needs.dual_layer && !needs.bluray && !media.layer_break_supported {
+    } else if problem.is_none()
+        && needs.content().needs_dual_layer_on(media.media_type)
+        && !media.media_type.is_bd()
+        && !media.layer_break_supported
+    {
         warning = Some(format!("{}: Der Layerwechsel wird vom Laufwerk festgelegt.", media.physical));
     }
     let room = capacity >= needs.sectors;
@@ -256,7 +267,7 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<B
     let x = speed_x(req.speed, &media_speeds, media_type);
     let detail = format!(
         "{} bei {}{}",
-        needs.disc_name(),
+        needs.disc_name(media_type),
         match req.speed {
             WriteSpeed::Max => format!("max. {}", speed_label((x * media_type.sectors_per_sec_1x()).round() as u32, media_type)),
             WriteSpeed::Specific(s) => speed_label(s, media_type),
@@ -274,6 +285,7 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<B
         // Deleting the DVD afterwards takes the image with it.
         keep_iso: req.keep_iso && !req.delete_after,
         capacities: Capacities::DVD,
+        media_type: Some(media_type),
     };
     burn_video_ts(system_burner().as_ref(), &job, cancel, |u| {
         let phase = if u.progress.phase == BurnPhase::Preparing { JobPhase::Image } else { JobPhase::Burning };
@@ -293,8 +305,14 @@ pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequ
     state.cancel.store(false, Ordering::SeqCst);
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
-    let kind = if is_bdmv_folder(Path::new(&request.video_ts)) { "Blu-ray" } else { "DVD" };
+    let bdmv = is_bdmv_folder(Path::new(&request.video_ts));
     std::thread::spawn(move || {
+        let on_bd = system_burner().probe_media(&request.drive_id).map_or(true, |m| m.media_type.is_bd());
+        let kind = match (bdmv, on_bd) {
+            (true, true) => "Blu-ray",
+            (true, false) => "AVCHD-Disc",
+            _ => "DVD",
+        };
         let mut done = match run_burn(&app, &request, &cancel) {
             Ok(outcome) => BurnDone {
                 ok: true,
@@ -351,7 +369,7 @@ mod tests {
 
     #[test]
     fn auto_start_only_on_blank_media_with_room() {
-        let small = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false };
+        let small = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false, fits_dvd: true };
         let v = media_view(media(true, false, MediaType::Dvd5, 2_295_104), &small, "auto", false);
         assert!(v.problem.is_none() && v.auto_ok && !v.needs_erase);
         assert_eq!(v.default_speed, WriteSpeed::Max);
@@ -375,7 +393,7 @@ mod tests {
         // Too small.
         assert!(media_view(media(true, false, MediaType::Dvd5, 900_000), &small, "auto", false).problem.is_some());
         // DVD-9 content on a single-layer disc.
-        let big = DiscNeeds { sectors: 3_000_000, size_gb: 6.1, dual_layer: true, bluray: false };
+        let big = DiscNeeds { sectors: 3_000_000, size_gb: 6.1, dual_layer: true, bluray: false, fits_dvd: true };
         assert!(media_view(media(true, false, MediaType::Dvd5, 2_295_104), &big, "auto", false).problem.is_some());
         let v = media_view(media(true, false, MediaType::Dvd9, 4_173_824), &big, "auto", false);
         assert!(v.auto_ok);
@@ -384,8 +402,8 @@ mod tests {
 
     #[test]
     fn blu_ray_media_and_speeds() {
-        let bd25 = DiscNeeds { sectors: 10_000_000, size_gb: 20.5, dual_layer: false, bluray: true };
-        let bd50 = DiscNeeds { sectors: 20_000_000, size_gb: 41.0, dual_layer: true, bluray: true };
+        let bd25 = DiscNeeds { sectors: 10_000_000, size_gb: 20.5, dual_layer: false, bluray: true, fits_dvd: false };
+        let bd50 = DiscNeeds { sectors: 20_000_000, size_gb: 41.0, dual_layer: true, bluray: true, fits_dvd: false };
         let bd_media = |t: MediaType, sectors: u64| MediaInfo {
             physical: "BD-R".into(),
             speeds: vec![26_341, 13_170, 8_780],
@@ -404,9 +422,19 @@ mod tests {
         assert!(media_view(bd_media(MediaType::Bd25, 12_219_392), &bd50, "auto", false).problem.unwrap().contains("BD-50"));
         assert!(media_view(bd_media(MediaType::Bd50, 24_438_784), &bd50, "auto", false).auto_ok);
         assert!(media_view(media(true, false, MediaType::Dvd5, 2_295_104), &bd25, "auto", false).problem.is_some());
-        let dvd = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false };
+        let dvd = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false, fits_dvd: true };
         assert!(media_view(bd_media(MediaType::Bd25, 12_219_392), &dvd, "auto", false).problem.is_some());
-        assert_eq!((bd25.disc_name(), bd50.disc_name(), dvd.disc_name()), ("BD-25", "BD-50", "DVD-5"));
+        assert_eq!(
+            (bd25.disc_name(MediaType::Bd25), bd50.disc_name(MediaType::Bd50), dvd.disc_name(MediaType::Dvd5)),
+            ("BD-25", "BD-50", "DVD-5")
+        );
+        // AVCHD: a small BDMV is accepted on DVD media and named by the DVD size.
+        let avchd = DiscNeeds { sectors: 3_500_000, size_gb: 7.2, dual_layer: false, bluray: true, fits_dvd: true };
+        let v = media_view(media(true, false, MediaType::Dvd5, 2_295_104), &avchd, "auto", false);
+        assert!(v.problem.unwrap().contains("DVD-9"));
+        let v = media_view(media(true, false, MediaType::Dvd9, 4_382_016), &avchd, "auto", false);
+        assert!(v.problem.is_none() && v.auto_ok, "{:?}", v.problem);
+        assert_eq!((avchd.disc_name(MediaType::Dvd9), avchd.disc_name(MediaType::Bd25)), ("AVCHD (DVD-9)", "BD-25"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::bd::BdRate;
 use crate::author::{xml_escape, ClipSource, MenuFrame, Resolution, TvStandard};
-use crate::probe::{AudioStream, MediaInfo, SubtitleKind, SubtitleStream, VideoStream};
+use crate::probe::{AudioStream, Crop, MediaInfo, SubtitleKind, SubtitleStream, VideoStream};
 use crate::subpic;
 use crate::tools::{FfmpegProgress, ToolError, Toolchain};
 
@@ -59,6 +59,10 @@ impl Aspect {
     }
 }
 
+fn filter_of(filters: &[Option<String>], n: usize) -> Option<&str> {
+    filters.get(n).and_then(|f| f.as_deref())
+}
+
 /// Size of the picture inside a coded frame of `frame` pixels shown at `target` (e.g. 720x576
 /// PAL, 352x288 SIF): wider sources get letterbox bars, narrower ones pillarbox bars.
 pub fn active_size(source_aspect: f64, target: Aspect, frame: (u32, u32)) -> (u32, u32) {
@@ -74,6 +78,11 @@ pub fn active_size(source_aspect: f64, target: Aspect, frame: (u32, u32)) -> (u3
     }
 }
 
+/// `crop=w:h:x:y` for the picture section chosen by the user, if any.
+fn crop_filter(v: &VideoStream) -> Option<String> {
+    v.crop.map(|c| format!("crop={}:{}:{}:{}", c.w, c.h, c.x, c.y))
+}
+
 /// ffmpeg `-vf` chain: deinterlace, frame rate of the TV standard, scale to the active area in
 /// BT.601, pad to the coded frame of `resolution`.
 pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard, resolution: Resolution) -> String {
@@ -84,6 +93,7 @@ pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard, resolution:
     if v.is_interlaced() {
         f.push("bwdif=mode=send_frame".to_string());
     }
+    f.extend(crop_filter(v));
     f.push(format!("fps={}", tv.frame_rate()));
     f.push(format!("scale={w}:{h}:flags=lanczos:out_color_matrix=bt601:out_range=tv"));
     if (w, h) != (fw, fh) {
@@ -101,6 +111,272 @@ pub fn ac3_settings(channels: u32) -> (u32, u32) {
     } else {
         (192, 2)
     }
+}
+
+/// How audio tracks are written ("Audio-Modus").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioMode {
+    /// Copy compliant AC-3/DTS tracks, re-encode everything else to AC-3.
+    #[default]
+    Auto,
+    /// Always AC-3.
+    Ac3,
+    /// Uncompressed LPCM (DVD: not reliable with ffmpeg's muxer, falls back to AC-3).
+    Lpcm,
+}
+
+/// Disc format the audio has to comply with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioTarget {
+    Dvd,
+    Bluray,
+    /// AVCHD on DVD media: AC-3 and LPCM only.
+    Avchd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioKind {
+    Ac3,
+    Dts,
+    Lpcm,
+}
+
+/// What happens to one audio track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioOut {
+    /// Stream copy (`bsf`: e.g. `dca_core` to strip DTS-HD extensions).
+    Copy { kind: AudioKind, bsf: Option<&'static str>, kbps: u32, ch: u32 },
+    Ac3 { kbps: u32, ch: u32 },
+    /// Uncompressed PCM written with ffmpeg codec `codec`.
+    Pcm { codec: &'static str, ch: u32 },
+}
+
+impl AudioOut {
+    pub fn kbps(self) -> u32 {
+        match self {
+            AudioOut::Copy { kbps, .. } | AudioOut::Ac3 { kbps, .. } => kbps,
+            AudioOut::Pcm { codec, ch } => 48 * if codec == "pcm_s24le" { 24 } else { 16 } * ch,
+        }
+    }
+
+    pub fn channels(self) -> u32 {
+        match self {
+            AudioOut::Copy { ch, .. } | AudioOut::Ac3 { ch, .. } | AudioOut::Pcm { ch, .. } => ch,
+        }
+    }
+
+    pub fn kind(self) -> AudioKind {
+        match self {
+            AudioOut::Copy { kind, .. } => kind,
+            AudioOut::Ac3 { .. } => AudioKind::Ac3,
+            AudioOut::Pcm { .. } => AudioKind::Lpcm,
+        }
+    }
+
+    /// Stereo or 5.1 label for menus and reports.
+    pub fn layout_label(self) -> &'static str {
+        match self.channels() {
+            1 => "Mono",
+            2 => "Stereo",
+            6 => "5.1",
+            8 => "7.1",
+            _ => "Mehrkanal",
+        }
+    }
+
+    /// dvdauthor's `<audio format=…>` value.
+    pub fn dvdauthor_format(self) -> &'static str {
+        match self.kind() {
+            AudioKind::Ac3 => "ac3",
+            AudioKind::Dts => "dts",
+            AudioKind::Lpcm => "pcm",
+        }
+    }
+}
+
+/// Stream copy of `a` if it complies with `target` (`None` = must be re-encoded).
+fn copy_plan(a: &AudioStream, target: AudioTarget) -> Option<AudioOut> {
+    let kbps = a.bit_rate.map(|b| b.div_ceil(1000));
+    let rate_ok = a.sample_rate == Some(48_000);
+    let profile = a.profile.as_deref().unwrap_or("");
+    match (a.codec.as_str(), target) {
+        ("ac3", _) if rate_ok && a.channels <= 6 => {
+            let kbps = kbps?;
+            let max = if target == AudioTarget::Dvd { 448 } else { 640 };
+            (kbps <= max).then_some(AudioOut::Copy { kind: AudioKind::Ac3, bsf: None, kbps, ch: a.channels })
+        }
+        // DTS-HD / 96 kHz: only the 48 kHz core fits a DVD.
+        ("dts", AudioTarget::Dvd) if profile.contains("HD") || profile.contains("96/24") => {
+            Some(AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: 1536, ch: a.channels.min(6) })
+        }
+        ("dts", AudioTarget::Dvd) if rate_ok && a.channels <= 6 => {
+            let kbps = kbps.unwrap_or(1536);
+            (kbps <= 1536).then_some(AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps, ch: a.channels })
+        }
+        // shortcut: DTS-HD MA bitrate is often reported as the core's; estimate 5 Mbit/s when absent.
+        ("dts", AudioTarget::Bluray) => Some(AudioOut::Copy {
+            kind: AudioKind::Dts,
+            bsf: None,
+            kbps: kbps.unwrap_or(if profile.contains("MA") { 5000 } else { 1536 }),
+            ch: a.channels,
+        }),
+        _ => None,
+    }
+}
+
+/// Output plan of one source audio track. `filtered`: a filter (loudnorm) has to run on it or the
+/// title is trimmed, which rules out a stream copy (ffmpeg's input seeking does not cut copied
+/// audio at the start, it would drift against the re-encoded video).
+pub fn plan_audio(a: &AudioStream, target: AudioTarget, mode: AudioMode, filtered: bool) -> AudioOut {
+    match (mode, target) {
+        (AudioMode::Lpcm, AudioTarget::Bluray) => return AudioOut::Pcm { codec: "pcm_s24le", ch: a.channels.clamp(1, 8) },
+        (AudioMode::Lpcm, AudioTarget::Avchd) => return AudioOut::Pcm { codec: "pcm_s16le", ch: 2 },
+        _ => {}
+    }
+    if mode == AudioMode::Auto && !filtered {
+        if let Some(copy) = copy_plan(a, target) {
+            return copy;
+        }
+    }
+    let (kbps, ch) = ac3_settings(a.channels);
+    AudioOut::Ac3 { kbps, ch }
+}
+
+/// Silent filler track of a Blu-ray title that has fewer tracks than the disc.
+pub const SILENCE_OUT: AudioOut = AudioOut::Ac3 { kbps: BD_SILENCE_KBPS, ch: 2 };
+
+/// Output options of audio track `n`: codec, bitrate/channels, optional filter.
+fn audio_track_args(n: usize, out: AudioOut, filter: Option<&str>) -> Vec<OsString> {
+    let mut a: Vec<OsString> = Vec::new();
+    let mut push = |k: String, v: String| a.extend([OsString::from(k), OsString::from(v)]);
+    match out {
+        AudioOut::Copy { bsf, .. } => {
+            push(format!("-c:a:{n}"), "copy".into());
+            if let Some(bsf) = bsf {
+                push(format!("-bsf:a:{n}"), bsf.into());
+            }
+        }
+        AudioOut::Ac3 { kbps, ch } => {
+            push(format!("-c:a:{n}"), "ac3".into());
+            push(format!("-ar:a:{n}"), "48000".into());
+            push(format!("-b:a:{n}"), format!("{kbps}k"));
+            push(format!("-ac:a:{n}"), ch.to_string());
+        }
+        AudioOut::Pcm { codec, ch } => {
+            push(format!("-c:a:{n}"), codec.into());
+            push(format!("-ar:a:{n}"), "48000".into());
+            push(format!("-ac:a:{n}"), ch.to_string());
+        }
+    }
+    if let Some(f) = filter.filter(|_| !matches!(out, AudioOut::Copy { .. })) {
+        push(format!("-filter:a:{n}"), f.to_string());
+    }
+    a
+}
+
+/// EBU R128 target: integrated loudness, true peak and loudness range.
+const LOUDNORM_TARGET: &str = "I=-23:TP=-1:LRA=20";
+
+/// Result of loudnorm's measuring run for one audio track.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Loudness {
+    input_i: f64,
+    input_tp: f64,
+    input_lra: f64,
+    input_thresh: f64,
+    target_offset: f64,
+}
+
+impl Loudness {
+    /// Measured integrated loudness in LUFS.
+    pub fn integrated(&self) -> f64 {
+        self.input_i
+    }
+
+    /// Second-run filter: applies the measured values linearly and brings the track back to 48 kHz
+    /// (loudnorm itself resamples to 192 kHz).
+    pub fn filter(&self) -> String {
+        format!(
+            "loudnorm={LOUDNORM_TARGET}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}:measured_thresh={:.2}:offset={:.2}:linear=true,aresample=48000",
+            self.input_i, self.input_tp, self.input_lra, self.input_thresh, self.target_offset
+        )
+    }
+}
+
+/// Reads the JSON block `loudnorm=print_format=json` prints into ffmpeg's log. `None` when it is
+/// missing or silent (`-inf`): such a track is left alone.
+pub fn parse_loudnorm_report(log: &str) -> Option<Loudness> {
+    let start = log.rfind('{')?;
+    let end = start + log[start..].find('}')?;
+    let v: serde_json::Value = serde_json::from_str(&log[start..=end]).ok()?;
+    let num = |k: &str| v.get(k)?.as_str()?.trim().parse::<f64>().ok().filter(|x| x.is_finite());
+    Some(Loudness {
+        input_i: num("input_i")?,
+        input_tp: num("input_tp")?,
+        input_lra: num("input_lra")?,
+        input_thresh: num("input_thresh")?,
+        target_offset: num("target_offset")?,
+    })
+}
+
+/// Arguments of the measuring run for audio stream `index` of `info` (the used section only).
+pub fn loudnorm_measure_args(info: &MediaInfo, index: u32) -> Vec<OsString> {
+    let mut a = info.input_args();
+    a.extend(["-map".into(), format!("0:{index}").into(), "-vn".into(), "-sn".into(), "-af".into()]);
+    a.extend([format!("loudnorm={LOUDNORM_TARGET}:print_format=json").into(), "-f".into(), "null".into(), NULL_DEVICE.into()]);
+    a
+}
+
+/// Loudness filter per audio track (`None` for silent filler tracks and tracks that cannot be
+/// measured): one measuring run each, the first half of loudnorm's two-pass mode.
+pub async fn measure_loudnorm(tools: &Toolchain, info: &MediaInfo, tracks: &[Option<&AudioStream>]) -> Result<Vec<Option<String>>, ToolError> {
+    let mut filters = Vec::new();
+    for track in tracks {
+        filters.push(match track {
+            Some(t) => {
+                let log = tools.ffmpeg_report(&loudnorm_measure_args(info, t.index)).await?;
+                parse_loudnorm_report(&log).map(|l| l.filter())
+            }
+            None => None,
+        });
+    }
+    Ok(filters)
+}
+
+/// Last `crop=w:h:x:y` that ffmpeg's `cropdetect` logged (with `reset=0` the largest picture seen).
+pub fn parse_cropdetect(log: &str) -> Option<(u32, u32, u32, u32)> {
+    let line = log.lines().rev().find(|l| l.contains("crop="))?;
+    let spec = &line[line.rfind("crop=")? + 5..];
+    let mut n = spec.split_whitespace().next()?.split(':').map(|v| v.trim().parse::<u32>());
+    Some((n.next()?.ok()?, n.next()?.ok()?, n.next()?.ok()?, n.next()?.ok()?))
+}
+
+/// The crop that keeps everything every rectangle (w, h, x, y) shows: their bounding box inside
+/// the `frame` (width, height).
+pub fn union_crop(rects: &[(u32, u32, u32, u32)], frame: (u32, u32)) -> Crop {
+    let x0 = rects.iter().map(|r| r.2).min().unwrap_or(0);
+    let y0 = rects.iter().map(|r| r.3).min().unwrap_or(0);
+    let x1 = rects.iter().map(|r| r.2 + r.0).max().unwrap_or(frame.0).min(frame.0);
+    let y1 = rects.iter().map(|r| r.3 + r.1).max().unwrap_or(frame.1).min(frame.1);
+    Crop { top: y0, bottom: frame.1 - y1, left: x0, right: frame.0 - x1 }
+}
+
+/// Finds the black bars of the video of `info`: `cropdetect` over 2 s at 25, 50 and 75 % of the
+/// used section, the largest picture of the three. All zero when nothing was detected.
+pub async fn detect_crop(tools: &Toolchain, info: &MediaInfo) -> Result<Crop, ToolError> {
+    let v = info.video.as_ref().expect("probed file has video");
+    let mut rects = Vec::new();
+    for frac in [0.25, 0.5, 0.75] {
+        let at = info.trim_start() + (info.duration_secs * frac - 1.0).max(0.0);
+        let mut a: Vec<OsString> = vec!["-ss".into(), format!("{at:.3}").into(), "-t".into(), "2".into(), "-i".into(), info.path.clone().into_os_string()];
+        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-an".into(), "-sn".into(), "-vf".into(), "cropdetect=limit=24:round=2:reset=0".into()]);
+        a.extend(["-f".into(), "null".into(), NULL_DEVICE.into()]);
+        if let Some(r) = parse_cropdetect(&tools.ffmpeg_report(&a).await?) {
+            rects.push(r);
+        }
+    }
+    Ok(if rects.is_empty() { Crop::default() } else { union_crop(&rects, (v.width, v.height)) })
 }
 
 /// Peak video rate so that video + all audio stays within the DVD mux rate.
@@ -145,6 +421,10 @@ pub struct EncodeJob<'a> {
     pub resolution: Resolution,
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
+    pub audio_mode: AudioMode,
+    /// Audio filter (loudnorm) per audio track; a filtered track is never copied. Missing
+    /// entries mean no filter.
+    pub audio_filters: Vec<Option<String>>,
 }
 
 /// 2-pass statistics files (`{stem}_2pass*.log|.mbtree|.temp`) in `dir`.
@@ -230,14 +510,8 @@ impl EncodeJob<'_> {
         if let Some(hw) = self.hwaccel {
             a.extend(["-hwaccel".into(), hw.into()]);
         }
-        a.extend([
-            "-i".into(),
-            self.info.path.clone().into_os_string(),
-            "-map".into(),
-            format!("0:{}", v.index).into(),
-            "-vf".into(),
-            video_filter(v, self.aspect, self.tv, self.resolution).into(),
-        ]);
+        a.extend(self.info.input_args());
+        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), video_filter(v, self.aspect, self.tv, self.resolution).into()]);
         a
     }
 
@@ -274,8 +548,17 @@ impl EncodeJob<'_> {
         format!("{}.mpg", self.stem)
     }
 
+    /// Output plan of every audio track.
+    pub fn audio_outs(&self) -> Vec<AudioOut> {
+        self.audio
+            .iter()
+            .enumerate()
+            .map(|(n, a)| plan_audio(a, AudioTarget::Dvd, self.audio_mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
+            .collect()
+    }
+
     pub fn audio_kbps_total(&self) -> u32 {
-        self.audio.iter().map(|a| ac3_settings(a.channels).0).sum()
+        self.audio_outs().iter().map(|o| o.kbps()).sum()
     }
 
     /// Extraction of the text subtitles as SRT and of PGS subtitles as raw `.sup` (stream copy
@@ -283,7 +566,7 @@ impl EncodeJob<'_> {
     /// by ffprobe, see [`subpic::vobsub_probe_args`]).
     pub fn subtitle_args(&self) -> Option<Vec<OsString>> {
         let tracks: Vec<(usize, &SubtitleStream)> = self.subtitles.iter().copied().enumerate().collect();
-        extract_subtitle_args(&self.info.path, &tracks, &self.dir, &self.stem)
+        extract_subtitle_args(self.info, &tracks, &self.dir, &self.stem)
     }
 
     /// Where the source picture lies in the DVD frame (subpictures use the full 720-wide raster,
@@ -292,7 +575,11 @@ impl EncodeJob<'_> {
         let v = self.info.video.as_ref().expect("probed file has video");
         let (fw, fh) = self.tv.size();
         let (aw, ah) = active_size(v.display_aspect, self.aspect, (fw, fh));
-        subpic::Target::new(self.tv, ((fw - aw) / 2, (fh - ah) / 2, aw, ah), canvas, (v.width, v.height))
+        let target = subpic::Target::new(self.tv, ((fw - aw) / 2, (fh - ah) / 2, aw, ah), canvas, (v.width, v.height));
+        match v.crop {
+            Some(c) => target.cropped((c.x, c.y, c.w, c.h), (v.width, v.height)),
+            None => target,
+        }
     }
 
     /// Arguments of the transcoding run (1-pass, or the final run of a 2-pass encode): video and
@@ -308,12 +595,8 @@ impl EncodeJob<'_> {
         for track in &self.audio {
             a.extend([s("-map"), format!("0:{}", track.index).into()]);
         }
-        if !self.audio.is_empty() {
-            a.extend([s("-c:a"), s("ac3"), s("-ar"), s("48000")]);
-        }
-        for (n, track) in self.audio.iter().enumerate() {
-            let (kbps, ch) = ac3_settings(track.channels);
-            a.extend([format!("-b:a:{n}").into(), format!("{kbps}k").into(), format!("-ac:a:{n}").into(), ch.to_string().into()]);
+        for (n, out) in self.audio_outs().into_iter().enumerate() {
+            a.extend(audio_track_args(n, out, filter_of(&self.audio_filters, n)));
         }
         a.extend(["-sn", "-dn", "-f", "dvd", "-muxrate", &format!("{DVD_MUX_RATE_KBPS}k"), "-packetsize", "2048"].map(s));
         a.push(output.into());
@@ -329,8 +612,9 @@ pub fn subtitle_file(stem: &str, n: usize, ext: &str) -> String {
 /// ffmpeg arguments extracting text subtitles as SRT and PGS as raw `.sup` into `dir`
 /// (`tracks`: track number and stream; files named by [`subtitle_file`]). `None` if no stream
 /// needs extraction.
-pub fn extract_subtitle_args(input: &Path, tracks: &[(usize, &SubtitleStream)], dir: &Path, stem: &str) -> Option<Vec<OsString>> {
-    let mut a: Vec<OsString> = vec!["-y".into(), "-i".into(), input.as_os_str().to_owned()];
+pub fn extract_subtitle_args(info: &MediaInfo, tracks: &[(usize, &SubtitleStream)], dir: &Path, stem: &str) -> Option<Vec<OsString>> {
+    let mut a: Vec<OsString> = vec!["-y".into()];
+    a.extend(info.input_args());
     let mut any = false;
     for &(n, sub) in tracks {
         let map = format!("0:{}", sub.index);
@@ -410,7 +694,7 @@ pub fn nvenc_bd_options() -> [&'static str; 16] {
     ]
 }
 
-/// Peak video rate of the Blu-ray encodes (x264 VBV, kbit/s) and its buffer.
+/// Default peak video rate of the Blu-ray encodes (x264 VBV, kbit/s) and its buffer.
 pub const BD_MAXRATE_KBPS: u32 = 40_000;
 pub const BD_BUFSIZE_KBIT: u32 = 30_000;
 /// AC-3 bitrate of the silent filler tracks.
@@ -426,6 +710,7 @@ pub fn bd_video_filter(v: &VideoStream, rate: BdRate, resolution: Resolution) ->
     if v.is_interlaced() {
         f.push("bwdif=mode=send_frame".to_string());
     }
+    f.extend(crop_filter(v));
     f.push(format!("fps={}", rate.ffmpeg()));
     f.push(format!("scale={w}:{h}:flags=lanczos:out_color_matrix=bt709:out_range=tv"));
     if (w, h) != (fw, fh) {
@@ -460,6 +745,13 @@ pub struct BdEncodeJob<'a> {
     pub resolution: Resolution,
     pub hwaccel: Option<&'static str>,
     pub encoder: BdEncoder,
+    pub audio_mode: AudioMode,
+    /// [`AudioTarget::Bluray`] or [`AudioTarget::Avchd`].
+    pub audio_target: AudioTarget,
+    pub audio_filters: Vec<Option<String>>,
+    /// Peak rate and VBV buffer of the video (kbit/s, kbit).
+    pub maxrate_kbps: u32,
+    pub bufsize_kbit: u32,
 }
 
 impl BdEncodeJob<'_> {
@@ -476,8 +768,19 @@ impl BdEncodeJob<'_> {
         self.dir.join(format!("{}_2pass", self.stem))
     }
 
+    /// Output plan of every disc audio track (silent filler where the title has none).
+    pub fn audio_outs(&self) -> Vec<AudioOut> {
+        self.audio
+            .iter()
+            .enumerate()
+            .map(|(n, a)| {
+                a.map_or(SILENCE_OUT, |a| plan_audio(a, self.audio_target, self.audio_mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
+            })
+            .collect()
+    }
+
     pub fn audio_kbps_total(&self) -> u32 {
-        self.audio.iter().map(|a| a.map_or(BD_SILENCE_KBPS, |a| ac3_settings(a.channels).0)).sum()
+        self.audio_outs().iter().map(|o| o.kbps()).sum()
     }
 
     fn silence_count(&self) -> usize {
@@ -498,7 +801,7 @@ impl BdEncodeJob<'_> {
                 .map(OsString::from)
                 .to_vec();
         a.push(format!("{}k", self.video_kbps).into());
-        a.extend(["-maxrate".into(), format!("{BD_MAXRATE_KBPS}k").into(), "-bufsize".into(), format!("{BD_BUFSIZE_KBIT}k").into()]);
+        a.extend(["-maxrate".into(), format!("{}k", self.maxrate_kbps).into(), "-bufsize".into(), format!("{}k", self.bufsize_kbit).into()]);
         a.extend(["-g".into(), self.rate.keyint().to_string().into(), "-bf".into(), "3".into(), "-x264-params".into(), x264.into()]);
         a.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(OsString::from));
         a
@@ -511,7 +814,7 @@ impl BdEncodeJob<'_> {
             .to_vec();
         a.extend(nvenc_bd_options().map(OsString::from));
         a.extend(["-b:v".into(), format!("{}k", self.video_kbps).into()]);
-        a.extend(["-maxrate".into(), format!("{BD_MAXRATE_KBPS}k").into(), "-bufsize".into(), format!("{BD_BUFSIZE_KBIT}k").into()]);
+        a.extend(["-maxrate".into(), format!("{}k", self.maxrate_kbps).into(), "-bufsize".into(), format!("{}k", self.bufsize_kbit).into()]);
         a.extend(["-g".into(), self.rate.keyint().to_string().into(), "-bf".into(), "3".into()]);
         if self.two_pass {
             a.extend(["-multipass", "fullres"].map(OsString::from));
@@ -527,7 +830,7 @@ impl BdEncodeJob<'_> {
         if let Some(hw) = self.hwaccel {
             a.extend(["-hwaccel".into(), hw.into()]);
         }
-        a.extend(["-i".into(), self.info.path.clone().into_os_string()]);
+        a.extend(self.info.input_args());
         if with_audio && self.silence_count() > 0 {
             a.extend(["-f", "lavfi", "-t"].map(OsString::from));
             a.push(format!("{:.3}", self.info.duration_secs).into());
@@ -558,21 +861,10 @@ impl BdEncodeJob<'_> {
         for track in &self.audio {
             a.extend([s("-map"), track.map_or_else(|| "1:a:0".into(), |t| format!("0:{}", t.index)).into()]);
         }
-        if !self.audio.is_empty() {
-            a.extend([s("-c:a"), s("ac3"), s("-ar"), s("48000")]);
+        for (n, out) in self.audio_outs().into_iter().enumerate() {
+            a.extend(audio_track_args(n, out, filter_of(&self.audio_filters, n)));
         }
-        for (n, track) in self.audio.iter().enumerate() {
-            let (kbps, ch) = track.map_or((BD_SILENCE_KBPS, 2), |t| ac3_settings(t.channels));
-            // apad + -t: every audio track ends together with the video (concatenation in tsMuxeR).
-            a.extend([
-                format!("-b:a:{n}").into(),
-                format!("{kbps}k").into(),
-                format!("-ac:a:{n}").into(),
-                ch.to_string().into(),
-                format!("-filter:a:{n}").into(),
-                s("apad"),
-            ]);
-        }
+        // -t cuts every audio track (also copied ones, at packet granularity) at the video length.
         a.extend([s("-t"), format!("{:.3}", self.info.duration_secs).into()]);
         a.extend(["-map_chapters", "-1", "-sn", "-dn", "-f", "matroska"].map(s));
         a.push(output.into());
@@ -619,10 +911,14 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
         "dvd_subtitle" => {
             let json = tools.ffprobe_output(&subpic::vobsub_probe_args(&job.info.path, sub.index)).await?;
             let v = job.info.video.as_ref().expect("probed file has video");
+            let trim = job.info.trim;
             // Canvas: the .idx size, else the DVD raster the source belongs to.
             let fallback = (720, if v.width == 720 { v.height } else if v.height >= 576 { 576 } else { 480 });
             tokio::task::spawn_blocking(move || {
-                let probe = subpic::parse_vobsub_probe(&json)?;
+                let mut probe = subpic::parse_vobsub_probe(&json)?;
+                if let Some(t) = trim {
+                    probe = probe.trimmed(t.start, t.end);
+                }
                 let (palette, size) = subpic::parse_idx_header(&String::from_utf8_lossy(&probe.extradata));
                 Ok(subpic::decode_vobsub(&probe.packets, palette.as_ref(), size.unwrap_or(fallback)))
             })
@@ -681,6 +977,23 @@ pub fn thumbnail_args(input: &Path, at_secs: f64, output: &Path) -> Vec<OsString
         "1".into(),
         "-vf".into(),
         "scale=trunc(ih*dar/2)*2:ih,setsar=1,scale=384:-2".into(),
+        output.as_os_str().to_owned(),
+    ]
+}
+
+/// Arguments extracting the whole picture at `at_secs` in display proportions, `width` pixels wide,
+/// as JPEG (the crop inspector shows it; crop values are fractions of it).
+pub fn frame_args(input: &Path, at_secs: f64, width: u32, output: &Path) -> Vec<OsString> {
+    vec![
+        "-y".into(),
+        "-ss".into(),
+        format!("{at_secs:.3}").into(),
+        "-i".into(),
+        input.as_os_str().to_owned(),
+        "-frames:v".into(),
+        "1".into(),
+        "-vf".into(),
+        format!("scale=trunc(ih*dar/2)*2:ih,setsar=1,scale={width}:-2").into(),
         output.as_os_str().to_owned(),
     ]
 }
@@ -1109,6 +1422,7 @@ mod tests {
             display_aspect: dar,
             fps: 23.976,
             field_order: field_order.into(),
+            crop: None,
         }
     }
 
@@ -1176,11 +1490,12 @@ mod tests {
             duration_secs: 60.0,
             video: Some(video(1920, 1080, 16.0 / 9.0, "progressive")),
             audio: vec![
-                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true },
-                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false },
+                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true, bit_rate: None, sample_rate: None, profile: None },
+                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false, bit_rate: None, sample_rate: None, profile: None },
             ],
             subtitles: vec![SubtitleStream { index: 3, codec: "subrip".into(), kind: SubtitleKind::Text, language: None, title: None, forced: false, width: None, height: None }],
             chapters: vec![],
+            trim: None,
         };
         let job = EncodeJob {
             info: &info,
@@ -1195,6 +1510,8 @@ mod tests {
             tv: TvStandard::Pal,
             resolution: Resolution::FullD1,
             hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_filters: vec![],
         };
         let args: Vec<String> = job.encode_args("pipe:1").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
@@ -1205,7 +1522,7 @@ mod tests {
         assert!(joined.contains("-g 12 -bf 2"));
         assert!(joined.contains("-b:v 5000k -maxrate 9140k -bufsize 1835k -aspect 16:9"));
         // Video and both AC-3 tracks go straight into one DVD program stream (no mux pass).
-        assert!(joined.contains("-map 0:1 -map 0:2 -c:a ac3 -ar 48000 -b:a:0 448k -ac:a:0 6 -b:a:1 192k -ac:a:1 2"), "{joined}");
+        assert!(joined.contains("-map 0:1 -map 0:2 -c:a:0 ac3 -ar:a:0 48000 -b:a:0 448k -ac:a:0 6 -c:a:1 ac3 -ar:a:1 48000 -b:a:1 192k -ac:a:1 2"), "{joined}");
         assert!(joined.ends_with("-sn -dn -f dvd -muxrate 10080k -packetsize 2048 pipe:1"), "{joined}");
         assert!(!joined.contains(".m2v") && !joined.contains(".ac3") && !joined.contains("srt"));
 
@@ -1381,11 +1698,12 @@ mod tests {
             duration_secs: 60.0,
             video: Some(video(1920, 1080, 16.0 / 9.0, "progressive")),
             audio: vec![
-                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true },
-                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false },
+                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true, bit_rate: None, sample_rate: None, profile: None },
+                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false, bit_rate: None, sample_rate: None, profile: None },
             ],
             subtitles: vec![],
             chapters: vec![],
+            trim: None,
         }
     }
 
@@ -1402,6 +1720,11 @@ mod tests {
             encoder: BdEncoder::X264,
             resolution: Resolution::Hd1080,
             hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_target: AudioTarget::Bluray,
+            audio_filters: vec![],
+            maxrate_kbps: BD_MAXRATE_KBPS,
+            bufsize_kbit: BD_BUFSIZE_KBIT,
         }
     }
 
@@ -1469,13 +1792,14 @@ mod tests {
     }
 
     #[test]
-    fn bd_audio_is_padded_and_silence_fills_missing_tracks() {
+    fn bd_silence_fills_missing_tracks() {
         let info = bd_info();
         let job = bd_job(&info);
         let a = strings(job.encode_args("out.mkv"));
         assert!(a.starts_with("-y -i in.mkv -f lavfi -t 60.000 -i anullsrc=r=48000:cl=stereo -map 0:0 -vf "), "{a}");
-        assert!(a.contains("-map 0:1 -map 0:2 -map 1:a:0 -c:a ac3 -ar 48000"), "{a}");
-        assert!(a.contains("-b:a:0 448k -ac:a:0 6 -filter:a:0 apad -b:a:1 192k -ac:a:1 2 -filter:a:1 apad -b:a:2 192k -ac:a:2 2 -filter:a:2 apad"), "{a}");
+        assert!(a.contains("-map 0:1 -map 0:2 -map 1:a:0 -c:a:0 ac3"), "{a}");
+        assert!(a.contains("-b:a:0 448k -ac:a:0 6 -c:a:1 ac3 -ar:a:1 48000 -b:a:1 192k -ac:a:1 2 -c:a:2 ac3 -ar:a:2 48000 -b:a:2 192k -ac:a:2 2"), "{a}");
+        assert!(!a.contains("apad"), "{a}");
         assert!(a.ends_with("-t 60.000 -map_chapters -1 -sn -dn -f matroska out.mkv"), "{a}");
         assert_eq!(job.audio_kbps_total(), 448 + 192 + 192);
         // No silent track: no extra input.
@@ -1494,7 +1818,7 @@ mod tests {
         assert!(first.contains("-pass 1 -passlogfile") && first.contains("title_01_2pass"), "{first}");
         assert!(first.ends_with(&format!("-an -sn -f rawvideo {NULL_DEVICE}")) && !first.contains("lavfi") && !first.contains("-c:a"), "{first}");
         let last = strings(job.encode_args("out.mkv"));
-        assert!(last.contains("-pass 2 -passlogfile") && last.contains("-c:a ac3"), "{last}");
+        assert!(last.contains("-pass 2 -passlogfile") && last.contains("-c:a:0 ac3"), "{last}");
         // Same video settings in both runs.
         let video = |s: &str| s[s.find("-c:v libx264").unwrap()..s.find("-pass").unwrap()].to_string();
         assert_eq!(video(&first), video(&last));
@@ -1507,11 +1831,207 @@ mod tests {
         let pgs = sub(4, "hdmv_pgs_subtitle", SubtitleKind::Bitmap);
         let vob = sub(5, "dvd_subtitle", SubtitleKind::Bitmap);
         // Track numbers pick the file names (BD tracks may skip positions a title lacks).
-        let a = strings(extract_subtitle_args(Path::new("in.mkv"), &[(0, &text), (1, &pgs), (2, &vob)], Path::new("w"), "title_02").unwrap());
+        let a = strings(extract_subtitle_args(&bd_info(), &[(0, &text), (1, &pgs), (2, &vob)], Path::new("w"), "title_02").unwrap());
         assert!(a.starts_with("-y -i in.mkv -map 0:3 -c:s srt -vn -an -f srt "), "{a}");
         assert!(a.contains("title_02_s1.srt") && a.contains("-map 0:4 -c:s copy -vn -an -f sup ") && a.contains("title_02_s2.sup"), "{a}");
         assert!(!a.contains("0:5"), "VobSub is not extracted: {a}");
-        assert!(extract_subtitle_args(Path::new("in.mkv"), &[(0, &vob)], Path::new("w"), "t").is_none());
+        assert!(extract_subtitle_args(&bd_info(), &[(0, &vob)], Path::new("w"), "t").is_none());
         assert_eq!(subtitle_file("title_01", 2, "sup"), "title_01_s3.sup");
+    }
+
+    fn audio(codec: &str, channels: u32, kbps: Option<u32>, rate: Option<u32>, profile: Option<&str>) -> AudioStream {
+        AudioStream {
+            index: 1,
+            codec: codec.into(),
+            channels,
+            channel_layout: String::new(),
+            language: None,
+            title: None,
+            default: false,
+            bit_rate: kbps.map(|k| k * 1000),
+            sample_rate: rate,
+            profile: profile.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn audio_copy_rules() {
+        use AudioMode::*;
+        use AudioTarget::*;
+        let ac3 = |kbps| audio("ac3", 6, Some(kbps), Some(48_000), None);
+        let kind = |a: &AudioStream, t, m, f| plan_audio(a, t, m, f);
+        // AC-3: DVD ≤ 448, BD/AVCHD ≤ 640 at 48 kHz.
+        assert!(matches!(kind(&ac3(448), Dvd, Auto, false), AudioOut::Copy { kind: AudioKind::Ac3, kbps: 448, ch: 6, bsf: None }));
+        assert!(matches!(kind(&ac3(640), Dvd, Auto, false), AudioOut::Ac3 { kbps: 448, ch: 6 }));
+        assert!(matches!(kind(&ac3(640), Bluray, Auto, false), AudioOut::Copy { .. }));
+        assert!(matches!(kind(&ac3(640), Avchd, Auto, false), AudioOut::Copy { .. }));
+        assert!(matches!(kind(&audio("ac3", 2, Some(192), Some(44_100), None), Bluray, Auto, false), AudioOut::Ac3 { kbps: 192, ch: 2 }));
+        assert!(matches!(kind(&audio("ac3", 6, None, Some(48_000), None), Dvd, Auto, false), AudioOut::Ac3 { .. }), "unknown bitrate");
+        // Mode "always AC-3" and filters rule copying out.
+        assert!(matches!(kind(&ac3(384), Dvd, Ac3, false), AudioOut::Ac3 { .. }));
+        assert!(matches!(kind(&ac3(384), Dvd, Auto, true), AudioOut::Ac3 { .. }));
+        // DTS: core copied on DVD (HD → core only), as is on BD, re-encoded on AVCHD; E-AC-3 never copied.
+        let dts = audio("dts", 6, Some(1509), Some(48_000), Some("DTS"));
+        assert!(matches!(kind(&dts, Dvd, Auto, false), AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps: 1509, .. }));
+        let hd = audio("dts", 8, Some(4000), Some(48_000), Some("DTS-HD MA"));
+        assert!(matches!(kind(&hd, Dvd, Auto, false), AudioOut::Copy { bsf: Some("dca_core"), kbps: 1536, ch: 6, .. }));
+        assert!(matches!(kind(&hd, Bluray, Auto, false), AudioOut::Copy { bsf: None, kbps: 4000, ch: 8, .. }));
+        assert!(matches!(kind(&dts, Avchd, Auto, false), AudioOut::Ac3 { kbps: 448, ch: 6 }));
+        assert!(matches!(kind(&audio("eac3", 6, Some(640), Some(48_000), None), Bluray, Auto, false), AudioOut::Ac3 { .. }));
+    }
+
+    #[test]
+    fn trimmed_titles_never_copy_audio() {
+        let mut info = bd_info();
+        info.audio[0] = audio("ac3", 6, Some(384), Some(48_000), None);
+        let job = BdEncodeJob { audio: vec![Some(&info.audio[0])], ..bd_job(&info) };
+        assert!(matches!(job.audio_outs()[0], AudioOut::Copy { .. }));
+        crate::probe::apply_trim(&mut info, Some(5.0), Some(30.0)).unwrap();
+        let job = BdEncodeJob { audio: vec![Some(&info.audio[0])], ..bd_job(&info) };
+        assert!(matches!(job.audio_outs()[0], AudioOut::Ac3 { kbps: 448, ch: 6 }), "{:?}", job.audio_outs());
+    }
+
+    #[test]
+    fn lpcm_plans() {
+        use AudioTarget::*;
+        let a = audio("flac", 6, None, Some(96_000), None);
+        let p = plan_audio(&a, Bluray, AudioMode::Lpcm, false);
+        assert_eq!(p, AudioOut::Pcm { codec: "pcm_s24le", ch: 6 });
+        assert_eq!(p.kbps(), 48 * 24 * 6);
+        assert_eq!(plan_audio(&a, Avchd, AudioMode::Lpcm, false), AudioOut::Pcm { codec: "pcm_s16le", ch: 2 });
+        // DVD: ffmpeg's muxer cannot write usable DVD LPCM, so LPCM mode means AC-3 there.
+        assert!(matches!(plan_audio(&a, Dvd, AudioMode::Lpcm, false), AudioOut::Ac3 { .. }));
+        assert_eq!(plan_audio(&a, Bluray, AudioMode::Lpcm, false).kind(), AudioKind::Lpcm);
+    }
+
+    #[test]
+    fn audio_args_copy_and_pcm() {
+        let copy = AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: 1536, ch: 6 };
+        let strings = |v: Vec<OsString>| v.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert_eq!(strings(audio_track_args(1, copy, Some("loudnorm"))), "-c:a:1 copy -bsf:a:1 dca_core", "no filter on copies");
+        assert_eq!(
+            strings(audio_track_args(0, AudioOut::Pcm { codec: "pcm_s24le", ch: 6 }, None)),
+            "-c:a:0 pcm_s24le -ar:a:0 48000 -ac:a:0 6"
+        );
+        assert_eq!(
+            strings(audio_track_args(2, AudioOut::Ac3 { kbps: 192, ch: 2 }, Some("aresample=48000"))),
+            "-c:a:2 ac3 -ar:a:2 48000 -b:a:2 192k -ac:a:2 2 -filter:a:2 aresample=48000"
+        );
+        assert_eq!(AudioOut::Pcm { codec: "pcm_s16le", ch: 2 }.dvdauthor_format(), "pcm");
+    }
+
+    #[test]
+    fn copied_audio_enters_the_dvd_job() {
+        let mut info = bd_info();
+        info.audio[0] = audio("ac3", 6, Some(384), Some(48_000), None);
+        let job = EncodeJob {
+            info: &info,
+            audio: vec![&info.audio[0]],
+            subtitles: vec![],
+            video_kbps: 5000,
+            aspect: Aspect::Wide,
+            dir: PathBuf::from("w"),
+            stem: "t".into(),
+            two_pass: false,
+            fast: false,
+            tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
+            hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_filters: vec![],
+        };
+        let args: Vec<String> = job.encode_args("o.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.join(" ").contains("-c:a:0 copy -sn"), "{args:?}");
+        assert_eq!(job.audio_kbps_total(), 384);
+    }
+
+    #[test]
+    fn trim_and_crop_reach_every_ffmpeg_run() {
+        let mut info = bd_info();
+        crate::probe::apply_trim(&mut info, Some(10.0), Some(40.0)).unwrap();
+        crate::probe::apply_crop(&mut info, crate::probe::Crop { top: 140, bottom: 140, left: 0, right: 0 }).unwrap();
+        let strings = |v: Vec<OsString>| v.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+
+        // Blu-ray: section as input options, crop before the scale, silence/-t for the section.
+        let bd = strings(bd_job(&info).encode_args("out.mkv"));
+        assert!(bd.starts_with("-y -ss 10.000 -to 40.000 -i in.mkv -f lavfi -t 30.000 -i anullsrc"), "{bd}");
+        // 1920x800 is 2.4:1 -> pillar/letterboxed into 16:9: the crop comes first, the active size is 1920x800.
+        assert!(bd.contains("-vf crop=1920:800:0:140,fps=24000/1001,scale=1920:800:"), "{bd}");
+        assert!(bd.contains("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"), "{bd}");
+        assert!(strings(bd_job(&info).first_pass_args()).starts_with("-y -ss 10.000 -to 40.000 -i in.mkv -map 0:0"));
+
+        // DVD: same input options; the aspect is that of the cropped picture (2.4:1 -> 16:9 letterbox).
+        let job = EncodeJob {
+            info: &info,
+            audio: vec![],
+            subtitles: info.subtitles.iter().collect(),
+            video_kbps: 5000,
+            aspect: Aspect::Wide,
+            dir: PathBuf::from("w"),
+            stem: "t".into(),
+            two_pass: false,
+            fast: false,
+            tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
+            hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_filters: vec![],
+        };
+        let dvd = strings(job.encode_args("o.mpg"));
+        assert!(dvd.starts_with("-y -ss 10.000 -to 40.000 -i in.mkv -map 0:0 -vf crop=1920:800:0:140,fps=25,scale=720:"), "{dvd}");
+        let (_, h) = active_size(info.video.as_ref().unwrap().display_aspect, Aspect::Wide, (720, 576));
+        assert_eq!(h, 426, "2.4:1 in a 16:9 frame leaves 426 of 576 lines");
+
+        // Subtitle extraction reads the same section.
+        let mut with_sub = info.clone();
+        with_sub.subtitles =
+            vec![SubtitleStream { index: 3, codec: "subrip".into(), kind: SubtitleKind::Text, language: None, title: None, forced: false, width: None, height: None }];
+        let sub = strings(extract_subtitle_args(&with_sub, &[(0, &with_sub.subtitles[0])], Path::new("w"), "t").unwrap());
+        assert!(sub.starts_with("-y -ss 10.000 -to 40.000 -i in.mkv -map 0:3"), "{sub}");
+    }
+
+    #[test]
+    fn loudnorm_report_and_filter() {
+        let log = "[Parsed_loudnorm_0 @ 0000] \n{\n\t\"input_i\" : \"-27.61\",\n\t\"input_tp\" : \"-4.47\",\n\t\"input_lra\" : \"18.06\",\n\t\"input_thresh\" : \"-39.20\",\n\t\"output_i\" : \"-16.58\",\n\t\"target_offset\" : \"0.58\"\n}\n";
+        let l = parse_loudnorm_report(log).unwrap();
+        assert_eq!(
+            l.filter(),
+            "loudnorm=I=-23:TP=-1:LRA=20:measured_I=-27.61:measured_TP=-4.47:measured_LRA=18.06:measured_thresh=-39.20:offset=0.58:linear=true,aresample=48000"
+        );
+        // Silence measures as -inf: no filter. Garbage and missing blocks too.
+        assert!(parse_loudnorm_report(&log.replace("-27.61", "-inf")).is_none());
+        assert!(parse_loudnorm_report("nothing here").is_none());
+        let info = bd_info();
+        let args: Vec<String> = loudnorm_measure_args(&info, 1).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args[..2], ["-i", "in.mkv"]);
+        assert!(args.join(" ").contains("-map 0:1 -vn -sn -af loudnorm=I=-23:TP=-1:LRA=20:print_format=json -f null"), "{args:?}");
+    }
+
+    #[test]
+    fn filtered_tracks_are_re_encoded_with_their_filter() {
+        let mut info = bd_info();
+        info.audio[0] = audio("ac3", 6, Some(384), Some(48_000), None);
+        let job = BdEncodeJob {
+            audio: vec![Some(&info.audio[0]), None],
+            audio_filters: vec![Some("loudnorm=I=-23,aresample=48000".into())],
+            ..bd_job(&info)
+        };
+        let a = job.encode_args("o.mkv").iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(a.contains("-c:a:0 ac3 -ar:a:0 48000 -b:a:0 448k -ac:a:0 6 -filter:a:0 loudnorm=I=-23,aresample=48000"), "{a}");
+        assert!(!a.contains("copy"), "{a}");
+    }
+
+    #[test]
+    fn cropdetect_log_and_union() {
+        let log = "[Parsed_cropdetect_0 @ 0x1] x1:0 x2:1919 y1:138 y2:941 w:1920 h:800 x:0 y:140 pts:1 t:0.04 limit:0.094118 crop=1920:800:0:140\n\
+                   [Parsed_cropdetect_0 @ 0x1] x1:0 x2:1919 y1:130 y2:949 w:1920 h:816 x:0 y:132 pts:2 t:0.08 limit:0.094118 crop=1920:816:0:132\n";
+        assert_eq!(parse_cropdetect(log), Some((1920, 816, 0, 132)), "the last (largest) report counts");
+        assert_eq!(parse_cropdetect("no crop here"), None);
+        // Union of two scenes: the larger picture wins, the frame size gives the bars.
+        let c = union_crop(&[(1920, 800, 0, 140), (1920, 816, 0, 132), (1900, 1080, 10, 0)], (1920, 1080));
+        assert_eq!(c, Crop { top: 0, bottom: 0, left: 0, right: 0 });
+        let c = union_crop(&[(1920, 800, 0, 140), (1920, 816, 0, 132)], (1920, 1080));
+        assert_eq!(c, Crop { top: 132, bottom: 132, left: 0, right: 0 });
+        assert_eq!(union_crop(&[], (1920, 1080)), Crop::default());
     }
 }

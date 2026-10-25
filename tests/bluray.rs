@@ -1,5 +1,6 @@
-//! Blu-ray output end to end: two clips (16:9 with 5.1 + stereo audio, an SRT and chapters; 4:3
-//! with one stereo track) become ONE autoplaying playlist on a BD-25 (H.264 + AC-3 via tsMuxeR),
+//! Blu-ray output end to end: two clips (16:9 25 fps with 5.1 + stereo audio, an SRT and chapters;
+//! 4:3 24 fps with one stereo track) become two chained playlists, each with its own frame rate, on
+//! a BD-25 (H.264 + AC-3 via tsMuxeR),
 //! 720p NTSC, the `--single-video` check, and the UDF 2.50 image of the result.
 //! Skipped (with a message) when ffmpeg or tsMuxeR are missing.
 
@@ -57,7 +58,7 @@ fn probe(tools: &Toolchain, file: &Path, select: &str, entries: &str) -> String 
     text
 }
 
-/// Clips in `dir`: `a.mkv` (12 s, 1280×720 25 fps, 5.1 + stereo AC-3, SRT) and `b.mkv` (6 s, 4:3).
+/// Clips in `dir`: `a.mkv` (12 s, 1280×720 25 fps, 5.1 + stereo AC-3, SRT) and `b.mkv` (6 s, 4:3, 24 fps).
 fn make_clips(tools: &Toolchain, dir: &Path) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let srt = dir.join("a.srt");
@@ -75,7 +76,7 @@ fn make_clips(tools: &Toolchain, dir: &Path) -> (PathBuf, PathBuf) {
     ffmpeg(
         tools,
         &[
-            "-f", "lavfi", "-i", "testsrc=s=640x480:r=25:d=6", "-f", "lavfi", "-i", "sine=f=330:d=6", "-c:v", "libx264", "-preset", "ultrafast",
+            "-f", "lavfi", "-i", "testsrc=s=640x480:r=24:d=6", "-f", "lavfi", "-i", "sine=f=330:d=6", "-c:v", "libx264", "-preset", "ultrafast",
             "-c:a", "ac3", "-metadata:s:a:0", "language=ger", b.to_str().unwrap(),
         ],
     );
@@ -102,7 +103,7 @@ fn fixture() -> Option<&'static (PathBuf, BuildReport)> {
             fast_encode: true,
             project_name: Some("BDTEST".into()),
             selections: vec![
-                StreamSelection { audio: Some(vec![1, 2]), subtitles: Some(vec![3]), label: None, chapters: Some(vec![0.0, 6.0]) },
+                StreamSelection { audio: Some(vec![1, 2]), subtitles: Some(vec![3]), label: None, chapters: Some(vec![0.0, 6.0]), ..StreamSelection::default() },
                 StreamSelection::default(),
             ],
             ..BuildOptions::default()
@@ -114,43 +115,64 @@ fn fixture() -> Option<&'static (PathBuf, BuildReport)> {
 }
 
 #[test]
-fn two_clips_make_one_autoplay_playlist() {
+fn two_clips_make_two_playlists_with_their_own_rates() {
     let Some((_, tools)) = tools() else { return };
     let Some((_, report)) = fixture() else { return };
     let bd = report.project_dir.as_path();
     assert_eq!(report.video_ts, bd.join("BDMV"));
-    for f in ["BDMV/index.bdmv", "BDMV/MovieObject.bdmv", "BDMV/PLAYLIST/00000.mpls", "BDMV/CLIPINF/00000.clpi", "BDMV/STREAM/00000.m2ts"] {
+    for f in [
+        "BDMV/index.bdmv",
+        "BDMV/MovieObject.bdmv",
+        "BDMV/PLAYLIST/00000.mpls",
+        "BDMV/PLAYLIST/00001.mpls",
+        "BDMV/CLIPINF/00000.clpi",
+        "BDMV/CLIPINF/00001.clpi",
+        "BDMV/STREAM/00000.m2ts",
+        "BDMV/STREAM/00001.m2ts",
+    ] {
         assert!(bd.join(f).is_file(), "{f} missing");
     }
     assert!(bd.join("CERTIFICATE").is_dir());
     assert_eq!((report.menu_pages, report.resolution), (0, Resolution::Hd1080));
     assert_eq!(report.titles.len(), 2);
-    assert!(report.warnings.iter().any(|w| w.contains("kein Menü")) || report.warnings.is_empty(), "{:?}", report.warnings);
     assert!(report.work_dir.is_none(), "work directory removed");
 
-    // One m2ts for both titles: H.264 High@4.1 1080, two AC-3 tracks, one PGS track.
-    let m2ts = bd.join("BDMV/STREAM/00000.m2ts");
-    let v = probe(&tools, &m2ts, "v:0", "stream=codec_name,profile,level,width,height,r_frame_rate");
-    for want in ["codec_name=h264", "profile=High", "level=41", "width=1920", "height=1080", "r_frame_rate=25/1"] {
-        assert!(v.contains(want), "{want} in {v}");
-    }
-    let audio = probe(&tools, &m2ts, "a", "stream=codec_name,channels");
-    assert_eq!(audio.matches("codec_name=ac3").count(), 2, "{audio}");
-    assert!(audio.contains("channels=6") && audio.contains("channels=2"), "{audio}");
-    assert_eq!(probe(&tools, &m2ts, "s", "stream=codec_name").matches("hdmv_pgs_subtitle").count(), 1);
-    let dur: f64 = String::from_utf8_lossy(
-        &Command::new(&tools.ffprobe).args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(&m2ts).output().unwrap().stdout,
-    )
-    .trim()
-    .parse()
-    .unwrap();
-    assert!((dur - 18.0).abs() < 0.5, "12 s + 6 s, got {dur}");
+    // Menu-less navigation: First Play + Top Menu + 2 title objects, title 1 chains into title 2.
+    let index = std::fs::read(bd.join("BDMV/index.bdmv")).unwrap();
+    assert_eq!(index, convertx_rust::hdmv::index_bdmv(0, 1, &[2, 3]));
+    let mobj = std::fs::read(bd.join("BDMV/MovieObject.bdmv")).unwrap();
+    assert_eq!(mobj, convertx_rust::hdmv::movie_object_bdmv(&convertx_rust::bd_menu::plan_without_menus(2).objects));
 
-    // B has one audio track only: the second one is silent while B plays, A's is audible.
-    let max_volume = |from: f64| -> f64 {
+    // Clip A keeps its 25 fps (1080i-flagged), clip B its 24 fps: H.264 High@4.1 1080 in both.
+    let (ma, mb) = (bd.join("BDMV/STREAM/00000.m2ts"), bd.join("BDMV/STREAM/00001.m2ts"));
+    for (m2ts, rate) in [(&ma, "r_frame_rate=25/1"), (&mb, "r_frame_rate=24/1")] {
+        let v = probe(&tools, m2ts, "v:0", "stream=codec_name,profile,level,width,height,r_frame_rate");
+        for want in ["codec_name=h264", "profile=High", "level=41", "width=1920", "height=1080", rate] {
+            assert!(v.contains(want), "{want} in {v}");
+        }
+        // Same track layout in both playlists: two AC-3 tracks.
+        let audio = probe(&tools, m2ts, "a", "stream=codec_name,channels");
+        assert_eq!(audio.matches("codec_name=ac3").count(), 2, "{audio}");
+    }
+    let audio = probe(&tools, &ma, "a", "stream=codec_name,channels");
+    assert!(audio.contains("channels=6") && audio.contains("channels=2"), "{audio}");
+    assert_eq!(probe(&tools, &ma, "s", "stream=codec_name").matches("hdmv_pgs_subtitle").count(), 1);
+    assert_eq!(probe(&tools, &mb, "s", "stream=codec_name").matches("hdmv_pgs_subtitle").count(), 1, "placeholder subtitle track");
+    let duration = |m2ts: &Path| -> f64 {
+        String::from_utf8_lossy(
+            &Command::new(&tools.ffprobe).args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(m2ts).output().unwrap().stdout,
+        )
+        .trim()
+        .parse()
+        .unwrap()
+    };
+    assert!((duration(&ma) - 12.0).abs() < 0.5 && (duration(&mb) - 6.0).abs() < 0.5, "{} / {}", duration(&ma), duration(&mb));
+
+    // B has one audio track only: its second one is silent, A's is audible.
+    let max_volume = |m2ts: &Path, from: f64| -> f64 {
         let out = Command::new(&tools.ffmpeg)
             .args(["-hide_banner", "-nostats", "-ss", &from.to_string(), "-i"])
-            .arg(&m2ts)
+            .arg(m2ts)
             .args(["-map", "0:a:1", "-af", "volumedetect", "-f", "null", "-"])
             .output()
             .unwrap();
@@ -158,21 +180,22 @@ fn two_clips_make_one_autoplay_playlist() {
         let at = log.find("max_volume:").unwrap_or_else(|| panic!("no volumedetect in {log}"));
         log[at + 11..].trim_start().split_whitespace().next().unwrap().parse().unwrap()
     };
-    assert!(max_volume(1.0) > -40.0, "A's stereo track is audible");
-    assert!(max_volume(13.5) < -80.0, "B's filler track is silent");
+    assert!(max_volume(&ma, 1.0) > -40.0, "A's stereo track is audible");
+    assert!(max_volume(&mb, 1.0) < -80.0, "B's filler track is silent");
 
-    // Chapter marks: one per chapter of all titles (2 + 1), at 0 / 6 s / end of A.
-    let mpls = std::fs::read(bd.join("BDMV/PLAYLIST/00000.mpls")).unwrap();
-    let marks = {
+    // Chapter marks per playlist: A has two (0 and 6 s), B one.
+    let marks = |n: u32| {
+        let mpls = std::fs::read(bd.join(format!("BDMV/PLAYLIST/{n:05}.mpls"))).unwrap();
         let at = u32::from_be_bytes(mpls[0x0c..0x10].try_into().unwrap()) as usize;
-        let n = u16::from_be_bytes(mpls[at + 4..at + 6].try_into().unwrap()) as usize;
-        (0..n)
+        let count = u16::from_be_bytes(mpls[at + 4..at + 6].try_into().unwrap()) as usize;
+        (0..count)
             .map(|i| u32::from_be_bytes(mpls[at + 6 + i * 14 + 4..at + 6 + i * 14 + 8].try_into().unwrap()) as f64 / 45_000.0)
             .collect::<Vec<_>>()
     };
-    assert_eq!(marks.len(), 3, "tsMuxeR adds no mark of its own: {marks:?}");
-    let start = marks[0];
-    assert!((marks[1] - start - 6.0).abs() < 0.2 && (marks[2] - start - 12.0).abs() < 0.2, "{marks:?}");
+    let a = marks(0);
+    assert_eq!(a.len(), 2, "{a:?}");
+    assert!((a[1] - a[0] - 6.0).abs() < 0.2, "{a:?}");
+    assert_eq!(marks(1).len(), 1);
 }
 
 #[test]
@@ -188,7 +211,7 @@ fn hd720_ntsc_single_clip() {
         resolution: Resolution::Hd720,
         tv_standard: TvStandard::Ntsc,
         fast_encode: true,
-        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None }],
+        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None, ..StreamSelection::default() }],
         ..BuildOptions::default()
     };
     let report = build(&rt, &opts).unwrap_or_else(|e| panic!("build failed: {e}"));
@@ -217,7 +240,7 @@ fn hw_encode_uses_nvenc_or_falls_back() {
         resolution: Resolution::Hd720,
         fast_encode: true,
         bd_hw_encode: true,
-        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None }],
+        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None, ..StreamSelection::default() }],
         ..BuildOptions::default()
     };
     let (mut steps, mut warnings) = (Vec::new(), Vec::new());
@@ -238,6 +261,157 @@ fn hw_encode_uses_nvenc_or_falls_back() {
     for want in ["codec_name=h264", "width=1280", "profile=High", "level=41"] {
         assert!(v.contains(want), "{want} in {v}");
     }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A 6 s 1280×720 clip with one 5.1 track at 48 kHz in `codec` (`ac3` copies, `dca` is experimental).
+fn make_audio_clip(tools: &Toolchain, dir: &Path, name: &str, codec: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let clip = dir.join(name);
+    ffmpeg(
+        tools,
+        &[
+            "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=25:d=6", "-f", "lavfi", "-i",
+            "sine=f=440:d=6:sample_rate=48000,aformat=channel_layouts=5.1", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", codec,
+            "-strict", "-2", "-b:a", if codec == "dca" { "768k" } else { "384k" }, "-metadata:s:a:0", "language=ger", clip.to_str().unwrap(),
+        ],
+    );
+    clip
+}
+
+fn audio_options(inputs: Vec<PathBuf>, out: PathBuf, disc: DiscType, mode: convertx_rust::encoder::AudioMode) -> BuildOptions {
+    BuildOptions {
+        inputs,
+        disc,
+        output: out,
+        resolution: Resolution::Hd1080,
+        fast_encode: true,
+        audio_mode: mode,
+        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None, ..StreamSelection::default() }],
+        ..BuildOptions::default()
+    }
+}
+
+/// Compliant AC-3 is copied (Auto), DTS is copied on a Blu-ray but re-encoded for AVCHD.
+#[test]
+fn audio_is_copied_when_compliant() {
+    use convertx_rust::encoder::AudioMode;
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_copy_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ac3 = make_audio_clip(&tools, &dir.join("clips"), "ac3.mkv", "ac3");
+    let dts = make_audio_clip(&tools, &dir.join("clips"), "dts.mkv", "dca");
+    let bitrate = |m2ts: &Path| probe(&tools, m2ts, "a", "stream=codec_name,bit_rate,channels");
+
+    // AC-3 384 kbps 5.1 -> copied on BD (the track keeps its bitrate).
+    let r = build(&rt, &audio_options(vec![ac3.clone()], dir.join("o1"), DiscType::Bd25, AudioMode::Auto)).unwrap();
+    let a = bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts"));
+    assert!(a.contains("codec_name=ac3") && a.contains("channels=6"), "{a}");
+    assert!(a.contains("bit_rate=384000"), "copied, not re-encoded at 448k: {a}");
+    // "Always AC-3" re-encodes at the default 448 kbps.
+    let r = build(&rt, &audio_options(vec![ac3], dir.join("o2"), DiscType::Bd25, AudioMode::Ac3)).unwrap();
+    assert!(bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts")).contains("bit_rate=448000"));
+
+    // DTS: copied on a Blu-ray, AC-3 on AVCHD.
+    let r = build(&rt, &audio_options(vec![dts.clone()], dir.join("o3"), DiscType::Bd25, AudioMode::Auto)).unwrap();
+    assert!(bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts")).contains("codec_name=dts"));
+    let r = build(&rt, &audio_options(vec![dts], dir.join("o4"), DiscType::Avchd5, AudioMode::Auto)).unwrap();
+    assert!(bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts")).contains("codec_name=ac3"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// LPCM: written as `pcm_s24le` into the Matroska intermediate, tsMuxeR makes BD LPCM of it.
+#[test]
+fn lpcm_ends_up_as_bluray_pcm() {
+    use convertx_rust::encoder::AudioMode;
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_lpcm_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let clip = make_audio_clip(&tools, &dir.join("clips"), "ac3.mkv", "ac3");
+    let r = build(&rt, &audio_options(vec![clip.clone()], dir.join("o1"), DiscType::Bd25, AudioMode::Lpcm)).unwrap();
+    let a = probe(&tools, &r.project_dir.join("BDMV/STREAM/00000.m2ts"), "a", "stream=codec_name,channels,sample_rate");
+    assert!(a.contains("codec_name=pcm_bluray") && a.contains("channels=6") && a.contains("sample_rate=48000"), "{a}");
+    // AVCHD: stereo 16 bit.
+    let r = build(&rt, &audio_options(vec![clip], dir.join("o2"), DiscType::Avchd5, AudioMode::Lpcm)).unwrap();
+    let a = probe(&tools, &r.project_dir.join("BDMV/STREAM/00000.m2ts"), "a", "stream=codec_name,channels");
+    assert!(a.contains("codec_name=pcm_bluray") && a.contains("channels=2"), "{a}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// AVCHD ("BD5"): the BDMV structure on a DVD-5 – small, within AVCHD limits, UDF 2.50 image that
+/// fits a single-layer DVD.
+#[test]
+fn avchd5_builds_a_dvd_sized_bdmv() {
+    use convertx_rust::burner::{DiscContent, DVD5_SECTORS};
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_avchd_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _) = make_clips(&tools, &dir.join("clips"));
+    let opts = BuildOptions {
+        inputs: vec![a],
+        disc: DiscType::Avchd5,
+        output: dir.join("out"),
+        resolution: Resolution::Hd1080,
+        fast_encode: true,
+        project_name: Some("AVCHD".into()),
+        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None, ..StreamSelection::default() }],
+        ..BuildOptions::default()
+    };
+    let report = build(&rt, &opts).unwrap_or_else(|e| panic!("build failed: {e}"));
+    assert_eq!(report.target_mb, 4300);
+    assert!(report.size_mb < 4300.0, "{}", report.size_mb);
+    // Video within AVCHD limits: at most 15 Mbit/s of video, 18 Mbit/s in total.
+    assert!(report.plan.video_kbps <= 15_000 && report.plan.total_kbps() <= 18_000, "{:?}", report.plan);
+    let m2ts = report.project_dir.join("BDMV/STREAM/00000.m2ts");
+    let v = probe(&tools, &m2ts, "v:0", "stream=codec_name,profile,level,width,height,bit_rate");
+    for want in ["codec_name=h264", "profile=High", "width=1920", "height=1080"] {
+        assert!(v.contains(want), "{want} in {v}");
+    }
+    // The finished folder is BD-structured and fits a DVD.
+    let content = DiscContent::of_folder(&report.video_ts).unwrap();
+    assert!(content.bluray && content.fits_dvd && content.sectors <= DVD5_SECTORS, "{content:?}");
+    let iso = dir.join("avchd.iso");
+    let plan = udf250::create_bd_image(&report.project_dir, &iso, "AVCHD", &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(std::fs::metadata(&iso).unwrap().len(), plan.size_bytes());
+    assert_eq!(&std::fs::read(&iso).unwrap()[17 * 2048 + 1..17 * 2048 + 6], b"NSR03");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Trim and crop on a Blu-ray: the clip is cut to the section, its audio is re-encoded in step
+/// with the video, and the picture keeps the cropped aspect (pillarboxed into 16:9).
+#[test]
+fn trim_and_crop_on_bluray() {
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_trim_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let clip = make_audio_clip(&tools, &dir.join("clips"), "ac3.mkv", "ac3");
+    let mut opts = audio_options(vec![clip], dir.join("out"), DiscType::Bd25, convertx_rust::encoder::AudioMode::Auto);
+    opts.selections[0].start_secs = Some(1.0);
+    opts.selections[0].end_secs = Some(5.0);
+    // 1280x720 minus 160 px left and right = 960x720 (4:3).
+    opts.selections[0].crop = Some(convertx_rust::probe::Crop { top: 0, bottom: 0, left: 160, right: 160 });
+    let report = build(&rt, &opts).unwrap_or_else(|e| panic!("build failed: {e}"));
+    let m2ts = report.project_dir.join("BDMV/STREAM/00000.m2ts");
+    let dur: f64 = String::from_utf8_lossy(
+        &Command::new(&tools.ffprobe).args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(&m2ts).output().unwrap().stdout,
+    )
+    .trim()
+    .parse()
+    .unwrap();
+    assert!((dur - 4.0).abs() < 0.3, "4 s section, got {dur}");
+    assert!((report.titles[0].duration_secs - 4.0).abs() < 0.3);
+    let audio = probe(&tools, &m2ts, "a", "stream=codec_name,bit_rate");
+    assert!(audio.contains("codec_name=ac3"), "{audio}");
+    // A pillarboxed 4:3 picture: the left and right edge of a frame are black.
+    let frame = dir.join("frame.png");
+    ffmpeg(&tools, &["-i", m2ts.to_str().unwrap(), "-frames:v", "1", "-vf", "crop=100:1080:0:0,format=gray", frame.to_str().unwrap()]);
+    let stats = Command::new(&tools.ffmpeg)
+        .args(["-hide_banner", "-i", frame.to_str().unwrap(), "-vf", "signalstats,metadata=print", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&stats.stderr).into_owned();
+    let ymax: u32 = log.split("lavfi.signalstats.YMAX=").nth(1).and_then(|r| r.split_whitespace().next()).unwrap().parse().unwrap();
+    assert!(ymax < 40, "left edge should be a black bar, YMAX={ymax}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -470,7 +644,7 @@ mod menus {
             project_name: Some("BDMENU".into()),
             custom_layout: Some(layout),
             selections: vec![
-                StreamSelection { audio: Some(vec![1, 2]), subtitles: Some(vec![3]), label: None, chapters: Some(vec![0.0, 6.0]) },
+                StreamSelection { audio: Some(vec![1, 2]), subtitles: Some(vec![3]), label: None, chapters: Some(vec![0.0, 6.0]), ..StreamSelection::default() },
                 StreamSelection::default(),
             ],
             ..BuildOptions::default()

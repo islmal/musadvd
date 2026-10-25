@@ -4,7 +4,8 @@
 //! - `probe_file`         analyse a dropped video (ffprobe via `probe.rs`)
 //! - `list_templates`     ConvertX menu templates found on this machine
 //! - `template_preview`   template thumbnail as data URL
-//! - `calculate_project`  bitrate and disc fill level for DVD5/DVD9/BD-25/BD-50
+//! - `calculate_project`  bitrate and disc fill level for DVD5/DVD9/BD-25/BD-50/AVCHD
+//! - `source_frame`, `detect_crop`  crop inspector (frame preview, black bar detection)
 //! - `start_conversion`   run the full pipeline in the background; progress arrives as
 //!                        `convert-event` events, the result as one `convert-done` event
 //! - `default_output_dir` suggestion for the output folder
@@ -25,7 +26,7 @@ use base64::Engine as _;
 use convertx_rust::calculator::{Clamp, DiscType, EncodingProfile, Quality};
 use convertx_rust::config::{AppSettings, UNSUPPORTED_CHOICES};
 use convertx_rust::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
-use convertx_rust::encoder::{ac3_settings, Aspect};
+use convertx_rust::encoder::{ac3_settings, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget};
 use convertx_rust::menu::{UiLang, DEFAULT_MOTION_SECS};
 use convertx_rust::probe::{self, language_name, SubtitleKind};
 use convertx_rust::template::Template;
@@ -106,6 +107,57 @@ struct AudioTrack {
     /// AC-3 bitrate and layout on the DVD.
     ac3_kbps: u32,
     dvd_layout: String,
+    /// What happens to the track per disc format and audio mode (the live estimate and the
+    /// track list pick the entry of the current settings).
+    plans: AudioPlans,
+}
+
+/// Bitrate, layout and whether the track is copied, for one disc format and audio mode.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioChoice {
+    kbps: u32,
+    layout: String,
+    copy: bool,
+    /// `ac3`, `dts` or `lpcm`.
+    codec: String,
+}
+
+#[derive(Serialize)]
+struct AudioModes {
+    auto: AudioChoice,
+    ac3: AudioChoice,
+    lpcm: AudioChoice,
+}
+
+#[derive(Serialize)]
+struct AudioPlans {
+    dvd: AudioModes,
+    bluray: AudioModes,
+    avchd: AudioModes,
+}
+
+fn audio_choice(out: AudioOut) -> AudioChoice {
+    AudioChoice {
+        kbps: out.kbps(),
+        layout: out.layout_label().into(),
+        copy: matches!(out, AudioOut::Copy { .. }),
+        codec: match out.kind() {
+            convertx_rust::encoder::AudioKind::Ac3 => "ac3",
+            convertx_rust::encoder::AudioKind::Dts => "dts",
+            convertx_rust::encoder::AudioKind::Lpcm => "lpcm",
+        }
+        .into(),
+    }
+}
+
+fn audio_plans(a: &probe::AudioStream) -> AudioPlans {
+    let modes = |t| AudioModes {
+        auto: audio_choice(plan_audio(a, t, AudioMode::Auto, false)),
+        ac3: audio_choice(plan_audio(a, t, AudioMode::Ac3, false)),
+        lpcm: audio_choice(plan_audio(a, t, AudioMode::Lpcm, false)),
+    };
+    AudioPlans { dvd: modes(AudioTarget::Dvd), bluray: modes(AudioTarget::Bluray), avchd: modes(AudioTarget::Avchd) }
 }
 
 #[derive(Serialize)]
@@ -185,6 +237,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                     default: a.default,
                     ac3_kbps: kbps,
                     dvd_layout: if ch == 6 { "5.1".into() } else { "Stereo".into() },
+                    plans: audio_plans(a),
                 }
             })
             .collect(),
@@ -299,6 +352,34 @@ async fn title_frame(state: State<'_, AppState>, path: String, at_secs: f64) -> 
     result?;
     let bytes = bytes.map_err(|e| e.to_string())?;
     Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// The whole picture of a video at `at_secs` as JPEG data URL, `width` pixels wide, in display
+/// proportions (crop inspector).
+#[tauri::command]
+async fn source_frame(state: State<'_, AppState>, path: String, at_secs: f64, width: u32) -> Result<String, String> {
+    let tools = toolchain(&state).await?;
+    let out = std::env::temp_dir().join(format!(
+        "convertx-source-{}-{}.jpg",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    let args = convertx_rust::encoder::frame_args(Path::new(&path), at_secs.max(0.0), width.clamp(64, 1920), &out);
+    let result = tools.ffmpeg(&args, 0.0, |_| {}).await.map_err(|e| e.to_string());
+    let bytes = std::fs::read(&out);
+    let _ = std::fs::remove_file(&out);
+    result?;
+    let bytes = bytes.map_err(|e| e.to_string())?;
+    Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// Finds the black bars of a video (inside the section `start_secs`..`end_secs`, if given).
+#[tauri::command]
+async fn detect_crop(state: State<'_, AppState>, path: String, start_secs: Option<f64>, end_secs: Option<f64>) -> Result<probe::Crop, String> {
+    let tools = toolchain(&state).await?;
+    let mut info = probe::probe(&tools.ffprobe, Path::new(&path)).await.map_err(|e| e.to_string())?;
+    probe::apply_trim(&mut info, start_secs, end_secs)?;
+    convertx_rust::encoder::detect_crop(tools, &info).await.map_err(|e| e.to_string())
 }
 
 /// Files passed on the command line (videos dropped onto the .exe, "Open with").
@@ -498,6 +579,13 @@ struct InputConfig {
     subtitles: Vec<u32>,
     label: Option<String>,
     chapters: Vec<f64>,
+    /// Used section of the file in seconds of the source.
+    #[serde(default)]
+    start_secs: Option<f64>,
+    #[serde(default)]
+    end_secs: Option<f64>,
+    #[serde(default)]
+    crop: Option<probe::Crop>,
 }
 
 #[derive(Deserialize)]
@@ -561,6 +649,9 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 subtitles: Some(i.subtitles.clone()),
                 label: i.label.clone(),
                 chapters: Some(i.chapters.clone()),
+                start_secs: i.start_secs,
+                end_secs: i.end_secs,
+                crop: i.crop,
             })
             .collect(),
         ..BuildOptions::default()
@@ -604,7 +695,11 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                         ok: true,
                         message: format!(
                             "{} fertig: {:.0} MB von {} MB",
-                            if opts.disc.is_bluray() { "Blu-ray" } else { "DVD" },
+                            match opts.disc {
+                                d if d.is_avchd() => "AVCHD",
+                                d if d.is_bluray() => "Blu-ray",
+                                _ => "DVD",
+                            },
                             r.size_mb,
                             r.target_mb
                         ),
@@ -692,6 +787,8 @@ fn main() {
             burn::startup_burn,
             burn::open_folder,
             title_frame,
+            source_frame,
+            detect_crop,
             menu_editor::check_layout,
             menu_editor::text_lines,
             menu_editor::load_layout,
@@ -809,6 +906,51 @@ mod tests {
         let r = project_calculation(long, EncodingProfile::Auto).unwrap();
         assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
         assert_eq!((r.titles[0].quality, r.titles[0].quality_percent), (Quality::Poor, 0.0));
+    }
+
+    #[test]
+    fn avchd_estimate_uses_avchd_limits() {
+        let titles = vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0 }];
+        let r = project_calculation(
+            ProjectSettings { disc: DiscType::Avchd5, titles: titles.clone(), motion_menu: false, motion_duration: None, bd_menu_secs: vec![] },
+            EncodingProfile::Auto,
+        )
+        .unwrap();
+        assert_eq!(r.target_mb, 4300);
+        assert!(r.fits && r.video_kbps > 5000 && r.video_kbps <= 15_000, "{}", r.video_kbps);
+        // Ten hours do not fit a DVD-5 as AVCHD even at the 2000 kbps floor.
+        let long = TitleLoad { duration_secs: 10.0 * 3600.0, ..titles[0] };
+        let r = project_calculation(
+            ProjectSettings { disc: DiscType::Avchd5, titles: vec![long], motion_menu: false, motion_duration: None, bd_menu_secs: vec![] },
+            EncodingProfile::Auto,
+        )
+        .unwrap();
+        assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
+    }
+
+    #[test]
+    fn audio_plans_follow_disc_and_mode() {
+        let ac3 = probe::AudioStream {
+            index: 1,
+            codec: "ac3".into(),
+            channels: 6,
+            channel_layout: "5.1".into(),
+            language: None,
+            title: None,
+            default: false,
+            bit_rate: Some(640_000),
+            sample_rate: Some(48_000),
+            profile: None,
+        };
+        let p = audio_plans(&ac3);
+        // 640 kbps AC-3 is copied on Blu-ray/AVCHD but re-encoded to 448 kbps for the DVD.
+        assert_eq!((p.dvd.auto.copy, p.dvd.auto.kbps), (false, 448));
+        assert_eq!((p.bluray.auto.copy, p.bluray.auto.kbps, p.avchd.auto.copy), (true, 640, true));
+        assert_eq!((p.bluray.ac3.copy, p.bluray.ac3.kbps), (false, 448));
+        // LPCM: 6 channels x 24 bit on Blu-ray, stereo 16 bit on AVCHD, AC-3 on DVD.
+        assert_eq!((p.bluray.lpcm.kbps, p.bluray.lpcm.codec.as_str()), (6912, "lpcm"));
+        assert_eq!((p.avchd.lpcm.kbps, p.avchd.lpcm.layout.as_str()), (1536, "Stereo"));
+        assert_eq!(p.dvd.lpcm.codec, "ac3");
     }
 
     #[test]

@@ -541,6 +541,18 @@ pub struct VobsubProbe {
     pub extradata: Vec<u8>,
 }
 
+impl VobsubProbe {
+    /// Keeps the packets shown within `start..end` seconds of the file and makes their times
+    /// relative to `start` (the encode starts there).
+    pub fn trimmed(mut self, start: f64, end: f64) -> VobsubProbe {
+        self.packets.retain(|(t, _)| *t >= start && *t < end);
+        for (t, _) in &mut self.packets {
+            *t -= start;
+        }
+        self
+    }
+}
+
 /// ffprobe arguments that dump the packets of stream `index` of `input`.
 pub fn vobsub_probe_args(input: &Path, index: u32) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = ["-v", "error", "-select_streams"].map(Into::into).to_vec();
@@ -617,6 +629,16 @@ impl Target {
             (0, 0, cw, ch)
         };
         Target { frame: tv.size(), area, source }
+    }
+
+    /// The same target for a video that is cropped to `crop` (x, y, w, h in `video` pixels): the
+    /// picture then shows only that part of the canvas.
+    pub fn cropped(mut self, crop: (u32, u32, u32, u32), video: (u32, u32)) -> Target {
+        let (sx, sy, sw, sh) = self.source;
+        let (fx, fy) = (sw as f64 / video.0.max(1) as f64, sh as f64 / video.1.max(1) as f64);
+        let at = |v: u32, f: f64| (v as f64 * f).round() as u32;
+        self.source = (sx + at(crop.0, fx), sy + at(crop.1, fy), at(crop.2, fx).max(1), at(crop.3, fy).max(1));
+        self
     }
 
     /// Position and size of a canvas rectangle in the frame (clamped into it).
@@ -1005,5 +1027,25 @@ mod tests {
         assert!(xml.contains(r#"start="00:00:03.00" end="00:00:04.00""#), "overlap trimmed: {xml}");
         assert!(dir.join("s1/00002.png").is_file());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn crop_moves_the_subtitle_source_area() {
+        // 1920x1080 video, 1920x1080 canvas, cropped to the 1920x800 middle part: subtitles at the
+        // bottom of the canvas (y = 900) land at the bottom of the shown picture.
+        let t = Target::new(TvStandard::Pal, (0, 72, 720, 432), (1920, 1080), (1920, 1080));
+        let c = t.cropped((0, 140, 1920, 800), (1920, 1080));
+        assert_eq!(c.source, (0, 140, 1920, 800));
+        let (_, y, _, _) = c.map(0, 900, 100, 50);
+        assert_eq!(y, 72 + ((900 - 140) as f64 * 432.0 / 800.0).round() as u32);
+        // Without crop the same canvas row maps proportionally into the whole area.
+        assert_ne!(t.map(0, 900, 100, 50).1, y);
+    }
+
+    #[test]
+    fn vobsub_packets_are_trimmed() {
+        let p = VobsubProbe { packets: vec![(5.0, vec![1; 8]), (12.0, vec![2; 8]), (30.0, vec![3; 8])], extradata: vec![] }.trimmed(10.0, 20.0);
+        assert_eq!(p.packets.len(), 1);
+        assert_eq!(p.packets[0].0, 2.0);
     }
 }

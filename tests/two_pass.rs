@@ -32,6 +32,7 @@ fn fake_info() -> MediaInfo {
             display_aspect: 16.0 / 9.0,
             fps: 25.0,
             field_order: "progressive".into(),
+            crop: None,
         }),
         audio: vec![AudioStream {
             index: 1,
@@ -41,9 +42,13 @@ fn fake_info() -> MediaInfo {
             language: None,
             title: None,
             default: true,
+            bit_rate: None,
+            sample_rate: None,
+            profile: None,
         }],
         subtitles: vec![],
         chapters: vec![],
+        trim: None,
     }
 }
 
@@ -61,6 +66,8 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         tv: TvStandard::Pal,
         resolution: Default::default(),
         hwaccel: None,
+        audio_mode: Default::default(),
+        audio_filters: vec![],
     }
 }
 
@@ -96,7 +103,7 @@ fn second_pass_reads_log_and_writes_audio() {
     let prefix = Path::new("w").join("title_01_2pass").to_string_lossy().into_owned();
     assert!(pair(&a, "-pass", "2"), "{a:?}");
     assert!(pair(&a, "-passlogfile", &prefix));
-    assert!(pair(&a, "-c:a", "ac3"), "AC-3 audio is written in pass 2");
+    assert!(pair(&a, "-c:a:0", "ac3"), "AC-3 audio is written in pass 2");
     // One output: the DVD program stream (video + audio muxed directly).
     assert!(pair(&a, "-f", "dvd"));
     assert_eq!(a.last().unwrap(), "out.mpg");

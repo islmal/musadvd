@@ -1,6 +1,7 @@
 //! Stream inspector based on `ffprobe -v quiet -print_format json -show_format -show_streams
 //! -show_chapters`.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,35 @@ pub struct MediaInfo {
     pub audio: Vec<AudioStream>,
     pub subtitles: Vec<SubtitleStream>,
     pub chapters: Vec<Chapter>,
+    /// Section of the file that is used (see [`apply_trim`]); `duration_secs` and the chapters
+    /// already describe the section.
+    pub trim: Option<Trim>,
+}
+
+/// Used section of a file in seconds of the source.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Trim {
+    pub start: f64,
+    pub end: f64,
+}
+
+/// Pixels cut from the edges of the source picture (user input, source pixels).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Crop {
+    pub top: u32,
+    pub bottom: u32,
+    pub left: u32,
+    pub right: u32,
+}
+
+/// The remaining picture after a [`Crop`], in source pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CropRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +83,9 @@ pub struct VideoStream {
     pub fps: f64,
     /// `progressive`, `tt`, `bb`, `tb`, `bt` or empty if unknown.
     pub field_order: String,
+    /// Picture section to keep (see [`apply_crop`]); `display_aspect` already is the aspect of
+    /// that section, `width`/`height` stay those of the source frame.
+    pub crop: Option<CropRect>,
 }
 
 impl VideoStream {
@@ -71,6 +104,11 @@ pub struct AudioStream {
     pub language: Option<String>,
     pub title: Option<String>,
     pub default: bool,
+    /// Stream bitrate in bit/s as reported by ffprobe, if any.
+    pub bit_rate: Option<u32>,
+    pub sample_rate: Option<u32>,
+    /// ffprobe `profile` (`DTS`, `DTS-HD MA`, `LC`, ...).
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -155,6 +193,9 @@ struct RawStream {
     channels: Option<u32>,
     channel_layout: Option<String>,
     duration: Option<String>,
+    bit_rate: Option<String>,
+    sample_rate: Option<String>,
+    profile: Option<String>,
     #[serde(default)]
     tags: RawTags,
     #[serde(default)]
@@ -195,6 +236,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
         audio: Vec::new(),
         subtitles: Vec::new(),
         chapters: Vec::new(),
+        trim: None,
     };
 
     for s in raw.streams {
@@ -219,6 +261,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                     display_aspect: dar,
                     fps,
                     field_order: s.field_order.unwrap_or_default(),
+                    crop: None,
                 });
             }
             Some("audio") => info.audio.push(AudioStream {
@@ -229,6 +272,9 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                 language: tag(s.tags.language),
                 title: tag(s.tags.title),
                 default: s.disposition.default == 1,
+                bit_rate: s.bit_rate.as_deref().and_then(|b| b.trim().parse().ok()),
+                sample_rate: s.sample_rate.as_deref().and_then(|b| b.trim().parse().ok()),
+                profile: s.profile.filter(|p| !p.is_empty()),
             }),
             Some("subtitle") => info.subtitles.push(SubtitleStream {
                 index: s.index,
@@ -257,6 +303,84 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
         .collect();
     info.chapters.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
     Ok(info)
+}
+
+impl MediaInfo {
+    /// Input arguments of every ffmpeg run that reads the video: the used section as input
+    /// options (timestamps then start at 0), then `-i path`.
+    pub fn input_args(&self) -> Vec<OsString> {
+        let mut a: Vec<OsString> = Vec::new();
+        if let Some(t) = self.trim {
+            a.extend(["-ss".into(), format!("{:.3}", t.start).into(), "-to".into(), format!("{:.3}", t.end).into()]);
+        }
+        a.extend(["-i".into(), self.path.clone().into_os_string()]);
+        a
+    }
+
+    /// Start of the used section in the source file (0 without trim).
+    pub fn trim_start(&self) -> f64 {
+        self.trim.map_or(0.0, |t| t.start)
+    }
+}
+
+/// Shortest section that makes sense.
+pub const MIN_TRIM_SECS: f64 = 1.0;
+
+/// Limits `info` to `start`..`end` seconds of the source (`None` = file start / end): checks the
+/// range, sets `duration_secs`, clips and shifts the chapters. A range covering the whole file
+/// changes nothing.
+pub fn apply_trim(info: &mut MediaInfo, start: Option<f64>, end: Option<f64>) -> Result<(), String> {
+    if start.is_none() && end.is_none() {
+        return Ok(());
+    }
+    let full = info.duration_secs;
+    let (s, e) = (start.unwrap_or(0.0), end.unwrap_or(full));
+    if !s.is_finite() || !e.is_finite() || s < 0.0 || e > full + 0.5 || s >= e {
+        return Err(format!("Schnitt: Start ({s:.1} s) und Ende ({e:.1} s) müssen innerhalb der Laufzeit ({full:.1} s) liegen, Start vor Ende"));
+    }
+    let e = e.min(full);
+    if e - s < MIN_TRIM_SECS {
+        return Err(format!("Schnitt: der Ausschnitt ist {:.1} s lang, mindestens {MIN_TRIM_SECS:.0} s sind nötig", e - s));
+    }
+    if s < 0.001 && e > full - 0.001 {
+        return Ok(());
+    }
+    info.trim = Some(Trim { start: s, end: e });
+    info.duration_secs = e - s;
+    info.chapters = std::mem::take(&mut info.chapters)
+        .into_iter()
+        .filter(|c| c.end_secs > s && c.start_secs < e)
+        .map(|c| Chapter { start_secs: (c.start_secs - s).max(0.0), end_secs: c.end_secs.min(e) - s, title: c.title })
+        .collect();
+    Ok(())
+}
+
+/// Smallest picture that is left after a crop.
+pub const MIN_CROP_SIZE: u32 = 64;
+
+/// Makes the video of `info` show only the picture inside `crop`: edges are rounded down to even
+/// values (multiples of 4 vertically for interlaced sources, whose fields must stay intact), the
+/// display aspect becomes that of the section. An all-zero crop changes nothing.
+pub fn apply_crop(info: &mut MediaInfo, crop: Crop) -> Result<(), String> {
+    if crop == Crop::default() {
+        return Ok(());
+    }
+    let Some(v) = info.video.as_mut() else { return Err("Zuschnitt: die Datei hat keine Videospur".into()) };
+    let step_y = if v.is_interlaced() { 4 } else { 2 };
+    let down = |x: u32, step: u32| x / step * step;
+    let (left, right) = (down(crop.left, 2), down(crop.right, 2));
+    let (top, bottom) = (down(crop.top, step_y), down(crop.bottom, step_y));
+    let w = v.width.saturating_sub(left + right);
+    let h = v.height.saturating_sub(top + bottom);
+    if left + right >= v.width || top + bottom >= v.height || w < MIN_CROP_SIZE || h < MIN_CROP_SIZE {
+        return Err(format!(
+            "Zuschnitt: von {}×{} Pixeln bleiben nur {w}×{h} übrig (mindestens {MIN_CROP_SIZE}×{MIN_CROP_SIZE})",
+            v.width, v.height
+        ));
+    }
+    v.display_aspect *= (w as f64 / v.width as f64) / (h as f64 / v.height as f64);
+    v.crop = Some(CropRect { x: left, y: top, w, h });
+    Ok(())
 }
 
 /// Runs ffprobe on `path`.
@@ -396,6 +520,75 @@ mod tests {
         assert_eq!(i.chapters.len(), 2);
         assert_eq!(i.chapters[0].title.as_deref(), Some("Eins"), "sorted by start");
         assert_eq!(i.chapters[1].start_secs, 300.0);
+    }
+
+    fn sample() -> MediaInfo {
+        parse_ffprobe_json(Path::new("x.mkv"), SAMPLE).unwrap()
+    }
+
+    #[test]
+    fn trim_limits_the_runtime_and_shifts_chapters() {
+        let mut i = sample();
+        apply_trim(&mut i, Some(100.0), Some(400.0)).unwrap();
+        assert_eq!((i.duration_secs, i.trim), (300.0, Some(Trim { start: 100.0, end: 400.0 })));
+        // "Eins" (0-300) is clipped to the section, "Zwei" (300-600) starts 200 s in.
+        assert_eq!(i.chapters.len(), 2);
+        assert_eq!((i.chapters[0].start_secs, i.chapters[0].end_secs), (0.0, 200.0));
+        assert_eq!((i.chapters[1].start_secs, i.chapters[1].end_secs), (200.0, 300.0));
+        let args: Vec<String> = i.input_args().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["-ss", "100.000", "-to", "400.000", "-i", "x.mkv"]);
+        assert_eq!(i.trim_start(), 100.0);
+
+        // Chapters outside the section are dropped.
+        let mut i = sample();
+        apply_trim(&mut i, Some(350.0), None).unwrap();
+        assert_eq!(i.chapters.len(), 1);
+        assert!((i.duration_secs - (5400.123 - 350.0)).abs() < 1e-6);
+
+        // The whole file is no trim; nothing given is no trim.
+        let mut i = sample();
+        apply_trim(&mut i, Some(0.0), Some(5400.123)).unwrap();
+        apply_trim(&mut i, None, None).unwrap();
+        assert!(i.trim.is_none());
+        assert_eq!(i.input_args().len(), 2);
+    }
+
+    #[test]
+    fn trim_is_validated() {
+        let bad = |s, e| {
+            let mut i = sample();
+            apply_trim(&mut i, s, e).unwrap_err()
+        };
+        assert!(bad(Some(-1.0), Some(10.0)).contains("Schnitt"));
+        assert!(bad(Some(10.0), Some(10.0)).contains("Schnitt"));
+        assert!(bad(Some(20.0), Some(10.0)).contains("Schnitt"));
+        assert!(bad(Some(0.0), Some(6000.0)).contains("Laufzeit"));
+        assert!(bad(Some(10.0), Some(10.5)).contains("mindestens 1 s"));
+        assert!(bad(Some(f64::NAN), None).contains("Schnitt"));
+    }
+
+    #[test]
+    fn crop_changes_the_aspect_and_rounds_to_even() {
+        // 1920x1080 with 140 px black bars top and bottom (+1 odd pixel at the left).
+        let mut i = sample();
+        apply_crop(&mut i, Crop { top: 140, bottom: 140, left: 1, right: 0 }).unwrap();
+        let v = i.video.unwrap();
+        assert_eq!(v.crop, Some(CropRect { x: 0, y: 140, w: 1920, h: 800 }));
+        assert!((v.display_aspect - 1920.0 / 800.0).abs() < 1e-9, "{}", v.display_aspect);
+        assert_eq!((v.width, v.height), (1920, 1080), "the source frame size stays");
+
+        // Interlaced: vertical edges are multiples of 4.
+        let mut i = sample();
+        i.video.as_mut().unwrap().field_order = "tt".into();
+        apply_crop(&mut i, Crop { top: 6, bottom: 10, left: 0, right: 0 }).unwrap();
+        assert_eq!(i.video.unwrap().crop, Some(CropRect { x: 0, y: 4, w: 1920, h: 1080 - 4 - 8 }));
+
+        // Too little left / nothing to do.
+        let mut i = sample();
+        assert!(apply_crop(&mut i, Crop { top: 500, bottom: 560, left: 0, right: 0 }).unwrap_err().contains("Zuschnitt"));
+        assert!(apply_crop(&mut i, Crop { top: 0, bottom: 0, left: 1900, right: 0 }).is_err());
+        apply_crop(&mut i, Crop::default()).unwrap();
+        assert!(i.video.unwrap().crop.is_none());
     }
 
     #[test]

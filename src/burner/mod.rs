@@ -161,7 +161,14 @@ pub struct DiscContent {
     pub sectors: u64,
     /// Needs a DVD-9 / BD-50.
     pub dual_layer: bool,
+    /// A `BDMV` image small enough for a DVD-9 (AVCHD, "BD5/BD9"): it may also go on DVD media.
+    pub fits_dvd: bool,
 }
+
+/// Sectors of a single-layer DVD (also the capacity the layer break is planned with).
+pub const DVD5_SECTORS: u64 = 2_295_104;
+/// Sectors of a dual-layer DVD.
+pub const DVD9_SECTORS: u64 = 2_295_104 + 2_086_912;
 
 /// A `BDMV` folder (not `VIDEO_TS`): recognised by its `index.bdmv`.
 pub fn is_bdmv_folder(folder: &Path) -> bool {
@@ -186,10 +193,20 @@ impl DiscContent {
         if is_bdmv_folder(folder) {
             let plan = udf250::plan_bd_image(bd_image_root(folder), "BLURAY").map_err(|e| e.to_string())?;
             let sectors = plan.total_sectors as u64;
-            Ok(DiscContent { bluray: true, sectors, dual_layer: udf250::is_dual_layer(sectors) })
+            Ok(DiscContent { bluray: true, sectors, dual_layer: udf250::is_dual_layer(sectors), fits_dvd: sectors <= DVD9_SECTORS })
         } else {
             let plan = layerbreak::plan_disc(folder, "DVD_VIDEO", layerbreak::Capacities::DVD).map_err(|e| e.to_string())?;
-            Ok(DiscContent { bluray: false, sectors: plan.image.total_sectors as u64, dual_layer: plan.layer_break.is_some() })
+            Ok(DiscContent { bluray: false, sectors: plan.image.total_sectors as u64, dual_layer: plan.layer_break.is_some(), fits_dvd: true })
+        }
+    }
+
+    /// Whether `media` has to be dual-layer: BDMV content on DVD media (AVCHD) by the DVD
+    /// capacity, everything else by [`dual_layer`](Self::dual_layer).
+    pub fn needs_dual_layer_on(&self, media: MediaType) -> bool {
+        if self.bluray && !media.is_bd() {
+            self.sectors > DVD5_SECTORS
+        } else {
+            self.dual_layer
         }
     }
 }
@@ -205,7 +222,16 @@ pub fn media_problem(media: &MediaInfo, content: &DiscContent) -> Option<String>
     let sectors = content.sectors;
     let size_gb = sectors as f64 * 2048.0 / 1e9;
     let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
-    let kind = if content.bluray { "Blu-ray" } else { "DVD" };
+    let avchd = content.bluray && content.fits_dvd && !media.media_type.is_bd();
+    let kind = if avchd {
+        "AVCHD-Disc"
+    } else if content.bluray {
+        "Blu-ray"
+    } else {
+        "DVD"
+    };
+    // AVCHD (BDMV on DVD media) is allowed when the image fits the DVD.
+    let wrong_medium = if content.bluray { !media.media_type.is_bd() && !content.fits_dvd } else { media.media_type.is_bd() };
     if !media.present {
         Some("Keine Disc eingelegt.".to_string())
     } else if media.media_type == MediaType::Unknown {
@@ -214,15 +240,17 @@ pub fn media_problem(media: &MediaInfo, content: &DiscContent) -> Option<String>
         Some(format!("Die {} kann in diesem Laufwerk nicht beschrieben werden.", media.physical))
     } else if !media.blank && !media.rewritable {
         Some(format!("Die {} ist bereits beschrieben.", media.physical))
-    } else if content.bluray != media.media_type.is_bd() {
+    } else if wrong_medium {
         Some(if content.bluray {
             format!("Die Blu-ray braucht einen BD-R/BD-RE-Rohling – die eingelegte {} ist keine Blu-ray.", media.physical)
         } else {
             format!("Die DVD braucht einen DVD-Rohling – die eingelegte {} ist eine Blu-ray.", media.physical)
         })
-    } else if content.dual_layer && !media.media_type.is_dual_layer() {
-        Some(if content.bluray {
+    } else if content.needs_dual_layer_on(media.media_type) && !media.media_type.is_dual_layer() {
+        Some(if content.bluray && media.media_type.is_bd() {
             format!("Die Blu-ray braucht {size_gb:.2} GB – bitte einen BD-50-Rohling (Dual Layer) einlegen.")
+        } else if content.bluray {
+            format!("Die AVCHD-Disc braucht {size_gb:.2} GB – bitte einen Double-Layer-Rohling (DVD-9) einlegen.")
         } else {
             format!("Die DVD braucht {size_gb:.2} GB – bitte einen Double-Layer-Rohling (DVD-9) einlegen.")
         })
@@ -552,6 +580,9 @@ pub struct BurnJob {
     /// Keep the image after a successful burn (otherwise it is always removed).
     pub keep_iso: bool,
     pub capacities: layerbreak::Capacities,
+    /// The inserted medium, if known: decides speed and time estimates (a BDMV image on DVD
+    /// media is AVCHD). `None` = the kind of the content.
+    pub media_type: Option<MediaType>,
 }
 
 /// Progress of [`burn_video_ts`] with the remaining time of image + burn + verification.
@@ -580,16 +611,18 @@ pub fn burn_video_ts(
 ) -> Result<BurnOutcome, BurnError> {
     let bluray = is_bdmv_folder(&job.video_ts);
     let label = sanitize_volume_label(&job.label);
+    let on_dvd = bluray && job.media_type.is_some_and(|m| !m.is_bd());
     let (image_bytes, dual_layer) = if bluray {
         let plan = udf250::plan_bd_image(bd_image_root(&job.video_ts), &label).map_err(|e| BurnError::Image(e.to_string()))?;
-        (plan.size_bytes() as f64, udf250::is_dual_layer(plan.total_sectors as u64))
+        let sectors = plan.total_sectors as u64;
+        (plan.size_bytes() as f64, if on_dvd { sectors > DVD5_SECTORS } else { udf250::is_dual_layer(sectors) })
     } else {
         let planned =
             layerbreak::plan_disc(&job.video_ts, &job.label, job.capacities).map_err(|e| BurnError::Image(e.to_string()))?;
         (planned.image.size_bytes() as f64, planned.layer_break.is_some())
     };
-    let medium = if bluray { Medium::Bd } else { Medium::Dvd };
-    let media_type = if bluray { MediaType::Bd25 } else { MediaType::Dvd5 };
+    let medium = if bluray && !on_dvd { Medium::Bd } else { Medium::Dvd };
+    let media_type = job.media_type.unwrap_or(if bluray { MediaType::Bd25 } else { MediaType::Dvd5 });
     let x = speed_x(job.speed, &job.media_speeds, media_type);
     let mut eta = BurnEta::new(medium, image_bytes, x, job.options.verify, dual_layer);
     let start = std::time::Instant::now();
@@ -774,9 +807,9 @@ mod tests {
 
     #[test]
     fn media_problems_by_content_kind() {
-        let dvd = DiscContent { bluray: false, sectors: 2_000_000, dual_layer: false };
-        let bd25 = DiscContent { bluray: true, sectors: 10_000_000, dual_layer: false };
-        let bd50 = DiscContent { bluray: true, sectors: 20_000_000, dual_layer: true };
+        let dvd = DiscContent { bluray: false, sectors: 2_000_000, dual_layer: false, fits_dvd: true };
+        let bd25 = DiscContent { bluray: true, sectors: 10_000_000, dual_layer: false, fits_dvd: false };
+        let bd50 = DiscContent { bluray: true, sectors: 20_000_000, dual_layer: true, fits_dvd: false };
         let dvd_r = media(MediaType::Dvd5, "DVD+R", true, false, 2_295_104);
         let bd_r = media(MediaType::Bd25, "BD-R", true, false, BD25);
         let bd_r_dl = media(MediaType::Bd50, "BD-R DL", true, false, udf250::BD50_SECTORS);
@@ -797,6 +830,25 @@ mod tests {
         assert!(media_problem(&media(MediaType::Bd25, "BD-R", false, false, BD25), &bd25).unwrap().contains("bereits beschrieben"));
         // Too little room.
         assert!(media_problem(&media(MediaType::Bd25, "BD-R", true, false, 5_000_000), &bd25).unwrap().contains("Nicht genug Platz"));
+    }
+
+    #[test]
+    fn avchd_goes_on_dvd_media() {
+        let avchd5 = DiscContent { bluray: true, sectors: 2_000_000, dual_layer: false, fits_dvd: true };
+        let avchd9 = DiscContent { bluray: true, sectors: 3_500_000, dual_layer: false, fits_dvd: true };
+        let dvd5 = media(MediaType::Dvd5, "DVD+R", true, false, DVD5_SECTORS);
+        let dvd9 = media(MediaType::Dvd9, "DVD+R DL", true, false, DVD9_SECTORS);
+        assert!(media_problem(&dvd5, &avchd5).is_none());
+        assert!(media_problem(&dvd9, &avchd9).is_none());
+        let p = media_problem(&dvd5, &avchd9).unwrap();
+        assert!(p.contains("AVCHD") && p.contains("DVD-9"), "{p}");
+        // The same image is also fine on a BD-R, which needs no second layer.
+        assert!(media_problem(&media(MediaType::Bd25, "BD-R", true, false, BD25), &avchd9).is_none());
+        assert!(!avchd5.needs_dual_layer_on(MediaType::Dvd5) && avchd9.needs_dual_layer_on(MediaType::Dvd5));
+        assert!(!avchd9.needs_dual_layer_on(MediaType::Bd25));
+        // BD-25 content (too big for a DVD) is still rejected on DVD media.
+        let big = DiscContent { bluray: true, sectors: 10_000_000, dual_layer: false, fits_dvd: false };
+        assert!(media_problem(&dvd9, &big).unwrap().contains("BD-R/BD-RE"));
     }
 
     const BD25: u64 = udf250::BD25_SECTORS;

@@ -457,7 +457,11 @@ export async function openBurner(
 
   /** "Blu-ray" or "DVD": known from the folder name until the disc check has run. */
   function discKind() {
-    return (needs?.bluray ?? /BDMV$/i.test(videoTs.replace(/[\\/]+$/, ""))) ? "Blu-ray" : "DVD";
+    const bluray = needs?.bluray ?? /BDMV$/i.test(videoTs.replace(/[\\/]+$/, ""));
+    if (!bluray) return "DVD";
+    // A BDMV that fits a DVD goes on DVD media as AVCHD.
+    const onDvd = !!media && media.media.present && !["bd25", "bd50"].includes(media.media.media_type);
+    return needs?.fitsDvd && onDvd ? "AVCHD-Disc" : "Blu-ray";
   }
 
   function render() {
@@ -474,7 +478,7 @@ export async function openBurner(
           : `${kind} wird gebrannt`
         : `Auf ${kind} brennen`;
     const info = needs
-      ? `Inhalt: ${needs.sizeGb.toFixed(2).replace(".", ",")} GB · ${needs.bluray ? (needs.dualLayer ? "BD-50 (Dual Layer) nötig" : "passt auf eine BD-25") : needs.dualLayer ? "DVD-9 (Double Layer) nötig" : "passt auf eine DVD-5"}`
+      ? `Inhalt: ${needs.sizeGb.toFixed(2).replace(".", ",")} GB · ${needs.bluray ? (needs.dualLayer ? "BD-50 (Dual Layer) nötig" : `passt auf eine BD-25${needs.fitsDvd ? ` oder als AVCHD auf eine ${needs.sectors > 2295104 ? "DVD-9" : "DVD-5"}` : ""}`) : needs.dualLayer ? "DVD-9 (Double Layer) nötig" : "passt auf eine DVD-5"}`
       : "Inhalt wird geprüft …";
     const canBurn = !burning && !finished && !!media && !media.problem && !!driveId && eraseOk();
     const countdownBar =

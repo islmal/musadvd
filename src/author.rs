@@ -244,6 +244,9 @@ pub struct TitleSpec {
     pub aspect: String,
     /// ISO 639-1 language per audio stream (`None` = unknown), in stream order.
     pub audio_langs: Vec<Option<String>>,
+    /// dvdauthor audio format per audio stream (`ac3`, `dts`, `pcm`); missing entries mean `ac3`.
+    #[serde(default)]
+    pub audio_formats: Vec<String>,
     /// ISO 639-1 language per subpicture stream, in stream id order.
     pub subtitle_langs: Vec<Option<String>>,
     /// Switch the first subtitle stream on when the title starts.
@@ -275,6 +278,7 @@ impl TitleSpec {
             chapters: vec!["0".to_string()],
             aspect: "16:9".to_string(),
             audio_langs: vec![],
+            audio_formats: vec![],
             subtitle_langs: vec![],
             force_subtitle: false,
         }
@@ -994,9 +998,10 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
         let _ = writeln!(x, "    <titles>");
         let widescreen = if t.aspect == "16:9" { r#" widescreen="nopanscan""# } else { "" };
         let _ = writeln!(x, r#"      <video format="{}" aspect="{}"{widescreen}/>"#, tv.dvdauthor_format(), xml_escape(&t.aspect));
-        for lang in &t.audio_langs {
+        for (n, lang) in t.audio_langs.iter().enumerate() {
             let lang = lang.as_ref().map(|l| format!(r#" lang="{}""#, xml_escape(l))).unwrap_or_default();
-            let _ = writeln!(x, r#"      <audio format="ac3"{lang}/>"#);
+            let format = t.audio_formats.get(n).map_or("ac3", String::as_str);
+            let _ = writeln!(x, r#"      <audio format="{}"{lang}/>"#, xml_escape(format));
         }
         for (id, lang) in t.subtitle_langs.iter().enumerate() {
             let lang = lang.as_ref().map(|l| format!(r#" lang="{}""#, xml_escape(l))).unwrap_or_default();
@@ -1173,6 +1178,7 @@ mod tests {
             chapters: vec!["0".into(), "5:00".into()],
             aspect: aspect.into(),
             audio_langs: vec![Some("de".into()), None],
+            audio_formats: vec!["ac3".into(), "dts".into()],
             subtitle_langs: vec![Some("en".into())],
             force_subtitle: false,
         };
@@ -1216,7 +1222,7 @@ mod tests {
         assert!(x.contains(r#"<button name="b1">g1 = 0; jump title 1 chapter 2;</button>"#));
         assert!(x.contains(r#"<video format="pal" aspect="16:9" widescreen="nopanscan"/>"#));
         assert!(x.contains(r#"<audio format="ac3" lang="de"/>"#));
-        assert!(x.contains(r#"<audio format="ac3"/>"#));
+        assert!(x.contains(r#"<audio format="dts"/>"#));
         assert!(x.contains(r#"<stream id="0" mode="widescreen"/>"#));
         assert!(x.contains(r#"<subpicture lang="en"/>"#));
         assert!(x.contains(r#"<vob file="a&amp;b.mpg" chapters="0,5:00"/>"#));

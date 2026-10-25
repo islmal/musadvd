@@ -212,6 +212,24 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
     BdNav { objects, title_objects: (1..=t_count).map(|t| title_obj(t) as u16).collect(), commands }
 }
 
+/// Navigation of a disc without menus: First Play starts title 1, every title object plays its
+/// own playlist and enters the next title with `JumpTitle`; the last one just ends. Playlist `t-1`
+/// is title `t`.
+pub fn plan_without_menus(titles: usize) -> BdNav {
+    let mut objects = vec![
+        MovieObject { commands: vec![hdmv::jump_title(1)], resume: false },
+        MovieObject { commands: vec![hdmv::jump_title(1)], resume: false },
+    ];
+    for t in 1..=titles {
+        let mut commands = vec![hdmv::play_pl(t as u32 - 1)];
+        if t < titles {
+            commands.push(hdmv::jump_title(t as u32 + 1));
+        }
+        objects.push(MovieObject { commands, resume: false });
+    }
+    BdNav { objects, title_objects: (0..titles).map(|t| 2 + t as u16).collect(), commands: Vec::new() }
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -706,5 +724,14 @@ mod tests {
         assert!(ig.palette[1][3] > 0 && ig.palette[0][3] == 0);
         assert_eq!(pages[0].secs, STILL_SECS);
         assert!(igs::build_sup(ig).len() > 100);
+    }
+
+    #[test]
+    fn menu_less_navigation_chains_the_titles() {
+        let n = plan_without_menus(3);
+        assert_eq!(n.title_objects, vec![2, 3, 4]);
+        assert_eq!(n.objects[0].commands, vec![hdmv::jump_title(1)]);
+        assert_eq!(n.objects[2].commands, vec![hdmv::play_pl(0), hdmv::jump_title(2)]);
+        assert_eq!(n.objects[4].commands, vec![hdmv::play_pl(2)], "the last title just ends");
     }
 }

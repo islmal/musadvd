@@ -7,9 +7,11 @@
 //! <output>/.convertx-work/         title_NN.mkv, subtitle files, bd.meta, tsmuxer.log
 //! ```
 //!
-//! The disc has no menu: all inputs form one playlist that autoplays (tsMuxeR concatenates the
-//! encoded titles; chapters sit at the chapters of every title). The DVD path in [`crate::dvd`]
-//! is untouched; [`crate::dvd::build_dvd`] dispatches here for BD discs.
+//! Every title gets its own tsMuxeR run (one playlist + clip each), so each keeps its own frame
+//! rate. Without menus the titles play one after the other (`bd_menu::plan_without_menus`); with
+//! the menu editor's layout the title playlists follow the menu clips. AVCHD ("BD5/BD9") is the
+//! same BDMV structure on DVD media with AVCHD limits. The DVD path in [`crate::dvd`] is
+//! untouched; [`crate::dvd::build_dvd`] dispatches here for BD and AVCHD discs.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,13 +20,13 @@ use crate::author::{AuthorError, ClipSource, MenuFrame, Resolution, TvStandard, 
 use crate::bd_menu::{self, BdNav};
 use crate::hdmv;
 use crate::bd_author::{BdProject, BdSubTrack, BdTitleFiles, SubKind, EMPTY_SRT};
-use crate::calculator::{Clamp, EncodingProfile};
+use crate::calculator::{Clamp, DiscType, EncodingProfile};
 use crate::dvd::{
-    available_cpus, cancellable, chapter_starts, custom_chapters, default_jobs, display_path, job, remove_old_output,
+    apply_selection, available_cpus, cancellable, chapter_starts, custom_chapters, default_jobs, display_path, job, remove_old_output,
     run_limited, safe_folder_name, select_streams, unique_dir, AtPath, BuildError, BuildOptions, BuildPhase, BuildReport,
     Event, Job, JobEvent, JobProgress, TitleLoad, TitleReport, WORK_DIR,
 };
-use crate::encoder::{self, ac3_settings, Aspect, BdEncodeJob, BdEncoder, EncodePhase, BD_SILENCE_KBPS};
+use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, EncodePhase, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
 use crate::probe::{self, language_name, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
@@ -34,8 +36,7 @@ use crate::tools::{ToolError, Toolchain};
 /// real limit anyway. shortcut: not measured yet, set after the real-GPU run.
 const NVENC_MAX_JOBS: usize = 4;
 
-/// Frame rate of a whole Blu-ray project. tsMuxeR concatenates the titles, so every title has to
-/// share one rate (identical SPS).
+/// Frame rate of one Blu-ray title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BdRate {
     /// Numerator and denominator.
@@ -74,9 +75,9 @@ fn film_rate(fps: f64) -> Option<(u32, u32)> {
     }
 }
 
-/// The one frame rate of a Blu-ray project: film sources keep 23.976 / 24 (mixed film rates
-/// become 23.976), everything else gets the TV rate – 1080: 25 / 29.97 flagged as interlaced,
-/// 720: 50 / 59.94 progressive.
+/// Frame rate of a Blu-ray title from its source rate(s): film sources keep 23.976 / 24 (mixed
+/// film rates become 23.976), everything else gets the TV rate – 1080: 25 / 29.97 flagged as
+/// interlaced, 720: 50 / 59.94 progressive.
 pub fn bd_frame_rate(source_fps: &[f64], tv: TvStandard, res: Resolution) -> BdRate {
     let films: Vec<Option<(u32, u32)>> = source_fps.iter().map(|&f| film_rate(f)).collect();
     if !films.is_empty() && films.iter().all(Option::is_some) {
@@ -131,6 +132,10 @@ struct BdTitle {
     subs: Vec<usize>,
     chapters: Vec<f64>,
     stem: String,
+    rate: BdRate,
+    audio_mode: AudioMode,
+    audio_target: AudioTarget,
+    loudnorm: bool,
 }
 
 impl BdTitle {
@@ -143,8 +148,16 @@ impl BdTitle {
         self.subs.get(k).map(|&i| &self.info.subtitles[i]).filter(|s| sub_track(s).kind == layout.subs[k].kind)
     }
 
+    /// Output plan of every disc audio track (silent filler where this title has none).
+    fn audio_outs(&self, layout: &Layout) -> Vec<AudioOut> {
+        self.audio_streams(layout)
+            .into_iter()
+            .map(|a| a.map_or(SILENCE_OUT, |a| plan_audio(a, self.audio_target, self.audio_mode, self.loudnorm || self.info.trim.is_some())))
+            .collect()
+    }
+
     fn audio_kbps(&self, layout: &Layout) -> u32 {
-        self.audio_streams(layout).iter().map(|a| a.map_or(BD_SILENCE_KBPS, |a| ac3_settings(a.channels).0)).sum()
+        self.audio_outs(layout).iter().map(|o| o.kbps()).sum()
     }
 }
 
@@ -177,7 +190,7 @@ async fn encode_bd_title(
     video_kbps: u32,
     (two_pass, fast, hw_decode): (bool, bool, bool),
     encoder: BdEncoder,
-    rate: BdRate,
+    (maxrate_kbps, bufsize_kbit): (u32, u32),
     resolution: Resolution,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>, f64), BuildError> {
@@ -199,13 +212,16 @@ async fn encode_bd_title(
             }
         }
     }
-    if let Some(args) = encoder::extract_subtitle_args(&t.info.path, &extract, work, &t.stem) {
+    if let Some(args) = encoder::extract_subtitle_args(&t.info, &extract, work, &t.stem) {
         tools.ffmpeg(&args, duration, |_| {}).await?;
     }
 
+    let rate = t.rate;
+    let audio = t.audio_streams(layout);
+    let audio_filters = if t.loudnorm { encoder::measure_loudnorm(tools, &t.info, &audio).await? } else { Vec::new() };
     let job = BdEncodeJob {
         info: &t.info,
-        audio: t.audio_streams(layout),
+        audio,
         video_kbps,
         dir: work.to_path_buf(),
         stem: t.stem.clone(),
@@ -215,6 +231,11 @@ async fn encode_bd_title(
         resolution,
         hwaccel,
         encoder,
+        audio_mode: t.audio_mode,
+        audio_target: t.audio_target,
+        audio_filters,
+        maxrate_kbps,
+        bufsize_kbit,
     };
     let frames_per_run = duration * rate.fps_f64();
     // Frames done count over both runs of a 2-pass encode; never let them go backwards.
@@ -236,9 +257,12 @@ async fn encode_bd_title(
     if real <= 0.0 {
         return Err(BuildError::Internal(format!("{}: ffprobe meldet keine Laufzeit", mkv.display())));
     }
-    let audio = (0..layout.audio_langs.len())
-        .map(|k| match t.audio.get(k).map(|&i| &t.info.audio[i]) {
-            Some(a) => format!("{} {}", language_name(a.language.as_deref()), if ac3_settings(a.channels).1 == 6 { "5.1" } else { "Stereo" }),
+    let audio = job
+        .audio_outs()
+        .into_iter()
+        .enumerate()
+        .map(|(k, out)| match t.audio.get(k).map(|&i| &t.info.audio[i]) {
+            Some(a) => format!("{} {}", language_name(a.language.as_deref()), out.layout_label()),
             None => "Stille (Platzhalter)".to_string(),
         })
         .collect();
@@ -307,7 +331,7 @@ async fn build_menus(
             duration_secs: t.info.duration_secs,
             clip: ClipSource {
                 path: t.info.path.clone(),
-                start_secs: (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
+                start_secs: t.info.trim_start() + (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
                 has_audio: !t.info.audio.is_empty(),
             },
             audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
@@ -432,7 +456,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let mut titles: Vec<BdTitle> = Vec::new();
     for (i, input) in opts.inputs.iter().enumerate() {
         log(Event::Step(format!("Analysiere {}", input.display())));
-        let info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
+        let mut info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
         if info.video.is_none() {
             return Err(BuildError::Internal(format!("{}: enthält keine Videospur", input.display())));
         }
@@ -443,6 +467,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         let (audio, mut subs, notes) = select_streams(&info, &sel, opts, &label);
         for note in notes {
             warn(log, note);
+        }
+        apply_selection(&mut info, &sel, &label)?;
+        if info.video.as_ref().is_some_and(|v| v.crop.is_some()) && subs.iter().any(|&s| info.subtitles[s].kind == SubtitleKind::Bitmap) {
+            warn(log, format!("{label}: Bild-Untertitel (PGS) behalten bei Zuschnitt ihre Position im Originalbild und können verschoben erscheinen"));
         }
         // Only SRT-like text and PGS can go on a BD here.
         subs.retain(|&s| {
@@ -457,12 +485,17 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             Some(starts) => custom_chapters(starts, info.duration_secs),
             None => chapter_starts(&info, opts.chapters.interval_secs, opts.chapters.min_video_secs),
         };
+        let fps = info.video.as_ref().map_or(0.0, |v| v.fps);
         titles.push(BdTitle {
             label,
             audio,
             subs,
             chapters: chapters.iter().map(|c| c.0).collect(),
             stem: format!("title_{:02}", i + 1),
+            rate: bd_frame_rate(&[fps], opts.tv_standard, opts.resolution),
+            audio_mode: opts.audio_mode,
+            audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
+            loudnorm: opts.loudnorm,
             info,
         });
     }
@@ -494,22 +527,24 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }
     let tv = opts.tv_standard;
     let resolution = opts.resolution;
-    let source_fps: Vec<f64> = titles.iter().map(|t| t.info.video.as_ref().map_or(0.0, |v| v.fps)).collect();
-    let rate = bd_frame_rate(&source_fps, tv, resolution);
+    // Menus (and their clips) use the first title's rate.
+    let menu_rate = titles[0].rate;
+    let medium_name = if opts.disc.is_avchd() { "AVCHD" } else { "Blu-ray" };
     log(Event::Step(format!(
-        "Blu-ray {} {}×{}, {:.3} Bilder/s{}",
+        "{medium_name} {} {}×{}, {} Playlist(s) mit eigener Bildrate; {} Tonspur(en), {} Untertitelspur(en)",
         resolution.label(),
         resolution.frame_size(tv).0,
         resolution.frame_size(tv).1,
-        rate.fps_f64(),
-        if rate.fake_interlaced { " (als 1080i markiert)" } else { "" }
+        titles.len(),
+        layout.audio_langs.len(),
+        layout.subs.len()
     )));
-    if titles.len() > 1 {
+    for t in &titles {
         log(Event::Step(format!(
-            "Eine Playlist aus {} Videos; {} Tonspur(en), {} Untertitelspur(en)",
-            titles.len(),
-            layout.audio_langs.len(),
-            layout.subs.len()
+            "{}: {:.3} Bilder/s{}",
+            t.label,
+            t.rate.fps_f64(),
+            if t.rate.fake_interlaced { " (als 1080i markiert)" } else { "" }
         )));
     }
 
@@ -520,7 +555,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         Some(layout) => {
             log(Event::Eta(Eta::new(JobPhase::Menus, None, None, None)));
             log(Event::Step(format!("Eigenes Menü-Layout: {} Menü(s)", layout.menus.len())));
-            let stage = build_menus(&tools, layout, &titles, opts, rate, &work, heavy_jobs, log).await?;
+            let stage = build_menus(&tools, layout, &titles, opts, menu_rate, &work, heavy_jobs, log).await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
             }
@@ -567,41 +602,41 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         (false, true) => "1-Pass, schnell",
         (false, false) => "1-Pass",
     };
-    let encoder = if !opts.bd_hw_encode {
-        BdEncoder::X264
-    } else if rate.fake_interlaced {
-        log(Event::Step("Video-Encoder: x264 – 1080i-Bildraten sind mit NVENC nicht möglich".into()));
-        BdEncoder::X264
+    // NVENC cannot flag 1080i, so titles with fake-interlaced rates use x264.
+    let nvenc_ok = if !opts.bd_hw_encode {
+        false
     } else {
         match tools.probe_nvenc().await {
-            Ok(()) => {
-                log(Event::Step("Video-Encoder: NVENC (h264_nvenc)".into()));
-                BdEncoder::Nvenc
-            }
+            Ok(()) => true,
             Err(reason) => {
                 warn(log, format!("Video-Encoder: x264 – NVENC nicht verfügbar: {reason}"));
-                BdEncoder::X264
+                false
             }
         }
     };
-    let encode_jobs = match encoder {
-        BdEncoder::Nvenc => heavy_jobs.min(NVENC_MAX_JOBS),
-        BdEncoder::X264 => heavy_jobs,
+    let encoders: Vec<BdEncoder> =
+        titles.iter().map(|t| if nvenc_ok && !t.rate.fake_interlaced { BdEncoder::Nvenc } else { BdEncoder::X264 }).collect();
+    if nvenc_ok {
+        let nv = encoders.iter().filter(|e| **e == BdEncoder::Nvenc).count();
+        log(Event::Step(format!("Video-Encoder: NVENC (h264_nvenc) für {nv} von {count} Titeln, sonst x264 (1080i-Bildraten)")));
     }
-    .min(count);
+    let encode_jobs = if encoders.iter().all(|e| *e == BdEncoder::Nvenc) { heavy_jobs.min(NVENC_MAX_JOBS) } else { heavy_jobs }.min(count);
     log(Event::Step(format!("Kodiere {count} Titel (H.264, {passes}, {encode_jobs} parallel, {} kbps Video)", plan.video_kbps)));
     log(Event::Phase(BuildPhase::Encoding { index: 0, count }));
-    let max_total = opts.disc.limits().max_total_kbps;
+    let limits = opts.disc.limits();
+    let max_total = limits.max_total_kbps;
+    let vbv = (limits.vbv_maxrate_kbps, limits.vbv_bufsize_kbit);
     let layout = Arc::new(layout);
     let titles: Vec<Arc<BdTitle>> = titles.into_iter().map(Arc::new).collect();
     let jobs: Vec<Job<(TitleReport, Option<&'static str>, f64)>> = titles
         .iter()
-        .map(|t| {
+        .zip(&encoders)
+        .map(|(t, &encoder)| {
             let (t, tools, work, layout) = (t.clone(), tools.clone(), work.clone(), layout.clone());
             let video_kbps = plan.video_kbps.min(max_total.saturating_sub(t.audio_kbps(&layout)));
             let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode);
             job(move |progress| async move {
-                encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, rate, resolution, progress).await
+                encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, resolution, progress).await
             })
         })
         .collect();
@@ -612,12 +647,12 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let mut last_emit = std::time::Instant::now();
     let mut last_overall = -1.0f64;
     let labels: Vec<String> = titles.iter().map(|t| t.label.clone()).collect();
-    let frames: Vec<f64> = titles.iter().map(|t| t.info.duration_secs * rate.fps_f64()).collect();
-    let mut frame_eta = FrameEta::new(&frames, if opts.two_pass && encoder == BdEncoder::X264 { 2 } else { 1 });
+    let frames: Vec<f64> = titles.iter().map(|t| t.info.duration_secs * t.rate.fps_f64()).collect();
+    let mut frame_eta = FrameEta::new(&frames, if opts.two_pass && encoders.contains(&BdEncoder::X264) { 2 } else { 1 });
     let expected_bytes = plan.estimated_mb * 1024.0 * 1024.0;
-    let dual_layer = opts.disc == crate::calculator::DiscType::Bd50;
-    let burn_estimate =
-        Some(eta::image_and_burn_secs(Medium::Bd, expected_bytes, eta::default_speed_x(Medium::Bd, dual_layer), true, dual_layer));
+    let dual_layer = matches!(opts.disc, DiscType::Bd50 | DiscType::Avchd9);
+    let medium = if opts.disc.is_avchd() { Medium::Dvd } else { Medium::Bd };
+    let burn_estimate = Some(eta::image_and_burn_secs(medium, expected_bytes, eta::default_speed_x(medium, dual_layer), true, dual_layer));
     let authoring_estimate = eta::authoring_secs(expected_bytes);
     let mut last_eta = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let encode_start = std::time::Instant::now();
@@ -683,15 +718,16 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 duration_secs,
                 chapters: t.chapters.clone(),
                 subs: layout.subs.iter().enumerate().map(|(k, s)| encoder::subtitle_file(&t.stem, k, sub_ext(s.kind))).collect(),
+                rate: t.rate,
+                audio_kinds: t.audio_outs(&layout).iter().map(|o| o.kind()).collect(),
             })
             .collect(),
         audio_langs: layout.audio_langs.clone(),
         sub_tracks: layout.subs.clone(),
-        rate,
         resolution,
     };
-    let meta = project.meta_text();
-    std::fs::write(work.join("bd.meta"), &meta).at(&work)?;
+    let menu_count = menus.as_ref().map_or(0, |m| m.count);
+    let mut meta = String::new();
     log(Event::Phase(BuildPhase::Authoring));
     log(Event::Eta(Eta {
         phase_label: "BDMV erstellen (tsMuxeR)".into(),
@@ -699,21 +735,18 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }));
     log(Event::Step("tsMuxeR erstellt BDMV".into()));
     cancel.check()?;
-    let mux_log = match &menus {
-        None => cancellable(cancel, tools.tsmuxer(&work, "bd.meta", "BD")).await?,
-        Some(stage) => {
-            // One playlist per title after the menus; the menus are already in BD/.
-            let mut all = String::new();
-            for i in 0..titles.len() {
-                cancel.check()?;
-                let name = format!("bd_title_{:02}.meta", i + 1);
-                std::fs::write(work.join(&name), project.title_meta_text(i, stage.count + i)).at(&work)?;
-                all.push_str(&cancellable(cancel, tools.tsmuxer(&work, &name, "BD")).await?);
-            }
-            write_navigation(&work.join("BD").join("BDMV"), &stage.nav).at(&work)?;
-            all
-        }
-    };
+    // One tsMuxeR run (playlist + clip) per title after the menus (which are already in BD/).
+    let mut mux_log = String::new();
+    for i in 0..titles.len() {
+        cancel.check()?;
+        let name = format!("bd_title_{:02}.meta", i + 1);
+        let text = project.title_meta_text(i, menu_count + i);
+        std::fs::write(work.join(&name), &text).at(&work)?;
+        meta.push_str(&text);
+        mux_log.push_str(&cancellable(cancel, tools.tsmuxer(&work, &name, "BD")).await?);
+    }
+    let nav = menus.as_ref().map_or_else(|| bd_menu::plan_without_menus(titles.len()), |m| m.nav.clone());
+    write_navigation(&work.join("BD").join("BDMV"), &nav).at(&work)?;
     cancel.check()?;
     std::fs::write(work.join("tsmuxer.log"), &mux_log).at(&work)?;
     let bd_root = work.join("BD");

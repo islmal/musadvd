@@ -13,7 +13,7 @@ use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
 use convertx_rust::burner::udf::plan_image;
 use convertx_rust::burner::udf250;
 use convertx_rust::burner::{
-    burn_video_ts, BurnError, BurnJob, BurnOptions, BurnPhase, BurnProgress, BurnUpdate, DriveInfo, MediaInfo,
+    burn_video_ts, media_problem, DiscContent, MediaType, BurnError, BurnJob, BurnOptions, BurnPhase, BurnProgress, BurnUpdate, DriveInfo, MediaInfo,
     OpticalBurner, WriteSpeed,
 };
 use convertx_rust::dvd::{self, BuildOptions};
@@ -175,6 +175,7 @@ fn job(video_ts: &Path, iso: PathBuf) -> BurnJob {
         options: BurnOptions { layer_break: None, verify: true, eject: true, erase: false, ..Default::default() },
         keep_iso: false,
         capacities: Capacities::DVD,
+        media_type: None,
     }
 }
 
@@ -381,6 +382,28 @@ fn blu_ray_image_reaches_the_burner_without_layer_break() {
     assert_eq!(updates[0].progress.message, "Disc-Image wird erstellt …");
     assert!(updates[0].remaining_secs > 0.0 && updates.iter().all(|u| u.remaining_secs.is_finite()));
     assert_eq!(updates.last().unwrap().remaining_secs, 0.0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// AVCHD: the same BDMV project burned on DVD media (UDF 2.50 image, no layer break, DVD timing).
+#[test]
+fn bdmv_on_dvd_media_is_burned_as_avchd() {
+    let dir = scratch("avchd");
+    let iso = dir.join("disc.iso");
+    let burner = FakeBurner::new(Mode::Ok);
+    let j = BurnJob { media_type: Some(MediaType::Dvd5), speed: WriteSpeed::Specific(10_820), ..bd_job(iso.clone()) };
+    let outcome = burn_video_ts(&burner, &j, &AtomicBool::new(false), |_| {}).unwrap();
+    assert!(!outcome.dual_layer, "3 MB fit a DVD-5");
+    no_image_left(&iso);
+    let seen = burner.seen().expect("burner was called");
+    let planned = udf250::plan_bd_image(bd_fixture().parent().unwrap(), "BRENNTEST").unwrap();
+    assert_eq!(seen.iso_size, planned.size_bytes(), "still the UDF 2.50 BDMV image");
+    assert_eq!((seen.layer_break, seen.speed), (None, WriteSpeed::Specific(10_820)));
+
+    let content = DiscContent::of_folder(bd_fixture()).unwrap();
+    assert!(content.bluray && content.fits_dvd && !content.dual_layer);
+    let dvd = MediaInfo { present: true, writable: true, blank: true, free_sectors: 2_295_104, total_sectors: 2_295_104, media_type: MediaType::Dvd5, physical: "DVD+R".into(), ..MediaInfo::none() };
+    assert!(media_problem(&dvd, &content).is_none(), "AVCHD content is accepted on DVD media");
     std::fs::remove_dir_all(&dir).ok();
 }
 

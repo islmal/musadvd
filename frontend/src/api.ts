@@ -4,7 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Disc choice; `custom` uses the target size from the settings. */
-export type Disc = "dvd5" | "dvd9" | "bd25" | "bd50" | { custom: number };
+/** `avchd5`/`avchd9`: Blu-ray folder structure on a DVD-5/DVD-9. */
+export type Disc = "dvd5" | "dvd9" | "bd25" | "bd50" | "avchd5" | "avchd9" | { custom: number };
 
 export interface VideoInfo {
   codec: string;
@@ -27,6 +28,34 @@ export interface AudioTrack {
   default: boolean;
   ac3Kbps: number;
   dvdLayout: string;
+  /** What happens to the track per disc format and audio mode. */
+  plans: AudioPlans;
+}
+
+/** Bitrate, layout and whether the track is copied, for one disc format and audio mode. */
+export interface AudioChoice {
+  kbps: number;
+  layout: string;
+  copy: boolean;
+  codec: "ac3" | "dts" | "lpcm";
+}
+export interface AudioModes {
+  auto: AudioChoice;
+  ac3: AudioChoice;
+  lpcm: AudioChoice;
+}
+export interface AudioPlans {
+  dvd: AudioModes;
+  bluray: AudioModes;
+  avchd: AudioModes;
+}
+
+/** Pixels cut from the edges of the source picture. */
+export interface Crop {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
 }
 
 export interface SubtitleTrack {
@@ -103,6 +132,10 @@ export interface InputConfig {
   subtitles: number[];
   label: string | null;
   chapters: number[];
+  /** Used section in seconds of the source file (null = file start / end). */
+  startSecs?: number | null;
+  endSecs?: number | null;
+  crop?: Crop | null;
 }
 
 export interface ConversionConfig {
@@ -206,6 +239,8 @@ export interface AppSettings {
   hw_decode: boolean;
   bd_hw_encode: boolean;
   fast_encode: boolean;
+  audio_mode: "auto" | "ac3" | "lpcm";
+  loudnorm: boolean;
   burn_speed: "auto" | "max" | "16" | "12" | "8" | "6" | "4" | "2.4";
   verify_after_burn: boolean;
   keep_iso: boolean;
@@ -291,6 +326,8 @@ export interface DiscNeeds {
   dualLayer: boolean;
   /** The content is a Blu-ray (BDMV). */
   bluray: boolean;
+  /** A BDMV small enough for a DVD-9 (AVCHD): DVD media are fine. */
+  fitsDvd: boolean;
 }
 
 export type BurnPhase = "preparing" | "formatting" | "writing" | "finalizing" | "verifying" | "done";
@@ -351,3 +388,8 @@ export const saveLayout = (path: string, layout: CustomLayout) => invoke<void>("
 export const imagePreview = (path: string) => invoke<string>("image_preview", { path });
 /** A frame of a video as data URL. */
 export const titleFrame = (path: string, atSecs: number) => invoke<string>("title_frame", { path, atSecs });
+/** The whole picture of a video at `atSecs`, `width` px wide, as data URL (crop inspector). */
+export const sourceFrame = (path: string, atSecs: number, width: number) => invoke<string>("source_frame", { path, atSecs, width });
+/** Black bars of a video (inside the section, if given). */
+export const detectCrop = (path: string, startSecs: number | null, endSecs: number | null) =>
+  invoke<Crop>("detect_crop", { path, startSecs, endSecs });
