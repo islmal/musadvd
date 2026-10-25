@@ -116,7 +116,9 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
             .find_map(|&r| layout.menus.iter().position(|m| m.role == r && m.title == Some(t)))
     };
 
-    let go = |obj: u32, mark: u32, flag: u32| vec![hdmv::mov(MARK, Op::Imm(mark)), hdmv::mov(FLAG, Op::Imm(flag)), hdmv::jump_object(obj)];
+    // Titles are entered with JumpTitle (not JumpObject): libbluray only switches its current title on
+    // that, and VLC hides the time display while the current title is an interactive one (menu/FP).
+    let go = |jump: Command, mark: u32, flag: u32| vec![hdmv::mov(MARK, Op::Imm(mark)), hdmv::mov(FLAG, Op::Imm(flag)), jump];
 
     let mut commands = Vec::new();
     for m in &layout.menus {
@@ -127,9 +129,9 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 continue;
             };
             let cmds = match action {
-                Action::PlayAll => go(title_obj(1), 0, 1),
-                Action::PlayTitle { title } => go(title_obj(*title as usize), 0, 0),
-                Action::PlayChapter { title, chapter } => go(title_obj(*title as usize), chapter - 1, 0),
+                Action::PlayAll => go(hdmv::jump_title(1), 0, 1),
+                Action::PlayTitle { title } => go(hdmv::jump_title(*title as u32), 0, 0),
+                Action::PlayChapter { title, chapter } => go(hdmv::jump_title(*title as u32), chapter - 1, 0),
                 Action::Menu { menu } => vec![hdmv::jump_object(menu_obj(by_id(menu)))],
                 Action::SetAudio { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
@@ -159,7 +161,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
 
     let mut objects = Vec::new();
     // First Play.
-    let start = if opts.auto_start { title_obj(1) } else { menu_obj(first_title_menu) };
+    let start = if opts.auto_start { hdmv::jump_title(1) } else { hdmv::jump_object(menu_obj(first_title_menu)) };
     objects.push(MovieObject { commands: go(start, 0, 0), resume: false });
     // Top Menu.
     objects.push(MovieObject { commands: vec![hdmv::jump_object(menu_obj(first_title_menu))], resume: false });
@@ -191,15 +193,15 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
         let mut c = vec![hdmv::play_pl_at_mark(Op::Imm(pl), Op::Gpr(MARK)), hdmv::mov(MARK, Op::Imm(0))];
         if opts.play_sequentially {
             match next {
-                Some(n) => c.push(hdmv::jump_object(title_obj(n))),
+                Some(n) => c.push(hdmv::jump_title(n as u32)),
                 None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), to_menu]),
             }
         } else {
-            let single_end = if opts.loop_playback { hdmv::jump_object(title_obj(t)) } else { to_menu };
+            let single_end = if opts.loop_playback { hdmv::jump_title(t as u32) } else { to_menu };
             match next {
                 Some(n) => c.extend([
                     hdmv::compare(Op::Gpr(FLAG), Cmp::Eq, Op::Imm(1)),
-                    hdmv::jump_object(title_obj(n)),
+                    hdmv::jump_title(n as u32),
                     single_end,
                 ]),
                 None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), single_end]),
@@ -612,12 +614,15 @@ mod tests {
         // 0 FP, 1 TM, 2/3 menus, 4/5 titles
         assert_eq!(n.objects.len(), 6);
         assert_eq!(n.title_objects, vec![4, 5]);
+        // Titles are only ever entered via JumpTitle, never JumpObject (VLC timebar).
+        let all = n.objects.iter().flat_map(|o| o.commands.iter()).chain(n.commands.iter().flatten().flatten().flatten());
+        assert!(all.into_iter().all(|c| *c != hdmv::jump_object(4) && *c != hdmv::jump_object(5)));
         // Play title 1: GPR1 = 0, GPR2 = 0, jump object 4.
-        assert_eq!(cmds(&n, 0, 0), &[hdmv::mov(1, Op::Imm(0)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(4)]);
+        assert_eq!(cmds(&n, 0, 0), &[hdmv::mov(1, Op::Imm(0)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(1)]);
         // Chapter 3 of title 2: mark index 2.
-        assert_eq!(cmds(&n, 0, 1), &[hdmv::mov(1, Op::Imm(2)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(5)]);
+        assert_eq!(cmds(&n, 0, 1), &[hdmv::mov(1, Op::Imm(2)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(2)]);
         // Play all: flag 1, title 1.
-        assert_eq!(cmds(&n, 0, 2), &[hdmv::mov(1, Op::Imm(0)), hdmv::mov(2, Op::Imm(1)), hdmv::jump_object(4)]);
+        assert_eq!(cmds(&n, 0, 2), &[hdmv::mov(1, Op::Imm(0)), hdmv::mov(2, Op::Imm(1)), hdmv::jump_title(1)]);
         assert_eq!(cmds(&n, 0, 3), &[hdmv::jump_object(3)]);
         // Subtitle off / on.
         assert_eq!(cmds(&n, 1, 2), &[hdmv::set_stream(0)]);
@@ -638,7 +643,7 @@ mod tests {
         assert_eq!(n.objects[0].commands[2], hdmv::jump_object(2));
         assert_eq!(n.objects[1].commands, vec![hdmv::jump_object(2)]);
         let auto = nav(PlaybackOptions { auto_start: true, ..PlaybackOptions::default() });
-        assert_eq!(auto.objects[0].commands[2], hdmv::jump_object(4));
+        assert_eq!(auto.objects[0].commands[2], hdmv::jump_title(1));
     }
 
     #[test]
@@ -653,7 +658,7 @@ mod tests {
                 hdmv::play_pl_at_mark(Op::Imm(2), Op::Gpr(1)),
                 clear,
                 hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)),
-                hdmv::jump_object(5),
+                hdmv::jump_title(2),
                 hdmv::jump_object(2)
             ]
         );
@@ -662,13 +667,13 @@ mod tests {
         let _ = play;
         // Loop, not sequential: repeat each title; play-all still advances.
         let n = nav(PlaybackOptions { loop_playback: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_object(4), hdmv::jump_object(5)]);
+        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(1), hdmv::jump_title(2)]);
         // Sequential: next title; the last one returns to the menu (or loops).
         let n = nav(PlaybackOptions { play_sequentially: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[4].commands[2..], [hdmv::jump_object(5)]);
+        assert_eq!(n.objects[4].commands[2..], [hdmv::jump_title(2)]);
         assert_eq!(n.objects[5].commands[2..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(2)]);
         let n = nav(PlaybackOptions { play_sequentially: true, loop_playback: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[5].commands[2..], [hdmv::jump_object(4)]);
+        assert_eq!(n.objects[5].commands[2..], [hdmv::jump_title(1)]);
         // Return to the title's own menu (title 1 has the settings menu, title 2 none).
         let n = nav(PlaybackOptions { return_to_title_menu: false, ..PlaybackOptions::default() });
         assert_eq!(n.objects[4].commands[4], hdmv::jump_object(3));

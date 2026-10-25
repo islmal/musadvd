@@ -149,3 +149,35 @@ fn paginated_menu() {
 
     std::fs::remove_dir_all(&out).ok();
 }
+
+/// Metallic root menu: icon buttons have their caption below the button rectangle; the
+/// highlight must still come from the icon (an empty mask lights up nothing on real players).
+#[test]
+fn icon_buttons_with_outside_captions_light_up() {
+    let tpl = Path::new(r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\Open_Style.ini");
+    if !tpl.is_file() {
+        eprintln!("skipping: {} not found", tpl.display());
+        return;
+    }
+    let out = out_dir("icons");
+    let summary = menu::render_menu_set(&MenuSetOptions {
+        template_path: tpl,
+        page_index: Some(1),
+        titles: titles(3),
+        menu_title: None,
+        output_dir: &out,
+        debug_frames: false,
+    })
+    .unwrap();
+    let buttons = &summary.menus[0].buttons;
+    assert!(!buttons.is_empty());
+    let (w, _, px, _) = read_indexed(&out.join("menu_highlight.png"));
+    for b in buttons {
+        let lit = (b.rect.y0..b.rect.y1)
+            .flat_map(|y| (b.rect.x0..b.rect.x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| px[(y * w + x) as usize] != 0)
+            .count();
+        assert!(lit > 100, "button {} has only {lit} highlight pixels", b.name);
+    }
+    std::fs::remove_dir_all(&out).ok();
+}

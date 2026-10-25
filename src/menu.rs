@@ -963,17 +963,25 @@ pub fn render_page(
         let y1 = (tb.y + tb.height as i32).clamp(0, ph as i32) as u32;
 
         if let Some((text, outline)) = button_text.get(&tb.index) {
+            let mut lit = false;
             for y in y0..y1 {
                 for x in x0..x1 {
                     let i = (y * pw + x) as usize;
                     if text.data[i] >= 0.5 {
                         mask.set(x, y, IDX_PATTERN);
+                        lit = true;
                     } else if outline.data[i] >= 0.5 {
                         mask.set(x, y, IDX_EMPHASIS1);
+                        lit = true;
                     }
                 }
             }
-            continue;
+            // An icon button whose caption lies outside its rectangle (Metallic root menu) has no
+            // text pixels in the rectangle; real players then show no highlight at all. Fall
+            // through to the icon / rectangle mask below.
+            if lit {
+                continue;
+            }
         }
 
         // Image button: overlay GIF (template `value`) > bitmap alpha > full rectangle.
@@ -999,6 +1007,7 @@ pub fn render_page(
         let source = overlay_img.or_else(|| button_bitmap.get(&tb.index).map(|(i, x, y)| (i.clone(), *x, *y, false)));
         match source {
             Some((img, ix, iy, is_overlay)) => {
+                let mut lit = false;
                 for y in y0..y1 {
                     for x in x0..x1 {
                         let (sx, sy) = (x as i64 - ix, y as i64 - iy);
@@ -1013,6 +1022,15 @@ pub fn render_page(
                             p[3] >= 128
                         };
                         if on {
+                            mask.set(x, y, IDX_PATTERN);
+                            lit = true;
+                        }
+                    }
+                }
+                // Never leave a button without highlight pixels (nothing would light up).
+                if !lit {
+                    for y in y0..y1 {
+                        for x in x0..x1 {
                             mask.set(x, y, IDX_PATTERN);
                         }
                     }
