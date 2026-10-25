@@ -136,6 +136,8 @@ export interface InputConfig {
   startSecs?: number | null;
   endSecs?: number | null;
   crop?: Crop | null;
+  /** Play together with the previous input behind one menu entry. */
+  mergeWithPrevious?: boolean;
 }
 
 export interface ConversionConfig {
@@ -240,6 +242,9 @@ export interface AppSettings {
   bd_hw_encode: boolean;
   fast_encode: boolean;
   audio_mode: "auto" | "ac3" | "lpcm";
+  scale_mode: "letterbox" | "panscan" | "stretch";
+  scale_filter: "bicubic" | "bilinear" | "lanczos";
+  deinterlace: "auto" | "yadif" | "off";
   loudnorm: boolean;
   burn_speed: "auto" | "max" | "16" | "12" | "8" | "6" | "4" | "2.4";
   verify_after_burn: boolean;

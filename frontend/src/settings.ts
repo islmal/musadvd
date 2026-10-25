@@ -316,6 +316,36 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           ],
           "Abweichende Quellen bekommen schwarze Balken (Letterbox bzw. Pillarbox).",
         ),
+        select(
+          "scale_mode",
+          "Video Skaliermethode",
+          [
+            ["letterbox", "Letterbox (Standard)"],
+            ["panscan", "Pan & Scan (Zuschneiden)"],
+            ["stretch", "Strecken"],
+          ],
+          "Letterbox: das Bild behält sein Seitenverhältnis, der Rest wird schwarz. Pan & Scan: das Bild füllt das ganze Bild aus, der Überstand wird mittig abgeschnitten. Strecken: das Bild wird ohne Rücksicht auf das Seitenverhältnis verzerrt.",
+        ),
+        select(
+          "scale_filter",
+          "Skalierungsfilter",
+          [
+            ["bilinear", "Bilinear (schnell)"],
+            ["bicubic", "Bikubisch (Standard)"],
+            ["lanczos", "Lanczos (hohe Qualität)"],
+          ],
+          "Algorithmus, mit dem das Bild vergrößert oder verkleinert wird.",
+        ),
+        select(
+          "deinterlace",
+          "Video-Deinterlacing",
+          [
+            ["auto", "Automatisch (bwdif)"],
+            ["yadif", "Immer deinterlacen (yadif)"],
+            ["off", "Nie deinterlacen"],
+          ],
+          "Automatisch: nur Videos, die als Halbbilder (interlaced) markiert sind. „Nie“ kann Kammartefakte erzeugen, wenn Halbbild-Material skaliert wird.",
+        ),
       ),
     ],
     menu: () => [

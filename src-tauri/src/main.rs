@@ -588,6 +588,8 @@ struct InputConfig {
     end_secs: Option<f64>,
     #[serde(default)]
     crop: Option<probe::Crop>,
+    #[serde(default)]
+    merge_with_previous: bool,
 }
 
 #[derive(Deserialize)]
@@ -654,6 +656,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 start_secs: i.start_secs,
                 end_secs: i.end_secs,
                 crop: i.crop,
+                merge_with_previous: i.merge_with_previous,
             })
             .collect(),
         ..BuildOptions::default()

@@ -6,7 +6,7 @@ use std::process::Command;
 
 use convertx_rust::calculator::DiscType;
 use convertx_rust::encoder::MenuAudio;
-use convertx_rust::dvd::{self, BuildOptions, Event};
+use convertx_rust::dvd::{self, BuildOptions, Event, StreamSelection};
 use convertx_rust::menu::UiLang;
 use convertx_rust::tools::Toolchain;
 
@@ -150,5 +150,53 @@ fn builds_dvd_with_submenus() {
         "only the project folder is left"
     );
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Two merged inputs are one title: a single titleset whose only PGC plays both VOBs.
+#[test]
+fn merged_inputs_share_one_titleset() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let Ok(tools) = rt.block_on(Toolchain::detect()) else {
+        eprintln!("skipping: tools missing");
+        return;
+    };
+    if !Path::new(TEMPLATE).is_file() {
+        eprintln!("skipping: {TEMPLATE} not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("cx_merge_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = |name: &str, size: &str, secs: u32| {
+        let path = dir.join(name);
+        ffmpeg(&tools, &[
+            "-f", "lavfi", "-i", &format!("testsrc2=size={size}:rate=25:duration={secs}"),
+            "-f", "lavfi", "-i", &format!("sine=f=440:duration={secs}"),
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", path.to_str().unwrap(),
+        ]);
+        path
+    };
+    let opts = BuildOptions {
+        inputs: vec![clip("a.mkv", "640x360", 3), clip("b.mkv", "640x480", 3)],
+        disc: DiscType::Dvd5,
+        template: PathBuf::from(TEMPLATE),
+        output: dir.join("out"),
+        chapters: dvd::ChapterSettings { interval_secs: 300.0, ..Default::default() },
+        selections: vec![StreamSelection::default(), StreamSelection { merge_with_previous: true, ..Default::default() }],
+        ..Default::default()
+    };
+    let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));
+    let vts = &report.video_ts;
+    assert!(vts.join("VTS_01_1.VOB").is_file());
+    let extra: Vec<_> = std::fs::read_dir(vts).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("VTS_02_")).collect();
+    assert!(extra.is_empty(), "a merged group must not create a second titleset: {extra:?}");
+    let xml = &report.authoring_xml;
+    assert_eq!(xml.matches("<titleset>").count(), 1);
+    let titles = &xml[xml.find("<titles>").unwrap()..xml.find("</titles>").unwrap()];
+    assert_eq!(titles.matches("<pgc>").count(), 1, "one title PGC");
+    assert_eq!(xml.matches(r#"<vob file="title_"#).count(), 2, "{xml}");
+    // Both members were encoded in the first member's 16:9 aspect.
+    assert!(report.titles.iter().all(|t| t.aspect.as_str() == "16:9"));
     std::fs::remove_dir_all(&dir).ok();
 }

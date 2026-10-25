@@ -59,6 +59,8 @@ interface Title {
   trimEnd: number | null;
   /** Picture edges cut away (source pixels). */
   crop: Crop | null;
+  /** Plays together with the previous title behind one menu entry (ignored for the first title). */
+  mergeWithPrevious: boolean;
 }
 
 type Tab = "audio" | "subtitles" | "chapters" | "edit" | "template";
@@ -304,6 +306,7 @@ async function addFiles(paths: string[]) {
         trimStart: null,
         trimEnd: null,
         crop: null,
+        mergeWithPrevious: false,
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
@@ -332,7 +335,30 @@ function removeSelected() {
   const i = state.titles.findIndex((t) => t.id === state.selected);
   if (i < 0) return;
   state.titles.splice(i, 1);
+  normalizeMerge();
   state.selected = state.titles[Math.min(i, state.titles.length - 1)]?.id ?? null;
+  renderAll();
+  scheduleCalc();
+}
+
+/** The first title has no predecessor to merge with. */
+function normalizeMerge() {
+  if (state.titles[0]) state.titles[0].mergeWithPrevious = false;
+}
+
+/** Titles grouped by menu entry: a title plus the directly following ones merged into it. */
+function titleGroups(): Title[][] {
+  const groups: Title[][] = [];
+  state.titles.forEach((t, i) => {
+    if (i > 0 && t.mergeWithPrevious) groups[groups.length - 1].push(t);
+    else groups.push([t]);
+  });
+  return groups;
+}
+
+function toggleMerge(t: Title) {
+  state.splitUndo = null;
+  t.mergeWithPrevious = !t.mergeWithPrevious;
   renderAll();
   scheduleCalc();
 }
@@ -343,6 +369,7 @@ function moveSelected(delta: number) {
   const j = i + delta;
   if (i < 0 || j < 0 || j >= state.titles.length) return;
   [state.titles[i], state.titles[j]] = [state.titles[j], state.titles[i]];
+  normalizeMerge();
   renderAll();
   scheduleCalc();
 }
@@ -373,7 +400,9 @@ async function splitByChapters(t: Title) {
     trimStart: s.start > 0.05 ? s.start : null,
     trimEnd: s.end < dur - 0.05 ? s.end : null,
     crop: t.crop ? { ...t.crop } : null,
+    mergeWithPrevious: false,
   }));
+  news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
   state.splitUndo = { original: t, ids: news.map((n) => n.id), index: i };
   state.selected = news[0].id;
@@ -454,7 +483,7 @@ function renderTitleList() {
       h(
         "li",
         {
-          class: `title-item${t.id === state.selected ? " selected" : ""}`,
+          class: `title-item${t.id === state.selected ? " selected" : ""}${i > 0 && t.mergeWithPrevious ? " merged" : ""}`,
           tabIndex: 0,
           onclick: () => select(t.id),
           onkeydown: (e: KeyboardEvent) => {
@@ -472,6 +501,21 @@ function renderTitleList() {
           t.crop ? " · zugeschnitten" : "",
         ),
         h("div", { class: "title-audio" }, audioSummary + subsSummary),
+        i > 0
+          ? h(
+              "button",
+              {
+                class: "btn small title-merge",
+                title: "Beide Videos laufen hinter einem Menüeintrag nacheinander (gleiche Anzahl Ton- und Untertitelspuren nötig)",
+                disabled: state.converting,
+                onclick: (e: Event) => {
+                  e.stopPropagation();
+                  toggleMerge(t);
+                },
+              },
+              t.mergeWithPrevious ? "Trennen" : "Mit vorherigem zusammenführen",
+            )
+          : "",
         h(
           "div",
           {
@@ -813,16 +857,26 @@ function renderChapterTab(t: Title) {
 
 /** The project's titles as the menu editor sees them. */
 function editorTitles(): EditorTitle[] {
-  return state.titles.map((t, i) => {
-    // Same chapter list the build uses (sorted starts), named like in the chapter tab.
-    const starts = effChapters(t);
+  return titleGroups().map((members, i) => {
+    const t = members[0];
+    // Same chapter list the build uses (sorted starts), named like in the chapter tab. Merged
+    // titles continue one after the other: every member's chapters are shifted by the runtime before it.
+    let offset = 0;
+    const starts: number[] = [];
+    const names: (string | null)[] = [];
+    for (const m of members) {
+      const own = effChapters(m);
+      starts.push(...own.map((s) => s + offset));
+      names.push(...own.map((s) => m.meta.chapters.find((c) => Math.abs(c.startSecs - s - (m.trimStart ?? 0)) < 0.5)?.title ?? null));
+      offset += effDuration(m);
+    }
     return {
       index: i + 1,
       label: t.label.trim() || t.meta.fileName.replace(/\.[^.]+$/, ""),
       path: t.meta.path,
       chapters: Math.max(1, starts.length),
-      durationSecs: effDuration(t),
-      chapterNames: starts.map((s) => t.meta.chapters.find((c) => Math.abs(c.startSecs - s - (t.trimStart ?? 0)) < 0.5)?.title ?? null),
+      durationSecs: offset,
+      chapterNames: names,
       chapterStarts: starts,
       // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
@@ -1305,6 +1359,7 @@ async function convert() {
         startSecs: t.trimStart,
         endSecs: t.trimEnd,
         crop: t.crop,
+        mergeWithPrevious: t.mergeWithPrevious,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",

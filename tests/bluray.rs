@@ -715,6 +715,41 @@ mod menus {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Two merged inputs form one menu entry but stay two playlists chained by the navigation.
+    #[test]
+    fn merged_inputs_chain_their_playlists() {
+        let Some((rt, tools)) = tools() else { return };
+        let dir = std::env::temp_dir().join(format!("cx_bdmerge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = make_clips(&tools, &dir.join("clips"));
+        let mut l = layout();
+        l.menus = vec![menu("main", MenuRole::Title, None, vec![
+            button(200.0, "Film", Action::PlayTitle { title: 1 }),
+            button(320.0, "Alle abspielen", Action::PlayAll),
+        ])];
+        let mut opts = options(&dir, vec![a, b], l);
+        // One audio track and no subtitles on both, so the files may be merged.
+        opts.selections = vec![
+            StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), ..StreamSelection::default() },
+            StreamSelection { merge_with_previous: true, ..StreamSelection::default() },
+        ];
+        let report = build(&rt, &opts).unwrap_or_else(|e| panic!("build failed: {e}"));
+        let bd = report.project_dir.as_path();
+        // Playlists: 0 menu, 1 and 2 the merged files.
+        for n in 0..3 {
+            assert!(bd.join(format!("BDMV/PLAYLIST/{n:05}.mpls")).is_file(), "playlist {n}");
+        }
+        assert!(!bd.join("BDMV/PLAYLIST/00003.mpls").exists());
+        // index.bdmv: both files are titles (objects 3 and 4); the first one jumps on to title 2.
+        let index = std::fs::read(bd.join("BDMV/index.bdmv")).unwrap();
+        assert_eq!(u16::from_be_bytes([index[0x6A], index[0x6B]]), 2);
+        let mobj = std::fs::read(bd.join("BDMV/MovieObject.bdmv")).unwrap();
+        assert_eq!(u16::from_be_bytes([mobj[0x30], mobj[0x31]]), 5, "2 + 1 menu + 2 files");
+        let jump: Vec<u8> = convertx_rust::hdmv::jump_title(2).into_iter().collect();
+        assert!(mobj.windows(jump.len()).any(|w| w == jump.as_slice()), "file 1 ends with JumpTitle 2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn invalid_layouts_fail_before_any_work() {
         let Some((rt, tools)) = tools() else { return };

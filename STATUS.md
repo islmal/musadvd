@@ -1,6 +1,6 @@
 # STATUS — convertx-rust
 
-> State as of **2026-10-25**. Architecture/context only; file tree, dependencies, git state:
+> State as of **2026-10-26**. Architecture/context only; file tree, dependencies, git state:
 > `SYSTEM_STATE.txt` (`~/.claude/scripts/generate_state.sh`); build + conventions: `CLAUDE.md`.
 
 ## 1. Mission & Out-of-Scope
@@ -24,7 +24,7 @@ branching, DVD-Audio, CSS, region coding, DVD-R DL layer break (drive default).
 ## 2. System Architecture & Data Flow
 
 **DVD job – five phases** (`eta::JobPhase`, "Phase n/5"): probe (ffprobe JSON) → plan titles (one
-titleset per input) → **[1] menus** (ConvertX template via `template.rs`/`menu.rs`, or custom JSON
+titleset per menu entry = merge group) → **[1] menus** (ConvertX template via `template.rs`/`menu.rs`, or custom JSON
 layout from the WYSIWYG editor via `layout.rs`; masks → spumux) → bitrate from the *real* menu size →
 **[2] videos** (parallel, one ffmpeg run writes MPEG-2 + AC-3 straight into a DVD program stream, piped
 through spumux per subtitle) → **[3] authoring** (`author.rs` → dvdauthor XML → `VIDEO_TS`) →
@@ -52,8 +52,16 @@ only (same source, different trim).
 - Audio (`encoder::plan_audio`, `audio_mode` auto/ac3/lpcm): compliant AC-3/DTS are stream-copied, the
   rest → AC-3; real per-track kbps feed the bitrate plan. LPCM only on BD (`pcm_s24le` → `pcm_bluray`)
   and AVCHD (stereo 16 bit).
-- Trim = ffmpeg *input* options via `MediaInfo::input_args()` in every run; crop right after `bwdif`;
-  EBU R128 loudnorm in two runs (`Toolchain::ffmpeg_report`).
+- Trim = ffmpeg *input* options via `MediaInfo::input_args()` in every run; crop right after the
+  deinterlacer; EBU R128 loudnorm in two runs (`Toolchain::ffmpeg_report`).
+- **Merge groups** (`StreamSelection::merge_with_previous`, `dvd::groups`): encoding stays per file; a
+  group is ONE DVD title (one PGC, several `<vob>`, chapters concatenated, every file starts a chapter)
+  and, on BD, one playlist/HDMV title per file chained by `JumpTitle` (`bd_menu::plan(…, groups)`; short
+  pause). Members need equal audio/subtitle track counts (German `BuildError`); DVD members take the
+  first member's aspect, differing audio formats force AC-3 for the whole group. Motion chapter pages take
+  their menu audio from the first chapter's own clip (file + start).
+- **Video processing** (`encoder::VideoProcessing`, settings `scale_mode/scale_filter/deinterlace`):
+  one shared `fit_chain` builds DVD and BD filters; `flags=` per `scale` (default bicubic, was lanczos).
 - Layer break: smallest title-cell start with L0 % 16 == 0 that fits; otherwise zero padding in front of
   a titleset's IFO + `TT_SRPT` patch (the only legal place).
 - Custom-layout navigation registers: DVD `g1` play-all, `g2` titleset dispatch, `g3` VMGM router; BD
@@ -74,23 +82,18 @@ only (same source, different trim).
 - BD has no 1080p25/29.97 → x264 `fake-interlaced` (flagged 1080i); NVENC cannot do that.
 - `TT_SRPT` VTS start sector is relative to `VIDEO_TS.IFO` in contiguous DVD order; VTS-internal
   addresses are relative to the VTS IFO. Work-dir marker is `.convertx-work/.convertx-work`.
-- IMAPI write speeds are sectors/s (1x DVD ≈ 676.27, 1x BD ≈ 2195.07); `WriteSpeed::Max` = −1.
-- Ring buffer cancel must be `ErrorKind::ConnectionAborted` (`Interrupted` is retried forever by
-  `write_all`); a ring abort after a burner failure must not mask the burner's real error.
-- A file ffmpeg still holds open shows 0 bytes in Explorer (NTFS updates the entry on close).
 - Custom DVD layouts: coordinates are TV storage pixels (720 wide, non-square); VTSM menu numbers
   shift by one when a titleset has a dispatcher PGC; buttons must be axis-aligned, ≤ 36 per menu,
   ≤ 128 VM commands per PGC. Image paths in layouts are absolute (not portable).
-- `Event` JSON: `{"type":"phase|step|progress|warning|eta","data":…}` (camelCase).
 
 ## 3. Roadmap & Known Issues
 
-**Last recorded test run (2026-10-25):** `cargo test --workspace` 0 failed (370 before + 5 new BD-template
-tests), Unix compile check green; `npm run build` not re-run.
+**Last recorded test run (2026-10-26):** full workspace 0 failed on 2026-10-25; since then only lib (299),
+`motion_menu`, `process_hygiene` re-run. Merge UI and merged motion chapter menus not checked by hand.
 
 **Next (prioritised)**
-1. Check the live player in a real built window (only the dev app via CDP so far): 4K HEVC proxy
-   performance, audio track choice, split + undo on real projects.
+- [planned] Template menu intro animations on BD/AVCHD → docs/plans/2026-10-26-template-menu-intro.md
+1. Live player in a real built window (dev app via CDP only): 4K HEVC proxy, audio track, split + undo.
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
    on DVD+R, DTS/LPCM BD audio; JumpTitle behaviour in VLC 3.0.23 (timebar, Menu key, title end →
    menu/loop/play-all).
@@ -100,9 +103,8 @@ tests), Unix compile check green; `npm run build` not re-run.
    no batch mode.
 4. Remaining burn tests: DVD-RW/DVD+RW with old content (erase/overwrite), DVD+R DL with a DVD-9 layer
    break; one real CLI burn; a real BD burn + standalone-player test (incl. NVENC discs, IGS menus).
-5. Polish ideas: show the harmonised BD track layout before converting; E-AC-3/TrueHD pass-through;
-   seamless BD title join; stream-copy trimming; DVD LPCM via another muxer; per-title audio mode; a
-   progress step for the loudnorm measuring run; Ctrl+C for `build-dvd`.
+5. Polish: show harmonised BD tracks; E-AC-3/TrueHD pass-through; seamless BD join; stream-copy trim;
+   DVD LPCM muxer; per-title audio mode; Ctrl+C for `build-dvd`.
 
 **Known issues / limitations**
 - Never verified on any standalone player or real disc: Blu-ray menus, AVCHD, mixed-rate BD, any Burn
@@ -122,29 +124,27 @@ tests), Unix compile check green; `npm run build` not re-run.
   skipped with a warning.
 - Half D1/SIF force 4:3; image writer aborts on non-DVD file names in `VIDEO_TS`; the subtitle font path
   is Windows-only; settings files from before 2026-10-15 keep their stored job count.
-- Removing/reordering videos breaks a custom layout's title references (conversion blocked until fixed).
+- Removing/reordering/merging videos breaks a custom layout's title references (`titlesKey` changes,
+  conversion blocked until fixed). Merge: no GUI pre-check of track counts, live player ignores the new
+  video filters, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
 
+- **2026-10-26 – Item-less main menus (Cinema, TV Series):** no `ML_PLAY_*` buttons on the title page → one
+  main page showing title 1; series: episode menu (`MNUS_SERIES_EPISODES`, all titles); else bonus menu
+  (titles 2..); chapter/settings buttons jump into title 1's menus (`entry ptt/audio` on DVD). DVD + BD.
+  Verified: 299 lib tests, all 19 templates build as DVD + AVCHD, menus viewed; not in a player.
+- **2026-10-25 – Merge groups + video processing:** "Mit vorherigem zusammenführen" in the title list,
+  `groups()` shared by DVD/BD, multi-`<vob>` titles (`author::VobSpec`), chained BD playlists, settings
+  page "Videobearbeitung" (scale mode/filter, deinterlace), CLI `--scale/--scale-filter/--deinterlace/--merge`.
+  Verified: unit tests per module, `tests/build_dvd.rs` (one VTS, one PGC) and `tests/bluray.rs` (chained
+  objects), full workspace run, Unix check. Not tested on a player.
 - **2026-10-25 – ConvertX templates on Blu-ray:** `bd_template.rs` turns a template into a `CustomLayout`
   (scaling, `ML_*` → `Action`, pagination incl. chapter/settings pages), wired into `bd::build_bd`. Verified:
   unit tests (288 lib), all real templates validate + render (~25 min debug), Unix check green. VLC test bugs
   fixed (offset, root background, chapter clips, icon highlight fit); user confirmed buttons, highlights and
   root background video work in VLC. Not tested on a standalone player.
-- **2026-10-25 – Workflow change:** STATUS condensed to 4 sections; file/dependency facts moved to the
-  generated `SYSTEM_STATE.txt` (git-ignored); build/conventions moved to `CLAUDE.md`. Verified: script
-  run, STATUS ≤ 150 lines.
+- **2026-10-25 – Workflow change:** STATUS in 4 sections, facts in generated `SYSTEM_STATE.txt`, build rules in `CLAUDE.md`.
 - **2026-10-25 – Live player, "Kapitel hier setzen", split into titles:** `preview.rs` loopback fMP4
   stream, CSP `media-src http://127.0.0.1:*`; chapter edit + `splitByChapters` with one-step undo.
   Verified: 370 tests green, dev app driven via CDP (play, seek, chapters, split, undo, ffmpeg count).
-- **2026-10-25 – Audio passthrough/LPCM, trim/crop/loudnorm, AVCHD, one BD playlist per title:**
-  `plan_audio`, `apply_trim`/`apply_crop`, `detect_crop`, AVCHD disc types, per-title tsMuxeR runs with
-  own frame rate/encoder, GUI tab "Schnitt & Bild". Verified: 367 tests incl. real tool builds; no player.
-- **2026-10-25 – BD menus enter titles with `JumpTitle`** (VLC shows time only for non-interactive
-  titles). Verified: 325 root-package tests; not in VLC.
-- **2026-10-24 – Burn Studio hang fix:** ring cancel `ConnectionAborted`, real burner errors no longer
-  masked, step context in IMAPI errors, layer break without exclusive access. Verified: burner tests
-  130/130; DVD+R DL write then succeeded (user report).
-- **2026-10-24 – Burn Studio M4:** shared operations layer `studio.rs`, CLI subcommands (`read-disc`,
-  `verify-disc`, `build-iso`, `iso-label`, `ifo-layerbreak`, `drive-info`), Tauri commands/events,
-  `burn-studio` window. Verified: 338 tests, browser run with mocked `invoke`.

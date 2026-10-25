@@ -152,6 +152,19 @@ enum Command {
         /// Normalise the loudness of all audio tracks (EBU R128, -23 LUFS).
         #[arg(long)]
         loudnorm: bool,
+        /// Fit into the frame with black bars (default), fill it and crop the overhang, or stretch.
+        #[arg(long, value_enum, default_value = "letterbox")]
+        scale: ScaleArg,
+        /// Scaling algorithm of the video.
+        #[arg(long, value_enum, default_value = "bicubic")]
+        scale_filter: ScaleFilterArg,
+        /// Deinterlacing: auto (only interlaced sources, bwdif), yadif (always), off.
+        #[arg(long, value_enum, default_value = "auto")]
+        deinterlace: DeinterlaceArg,
+        /// Inputs (1-based) that play together with their predecessor behind one menu entry,
+        /// e.g. `--merge 2,3` joins inputs 1-3.
+        #[arg(long, value_name = "NR", value_delimiter = ',')]
+        merge: Vec<usize>,
     },
     /// List DVD writers and the disc in each drive.
     Drives,
@@ -296,6 +309,39 @@ impl From<AudioArg> for convertx_rust::encoder::AudioMode {
             AudioArg::Lpcm => Self::Lpcm,
         }
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ScaleArg {
+    Letterbox,
+    Panscan,
+    Stretch,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ScaleFilterArg {
+    Bilinear,
+    Bicubic,
+    Lanczos,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DeinterlaceArg {
+    Auto,
+    Yadif,
+    Off,
+}
+
+/// One selection per input; `merge` lists the 1-based inputs joined with their predecessor.
+fn merge_selections(inputs: usize, merge: &[usize]) -> Result<Vec<dvd::StreamSelection>, String> {
+    let mut sel = vec![dvd::StreamSelection::default(); inputs];
+    for &n in merge {
+        if n < 2 || n > inputs {
+            return Err(format!("--merge {n}: nur Eingaben 2 bis {inputs} lassen sich mit der vorherigen zusammenführen"));
+        }
+        sel[n - 1].merge_with_previous = true;
+    }
+    Ok(sel)
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -728,6 +774,10 @@ fn main() -> ExitCode {
             no_hw_encode,
             audio,
             loudnorm,
+            scale,
+            scale_filter,
+            deinterlace,
+            merge,
             menu_audio,
             tv,
             resolution,
@@ -748,6 +798,13 @@ fn main() -> ExitCode {
                 }
                 Some(Ok(l)) => Some(l),
                 None => None,
+            };
+            let selections = match merge_selections(input.len(), &merge) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
             };
             let opts = BuildOptions {
                 inputs: input,
@@ -782,12 +839,29 @@ fn main() -> ExitCode {
                 bd_single_video: single_video,
                 encoding_profile: encoding_profile.into(),
                 project_name,
-                selections: vec![],
+                selections,
                 parallel_jobs: jobs.map(usize::from),
                 hw_decode,
                 bd_hw_encode: !no_hw_encode,
                 audio_mode: audio.into(),
                 loudnorm,
+                video: convertx_rust::encoder::VideoProcessing {
+                    scale: match scale {
+                        ScaleArg::Letterbox => convertx_rust::encoder::ScaleMode::Letterbox,
+                        ScaleArg::Panscan => convertx_rust::encoder::ScaleMode::PanScan,
+                        ScaleArg::Stretch => convertx_rust::encoder::ScaleMode::Stretch,
+                    },
+                    filter: match scale_filter {
+                        ScaleFilterArg::Bilinear => convertx_rust::encoder::ScaleFilter::Bilinear,
+                        ScaleFilterArg::Bicubic => convertx_rust::encoder::ScaleFilter::Bicubic,
+                        ScaleFilterArg::Lanczos => convertx_rust::encoder::ScaleFilter::Lanczos,
+                    },
+                    deinterlace: match deinterlace {
+                        DeinterlaceArg::Auto => convertx_rust::encoder::Deinterlace::Auto,
+                        DeinterlaceArg::Yadif => convertx_rust::encoder::Deinterlace::Yadif,
+                        DeinterlaceArg::Off => convertx_rust::encoder::Deinterlace::Off,
+                    },
+                },
                 ..Default::default()
             };
             let runtime = match tokio::runtime::Runtime::new() {

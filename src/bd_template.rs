@@ -58,6 +58,10 @@ fn clip((x, y, w, h): (f64, f64, f64, f64)) -> Option<(f64, f64, f64, f64)> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Titles,
+    /// All titles, listed on the page a series template's main menu links to.
+    Episodes,
+    /// Titles 2.. of a single-video template (`ML_PLAY_BONUS` items).
+    Bonus,
     Root,
     Chapters,
     Settings,
@@ -75,6 +79,8 @@ struct Ctx {
 fn menu_id(kind: Kind, title: u32, page_no: u32) -> String {
     match kind {
         Kind::Titles => format!("title-p{page_no}"),
+        Kind::Bonus => format!("bonus-p{page_no}"),
+        Kind::Episodes => format!("episodes-p{page_no}"),
         Kind::Root => format!("root-{title}"),
         Kind::Chapters => format!("chap-{title}-p{page_no}"),
         Kind::Settings if page_no == 1 => format!("set-{title}"),
@@ -107,6 +113,10 @@ struct Nav<'a> {
     chapter_starts: &'a [Vec<f64>],
     title_page: &'a Page,
     title_pages: u32,
+    /// Pages of the bonus menu (0 = none).
+    bonus_pages: u32,
+    /// Pages of the episode menu (0 = none).
+    episodes_pages: u32,
     has_root: Vec<bool>,
     /// Pages of the chapter / settings menu of each title (0 = none).
     chapter_pages: Vec<u32>,
@@ -128,8 +138,13 @@ impl Nav<'_> {
         let menu = |id: String| go(Action::Menu { menu: id });
         let home = || menu(self.title_page_id(t.max(1)));
         match (ctx.kind, loc.as_str()) {
-            (Kind::Titles, l) if TITLE_ITEMS.contains(&l) => {
-                let i = item(count_loc(page, TITLE_ITEMS));
+            (Kind::Titles | Kind::Episodes | Kind::Bonus, l) if TITLE_ITEMS.contains(&l) && (ctx.kind != Kind::Bonus || l == "ML_PLAY_BONUS") => {
+                // The bonus menu lists the titles after the first one.
+                let (i, skip) = match ctx.kind {
+                    Kind::Bonus => (item(count_loc(page, &["ML_PLAY_BONUS"])), 1),
+                    _ => (item(count_loc(page, TITLE_ITEMS)), 0),
+                };
+                let i = i + skip;
                 let label = self.titles.get(i)?.label.clone();
                 let title = i as u32 + 1;
                 let action = if self.has_root[i] {
@@ -168,7 +183,7 @@ impl Nav<'_> {
             (Kind::Settings, "ML_RESET_STT") if !lt?.subtitle_sources.is_empty() => go(Action::SetSubtitle { source: None }),
             // Item buttons on a page used for another purpose.
             (_, l) if TITLE_ITEMS.contains(&l) || ["ML_PLAY_CHAPTER", "ML_SET_AUD", "ML_SET_STT", "ML_RESET_STT"].contains(&l) => None,
-            (Kind::Titles, "ML_PLAY_ALL") => go(Action::PlayAll),
+            (Kind::Titles | Kind::Episodes | Kind::Bonus, "ML_PLAY_ALL") => go(Action::PlayAll),
             (_, "ML_PLAY_ALL" | "ML_RESUME") => {
                 if loc == "ML_RESUME" {
                     warnings.push("ML_RESUME: Blu-ray kennt kein Fortsetzen, der Titel startet von vorn".into());
@@ -179,12 +194,19 @@ impl Nav<'_> {
             (k, "ML_NEXT") if n < ctx.pages => menu(menu_id(k, t, n + 1)),
             (_, "ML_PREV" | "ML_NEXT") => None,
             (Kind::Titles, "ML_GO_TITLE_MENU" | "ML_BACK") => None,
-            (_, "ML_GO_TITLE_MENU") | (Kind::Root, "ML_BACK") => home(),
+            (_, "ML_GO_TITLE_MENU") | (Kind::Root | Kind::Bonus | Kind::Episodes, "ML_BACK") => home(),
             (_, "ML_BACK") => match self.has_root[t as usize - 1] {
                 true => menu(menu_id(Kind::Root, t, 1)),
                 false => home(),
             },
-            (Kind::Titles, "ML_GO_CHAPTER_MENU" | "ML_GO_SETTINGS_MENU") => None,
+            // A main menu without item buttons links straight to the first title's menus.
+            (Kind::Titles, "ML_GO_CHAPTER_MENU") if self.chapter_pages[0] > 0 => menu(menu_id(Kind::Chapters, 1, 1)),
+            (Kind::Titles, "ML_GO_SETTINGS_MENU") if self.settings_pages[0] > 0 => menu(menu_id(Kind::Settings, 1, 1)),
+            (Kind::Titles | Kind::Episodes | Kind::Bonus, "ML_GO_CHAPTER_MENU" | "ML_GO_SETTINGS_MENU") => None,
+            (Kind::Titles, "ML_GO_SERIES_EPISODES_MENU") if self.episodes_pages > 0 => menu(menu_id(Kind::Episodes, 0, 1)),
+            (_, "ML_GO_SERIES_EPISODES_MENU") => None,
+            (Kind::Titles | Kind::Root, "ML_GO_BONUS_MENU") if self.bonus_pages > 0 => menu(menu_id(Kind::Bonus, 0, 1)),
+            (_, "ML_GO_BONUS_MENU") => None,
             (_, "ML_GO_CHAPTER_MENU") => (self.chapter_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Chapters, t, 1)).and_then(|id| menu(id)),
             (_, "ML_GO_SETTINGS_MENU") => (self.settings_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Settings, t, 1)).and_then(|id| menu(id)),
             (_, other) => {
@@ -259,7 +281,11 @@ impl Nav<'_> {
             .filter(|b| b.visible)
             .filter_map(|b| self.map_action(ctx, page, b, warnings).map(|m| (b, m)))
             .collect();
-        let heading = &self.titles[ctx.title.max(1) as usize - 1].label;
+        let heading = match ctx.kind {
+            Kind::Bonus => "Bonus",
+            Kind::Episodes => "Episoden",
+            _ => &self.titles[ctx.title.max(1) as usize - 1].label,
+        };
         let image_file = |value: &str, warnings: &mut Vec<String>| {
             let path = resolve_resource(src.dir, value);
             if path.is_file() {
@@ -273,7 +299,7 @@ impl Nav<'_> {
         let text_of = |g: &Graphic, m: Option<&Mapped>| -> String {
             match m.and_then(|m| m.label.as_deref()) {
                 Some(l) => l.to_string(),
-                None if g.location.eq_ignore_ascii_case("ML_PAGE_TITLE") => heading.clone(),
+                None if g.location.eq_ignore_ascii_case("ML_PAGE_TITLE") => heading.to_string(),
                 None => localize(&g.value, UiLang::De).to_string(),
             }
         };
@@ -301,9 +327,10 @@ impl Nav<'_> {
                         let Some(src) = image_file(&g.value, warnings) else { continue };
                         Content::Image { src, fit: Fit::Stretch }
                     }
-                    // The sub menus of a title play that title's clip behind everything (as the DVD path does).
-                    None if g.location.eq_ignore_ascii_case("ML_PAGE_BACKGROUND") && ctx.kind != Kind::Titles => {
-                        Content::Video { title: ctx.title, start_secs: None, fit: fit_of(&g.padding) }
+                    // The menus of a title play that title's clip in the page's video window; the main
+                    // menu shows the first title.
+                    None if g.location.eq_ignore_ascii_case("ML_PAGE_BACKGROUND") => {
+                        Content::Video { title: ctx.title.max(1), start_secs: None, fit: fit_of(&g.padding) }
                     }
                     None => continue,
                 },
@@ -425,11 +452,21 @@ pub fn layout_from_template(
             _ => 0,
         })
         .collect();
+    // Single-video template: the main menu has no item buttons, the other titles sit in the bonus menu.
+    let no_items = count_loc(title_page, TITLE_ITEMS) == 0;
+    let episodes = page_by_style(template, "MNUS_SERIES_EPISODES").filter(|p| no_items && count_loc(p, TITLE_ITEMS) > 0);
+    let bonus = page_by_style(template, "MNUS_BONUS")
+        .filter(|p| episodes.is_none() && titles.len() > 1 && no_items && count_loc(p, &["ML_PLAY_BONUS"]) > 0);
     let nav = Nav {
         titles,
         chapter_starts,
         title_page,
-        title_pages: pages(titles.len(), count_loc(title_page, TITLE_ITEMS)),
+        title_pages: match count_loc(title_page, TITLE_ITEMS) {
+            0 => 1,
+            per => pages(titles.len(), per),
+        },
+        bonus_pages: bonus.map_or(0, |p| pages(titles.len() - 1, count_loc(p, &["ML_PLAY_BONUS"]))),
+        episodes_pages: episodes.map_or(0, |p| pages(titles.len(), count_loc(p, TITLE_ITEMS))),
         has_root: titles.iter().map(|_| root.is_some()).collect(),
         chapter_pages,
         settings_pages,
@@ -442,7 +479,7 @@ pub fn layout_from_template(
         menus.push(CustomMenu {
             id: menu_id(kind, title, page_no),
             name,
-            role: if kind == Kind::Titles { MenuRole::Title } else if kind == Kind::Settings { MenuRole::Settings } else { MenuRole::Root },
+            role: if matches!(kind, Kind::Titles | Kind::Episodes | Kind::Bonus) { MenuRole::Title } else if kind == Kind::Settings { MenuRole::Settings } else { MenuRole::Root },
             title: (title > 0).then_some(title),
             background: Background::default(),
             duration_secs: None,
@@ -452,6 +489,18 @@ pub fn layout_from_template(
     };
     for n in 1..=nav.title_pages {
         add(&title_src, Kind::Titles, 0, n, nav.title_pages, format!("Titelmenü {n}"), &mut warnings);
+    }
+    if let Some(page) = episodes {
+        let src = Source { tpl: template, dir: &main_dir, page };
+        for n in 1..=nav.episodes_pages {
+            add(&src, Kind::Episodes, 0, n, nav.episodes_pages, format!("Episodenmenü {n}"), &mut warnings);
+        }
+    }
+    if let Some(page) = bonus {
+        let src = Source { tpl: template, dir: &main_dir, page };
+        for n in 1..=nav.bonus_pages {
+            add(&src, Kind::Bonus, 0, n, nav.bonus_pages, format!("Bonusmenü {n}"), &mut warnings);
+        }
     }
     for t in 1..=titles.len() as u32 {
         let i = t as usize - 1;
@@ -621,6 +670,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn single_video_template_has_a_bonus_menu_and_a_main_video() {
+        let ini = [
+            "[CXT]\nKind=mtOpenStyle\n".to_string(),
+            page(0, "MNUS_TITLE", &[("ML_RESUME", 0, 0), ("ML_GO_BONUS_MENU", 0, 0)]),
+            page(1, "MNUS_BONUS", &[("ML_PLAY_BONUS", 0, 0), ("ML_PLAY_BONUS", 1, 1), ("ML_BACK", 0, 0)]),
+        ]
+        .concat()
+            + &video("Item0", 1, "ML_PAGE_BACKGROUND", 0, (0, 0, 424, 340));
+        let tpl = Template::parse(&ini).unwrap();
+        let titles = [lt("A", 1, &[1], &[]), lt("B", 1, &[1], &[]), lt("C", 1, &[1], &[])];
+        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide).unwrap();
+        let ids: Vec<&str> = l.menus.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(&ids[..2], ["title-p1", "bonus-p1"], "one main page although there are three titles");
+        assert_eq!(actions(&l, "title-p1"), [Action::PlayTitle { title: 1 }, menu_to("bonus-p1")]);
+        // Titles 2 and 3 are the bonus items (the page holds two), the first title is not.
+        assert_eq!(actions(&l, "bonus-p1"), [Action::PlayTitle { title: 2 }, Action::PlayTitle { title: 3 }, menu_to("title-p1")]);
+        assert!(menu(&l, "title-p1").elements.iter().any(|e| matches!(e.content, Content::Video { title: 1, start_secs: None, .. })));
+    }
+
+    #[test]
+    fn series_template_lists_all_titles_in_the_episode_menu() {
+        let ini = [
+            "[CXT]\nKind=mtOpenStyle\n".to_string(),
+            page(0, "MNUS_TITLE", &[("ML_PLAY_ALL", 0, 0), ("ML_GO_SERIES_EPISODES_MENU", 0, 0), ("ML_GO_BONUS_MENU", 0, 0)]),
+            page(1, "MNUS_SERIES_EPISODES", &[("ML_PLAY_EPISODE", 0, 0), ("ML_PLAY_EPISODE", 1, 1), ("ML_NEXT", 0, 0), ("ML_GO_TITLE_MENU", 0, 0)]),
+            page(2, "MNUS_BONUS", &[("ML_PLAY_BONUS", 0, 0), ("ML_BACK", 0, 0)]),
+        ]
+        .concat();
+        let tpl = Template::parse(&ini).unwrap();
+        let titles = [lt("A", 1, &[1], &[]), lt("B", 1, &[1], &[]), lt("C", 1, &[1], &[])];
+        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide).unwrap();
+        let ids: Vec<&str> = l.menus.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(&ids[..3], ["title-p1", "episodes-p1", "episodes-p2"], "no bonus menu next to an episode menu: {ids:?}");
+        // The bonus button is hidden, the episode button opens the list.
+        assert_eq!(actions(&l, "title-p1"), [Action::PlayAll, menu_to("episodes-p1")]);
+        assert_eq!(
+            actions(&l, "episodes-p1"),
+            [Action::PlayTitle { title: 1 }, Action::PlayTitle { title: 2 }, menu_to("episodes-p2"), menu_to("title-p1")]
+        );
+        assert_eq!(actions(&l, "episodes-p2"), [Action::PlayTitle { title: 3 }, menu_to("title-p1")]);
+    }
+
     fn menu<'a>(l: &'a CustomLayout, id: &str) -> &'a CustomMenu {
         l.menus.iter().find(|m| m.id == id).unwrap()
     }
@@ -678,7 +770,7 @@ mod tests {
         let (l, _) = build(&titles);
         let frame = MenuFrame::square(1920, 1080);
         crate::layout::validate_bd(&l, &titles, frame).unwrap();
-        let nav = bd_menu::plan(&l, &titles, &bd_menu::traits(&l, &titles, frame), PlaybackOptions::default());
+        let nav = bd_menu::plan(&l, &titles, &bd_menu::traits(&l, &titles, frame), PlaybackOptions::default(), &titles.iter().map(|t| vec![t.chapters]).collect::<Vec<_>>());
         let idx = |id: &str| l.menus.iter().position(|m| m.id == id).unwrap();
         // Graphic elements carry no commands: count buttons only.
         let cmds = |id: &str, n: usize| {

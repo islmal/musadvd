@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::author::{PlaybackOptions, Resolution, TvStandard};
-use crate::encoder::{AudioMode, MenuAudio};
+use crate::encoder::{AudioMode, Deinterlace, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::menu::TextOverflow;
@@ -27,6 +27,10 @@ pub const PROCESS_PRIORITIES: &[&str] = &["Normal", "BelowNormal", "Idle"];
 pub const MENU_AUDIO_MODES: &[&str] = &["title", "silence", "file"];
 /// How audio tracks are written: copy compliant AC-3/DTS, always AC-3, LPCM.
 pub const AUDIO_MODES: &[&str] = &["auto", "ac3", "lpcm"];
+/// "Videobearbeitung": how the picture is fitted into the frame, the swscale algorithm, deinterlacing.
+pub const SCALE_MODES: &[&str] = &["letterbox", "panscan", "stretch"];
+pub const SCALE_FILTERS: &[&str] = &["bicubic", "bilinear", "lanczos"];
+pub const DEINTERLACE_MODES: &[&str] = &["auto", "yadif", "off"];
 /// Write speed: `auto` = DVD-5 maximum, DVD-9 4x; otherwise maximum or a speed in x (mapped to
 /// the nearest speed the drive offers).
 pub const BURN_SPEEDS: &[&str] = &["auto", "max", "16", "12", "8", "6", "4", "2.4"];
@@ -84,6 +88,12 @@ pub struct AppSettings {
     pub force_first_subtitle: bool,
     /// See [`AUDIO_MODES`].
     pub audio_mode: String,
+    /// See [`SCALE_MODES`].
+    pub scale_mode: String,
+    /// See [`SCALE_FILTERS`].
+    pub scale_filter: String,
+    /// See [`DEINTERLACE_MODES`].
+    pub deinterlace: String,
     /// EBU R128 loudness normalisation of all audio tracks (forces a re-encode).
     pub loudnorm: bool,
     // Burning
@@ -139,6 +149,9 @@ impl Default for AppSettings {
             default_subtitle_language: String::new(),
             force_first_subtitle: false,
             audio_mode: AUDIO_MODES[0].into(),
+            scale_mode: SCALE_MODES[0].into(),
+            scale_filter: SCALE_FILTERS[0].into(),
+            deinterlace: DEINTERLACE_MODES[0].into(),
             loudnorm: false,
             burn_speed: BURN_SPEEDS[0].into(),
             verify_after_burn: true,
@@ -611,6 +624,9 @@ impl AppSettings {
         self.encoding_profile = choice(&self.encoding_profile, ENCODING_PROFILES);
         self.process_priority = choice(&self.process_priority, PROCESS_PRIORITIES);
         self.audio_mode = choice(&self.audio_mode, AUDIO_MODES);
+        self.scale_mode = choice(&self.scale_mode, SCALE_MODES);
+        self.scale_filter = choice(&self.scale_filter, SCALE_FILTERS);
+        self.deinterlace = choice(&self.deinterlace, DEINTERLACE_MODES);
         self.target_size_mb = self.target_size_mb.clamp(100, 20_000);
         self.max_concurrent_encodes = self.max_concurrent_encodes.clamp(1, 64);
         self.auto_chapter_interval_seconds = self.auto_chapter_interval_seconds.clamp(30, 3600);
@@ -738,6 +754,23 @@ impl AppSettings {
             "ac3" => AudioMode::Ac3,
             "lpcm" => AudioMode::Lpcm,
             _ => AudioMode::Auto,
+        };
+        opts.video = VideoProcessing {
+            scale: match self.scale_mode.as_str() {
+                "panscan" => ScaleMode::PanScan,
+                "stretch" => ScaleMode::Stretch,
+                _ => ScaleMode::Letterbox,
+            },
+            filter: match self.scale_filter.as_str() {
+                "bilinear" => ScaleFilter::Bilinear,
+                "lanczos" => ScaleFilter::Lanczos,
+                _ => ScaleFilter::Bicubic,
+            },
+            deinterlace: match self.deinterlace.as_str() {
+                "yadif" => Deinterlace::Yadif,
+                "off" => Deinterlace::Off,
+                _ => Deinterlace::Auto,
+            },
         };
         opts.loudnorm = self.loudnorm;
         opts.hw_decode = self.hw_decode;
@@ -902,6 +935,22 @@ mod tests {
         s.apply_to(&mut o);
         assert_eq!((o.resolution, o.encoding_profile), (Resolution::Sif, EncodingProfile::Mp));
         assert_eq!(AppSettings { encoding_profile: "SP_Short".into(), ..AppSettings::default() }.profile(), EncodingProfile::Sp);
+    }
+
+    #[test]
+    fn video_processing_settings() {
+        let mut o = BuildOptions::default();
+        AppSettings::default().apply_to(&mut o);
+        assert_eq!(o.video, VideoProcessing::default());
+        assert_eq!(o.video.filter, ScaleFilter::Bicubic);
+        let s = AppSettings { scale_mode: "panscan".into(), scale_filter: "lanczos".into(), deinterlace: "off".into(), ..AppSettings::default() };
+        s.apply_to(&mut o);
+        assert_eq!(o.video, VideoProcessing { scale: ScaleMode::PanScan, filter: ScaleFilter::Lanczos, deinterlace: Deinterlace::Off });
+        let s = AppSettings { scale_mode: "stretch".into(), deinterlace: "yadif".into(), ..AppSettings::default() };
+        s.apply_to(&mut o);
+        assert_eq!((o.video.scale, o.video.deinterlace), (ScaleMode::Stretch, Deinterlace::Yadif));
+        let bad = AppSettings { scale_mode: "x".into(), scale_filter: "y".into(), deinterlace: "z".into(), ..AppSettings::default() }.sanitized();
+        assert_eq!((bad.scale_mode.as_str(), bad.scale_filter.as_str(), bad.deinterlace.as_str()), ("letterbox", "bicubic", "auto"));
     }
 
     #[test]

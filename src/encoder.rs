@@ -78,27 +78,113 @@ pub fn active_size(source_aspect: f64, target: Aspect, frame: (u32, u32)) -> (u3
     }
 }
 
+/// Size that fills the whole coded frame at `target` aspect; the overhang of a wider/narrower
+/// source is cropped centred afterwards (Pan & Scan).
+pub fn cover_size(source_aspect: f64, target: Aspect, frame: (u32, u32)) -> (u32, u32) {
+    let (fw, fh) = frame;
+    let even = |v: f64| ((v / 2.0).round() as u32 * 2).max(2);
+    let t = target.ratio();
+    if source_aspect > t * 1.01 {
+        (even(fw as f64 * source_aspect / t), fh)
+    } else if source_aspect < t / 1.01 {
+        (fw, even(fh as f64 * t / source_aspect))
+    } else {
+        (fw, fh)
+    }
+}
+
 /// `crop=w:h:x:y` for the picture section chosen by the user, if any.
 fn crop_filter(v: &VideoStream) -> Option<String> {
     v.crop.map(|c| format!("crop={}:{}:{}:{}", c.w, c.h, c.x, c.y))
 }
 
-/// ffmpeg `-vf` chain: deinterlace, frame rate of the TV standard, scale to the active area in
-/// BT.601, pad to the coded frame of `resolution`.
-pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard, resolution: Resolution) -> String {
-    let frame = resolution.frame_size(tv);
-    let (w, h) = active_size(v.display_aspect, aspect, frame);
+/// How the picture is fitted into the coded frame ("Video Skaliermethode").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScaleMode {
+    /// Keep the aspect, add black bars.
+    #[default]
+    Letterbox,
+    /// Keep the aspect, fill the frame and crop the overhang.
+    PanScan,
+    /// Distort the picture to the frame.
+    Stretch,
+}
+
+/// swscale algorithm ("Skalierungsfilter").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScaleFilter {
+    Bilinear,
+    #[default]
+    Bicubic,
+    Lanczos,
+}
+
+impl ScaleFilter {
+    pub fn flag(self) -> &'static str {
+        match self {
+            ScaleFilter::Bilinear => "bilinear",
+            ScaleFilter::Bicubic => "bicubic",
+            ScaleFilter::Lanczos => "lanczos",
+        }
+    }
+}
+
+/// "Video-Deinterlacing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Deinterlace {
+    /// `bwdif` only for sources flagged interlaced.
+    #[default]
+    Auto,
+    /// `yadif` for every source.
+    Yadif,
+    Off,
+}
+
+/// Video processing options shared by the DVD and Blu-ray encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VideoProcessing {
+    pub scale: ScaleMode,
+    pub filter: ScaleFilter,
+    pub deinterlace: Deinterlace,
+}
+
+/// Shared chain: deinterlacer, user crop, `fps`, scale, bars/crop to the coded `frame`.
+/// Returns the filters before the aspect tag (`setdar`/`setsar`) and `format`.
+fn fit_chain(v: &VideoStream, aspect: Aspect, frame: (u32, u32), fps: &str, matrix: &str, vp: VideoProcessing) -> Vec<String> {
     let (fw, fh) = frame;
     let mut f = Vec::new();
-    if v.is_interlaced() {
-        f.push("bwdif=mode=send_frame".to_string());
+    match vp.deinterlace {
+        Deinterlace::Auto if v.is_interlaced() => f.push("bwdif=mode=send_frame".to_string()),
+        Deinterlace::Yadif => f.push("yadif=mode=send_frame".to_string()),
+        _ => {}
     }
     f.extend(crop_filter(v));
-    f.push(format!("fps={}", tv.frame_rate()));
-    f.push(format!("scale={w}:{h}:flags=lanczos:out_color_matrix=bt601:out_range=tv"));
-    if (w, h) != (fw, fh) {
-        f.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:black"));
+    f.push(format!("fps={fps}"));
+    let flags = format!("flags={}:out_color_matrix={matrix}:out_range=tv", vp.filter.flag());
+    match vp.scale {
+        ScaleMode::Letterbox => {
+            let (w, h) = active_size(v.display_aspect, aspect, frame);
+            f.push(format!("scale={w}:{h}:{flags}"));
+            if (w, h) != (fw, fh) {
+                f.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:black"));
+            }
+        }
+        ScaleMode::PanScan => {
+            let (w, h) = cover_size(v.display_aspect, aspect, frame);
+            f.push(format!("scale={w}:{h}:{flags}"));
+            if (w, h) != (fw, fh) {
+                f.push(format!("crop={fw}:{fh}"));
+            }
+        }
+        ScaleMode::Stretch => f.push(format!("scale={fw}:{fh}:{flags}")),
     }
+    f
+}
+
+/// ffmpeg `-vf` chain: deinterlace, frame rate of the TV standard, scale into the coded frame
+/// of `resolution` in BT.601 (bars, crop or stretch per `vp.scale`).
+pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard, resolution: Resolution, vp: VideoProcessing) -> String {
+    let mut f = fit_chain(v, aspect, resolution.frame_size(tv), tv.frame_rate(), "bt601", vp);
     f.push(format!("setdar={}", aspect.as_str().replace(':', "/")));
     f.push("format=yuv420p".to_string());
     f.join(",")
@@ -419,6 +505,7 @@ pub struct EncodeJob<'a> {
     pub tv: TvStandard,
     /// Coded frame size (Full D1, Half D1, SIF).
     pub resolution: Resolution,
+    pub video: VideoProcessing,
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
     pub audio_mode: AudioMode,
@@ -511,7 +598,7 @@ impl EncodeJob<'_> {
             a.extend(["-hwaccel".into(), hw.into()]);
         }
         a.extend(self.info.input_args());
-        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), video_filter(v, self.aspect, self.tv, self.resolution).into()]);
+        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), video_filter(v, self.aspect, self.tv, self.resolution, self.video).into()]);
         a
     }
 
@@ -701,21 +788,9 @@ pub const BD_BUFSIZE_KBIT: u32 = 30_000;
 pub const BD_SILENCE_KBPS: u32 = 192;
 
 /// Video filter chain of a Blu-ray title: deinterlace, project frame rate, scale into the HD
-/// frame in BT.709 keeping the display aspect (pillar/letterbox), square pixels.
-pub fn bd_video_filter(v: &VideoStream, rate: BdRate, resolution: Resolution) -> String {
-    let frame = resolution.frame_size(TvStandard::Pal);
-    let (w, h) = active_size(v.display_aspect, Aspect::Wide, frame);
-    let (fw, fh) = frame;
-    let mut f = Vec::new();
-    if v.is_interlaced() {
-        f.push("bwdif=mode=send_frame".to_string());
-    }
-    f.extend(crop_filter(v));
-    f.push(format!("fps={}", rate.ffmpeg()));
-    f.push(format!("scale={w}:{h}:flags=lanczos:out_color_matrix=bt709:out_range=tv"));
-    if (w, h) != (fw, fh) {
-        f.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:black"));
-    }
+/// frame in BT.709 (bars, crop or stretch per `vp.scale`), square pixels.
+pub fn bd_video_filter(v: &VideoStream, rate: BdRate, resolution: Resolution, vp: VideoProcessing) -> String {
+    let mut f = fit_chain(v, Aspect::Wide, resolution.frame_size(TvStandard::Pal), &rate.ffmpeg(), "bt709", vp);
     f.push("setsar=1".to_string());
     f.push("format=yuv420p".to_string());
     f.join(",")
@@ -743,6 +818,7 @@ pub struct BdEncodeJob<'a> {
     pub fast: bool,
     pub rate: BdRate,
     pub resolution: Resolution,
+    pub video: VideoProcessing,
     pub hwaccel: Option<&'static str>,
     pub encoder: BdEncoder,
     pub audio_mode: AudioMode,
@@ -836,7 +912,7 @@ impl BdEncodeJob<'_> {
             a.push(format!("{:.3}", self.info.duration_secs).into());
             a.extend(["-i", "anullsrc=r=48000:cl=stereo"].map(OsString::from));
         }
-        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), bd_video_filter(v, self.rate, self.resolution).into()]);
+        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), bd_video_filter(v, self.rate, self.resolution, self.video).into()]);
         a
     }
 
@@ -1455,20 +1531,20 @@ mod tests {
         assert!(Resolution::FullD1.allows_wide() && !Resolution::HalfD1.allows_wide() && !Resolution::Sif.allows_wide());
         let src = video(1920, 1080, 16.0 / 9.0, "progressive");
         assert_eq!(
-            video_filter(&src, Aspect::Standard, TvStandard::Pal, Resolution::HalfD1),
-            "fps=25,scale=352:432:flags=lanczos:out_color_matrix=bt601:out_range=tv,pad=352:576:(ow-iw)/2:(oh-ih)/2:black,setdar=4/3,format=yuv420p"
+            video_filter(&src, Aspect::Standard, TvStandard::Pal, Resolution::HalfD1, VideoProcessing::default()),
+            "fps=25,scale=352:432:flags=bicubic:out_color_matrix=bt601:out_range=tv,pad=352:576:(ow-iw)/2:(oh-ih)/2:black,setdar=4/3,format=yuv420p"
         );
-        let sif = video_filter(&video(640, 480, 4.0 / 3.0, "progressive"), Aspect::Standard, TvStandard::Ntsc, Resolution::Sif);
-        assert_eq!(sif, "fps=30000/1001,scale=352:240:flags=lanczos:out_color_matrix=bt601:out_range=tv,setdar=4/3,format=yuv420p");
+        let sif = video_filter(&video(640, 480, 4.0 / 3.0, "progressive"), Aspect::Standard, TvStandard::Ntsc, Resolution::Sif, VideoProcessing::default());
+        assert_eq!(sif, "fps=30000/1001,scale=352:240:flags=bicubic:out_color_matrix=bt601:out_range=tv,setdar=4/3,format=yuv420p");
     }
 
     #[test]
     fn filters() {
-        let f = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Pal, Resolution::FullD1);
-        assert_eq!(f, "fps=25,scale=720:576:flags=lanczos:out_color_matrix=bt601:out_range=tv,setdar=16/9,format=yuv420p");
-        let n = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Ntsc, Resolution::FullD1);
+        let f = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Pal, Resolution::FullD1, VideoProcessing::default());
+        assert_eq!(f, "fps=25,scale=720:576:flags=bicubic:out_color_matrix=bt601:out_range=tv,setdar=16/9,format=yuv420p");
+        let n = video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), Aspect::Wide, TvStandard::Ntsc, Resolution::FullD1, VideoProcessing::default());
         assert!(n.starts_with("fps=30000/1001,scale=720:480:"), "{n}");
-        let f = video_filter(&video(1920, 800, 2.4, "tt"), Aspect::Wide, TvStandard::Pal, Resolution::FullD1);
+        let f = video_filter(&video(1920, 800, 2.4, "tt"), Aspect::Wide, TvStandard::Pal, Resolution::FullD1, VideoProcessing::default());
         assert!(f.starts_with("bwdif=mode=send_frame,fps=25,scale=720:426:"), "{f}");
         assert!(f.contains("pad=720:576:(ow-iw)/2:(oh-ih)/2:black"));
     }
@@ -1509,6 +1585,7 @@ mod tests {
             fast: false,
             tv: TvStandard::Pal,
             resolution: Resolution::FullD1,
+            video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
             audio_filters: vec![],
@@ -1719,6 +1796,7 @@ mod tests {
             rate: BdRate { fps: (24000, 1001), fake_interlaced: false },
             encoder: BdEncoder::X264,
             resolution: Resolution::Hd1080,
+            video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
             audio_target: AudioTarget::Bluray,
@@ -1729,20 +1807,74 @@ mod tests {
     }
 
     #[test]
+    fn video_processing_modes() {
+        let vp = |scale, filter, deinterlace| VideoProcessing { scale, filter, deinterlace };
+        let scope = video(1920, 800, 2.4, "progressive");
+        let pan = vp(ScaleMode::PanScan, ScaleFilter::Bicubic, Deinterlace::Auto);
+        assert_eq!(
+            video_filter(&scope, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, pan),
+            "fps=25,scale=972:576:flags=bicubic:out_color_matrix=bt601:out_range=tv,crop=720:576,setdar=16/9,format=yuv420p"
+        );
+        // NTSC frame, 4:3 source into 16:9: the height overhangs.
+        let n = video_filter(&video(720, 576, 4.0 / 3.0, "progressive"), Aspect::Wide, TvStandard::Ntsc, Resolution::FullD1, pan);
+        assert!(n.contains("scale=720:640:") && n.contains("crop=720:480,"), "{n}");
+        let stretch = vp(ScaleMode::Stretch, ScaleFilter::Bicubic, Deinterlace::Auto);
+        assert_eq!(
+            video_filter(&scope, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, stretch),
+            "fps=25,scale=720:576:flags=bicubic:out_color_matrix=bt601:out_range=tv,setdar=16/9,format=yuv420p"
+        );
+        let bd = bd_video_filter(&video(720, 576, 4.0 / 3.0, "progressive"), BdRate { fps: (25, 1), fake_interlaced: false }, Resolution::Hd1080, pan);
+        assert_eq!(
+            bd,
+            "fps=25,scale=1920:1440:flags=bicubic:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p"
+        );
+        let bd = bd_video_filter(&scope, BdRate { fps: (25, 1), fake_interlaced: false }, Resolution::Hd1080, stretch);
+        assert!(bd.contains("scale=1920:1080:") && !bd.contains("pad="), "{bd}");
+    }
+
+    #[test]
+    fn scale_filter_flags() {
+        let v = video(1920, 1080, 16.0 / 9.0, "progressive");
+        for (filter, flag) in [(ScaleFilter::Bilinear, "bilinear"), (ScaleFilter::Bicubic, "bicubic"), (ScaleFilter::Lanczos, "lanczos")] {
+            let vp = VideoProcessing { filter, ..Default::default() };
+            assert!(video_filter(&v, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, vp).contains(&format!("scale=720:576:flags={flag}:")));
+            assert!(bd_video_filter(&v, BdRate { fps: (25, 1), fake_interlaced: false }, Resolution::Hd1080, vp).contains(&format!("flags={flag}:")));
+        }
+    }
+
+    #[test]
+    fn deinterlace_modes() {
+        let chain = |v: &VideoStream, d| {
+            video_filter(v, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, VideoProcessing { deinterlace: d, ..Default::default() })
+        };
+        let prog = video(1920, 1080, 16.0 / 9.0, "progressive");
+        let inter = video(1920, 1080, 16.0 / 9.0, "tt");
+        assert!(chain(&prog, Deinterlace::Auto).starts_with("fps=25,"));
+        assert!(chain(&inter, Deinterlace::Auto).starts_with("bwdif=mode=send_frame,fps=25,"));
+        assert!(chain(&prog, Deinterlace::Yadif).starts_with("yadif=mode=send_frame,fps=25,"));
+        assert!(chain(&inter, Deinterlace::Off).starts_with("fps=25,"));
+        // The user crop stays directly behind the deinterlacer (or first without one).
+        let mut c = inter.clone();
+        c.crop = Some(crate::probe::CropRect { x: 0, y: 100, w: 1920, h: 800 });
+        assert!(chain(&c, Deinterlace::Auto).starts_with("bwdif=mode=send_frame,crop=1920:800:0:100,fps=25,"));
+        assert!(chain(&c, Deinterlace::Off).starts_with("crop=1920:800:0:100,fps=25,"));
+    }
+
+    #[test]
     fn bd_filter_chain() {
         let r = BdRate { fps: (24000, 1001), fake_interlaced: false };
         assert_eq!(
-            bd_video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), r, Resolution::Hd1080),
-            "fps=24000/1001,scale=1920:1080:flags=lanczos:out_color_matrix=bt709:out_range=tv,setsar=1,format=yuv420p"
+            bd_video_filter(&video(1920, 1080, 16.0 / 9.0, "progressive"), r, Resolution::Hd1080, VideoProcessing::default()),
+            "fps=24000/1001,scale=1920:1080:flags=bicubic:out_color_matrix=bt709:out_range=tv,setsar=1,format=yuv420p"
         );
         // 4:3 sources are pillarboxed into the 16:9 frame; interlaced ones are deinterlaced first.
-        let f = bd_video_filter(&video(720, 576, 4.0 / 3.0, "tt"), BdRate { fps: (25, 1), fake_interlaced: true }, Resolution::Hd1080);
+        let f = bd_video_filter(&video(720, 576, 4.0 / 3.0, "tt"), BdRate { fps: (25, 1), fake_interlaced: true }, Resolution::Hd1080, VideoProcessing::default());
         assert_eq!(
             f,
-            "bwdif=mode=send_frame,fps=25,scale=1440:1080:flags=lanczos:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p"
+            "bwdif=mode=send_frame,fps=25,scale=1440:1080:flags=bicubic:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p"
         );
         // Scope films are letterboxed, 720p uses its own frame and doubled TV rate.
-        let f = bd_video_filter(&video(1920, 800, 2.4, "progressive"), BdRate { fps: (50, 1), fake_interlaced: false }, Resolution::Hd720);
+        let f = bd_video_filter(&video(1920, 800, 2.4, "progressive"), BdRate { fps: (50, 1), fake_interlaced: false }, Resolution::Hd720, VideoProcessing::default());
         assert!(f.starts_with("fps=50,scale=1280:534:") && f.contains("pad=1280:720:(ow-iw)/2:(oh-ih)/2:black"), "{f}");
     }
 
@@ -1936,6 +2068,7 @@ mod tests {
             fast: false,
             tv: TvStandard::Pal,
             resolution: Resolution::FullD1,
+            video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
             audio_filters: vec![],
@@ -1973,6 +2106,7 @@ mod tests {
             fast: false,
             tv: TvStandard::Pal,
             resolution: Resolution::FullD1,
+            video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
             audio_filters: vec![],

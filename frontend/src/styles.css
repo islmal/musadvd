@@ -2283,3 +2283,19 @@ input.time {
 #btn-split-undo[hidden] {
   display: none;
 }
+
+/* Titles merged into the previous menu entry: indented with a bracket. */
+.title-item.merged {
+  margin-left: 18px;
+  margin-top: -4px;
+  border-left: 3px solid var(--accent);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.title-merge {
+  font-size: 12px;
+  padding: 2px 8px;
+  justify-self: start;
+  margin-top: 4px;
+}

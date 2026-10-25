@@ -961,7 +961,7 @@ pub(crate) fn frame_font_size(size: f32, canvas: Canvas, frame: impl Into<MenuFr
 pub(crate) fn clip_of(titles: &[LayoutTitle], title: u32, start: Option<f64>) -> ClipSource {
     let t = &titles[title as usize - 1];
     match start {
-        Some(s) => ClipSource { start_secs: s.clamp(0.0, (t.duration_secs - 1.0).max(0.0)), ..t.clip.clone() },
+        Some(s) => ClipSource { start_secs: s.clamp(0.0, (t.duration_secs - crate::menu::DEFAULT_MOTION_SECS).max(0.0)), ..t.clip.clone() },
         None => t.clip.clone(),
     }
 }

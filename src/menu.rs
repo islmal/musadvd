@@ -738,6 +738,11 @@ pub fn localize(text: &str, lang: UiLang) -> &str {
         "Subtitles" => "Untertitel",
         "No subtitle" => "Keine Untertitel",
         "Audio" => "Tonspur",
+        "Episodes" => "Episoden",
+        "Bonuses" => "Bonus",
+        "Previous" => "Zurück",
+        "Next" => "Weiter",
+        "Title menu" => "Hauptmenü",
         _ => text,
     }
 }
@@ -1230,7 +1235,8 @@ fn render_menu_page(
                 .filter(|b| matches!(b.action, author::ButtonAction::PlayChapter(_)))
                 .find_map(|b| b.clip.as_ref());
             match first_chapter {
-                Some(c) if opts.audio_from_first_chapter => ClipSource { start_secs: c.start_secs, ..base.clone() },
+                // The chapter's own file: chapters of merged videos come from different sources.
+                Some(c) if opts.audio_from_first_chapter => c.clone(),
                 _ => base.clone(),
             }
         });

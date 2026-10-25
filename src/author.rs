@@ -232,14 +232,20 @@ impl std::error::Error for AuthorError {}
 // Titles
 // ---------------------------------------------------------------------------
 
+/// One MPEG-2 program stream of a title with its chapter marks.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VobSpec {
+    pub file: String,
+    /// Chapter marks relative to this file in dvdauthor syntax (`0`, `5:00`, `1:02:03.5`).
+    pub chapters: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TitleSpec {
-    /// MPEG-2 program stream for this title.
-    pub vob: String,
+    /// Program streams played in sequence as one title (several = merged inputs).
+    pub vobs: Vec<VobSpec>,
     /// Text shown on the menu button.
     pub label: String,
-    /// Chapter marks in dvdauthor syntax (`0`, `5:00`, `1:02:03.5`).
-    pub chapters: Vec<String>,
     /// Video aspect, `4:3` or `16:9`.
     pub aspect: String,
     /// ISO 639-1 language per audio stream (`None` = unknown), in stream order.
@@ -265,7 +271,7 @@ impl TitleSpec {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| vob.to_string());
-        let spec = TitleSpec { vob: vob.to_string(), label, chapters, ..TitleSpec::placeholder(1) };
+        let spec = TitleSpec { vobs: vec![VobSpec { file: vob.to_string(), chapters }], label, ..TitleSpec::placeholder(1) };
         spec.validate()?;
         Ok(spec)
     }
@@ -273,9 +279,8 @@ impl TitleSpec {
     /// Placeholder title `title_NN.mpg` with a single chapter at 0.
     pub fn placeholder(n: usize) -> Self {
         TitleSpec {
-            vob: format!("title_{n:02}.mpg"),
+            vobs: vec![VobSpec { file: format!("title_{n:02}.mpg"), chapters: vec!["0".to_string()] }],
             label: format!("Title {n}"),
-            chapters: vec!["0".to_string()],
             aspect: "16:9".to_string(),
             audio_langs: vec![],
             audio_formats: vec![],
@@ -284,9 +289,14 @@ impl TitleSpec {
         }
     }
 
+    /// First program stream; names the title in error messages.
+    pub fn first_vob(&self) -> &str {
+        self.vobs.first().map_or("", |v| v.file.as_str())
+    }
+
     pub fn validate(&self) -> Result<(), AuthorError> {
         let re = Regex::new(r"^\d+(:[0-5]?\d){0,2}(\.\d+)?$").expect("valid chapter regex");
-        match self.chapters.iter().find(|c| !re.is_match(c)) {
+        match self.vobs.iter().flat_map(|v| &v.chapters).find(|c| !re.is_match(c)) {
             Some(bad) => Err(AuthorError::InvalidChapter(bad.clone())),
             None => Ok(()),
         }
@@ -320,6 +330,8 @@ pub enum Domain {
 pub enum ButtonAction {
     /// VMGM: open the root menu of titleset N.
     OpenTitleset(u32),
+    /// VMGM: open a specific menu (dvdauthor entry `root`, `ptt` or `audio`) of titleset N.
+    TitlesetMenu(u32, &'static str),
     /// Play a title: global title number in the VMGM, titleset-local number in a VTSM.
     PlayTitle(u32),
     PlayAll,
@@ -354,6 +366,7 @@ impl ButtonAction {
         let vmgm = ctx.domain == Domain::Vmgm;
         match self {
             ButtonAction::OpenTitleset(ts) => format!("g1 = 0; jump titleset {ts} menu;"),
+            ButtonAction::TitlesetMenu(ts, entry) => format!("g1 = 0; jump titleset {ts} menu entry {entry};"),
             ButtonAction::PlayTitle(t) => format!("g1 = 0; jump title {t};"),
             ButtonAction::PlayAll => format!("g1 = {}; jump title 1;", vmgm as u8),
             ButtonAction::Menu(m) => format!("jump menu {m};"),
@@ -473,6 +486,8 @@ pub struct ChapterEntry {
 pub enum MenuKind<'a> {
     /// VMGM main menu listing all titles.
     Titles(&'a [TitleEntry]),
+    /// VMGM bonus menu (`ML_PLAY_BONUS` items): every title but the first, which the main menu plays.
+    Bonus(&'a [TitleEntry]),
     /// VTSM hub: chapters, settings, back, play.
     Root,
     Chapters(&'a [ChapterEntry]),
@@ -482,7 +497,7 @@ pub enum MenuKind<'a> {
 impl MenuKind<'_> {
     pub fn domain(&self) -> Domain {
         match self {
-            MenuKind::Titles(_) => Domain::Vmgm,
+            MenuKind::Titles(_) | MenuKind::Bonus(_) => Domain::Vmgm,
             _ => Domain::Vtsm,
         }
     }
@@ -499,6 +514,14 @@ pub struct MenuLinks {
     /// VMGM page that lists this title ("back to main menu"); `None` = the disc has no main
     /// menu, back buttons are hidden.
     pub main_menu: Option<u32>,
+    /// First page of the bonus menu (`ML_GO_BONUS_MENU`); `None` = no bonus menu, the button is hidden.
+    pub bonus: Option<u32>,
+    /// First page of the episode menu (`ML_GO_SERIES_EPISODES_MENU`); `None` = the button is hidden.
+    pub episodes: Option<u32>,
+    /// dvdauthor entries of title 1's chapter / settings menus, for a main menu that has no item
+    /// buttons and links to them directly (single-video and series templates).
+    pub title1_chapters: Option<&'static str>,
+    pub title1_settings: Option<&'static str>,
 }
 
 fn upper(s: &str) -> String {
@@ -518,14 +541,19 @@ pub fn items_per_page(page: &Page) -> usize {
 
 /// Main menu page (1-based) on which title `index` (0-based) is listed.
 pub fn title_page_of(page: &Page, index: usize) -> u32 {
-    (index / count_loc(page, TITLE_ITEMS).max(1)) as u32 + 1
+    match count_loc(page, TITLE_ITEMS) {
+        0 => 1, // a page without item buttons (single-video template) is one page
+        per => (index / per) as u32 + 1,
+    }
 }
 
 /// Number of menu pages needed for `kind` on `page`.
 pub fn page_count(page: &Page, kind: &MenuKind) -> u32 {
     let pages = |items: usize, per: usize| items.div_ceil(per.max(1)).max(1);
     let n = match kind {
+        MenuKind::Titles(_) if count_loc(page, TITLE_ITEMS) == 0 => 1,
         MenuKind::Titles(t) => pages(t.len(), count_loc(page, TITLE_ITEMS)),
+        MenuKind::Bonus(t) => pages(t.len(), count_loc(page, &["ML_PLAY_BONUS"])),
         MenuKind::Root => 1,
         MenuKind::Chapters(c) => pages(c.len(), count_loc(page, &["ML_PLAY_CHAPTER"])),
         MenuKind::Settings { audio, subtitles } => pages(audio.len(), count_loc(page, &["ML_SET_AUD"]))
@@ -572,6 +600,17 @@ pub fn plan_buttons(
                     None => ButtonAction::PlayTitle(i as u32 + 1),
                 }
             }
+            (MenuKind::Bonus(titles), "ML_PLAY_BONUS") => {
+                let i = item(count_loc(page, &["ML_PLAY_BONUS"]));
+                let Some(t) = titles.get(i) else { continue };
+                label = Some(t.label.clone());
+                thumbnail = t.thumbnail.clone();
+                clip = t.clip.clone();
+                match t.titleset_menu {
+                    Some(ts) => ButtonAction::OpenTitleset(ts),
+                    None => ButtonAction::PlayTitle(i as u32 + 2), // title 1 is not a bonus
+                }
+            }
             (MenuKind::Chapters(chapters), "ML_PLAY_CHAPTER") => {
                 let i = item(count_loc(page, &["ML_PLAY_CHAPTER"]));
                 let Some(c) = chapters.get(i) else { continue };
@@ -606,7 +645,8 @@ pub fn plan_buttons(
             (_, "ML_PREV") if page_no > 1 => ButtonAction::Menu(menu_no - 1),
             (_, "ML_NEXT") if page_no < pages => ButtonAction::Menu(menu_no + 1),
             (_, "ML_PREV" | "ML_NEXT") => continue,
-            (MenuKind::Titles(_), "ML_GO_TITLE_MENU" | "ML_BACK") => continue,
+            // The episode menu (reached from the main menu) has a way back, the main menu itself not.
+            (MenuKind::Titles(_), "ML_GO_TITLE_MENU" | "ML_BACK") if links.main_menu.is_none() => continue,
             (_, "ML_GO_TITLE_MENU") | (MenuKind::Root, "ML_BACK") => match links.main_menu {
                 Some(p) => ButtonAction::MainMenu(p),
                 None => continue, // the disc has no main menu
@@ -617,6 +657,22 @@ pub fn plan_buttons(
                     Some(p) => ButtonAction::MainMenu(p),
                     None => continue,
                 },
+            },
+            (_, "ML_GO_BONUS_MENU") => match links.bonus {
+                Some(b) => ButtonAction::Menu(b),
+                None => continue,
+            },
+            (MenuKind::Titles(_), "ML_GO_CHAPTER_MENU") => match links.title1_chapters {
+                Some(e) => ButtonAction::TitlesetMenu(1, e),
+                None => continue,
+            },
+            (MenuKind::Titles(_), "ML_GO_SETTINGS_MENU") => match links.title1_settings {
+                Some(e) => ButtonAction::TitlesetMenu(1, e),
+                None => continue,
+            },
+            (_, "ML_GO_SERIES_EPISODES_MENU") => match links.episodes {
+                Some(e) => ButtonAction::Menu(e),
+                None => continue,
             },
             (_, "ML_GO_CHAPTER_MENU") => match links.chapters {
                 Some(c) => ButtonAction::Menu(c),
@@ -1022,15 +1078,12 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
             title_pre = format!("{title_pre} subtitle = 64;").trim().to_string();
         }
         if !title_pre.is_empty() {
-            write_commands(&mut x, "        ", "pre", &title_pre, &t.vob)?;
+            write_commands(&mut x, "        ", "pre", &title_pre, t.first_vob())?;
         }
-        let _ = writeln!(
-            x,
-            r#"        <vob file="{}" chapters="{}"/>"#,
-            xml_escape(&t.vob),
-            xml_escape(&t.chapters.join(","))
-        );
-        write_commands(&mut x, "        ", "post", &back, &t.vob)?;
+        for v in &t.vobs {
+            let _ = writeln!(x, r#"        <vob file="{}" chapters="{}"/>"#, xml_escape(&v.file), xml_escape(&v.chapters.join(",")));
+        }
+        write_commands(&mut x, "        ", "post", &back, t.first_vob())?;
         let _ = writeln!(x, "      </pgc>");
         let _ = writeln!(x, "    </titles>");
         let _ = writeln!(x, "  </titleset>");
@@ -1134,10 +1187,10 @@ mod tests {
     #[test]
     fn title_spec_cli() {
         let t = TitleSpec::parse_cli(r"C:\vids\Movie One.mpg@0,10:00,1:02:03.5").unwrap();
-        assert_eq!(t.vob, r"C:\vids\Movie One.mpg");
+        assert_eq!(t.first_vob(), r"C:\vids\Movie One.mpg");
         assert_eq!(t.label, "Movie One");
-        assert_eq!(t.chapters, vec!["0", "10:00", "1:02:03.5"]);
-        assert_eq!(TitleSpec::parse_cli("a.mpg").unwrap().chapters, vec!["0"]);
+        assert_eq!(t.vobs[0].chapters, vec!["0", "10:00", "1:02:03.5"]);
+        assert_eq!(TitleSpec::parse_cli("a.mpg").unwrap().vobs[0].chapters, vec!["0"]);
         assert!(matches!(TitleSpec::parse_cli("a.mpg@0,abc"), Err(AuthorError::InvalidChapter(_))));
         assert!(matches!(TitleSpec::parse_cli("a.mpg@1:75"), Err(AuthorError::InvalidChapter(_))));
     }
@@ -1146,7 +1199,7 @@ mod tests {
     fn chapter_marks() {
         assert_eq!(chapter_mark(0.0), "0:00:00");
         assert_eq!(chapter_mark(3723.5), "1:02:03.500");
-        let t = TitleSpec { chapters: vec![chapter_mark(0.0), chapter_mark(612.04)], ..TitleSpec::placeholder(1) };
+        let t = TitleSpec { vobs: vec![VobSpec { file: "a.mpg".into(), chapters: vec![chapter_mark(0.0), chapter_mark(612.04)] }], ..TitleSpec::placeholder(1) };
         assert!(t.validate().is_ok());
     }
 
@@ -1167,15 +1220,35 @@ mod tests {
     }
 
     #[test]
+    fn merged_title_has_one_pgc_with_several_vobs() {
+        let mut t = TitleSpec::placeholder(1);
+        t.vobs = vec![
+            VobSpec { file: "a.mpg".into(), chapters: vec!["0".into(), "5:00".into()] },
+            VobSpec { file: "b.mpg".into(), chapters: vec!["0".into()] },
+        ];
+        let layout = DvdLayout {
+            dest: "DVD".into(),
+            menu_aspect: "4:3".into(),
+            playback: PlaybackOptions::default(),
+            tv: TvStandard::Pal,
+            title_pre: None,
+            vmgm_menus: vec![],
+            titlesets: vec![TitlesetSpec { main_menu_page: 0, menus: vec![], title: t }],
+        };
+        let x = dvdauthor_xml(&layout).unwrap();
+        assert_eq!(x.matches("<pgc>").count(), 1);
+        assert!(x.contains(r#"<vob file="a.mpg" chapters="0,5:00"/>"#) && x.contains(r#"<vob file="b.mpg" chapters="0"/>"#), "{x}");
+    }
+
+    #[test]
     fn dvdauthor_xml_structure() {
         let mut b = button("b1", 0, 0, 10, 10);
         b.action = ButtonAction::OpenTitleset(1);
         let mut c = button("b1", 0, 0, 10, 10);
         c.action = ButtonAction::PlayChapter(2);
         let title = |vob: &str, aspect: &str| TitleSpec {
-            vob: vob.into(),
+            vobs: vec![VobSpec { file: vob.into(), chapters: vec!["0".into(), "5:00".into()] }],
             label: "A".into(),
-            chapters: vec!["0".into(), "5:00".into()],
             aspect: aspect.into(),
             audio_langs: vec![Some("de".into()), None],
             audio_formats: vec!["ac3".into(), "dts".into()],

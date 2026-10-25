@@ -90,8 +90,23 @@ pub fn title_playlist(menus: usize, t: u32) -> u32 {
 }
 
 /// Plans the movie objects. `layout` must have passed [`crate::layout::validate_bd`].
-pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits], opts: PlaybackOptions) -> BdNav {
-    let (m_count, t_count) = (layout.menus.len(), titles.len());
+///
+/// `titles` are the layout titles (one per menu entry); `groups` lists, per entry, the chapter
+/// count of each merged file. Every file is an HDMV title of its own (title numbers run over all
+/// files); a file that is not the last of its entry jumps on to the next one when it ends.
+pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits], opts: PlaybackOptions, groups: &[Vec<usize>]) -> BdNav {
+    let m_count = layout.menus.len();
+    let t_count: usize = groups.iter().map(Vec::len).sum();
+    // HDMV title number of the first file of each entry (index = entry number - 1).
+    let first_of: Vec<u32> = groups
+        .iter()
+        .scan(1u32, |next, g| {
+            let first = *next;
+            *next += g.len() as u32;
+            Some(first)
+        })
+        .collect();
+    let first_file = |entry: u32| first_of.get(entry as usize - 1).copied().unwrap_or(1);
     let menu_obj = |i: usize| 2 + i as u32;
     let title_obj = |t: usize| (2 + m_count + t - 1) as u32;
     let first_title_menu = layout.menus.iter().position(|m| m.role == MenuRole::Title).unwrap_or(0);
@@ -130,8 +145,20 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
             };
             let cmds = match action {
                 Action::PlayAll => go(hdmv::jump_title(1), 0, 1),
-                Action::PlayTitle { title } => go(hdmv::jump_title(*title as u32), 0, 0),
-                Action::PlayChapter { title, chapter } => go(hdmv::jump_title(*title as u32), chapter - 1, 0),
+                Action::PlayTitle { title } => go(hdmv::jump_title(first_file(*title as u32)), 0, 0),
+                Action::PlayChapter { title, chapter } => {
+                    // Chapters run across the merged files: find the file and its local mark.
+                    let mut local = chapter - 1;
+                    let mut file = 0;
+                    for (k, &n) in groups.get(*title as usize - 1).into_iter().flatten().enumerate() {
+                        if local < n as u32 {
+                            file = k;
+                            break;
+                        }
+                        local -= n as u32;
+                    }
+                    go(hdmv::jump_title(first_file(*title as u32) + file as u32), local, 0)
+                }
                 Action::Menu { menu } => vec![hdmv::jump_object(menu_obj(by_id(menu)))],
                 Action::SetAudio { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
@@ -178,36 +205,43 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
         };
         objects.push(MovieObject { commands: cmds, resume: false });
     }
-    // Titles: play from the mark in GPR1, then what the playback options say.
-    for t in 1..=t_count {
-        let pl = title_playlist(m_count, t as u32);
-        let next = if t < t_count {
-            Some(t + 1)
-        } else if opts.loop_playback {
-            Some(1)
-        } else {
-            None
-        };
-        let to_menu_idx = if !opts.return_to_title_menu { own_menu(t as u32) } else { None }.unwrap_or_else(|| main_menu(t as u32));
-        let to_menu = hdmv::jump_object(menu_obj(to_menu_idx));
-        let mut c = vec![hdmv::play_pl_at_mark(Op::Imm(pl), Op::Gpr(MARK)), hdmv::mov(MARK, Op::Imm(0))];
-        if opts.play_sequentially {
-            match next {
-                Some(n) => c.push(hdmv::jump_title(n as u32)),
-                None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), to_menu]),
+    // Titles (one per file): play from the mark in GPR1, then what the playback options say.
+    let g_count = groups.len();
+    let mut t = 0usize;
+    for (g, members) in groups.iter().enumerate() {
+        let g = g + 1;
+        for k in 0..members.len() {
+            t += 1;
+            let pl = title_playlist(m_count, t as u32);
+            let mut c = vec![hdmv::play_pl_at_mark(Op::Imm(pl), Op::Gpr(MARK)), hdmv::mov(MARK, Op::Imm(0))];
+            if k + 1 < members.len() {
+                c.push(hdmv::jump_title(t as u32 + 1));
+                objects.push(MovieObject { commands: c, resume: false });
+                continue;
             }
-        } else {
-            let single_end = if opts.loop_playback { hdmv::jump_title(t as u32) } else { to_menu };
-            match next {
-                Some(n) => c.extend([
-                    hdmv::compare(Op::Gpr(FLAG), Cmp::Eq, Op::Imm(1)),
-                    hdmv::jump_title(n as u32),
-                    single_end,
-                ]),
-                None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), single_end]),
+            let next = if g < g_count {
+                Some(first_file(g as u32 + 1))
+            } else if opts.loop_playback {
+                Some(first_file(1))
+            } else {
+                None
+            };
+            let to_menu_idx = if !opts.return_to_title_menu { own_menu(g as u32) } else { None }.unwrap_or_else(|| main_menu(g as u32));
+            let to_menu = hdmv::jump_object(menu_obj(to_menu_idx));
+            if opts.play_sequentially {
+                match next {
+                    Some(n) => c.push(hdmv::jump_title(n)),
+                    None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), to_menu]),
+                }
+            } else {
+                let single_end = if opts.loop_playback { hdmv::jump_title(first_file(g as u32)) } else { to_menu };
+                match next {
+                    Some(n) => c.extend([hdmv::compare(Op::Gpr(FLAG), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(n), single_end]),
+                    None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), single_end]),
+                }
             }
+            objects.push(MovieObject { commands: c, resume: false });
         }
-        objects.push(MovieObject { commands: c, resume: false });
     }
     BdNav { objects, title_objects: (1..=t_count).map(|t| title_obj(t) as u16).collect(), commands }
 }
@@ -637,7 +671,56 @@ mod tests {
         let l = layout();
         let t = [title(5), title(5)];
         let tr = [MenuTraits { moving: false, has_buttons: true }, MenuTraits { moving: true, has_buttons: true }];
-        plan(&l, &t, &tr, opts)
+        plan(&l, &t, &tr, opts, &[vec![5], vec![5]])
+    }
+
+    /// Entries `[a, b]` and `[c]`: three files, the second entry starts at title 3.
+    fn merged_nav(opts: PlaybackOptions) -> BdNav {
+        let l = layout();
+        let t = [title(5), title(5)];
+        let tr = [MenuTraits { moving: false, has_buttons: true }, MenuTraits { moving: true, has_buttons: true }];
+        plan(&l, &t, &tr, opts, &[vec![2, 3], vec![5]])
+    }
+
+    #[test]
+    fn merged_files_chain_and_resolve_chapters() {
+        let n = merged_nav(PlaybackOptions::default());
+        // 0 FP, 1 TM, 2/3 menus, 4/5/6 files.
+        assert_eq!(n.objects.len(), 7);
+        assert_eq!(n.title_objects, vec![4, 5, 6]);
+        // The menu entry of the second group plays its first (only) file, HDMV title 3.
+        assert_eq!(cmds(&n, 0, 0)[2], hdmv::jump_title(1));
+        assert_eq!(cmds(&n, 0, 1), &[hdmv::mov(1, Op::Imm(2)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(3)]);
+        // Member 1 ends with an unconditional jump to member 2 (mark reset as before).
+        assert_eq!(n.objects[4].commands[2..], [hdmv::jump_title(2)]);
+        // Last member of group 1: play-all continues with the first file of group 2.
+        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(3), hdmv::jump_object(2)]);
+        assert_eq!(n.objects[6].commands[2..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(2)]);
+
+        let n = merged_nav(PlaybackOptions { play_sequentially: true, ..PlaybackOptions::default() });
+        assert_eq!(n.objects[5].commands[2..], [hdmv::jump_title(3)]);
+        let n = merged_nav(PlaybackOptions { play_sequentially: true, loop_playback: true, ..PlaybackOptions::default() });
+        assert_eq!(n.objects[6].commands[2..], [hdmv::jump_title(1)], "the loop starts at the first file of entry 1");
+        // Single-title loop repeats the whole entry, not just its last file.
+        let n = merged_nav(PlaybackOptions { loop_playback: true, ..PlaybackOptions::default() });
+        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(3), hdmv::jump_title(1)]);
+    }
+
+    #[test]
+    fn chapters_cross_member_boundaries() {
+        let mut l = layout();
+        l.menus[0].elements = vec![
+            button(0.0, 0.0, Action::PlayChapter { title: 1, chapter: 2 }),
+            button(0.0, 0.0, Action::PlayChapter { title: 1, chapter: 3 }),
+            button(0.0, 0.0, Action::PlayChapter { title: 1, chapter: 5 }),
+        ];
+        let t = [title(5), title(5)];
+        let tr = [MenuTraits { moving: false, has_buttons: true }, MenuTraits { moving: true, has_buttons: true }];
+        let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![2, 3], vec![5]]);
+        let go = |mark, title| [hdmv::mov(1, Op::Imm(mark)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(title)];
+        assert_eq!(cmds(&n, 0, 0), &go(1, 1), "chapter 2 is the last mark of file 1");
+        assert_eq!(cmds(&n, 0, 1), &go(0, 2), "chapter 3 is the first mark of file 2");
+        assert_eq!(cmds(&n, 0, 2), &go(2, 2));
     }
 
     fn cmds(n: &BdNav, menu: usize, el: usize) -> &[Command] {
@@ -734,7 +817,7 @@ mod tests {
         crate::layout::validate_bd(&l, &t, frame).unwrap();
         let tr = traits(&l, &t, frame);
         assert_eq!(tr[0], MenuTraits { moving: false, has_buttons: true });
-        let nav = plan(&l, &t, &tr, PlaybackOptions::default());
+        let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
         let dir = std::env::temp_dir().join(format!("bdmenu-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };

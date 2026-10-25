@@ -22,10 +22,10 @@ use tokio::task::JoinSet;
 
 use crate::author::{
     self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, Resolution, TvStandard, DvdLayout, MenuKind, MenuLinks, MenuSpec, TitleEntry,
-    TitleSpec, TitlesetSpec, MAX_CHAPTERS, MAX_TITLES,
+    TitleSpec, TitlesetSpec, VobSpec, MAX_CHAPTERS, MAX_TITLES,
 };
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
-use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio};
+use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
 use crate::probe::{self, language_matches, language_name, MediaInfo, ProbeError, SubtitleKind};
 use crate::template::{Page, Template};
@@ -348,6 +348,8 @@ pub struct BuildOptions {
     pub process_priority: ProcessPriority,
     /// How audio tracks are written (copy compliant AC-3/DTS, always AC-3, LPCM).
     pub audio_mode: AudioMode,
+    /// Scaling method, filter and deinterlacing ("Videobearbeitung").
+    pub video: VideoProcessing,
     /// EBU R128 loudness normalisation of every audio track (forces a re-encode).
     pub loudnorm: bool,
     /// Tracks in this language become the first (default) audio stream.
@@ -405,6 +407,59 @@ pub struct StreamSelection {
     pub end_secs: Option<f64>,
     /// Picture edges to cut away (source pixels).
     pub crop: Option<probe::Crop>,
+    /// Play this input together with the previous one behind a single menu entry.
+    #[serde(default)]
+    pub merge_with_previous: bool,
+}
+
+/// Index ranges of the menu entries: an input plus all directly following inputs that are merged
+/// with their predecessor. The flag of the first input is ignored.
+pub fn groups(selections: &[StreamSelection], n: usize) -> Vec<std::ops::Range<usize>> {
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    for i in 0..n {
+        let merged = i > 0 && selections.get(i).is_some_and(|s| s.merge_with_previous);
+        match out.last_mut() {
+            Some(last) if merged => last.end = i + 1,
+            _ => out.push(i..i + 1),
+        }
+    }
+    out
+}
+
+/// One merged member: label, audio track count, subtitle track count.
+pub(crate) type MemberShape<'a> = (&'a str, usize, usize);
+
+/// Merged files play as one title, so they need the same audio and subtitle track layout.
+pub(crate) fn check_group_shapes(members: &[MemberShape]) -> Result<(), BuildError> {
+    let Some(&(first, audio, subs)) = members.first() else { return Ok(()) };
+    for &(label, a, s) in &members[1..] {
+        if a != audio {
+            return Err(BuildError::Template(format!(
+                "{label} lässt sich nicht mit {first} zusammenführen: {a} statt {audio} Tonspuren (Spuren in den Titeleinstellungen angleichen)"
+            )));
+        }
+        if s != subs {
+            return Err(BuildError::Template(format!(
+                "{label} lässt sich nicht mit {first} zusammenführen: {s} statt {subs} Untertitelspuren (Spuren in den Titeleinstellungen angleichen)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Makes the members of a merged DVD title compatible: all use the first member's aspect and,
+/// if the audio formats differ at some track, all are re-encoded to AC-3.
+fn harmonize_group(members: &mut [TitlePlan]) {
+    let Some(first) = members.first() else { return };
+    let formats = |m: &TitlePlan| m.audio_outs().iter().map(|o| o.dvdauthor_format()).collect::<Vec<_>>();
+    let (aspect, first_formats) = (first.aspect, formats(first));
+    let same_audio = members.iter().all(|m| formats(m) == first_formats);
+    for m in members.iter_mut() {
+        m.aspect = aspect;
+        if !same_audio {
+            m.audio_mode = AudioMode::Ac3;
+        }
+    }
 }
 
 /// Coarse build stages, for progress displays.
@@ -547,6 +602,7 @@ struct TitlePlan {
     chapter_titles: Vec<Option<String>>,
     aspect: Aspect,
     audio_mode: AudioMode,
+    video: VideoProcessing,
     loudnorm: bool,
     stem: String,
     thumbnail: Option<PathBuf>,
@@ -562,8 +618,9 @@ impl TitlePlan {
     fn clip_at(&self, start_secs: f64) -> ClipSource {
         ClipSource {
             path: self.info.path.clone(),
-            // Positions inside the title; the file is read from the trimmed start on.
-            start_secs: self.info.trim_start() + start_secs.min((self.info.duration_secs - 1.0).max(0.0)),
+            // Positions inside the title; the file is read from the trimmed start on. Clamped so the clip never
+            // loops: `-stream_loop` at the end of a 4K file takes minutes (shortcut: assumes the default menu length).
+            start_secs: self.info.trim_start() + start_secs.min((self.info.duration_secs - menu::DEFAULT_MOTION_SECS).max(0.0)),
             has_audio: !self.info.audio.is_empty(),
         }
     }
@@ -831,6 +888,7 @@ async fn encode_title(
         resolution,
         hwaccel,
         audio_mode: t.audio_mode,
+        video: t.video,
         audio_filters,
     };
     let frames_per_run = t.info.duration_secs * output_fps(tv);
@@ -1039,12 +1097,27 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
             audio_mode: opts.audio_mode,
+            video: opts.video,
             loudnorm: opts.loudnorm,
             stem: format!("title_{:02}", i + 1),
             thumbnail: None,
             chapter_thumbs: Vec::new(),
             info,
         });
+    }
+
+    let groups = groups(&opts.selections, titles.len());
+    for g in &groups {
+        let shapes: Vec<MemberShape> = titles[g.clone()].iter().map(|t| (t.label.as_str(), t.audio.len(), t.subtitles.len())).collect();
+        check_group_shapes(&shapes)?;
+        let chapters: usize = titles[g.clone()].iter().map(|t| t.chapters.len()).sum();
+        if chapters > MAX_CHAPTERS {
+            return Err(BuildError::Template(format!(
+                "{}: {chapters} Kapitel nach dem Zusammenführen, eine DVD erlaubt {MAX_CHAPTERS} pro Titel",
+                titles[g.start].label
+            )));
+        }
+        harmonize_group(&mut titles[g.clone()]);
     }
 
     let tools = Arc::new(tools.with_priority(opts.process_priority));
@@ -1064,15 +1137,18 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         log(Event::Phase(BuildPhase::Menus));
         log(Event::Eta(Eta::new(JobPhase::Menus, None, None, None)));
         log(Event::Step(format!("Eigenes Menü-Layout: {} Menü(s)", layout.menus.len())));
-        let layout_titles: Vec<crate::layout::LayoutTitle> = titles
+        let layout_titles: Vec<crate::layout::LayoutTitle> = groups
             .iter()
-            .map(|t| crate::layout::LayoutTitle {
+            .map(|g| {
+                let (members, t) = (&titles[g.clone()], &titles[g.start]);
+                crate::layout::LayoutTitle {
                 label: t.label.clone(),
-                chapters: t.chapters.len(),
-                duration_secs: t.info.duration_secs,
+                chapters: members.iter().map(|m| m.chapters.len()).sum(),
+                duration_secs: members.iter().map(|m| m.info.duration_secs).sum(),
                 clip: t.clip(),
                 audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
                 subtitle_sources: t.subtitles.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+                }
             })
             .collect();
         let secs = opts.motion_duration.unwrap_or(crate::layout::DEFAULT_MENU_SECS);
@@ -1172,7 +1248,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         let ui = opts.ui_lang;
         let chapter_word = if ui == UiLang::De { "Kapitel" } else { "Chapter" };
         // A single video can do without the main (title) menu.
-        let has_main_menu = !(opts.no_title_menu_for_single_title && titles.len() == 1);
+        let has_main_menu = !(opts.no_title_menu_for_single_title && groups.len() == 1);
         let settings_word = if ui == UiLang::De { "Einstellungen" } else { "Settings" };
         // ConvertX default: the project is named after the first video.
         let main_heading = opts
@@ -1194,19 +1270,21 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         };
         let titles_have_sound = opts.motion_audio != MenuAudio::Silence;
         // VMGM page that lists each title (back buttons and the end of playback return there).
-        let main_pages: Vec<u32> = (0..titles.len()).map(|i| author::title_page_of(title_page, i)).collect();
+        let main_pages: Vec<u32> = (0..groups.len()).map(|i| author::title_page_of(title_page, i)).collect();
 
-        let render_titleset = |(i, t): (usize, &TitlePlan)| -> Result<Vec<RenderedMenu>, MenuError> {
+        let render_titleset = |(i, g): (usize, &std::ops::Range<usize>)| -> Result<Vec<RenderedMenu>, MenuError> {
+            let (members, t) = (&titles[g.clone()], &titles[g.start]);
             let title_clip = t.clip();
             let title_audio = (titles_have_sound && !t.info.audio.is_empty()).then(|| t.clip());
-            let chapters: Vec<ChapterEntry> = t
-                .chapters
+            // Chapters run across the merged files; every file starts a new chapter.
+            let chapters: Vec<ChapterEntry> = members
                 .iter()
+                .flat_map(|m| m.chapters.iter().enumerate().map(move |(n, &start)| (m, n, start)))
                 .enumerate()
-                .map(|(n, &start)| ChapterEntry {
-                    label: t.chapter_titles[n].clone().unwrap_or_else(|| opts.chapters.label(n + 1, ui)),
-                    thumbnail: t.chapter_thumbs.get(n).cloned().flatten(),
-                    clip: motion.then(|| t.clip_at(start)),
+                .map(|(k, (m, n, start))| ChapterEntry {
+                    label: m.chapter_titles[n].clone().unwrap_or_else(|| opts.chapters.label(k + 1, ui)),
+                    thumbnail: m.chapter_thumbs.get(n).cloned().flatten(),
+                    clip: motion.then(|| m.clip_at(start)),
                 })
                 .collect();
             let audio = t.audio_labels();
@@ -1226,7 +1304,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             let root_no = root_page.map(|_| alloc(1));
             let chap_no = chap_page.filter(|_| need_chapters).map(|p| alloc(author::page_count(p, &chap_kind)));
             let set_no = set_page.filter(|_| need_settings).map(|p| alloc(author::page_count(p, &set_kind)));
-            let links = MenuLinks { first: 0, root: root_no, chapters: chap_no, settings: set_no, main_menu: has_main_menu.then(|| main_pages[i]) };
+            let links = MenuLinks { first: 0, root: root_no, chapters: chap_no, settings: set_no, main_menu: has_main_menu.then(|| main_pages[i]), bonus: None, episodes: None, title1_chapters: None, title1_settings: None };
 
             let mut rendered = Vec::new();
             let jobs: [(Option<&Page>, Option<u32>, MenuKind, Option<&PathBuf>, String, &str); 3] = [
@@ -1267,15 +1345,16 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             }
             Ok(rendered)
         };
-        let ts_menus: Vec<Vec<RenderedMenu>> = titles.par_iter().enumerate().map(render_titleset).collect::<Result<_, _>>()?;
+        let ts_menus: Vec<Vec<RenderedMenu>> = groups.par_iter().enumerate().map(render_titleset).collect::<Result<_, _>>()?;
         for w in ts_menus.iter().flatten().flat_map(|m| &m.warnings) {
             warn(log, w.clone());
         }
         let has_ts_menus: Vec<bool> = ts_menus.iter().map(|m| !m.is_empty()).collect();
 
-        let entries: Vec<TitleEntry> = titles
+        let entries: Vec<TitleEntry> = groups
             .iter()
             .enumerate()
+            .map(|(i, g)| (i, &titles[g.start]))
             .map(|(i, t)| TitleEntry {
                 label: t.label.clone(),
                 thumbnail: t.thumbnail.clone(),
@@ -1284,25 +1363,94 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             })
             .collect();
         let vmgm = if has_main_menu {
-            menu::render_menu(
+            // Templates whose main menu has no item buttons: it plays title 1 and shows it in its video
+            // window. Series templates list all titles in an episode menu; "one main video" templates
+            // put the titles after the first into a bonus menu.
+            let no_items = author::count_loc(title_page, author::TITLE_ITEMS) == 0;
+            let episodes_page = page_by_style(&main, "MNUS_SERIES_EPISODES").filter(|p| no_items && author::count_loc(p, author::TITLE_ITEMS) > 0);
+            let bonus_page = page_by_style(&main, "MNUS_BONUS")
+                .filter(|p| episodes_page.is_none() && entries.len() > 1 && no_items && author::count_loc(p, &["ML_PLAY_BONUS"]) > 0);
+            let main_total = author::page_count(title_page, &MenuKind::Titles(&entries));
+            // Title 1's chapter / settings menus, reachable straight from an item-less main menu.
+            let entry_of = |prefix: &str| -> Option<&'static str> {
+                let spec = ts_menus.first()?.iter().flat_map(|m| &m.pages).map(|(s, _)| s).find(|s| s.vob.starts_with(prefix) && s.entry.is_some())?;
+                ["root", "ptt", "audio"].into_iter().find(|e| spec.entry.as_deref() == Some(e))
+            };
+            let mut main_menu = menu::render_menu(
                 &main,
                 title_page,
                 &MenuKind::Titles(&entries),
-                MenuLinks { first: 1, ..MenuLinks::default() },
+                MenuLinks {
+                    first: 1,
+                    bonus: bonus_page.map(|_| main_total + 1),
+                    episodes: episodes_page.map(|_| main_total + 1),
+                    title1_chapters: entry_of("ts01_chap").filter(|_| no_items),
+                    title1_settings: entry_of("ts01_set").filter(|_| no_items),
+                    ..MenuLinks::default()
+                },
                 Some("title"),
                 "vmgm",
                 &work,
                 &RenderOptions {
                     heading: Some(&main_heading),
+                    background_video: titles[0].thumbnail.as_deref(),
                     ui_lang: ui,
                     motion,
+                    background_clip: entries[0].clip.as_ref().filter(|_| motion),
                     motion_duration: opts.motion_duration,
                     text_overflow: opts.text_overflow,
                     tv,
                     menu_audio: main_menu_audio.as_ref(),
                     ..RenderOptions::still(&main_dir)
                 },
-            )?
+            )?;
+            if let Some(page) = episodes_page {
+                let episodes = menu::render_menu(
+                    &main,
+                    page,
+                    &MenuKind::Titles(&entries),
+                    MenuLinks { first: main_total + 1, main_menu: Some(1), ..MenuLinks::default() },
+                    None,
+                    "episodes",
+                    &work,
+                    &RenderOptions {
+                        heading: Some(if ui == UiLang::De { "Episoden" } else { "Episodes" }),
+                        ui_lang: ui,
+                        motion,
+                        motion_duration: opts.motion_duration,
+                        text_overflow: opts.text_overflow,
+                        tv,
+                        menu_audio: main_menu_audio.as_ref(),
+                        ..RenderOptions::still(&main_dir)
+                    },
+                )?;
+                main_menu.pages.extend(episodes.pages);
+                main_menu.warnings.extend(episodes.warnings);
+            }
+            if let Some(page) = bonus_page {
+                let bonus = menu::render_menu(
+                    &main,
+                    page,
+                    &MenuKind::Bonus(&entries[1..]),
+                    MenuLinks { first: main_total + 1, main_menu: Some(1), ..MenuLinks::default() },
+                    None,
+                    "bonus",
+                    &work,
+                    &RenderOptions {
+                        heading: Some("Bonus"),
+                        ui_lang: ui,
+                        motion,
+                        motion_duration: opts.motion_duration,
+                        text_overflow: opts.text_overflow,
+                        tv,
+                        menu_audio: main_menu_audio.as_ref(),
+                        ..RenderOptions::still(&main_dir)
+                    },
+                )?;
+                main_menu.pages.extend(bonus.pages);
+                main_menu.warnings.extend(bonus.warnings);
+            }
+            main_menu
     } else {
             log(Event::Step("Nur ein Video: kein Titelmenü".into()));
             RenderedMenu { pages: vec![], warnings: vec![] }
@@ -1539,17 +1687,21 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
 
     // 8. dvdauthor --------------------------------------------------------------------------------
     let MenuStage { vmgm_menus, ts_menus, main_pages, title_pre, .. } = stage;
-    let titlesets = titles
+    let titlesets = groups
         .iter()
         .zip(ts_menus)
         .zip(&main_pages)
-        .map(|((t, menus), &main_menu_page)| TitlesetSpec {
+        .map(|((g, menus), &main_menu_page)| (&titles[g.clone()], menus, main_menu_page))
+        .map(|(members, menus, main_menu_page)| (&members[0], members, menus, main_menu_page))
+        .map(|(t, members, menus, main_menu_page)| TitlesetSpec {
             main_menu_page,
             menus,
             title: TitleSpec {
-                vob: format!("{}.mpg", t.stem),
+                vobs: members
+                    .iter()
+                    .map(|m| VobSpec { file: format!("{}.mpg", m.stem), chapters: m.chapters.iter().map(|&c| chapter_mark(c)).collect() })
+                    .collect(),
                 label: t.label.clone(),
-                chapters: t.chapters.iter().map(|&c| chapter_mark(c)).collect(),
                 aspect: t.aspect.as_str().into(),
                 audio_formats: t.audio_outs().iter().map(|o| o.dvdauthor_format().to_string()).collect(),
                 audio_langs: t
@@ -1661,6 +1813,27 @@ mod tests {
                 .collect(),
             trim: None,
         }
+    }
+
+    #[test]
+    fn merge_groups() {
+        let sel = |flags: &[bool]| -> Vec<StreamSelection> {
+            flags.iter().map(|&m| StreamSelection { merge_with_previous: m, ..Default::default() }).collect()
+        };
+        assert_eq!(groups(&[], 3), vec![0..1, 1..2, 2..3], "missing selections never merge");
+        assert_eq!(groups(&sel(&[true, false, false]), 3), vec![0..1, 1..2, 2..3], "flag on the first input is ignored");
+        assert_eq!(groups(&sel(&[false, true, false]), 3), vec![0..2, 2..3]);
+        assert_eq!(groups(&sel(&[false, false, true]), 3), vec![0..1, 1..3]);
+        assert_eq!(groups(&sel(&[false, true, true]), 3), vec![0..3]);
+        assert!(groups(&sel(&[]), 0).is_empty());
+    }
+
+    #[test]
+    fn merged_members_need_equal_tracks() {
+        assert!(check_group_shapes(&[("a", 2, 1), ("b", 2, 1)]).is_ok());
+        let e = check_group_shapes(&[("a", 2, 1), ("b", 1, 1)]).unwrap_err().to_string();
+        assert!(e.contains("b lässt sich nicht mit a zusammenführen") && e.contains("Tonspuren"), "{e}");
+        assert!(check_group_shapes(&[("a", 1, 0), ("b", 1, 2)]).unwrap_err().to_string().contains("Untertitel"));
     }
 
     #[test]

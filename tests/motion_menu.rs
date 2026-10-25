@@ -39,7 +39,7 @@ fn chapters(n: usize) -> Vec<ChapterEntry> {
 fn render_chapter_page(t: &Template, motion: bool, chapters: &[ChapterEntry]) -> menu::RenderedPage {
     let page = page_by_style(t, "MNUS_CHAPTER").expect("Open Style has a chapter page");
     let kind = MenuKind::Chapters(chapters);
-    let links = MenuLinks { first: 1, root: None, chapters: Some(1), settings: None, main_menu: None };
+    let links = MenuLinks { first: 1, root: None, chapters: Some(1), settings: None, main_menu: None, bonus: None, episodes: None, title1_chapters: None, title1_settings: None };
     let (buttons, _) = author::plan_buttons(page, &kind, 1, links, PAL_WIDTH, PAL_HEIGHT).unwrap();
     let opts = RenderOptions { motion, ui_lang: UiLang::De, ..RenderOptions::still(Path::new(DIR)) };
     menu::render_page(t, page, &buttons, &opts).unwrap()
@@ -93,7 +93,7 @@ fn chapter_pages_start_sound_at_their_first_chapter() {
     let page = page_by_style(&t, "MNUS_CHAPTER").unwrap();
     let chapters = chapters(8); // 6 per page -> page 2 starts with chapter 7 (360 s)
     let kind = MenuKind::Chapters(&chapters);
-    let links = MenuLinks { first: 1, root: None, chapters: Some(1), settings: None, main_menu: None };
+    let links = MenuLinks { first: 1, root: None, chapters: Some(1), settings: None, main_menu: None, bonus: None, episodes: None, title1_chapters: None, title1_settings: None };
     let sound = clip(30.0);
     let opts = RenderOptions {
         motion: true,

@@ -139,7 +139,7 @@ fn all_templates_become_valid_blu_ray_menus() {
                 let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect)
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
                 validate_bd(&layout, &titles, frame).unwrap_or_else(|e| panic!("{name}: {e}"));
-                let nav = bd_menu::plan(&layout, &titles, &bd_menu::traits(&layout, &titles, frame), PlaybackOptions::default());
+                let nav = bd_menu::plan(&layout, &titles, &bd_menu::traits(&layout, &titles, frame), PlaybackOptions::default(), &titles.iter().map(|t| vec![t.chapters]).collect::<Vec<_>>());
                 let dir = out.join(format!("{count}"));
                 std::fs::create_dir_all(&dir).unwrap();
                 let pages = bd_menu::render_pages(&layout, &titles, frame, rate, &nav, &dir, 10.0)

@@ -65,6 +65,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         fast: false,
         tv: TvStandard::Pal,
         resolution: Default::default(),
+        video: Default::default(),
         hwaccel: None,
         audio_mode: Default::default(),
         audio_filters: vec![],

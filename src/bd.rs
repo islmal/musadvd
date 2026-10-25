@@ -13,6 +13,7 @@
 //! same BDMV structure on DVD media with AVCHD limits. The DVD path in [`crate::dvd`] is
 //! untouched; [`crate::dvd::build_dvd`] dispatches here for BD and AVCHD discs.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ use crate::dvd::{
     run_limited, safe_folder_name, select_streams, unique_dir, AtPath, BuildError, BuildOptions, BuildPhase, BuildReport,
     Event, Job, JobEvent, JobProgress, TitleLoad, TitleReport, WORK_DIR,
 };
-use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, EncodePhase, SILENCE_OUT};
+use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, EncodePhase, VideoProcessing, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
 use crate::probe::{self, language_name, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
@@ -137,6 +138,7 @@ struct BdTitle {
     stem: String,
     rate: BdRate,
     audio_mode: AudioMode,
+    video: VideoProcessing,
     audio_target: AudioTarget,
     loudnorm: bool,
 }
@@ -235,6 +237,7 @@ async fn encode_bd_title(
         hwaccel,
         encoder,
         audio_mode: t.audio_mode,
+        video: t.video,
         audio_target: t.audio_target,
         audio_filters,
         maxrate_kbps,
@@ -309,29 +312,39 @@ fn write_navigation(bdmv: &Path, nav: &BdNav) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Source time of each chapter's sample frame (3 s in, like the DVD chapter thumbnails).
-fn chapter_samples(titles: &[BdTitle]) -> Vec<Vec<f64>> {
-    titles
+/// Source time of each chapter's sample frame (3 s in, like the DVD chapter thumbnails), per
+/// menu entry; merged files contribute their chapters one after the other.
+fn chapter_samples(titles: &[BdTitle], groups: &[Range<usize>]) -> Vec<Vec<f64>> {
+    groups
         .iter()
-        .map(|t| t.chapters.iter().map(|&c| t.info.trim_start() + (c + 3.0).min((t.info.duration_secs - 0.5).max(0.0))).collect())
+        .map(|g| {
+            titles[g.clone()]
+                .iter()
+                .flat_map(|t| t.chapters.iter().map(|&c| t.info.trim_start() + (c + 3.0).min((t.info.duration_secs - 0.5).max(0.0))))
+                .collect()
+        })
         .collect()
 }
 
-/// What the menu layout may refer to: the selected titles.
-fn layout_titles(titles: &[BdTitle]) -> Vec<crate::layout::LayoutTitle> {
-    titles
+/// What the menu layout may refer to: one entry per group of merged titles (label, clip and
+/// tracks of the first file; chapters and duration summed up).
+fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>]) -> Vec<crate::layout::LayoutTitle> {
+    groups
         .iter()
-        .map(|t| crate::layout::LayoutTitle {
-            label: t.label.clone(),
-            chapters: t.chapters.len(),
-            duration_secs: t.info.duration_secs,
-            clip: ClipSource {
-                path: t.info.path.clone(),
-                start_secs: t.info.trim_start() + (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
-                has_audio: !t.info.audio.is_empty(),
-            },
-            audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
-            subtitle_sources: t.subs.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+        .map(|g| {
+            let (members, t) = (&titles[g.clone()], &titles[g.start]);
+            crate::layout::LayoutTitle {
+                label: t.label.clone(),
+                chapters: members.iter().map(|m| m.chapters.len()).sum(),
+                duration_secs: members.iter().map(|m| m.info.duration_secs).sum(),
+                clip: ClipSource {
+                    path: t.info.path.clone(),
+                    start_secs: t.info.trim_start() + (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
+                    has_audio: !t.info.audio.is_empty(),
+                },
+                audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
+                subtitle_sources: t.subs.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+            }
         })
         .collect()
 }
@@ -343,6 +356,7 @@ async fn build_menus(
     tools: &Arc<Toolchain>,
     layout: &crate::layout::CustomLayout,
     titles: &[BdTitle],
+    groups: &[Range<usize>],
     opts: &BuildOptions,
     rate: BdRate,
     work: &Path,
@@ -353,10 +367,11 @@ async fn build_menus(
     let template = |e: crate::layout::LayoutError| BuildError::Template(e.to_string());
     let (fw, fh) = opts.resolution.frame_size(TvStandard::Pal);
     let frame = MenuFrame::square(fw, fh);
-    let layout_titles = layout_titles(titles);
+    let layout_titles = layout_titles(titles, groups);
     crate::layout::validate_bd(layout, &layout_titles, frame).map_err(template)?;
     let traits = bd_menu::traits(layout, &layout_titles, frame);
-    let nav = bd_menu::plan(layout, &layout_titles, &traits, opts.playback);
+    let members: Vec<Vec<usize>> = groups.iter().map(|g| titles[g.clone()].iter().map(|t| t.chapters.len()).collect()).collect();
+    let nav = bd_menu::plan(layout, &layout_titles, &traits, opts.playback, &members);
     let secs = opts.motion_duration.unwrap_or(crate::layout::DEFAULT_MENU_SECS);
     let pages = bd_menu::render_pages(layout, &layout_titles, frame, rate, &nav, work, secs).map_err(template)?;
     let warnings: Vec<String> = pages.iter().flat_map(|p| p.warnings.clone()).collect();
@@ -512,10 +527,16 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             stem: format!("title_{:02}", i + 1),
             rate: bd_frame_rate(&[fps], opts.tv_standard, opts.resolution),
             audio_mode: opts.audio_mode,
+            video: opts.video,
             audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
             loudnorm: opts.loudnorm,
             info,
         });
+    }
+    let groups = crate::dvd::groups(&opts.selections, titles.len());
+    for g in &groups {
+        let shapes: Vec<crate::dvd::MemberShape> = titles[g.clone()].iter().map(|t| (t.label.as_str(), t.audio.len(), t.subs.len())).collect();
+        crate::dvd::check_group_shapes(&shapes)?;
     }
     let tools = Arc::new(tools.with_priority(opts.process_priority));
     let heavy_jobs = opts.parallel_jobs.unwrap_or_else(default_jobs).max(1);
@@ -583,7 +604,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 None
             } else {
                 let aspect = if opts.aspect_policy == crate::dvd::AspectPolicy::Standard { Aspect::Standard } else { Aspect::Wide };
-                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles), &vec![None; titles.len()], &chapter_samples(&titles), aspect)
+                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles, &groups), &vec![None; groups.len()], &chapter_samples(&titles, &groups), aspect)
                     .map_err(|e| BuildError::Template(e.to_string()))?;
                 for w in notes {
                     warn(log, w);
@@ -598,7 +619,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let menus = match menu_layout {
         Some(layout) => {
             log(Event::Eta(Eta::new(JobPhase::Menus, None, None, None)));
-            let stage = build_menus(&tools, layout, &titles, opts, menu_rate, &work, heavy_jobs, log).await?;
+            let stage = build_menus(&tools, layout, &titles, &groups, opts, menu_rate, &work, heavy_jobs, log).await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
             }
