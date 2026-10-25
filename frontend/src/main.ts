@@ -1,12 +1,12 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openSettings } from "./settings";
 import { openBurner } from "./burn";
-import { renderEditTab } from "./edit";
+import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
 import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   checkLayout,
   calculateProject,
@@ -90,6 +90,8 @@ const state = {
   calc: null as CalculationResult | null,
   probing: 0,
   converting: false,
+  /** One-step undo of "In separate Titel aufteilen". */
+  splitUndo: null as { original: Title; ids: number[]; index: number } | null,
 };
 let nextId = 1;
 
@@ -280,6 +282,7 @@ function status(text: string, kind: "info" | "error" = "info") {
 // ---------------------------------------------------------------------------
 
 async function addFiles(paths: string[]) {
+  state.splitUndo = null;
   const videos = paths.filter((p) => VIDEO_EXTENSIONS.includes(p.split(".").pop()?.toLowerCase() ?? ""));
   if (videos.length === 0) {
     status("Keine unterstützten Videodateien.", "error");
@@ -325,6 +328,7 @@ async function addViaDialog() {
 }
 
 function removeSelected() {
+  state.splitUndo = null;
   const i = state.titles.findIndex((t) => t.id === state.selected);
   if (i < 0) return;
   state.titles.splice(i, 1);
@@ -334,10 +338,57 @@ function removeSelected() {
 }
 
 function moveSelected(delta: number) {
+  state.splitUndo = null;
   const i = state.titles.findIndex((t) => t.id === state.selected);
   const j = i + delta;
   if (i < 0 || j < 0 || j >= state.titles.length) return;
   [state.titles[i], state.titles[j]] = [state.titles[j], state.titles[i]];
+  renderAll();
+  scheduleCalc();
+}
+
+/** Index of the split titles in `state.titles` while the undo is still valid, else -1. */
+function splitUndoIndex(): number {
+  const u = state.splitUndo;
+  if (!u) return -1;
+  const ok = u.ids.every((id, k) => state.titles[u.index + k]?.id === id);
+  return ok ? u.index : -1;
+}
+
+/** One title becomes one title per chapter segment: same source, different trim (nothing is cut on disk). */
+async function splitByChapters(t: Title) {
+  const dur = t.meta.durationSecs;
+  const segs = chapterSegments(t.chapters, t.trimStart ?? 0, t.trimEnd ?? dur);
+  const i = state.titles.findIndex((x) => x.id === t.id);
+  if (segs.length < 2 || i < 0) return;
+  const text = `„${t.label}“ in ${segs.length} Titel aufteilen? Mit „Aufteilen rückgängig“ lässt sich das wieder zusammenführen.`;
+  if (!(await ask(text, { title: "Titel aufteilen", kind: "info" }))) return;
+  const news: Title[] = segs.map((s, k) => ({
+    id: nextId++,
+    meta: t.meta,
+    audio: new Set(t.audio),
+    subs: new Set(t.subs),
+    label: t.meta.chapters.find((c) => Math.abs(c.startSecs - s.chapter) < 0.5)?.title || `${t.label} – Kapitel ${k + 1}`,
+    chapters: [0],
+    trimStart: s.start > 0.05 ? s.start : null,
+    trimEnd: s.end < dur - 0.05 ? s.end : null,
+    crop: t.crop ? { ...t.crop } : null,
+  }));
+  state.titles.splice(i, 1, ...news);
+  state.splitUndo = { original: t, ids: news.map((n) => n.id), index: i };
+  state.selected = news[0].id;
+  renderAll();
+  scheduleCalc();
+  status(`In ${news.length} Titel aufgeteilt.`);
+}
+
+function undoSplit() {
+  const i = splitUndoIndex();
+  const u = state.splitUndo;
+  if (!u || i < 0) return;
+  state.titles.splice(i, u.ids.length, u.original);
+  state.selected = u.original.id;
+  state.splitUndo = null;
   renderAll();
   scheduleCalc();
 }
@@ -494,6 +545,7 @@ function renderFooter() {
         : "";
   }
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
+  ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +564,7 @@ function renderTabs() {
     b.setAttribute("aria-selected", String(active));
   });
   const body = $("tab-body");
+  void disposePlayer();
   body.replaceChildren();
   const t = selectedTitle();
 
@@ -563,6 +616,14 @@ const editHooks = {
     return dar >= (4 / 3 + 16 / 9) / 2 ? 16 / 9 : 4 / 3;
   },
   status,
+  audioIndex: () => {
+    const t = selectedTitle();
+    return t?.meta.audio.find((a) => t.audio.has(a.index))?.index ?? null;
+  },
+  split: () => {
+    const t = selectedTitle();
+    if (t) void splitByChapters(t);
+  },
 };
 
 function renderAudioTab(t: Title) {
@@ -1275,6 +1336,7 @@ async function init() {
   $("btn-add").addEventListener("click", () => void addViaDialog());
   $("dropzone").addEventListener("click", () => void addViaDialog());
   $("btn-remove").addEventListener("click", removeSelected);
+  $("btn-split-undo").addEventListener("click", undoSplit);
   $("btn-up").addEventListener("click", () => moveSelected(-1));
   $("btn-down").addEventListener("click", () => moveSelected(1));
   document.addEventListener("keydown", (e) => {

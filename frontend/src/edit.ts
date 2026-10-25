@@ -1,6 +1,7 @@
 // Tab "Schnitt & Bild": timeline trimmer (start/end of the used section) and crop inspector
-// (black bars cut away, with automatic detection and a preview of the output frame).
-import { detectCrop, sourceFrame, titleFrame, type Crop, type VideoMetadata } from "./api";
+// (black bars cut away, with automatic detection and a preview of the output frame). The trimmer has a
+// live player (ffmpeg fMP4 stream from `preview.rs`) to set start, end and chapters at the playhead.
+import { detectCrop, previewStop, previewStream, sourceFrame, type Crop, type VideoMetadata } from "./api";
 
 /** The part of a project title this tab edits. */
 export interface EditTarget {
@@ -9,6 +10,8 @@ export interface EditTarget {
   trimStart: number | null;
   trimEnd: number | null;
   crop: Crop | null;
+  /** Chapter starts in source seconds (first is 0); edited in place by "Kapitel hier setzen". */
+  chapters: number[];
 }
 
 export interface EditHooks {
@@ -17,6 +20,10 @@ export interface EditHooks {
   /** Frame aspect (width / height) the picture of display aspect `dar` ends up in on the disc. */
   targetAspect(dar: number): number;
   status(text: string, kind?: "info" | "error"): void;
+  /** ffprobe index of the audio track the player plays (null = silent). */
+  audioIndex(): number | null;
+  /** Turn the title into one title per chapter segment. */
+  split(): void;
 }
 
 const MIN_SECS = 1;
@@ -58,6 +65,53 @@ export function parsePrecise(text: string): number | null {
   return total;
 }
 
+/** Active player of the open tab; `pos` = logical source time of the playhead. */
+let player: { video: HTMLVideoElement; pos(): number } | null = null;
+
+/** Stops playback and the preview ffmpeg (call before the tab is torn down). */
+export async function disposePlayer() {
+  const p = player;
+  player = null;
+  if (p) {
+    p.video.pause();
+    p.video.removeAttribute("src");
+    p.video.load();
+  }
+  try {
+    await previewStop();
+  } catch {
+    // nothing left to stop
+  }
+}
+
+/** Segments the chapters cut the used section [start, end] into; each starts at `chapter` (a source chapter time). */
+export function chapterSegments(chapters: number[], start: number, end: number): { start: number; end: number; chapter: number }[] {
+  const cs = [...chapters].sort((a, b) => a - b);
+  const starts = [start, ...cs.filter((c) => c > start + 0.5 && c < end - 1)];
+  const segs = starts.map((s, i) => ({
+    start: s,
+    end: starts[i + 1] ?? end,
+    chapter: i === 0 ? Math.max(0, ...cs.filter((c) => c <= start + 0.5)) : s,
+  }));
+  const out: typeof segs = [];
+  segs.forEach((s, i) => {
+    if (s.end - s.start < 1) {
+      if (out.length) out[out.length - 1].end = s.end;
+      else if (segs[i + 1]) segs[i + 1] = { ...segs[i + 1], start: s.start, chapter: s.chapter };
+    } else out.push(s);
+  });
+  return out;
+}
+
+{
+  const ranges = (c: number[], a: number, b: number) => chapterSegments(c, a, b).map((s) => `${s.start}-${s.end}`).join(" ");
+  console.assert(ranges([], 0, 100) === "0-100");
+  console.assert(ranges([0, 60, 120], 0, 180) === "0-60 60-120 120-180");
+  console.assert(ranges([0, 0.3, 60], 0, 120) === "0-60 60-120");
+  console.assert(ranges([0, 60, 120], 50, 130) === "50-60 60-120 120-130");
+  console.assert(ranges([0, 60, 60.6], 0, 180) === "0-60.6 60.6-180");
+}
+
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const even = (v: number) => Math.round(v / 2) * 2;
 
@@ -82,9 +136,69 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   const range = h("div", { class: "trim-range" });
   const hStart = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": "Startpunkt", title: "Startpunkt ziehen" });
   const hEnd = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": "Endpunkt", title: "Endpunkt ziehen" });
-  const track = h("div", { class: "trim-track" }, range, hStart, hEnd);
-  const startImg = h("img", { class: "trim-frame", alt: "Bild am Start" }) as HTMLImageElement;
-  const endImg = h("img", { class: "trim-frame", alt: "Bild am Ende" }) as HTMLImageElement;
+  const playhead = h("div", { class: "trim-playhead" });
+  const track = h("div", { class: "trim-track" }, range, playhead, hStart, hEnd);
+  const video = h("video", { playsinline: "", preload: "auto", "aria-label": "Vorschau" }) as HTMLVideoElement;
+  const timeText = h("span", { class: "mono" });
+  const playBtn = h("button", { class: "btn", type: "button" }, "Wiedergabe") as HTMLButtonElement;
+  const splitBtn = h("button", { class: "btn", type: "button", onclick: () => hooks.split() }, "In separate Titel aufteilen") as HTMLButtonElement;
+  const splitHint = h("span", { class: "hint" });
+
+  // Output timestamps of a stream start at 0 (`-ss` before `-i`): logical time = base + currentTime.
+  let base = 0;
+  let seq = 0;
+  let streamUrl: Promise<string> | null = null;
+  const pos = () => base + (video.currentTime || 0);
+  const paintPlayhead = () => {
+    playhead.style.left = `${(clamp(pos(), 0, dur) / dur) * 100}%`;
+    timeText.textContent = `${fmtPrecise(pos())} / ${fmtPrecise(dur)}`;
+    playBtn.textContent = video.paused ? "Wiedergabe" : "Pause";
+  };
+  const seek = async (secs: number, play: boolean) => {
+    const mine = ++seq;
+    const at = clamp(secs, 0, Math.max(0, dur - 0.1));
+    try {
+      streamUrl ??= previewStream(t.meta.path);
+      const url = await streamUrl;
+      await previewStop();
+      if (mine !== seq) return;
+      const a = hooks.audioIndex();
+      base = at;
+      video.src = `${url}?t=${at.toFixed(3)}${a !== null ? `&a=${a}` : ""}`;
+      if (play) void video.play().catch(() => {});
+      paintPlayhead();
+    } catch (e) {
+      streamUrl = null;
+      hooks.status(`Vorschau: ${e}`, "error");
+    }
+  };
+  player = { video, pos };
+  for (const ev of ["timeupdate", "play", "pause", "seeked"]) video.addEventListener(ev, paintPlayhead);
+  video.addEventListener("timeupdate", () => {
+    if (pos() >= dur) video.pause();
+  });
+  playBtn.addEventListener("click", () => {
+    if (!video.paused) video.pause();
+    else if (!video.src || video.ended || pos() >= dur - 0.2) void seek(pos() >= dur - 0.2 ? start : pos(), true);
+    else void video.play().catch(() => {});
+  });
+  track.addEventListener("pointerdown", (e) => {
+    if (e.target instanceof HTMLElement && e.target.classList.contains("trim-handle")) return;
+    const r = track.getBoundingClientRect();
+    void seek(clamp((e.clientX - r.left) / r.width, 0, 1) * dur, !video.paused);
+  });
+
+  const paintMarks = () => {
+    track.querySelectorAll(".trim-chapter").forEach((m) => m.remove());
+    for (const c of t.chapters) {
+      if (c > 0.05 && c < dur) track.append(h("div", { class: "trim-chapter", style: `left:${(c / dur) * 100}%`, title: fmtPrecise(c) }));
+    }
+  };
+  const refreshSplit = () => {
+    const n = chapterSegments(t.chapters, start, end).length;
+    splitBtn.disabled = n < 2;
+    splitHint.textContent = n < 2 ? "Mindestens zwei Kapitel im Ausschnitt nötig." : `Ergibt ${n} Titel.`;
+  };
 
   const store = () => {
     t.trimStart = start > 0.05 ? start : null;
@@ -102,24 +216,17 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     if (document.activeElement !== startInput) startInput.value = fmtPrecise(start);
     if (document.activeElement !== endInput) endInput.value = fmtPrecise(end);
     length.textContent = `Länge ${fmtPrecise(end - start)} von ${fmtPrecise(dur)}`;
+    refreshSplit();
   };
 
-  let frameTimer: number | undefined;
-  const loadFrames = () => {
-    window.clearTimeout(frameTimer);
-    frameTimer = window.setTimeout(() => {
-      titleFrame(t.meta.path, start).then((u) => (startImg.src = u)).catch(() => startImg.removeAttribute("src"));
-      titleFrame(t.meta.path, Math.max(0, end - 0.5)).then((u) => (endImg.src = u)).catch(() => endImg.removeAttribute("src"));
-    }, 250);
-  };
-
-  const set = (which: "start" | "end", value: number, commit: boolean) => {
+  /** `show`: a committed handle/typed change shows that frame (paused) in the player. */
+  const set = (which: "start" | "end", value: number, commit: boolean, show = true) => {
     if (which === "start") start = clamp(Math.round(value * 10) / 10, 0, end - MIN_SECS);
     else end = clamp(Math.round(value * 10) / 10, start + MIN_SECS, dur);
     store();
     paint();
     if (commit) {
-      loadFrames();
+      if (show) void seek(which === "start" ? start : Math.max(start, end - 0.5), false);
       hooks.changed();
     }
   };
@@ -169,13 +276,45 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   typed(startInput, "start");
   typed(endInput, "end");
 
+  const addChapter = () => {
+    const c = Math.round(pos() * 10) / 10;
+    const bad = c <= 0 || c >= dur - 1 || t.chapters.some((x) => Math.abs(x - c) < 0.5) || c < start || c > end;
+    if (bad) {
+      hooks.status("Hier kann kein Kapitel gesetzt werden (Anfang/Ende, vorhandenes Kapitel in der Nähe oder außerhalb des Ausschnitts).", "error");
+      return;
+    }
+    t.chapters.push(c);
+    t.chapters.sort((x, y) => x - y);
+    paintMarks();
+    refreshSplit();
+    hooks.changed();
+    hooks.status(`Kapitel bei ${fmtPrecise(c)} gesetzt.`);
+  };
+  const btn = (label: string, onclick: () => void) => h("button", { class: "btn", type: "button", onclick }, label);
+
   paint();
-  loadFrames();
+  paintMarks();
+  paintPlayhead();
+  void seek(start, false);
   return h(
     "section",
     { class: "edit-section" },
     h("h3", {}, "Schnitt"),
-    h("p", { class: "hint" }, "Nur den gewählten Ausschnitt ins Video übernehmen (Vorspann und Abspann abschneiden). Kapitel werden auf den Ausschnitt gekürzt."),
+    h("p", { class: "hint" }, "Nur den gewählten Ausschnitt ins Video übernehmen (Vorspann und Abspann abschneiden). Kapitel werden auf den Ausschnitt gekürzt. Vorschau in 480p, nach dem Springen dauert es kurz."),
+    h(
+      "div",
+      { class: "edit-player" },
+      video,
+      h(
+        "div",
+        { class: "player-controls" },
+        playBtn,
+        timeText,
+        btn("Start hier setzen", () => set("start", pos(), true, false)),
+        btn("Ende hier setzen", () => set("end", pos(), true, false)),
+        btn("Kapitel hier setzen", addChapter),
+      ),
+    ),
     track,
     h(
       "div",
@@ -193,14 +332,13 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
             end = dur;
             store();
             paint();
-            loadFrames();
             hooks.changed();
           },
         },
         "Gesamtes Video",
       ),
     ),
-    h("div", { class: "trim-frames" }, h("figure", {}, startImg, h("figcaption", {}, "Start")), h("figure", {}, endImg, h("figcaption", {}, "Ende"))),
+    h("div", { class: "row" }, splitBtn, splitHint),
   );
 }
 
@@ -333,8 +471,8 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
     const b = t.trimEnd ?? t.meta.durationSecs;
     return a + (b - a) / 2;
   };
-  const loadImage = () => {
-    sourceFrame(t.meta.path, midpoint(), 640)
+  const loadImage = (at: number) => {
+    sourceFrame(t.meta.path, at, 640)
       .then((u) => {
         img.onload = () => drawOutput();
         img.src = u;
@@ -386,7 +524,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
   );
 
   paint();
-  loadImage();
+  loadImage(midpoint());
   return h(
     "section",
     { class: "edit-section" },
@@ -400,7 +538,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
         "div",
         { class: "crop-side" },
         h("div", { class: "crop-fields" }, ...(["top", "bottom", "left", "right"] as const).map((e) => h("label", {}, labels[e], fields[e]))),
-        h("div", { class: "row" }, detect, reset),
+        h("div", { class: "row" }, detect, reset, h("button", { class: "btn", type: "button", onclick: () => loadImage(player?.pos() ?? midpoint()) }, "Bild von Abspielposition")),
         h("div", { class: "crop-output-box" }, out, info),
       ),
     ),

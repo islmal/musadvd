@@ -5,6 +5,7 @@
 //! - `list_templates`     ConvertX menu templates found on this machine
 //! - `template_preview`   template thumbnail as data URL
 //! - `calculate_project`  bitrate and disc fill level for DVD5/DVD9/BD-25/BD-50/AVCHD
+//! - `preview_stream`, `preview_stop`  live player of the edit tab (see `preview.rs`)
 //! - `source_frame`, `detect_crop`  crop inspector (frame preview, black bar detection)
 //! - `start_conversion`   run the full pipeline in the background; progress arrives as
 //!                        `convert-event` events, the result as one `convert-done` event
@@ -17,6 +18,7 @@
 mod burn;
 mod burn_studio;
 mod menu_editor;
+mod preview;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -734,6 +736,7 @@ fn main() {
         .manage(AppState::new())
         .manage(burn::BurnState::default())
         .manage(burn_studio::StudioState::default())
+        .manage(preview::PreviewServer::start().expect("preview server"))
         .setup(|app| {
             // `--burn-studio`: start with the Burn Studio window only (the main window stays hidden).
             if std::env::args().any(|a| a == "--burn-studio") {
@@ -751,6 +754,9 @@ fn main() {
         .on_window_event(|window, event| {
             // The menu editor is a second window: it must not outlive the main one.
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(p) = window.app_handle().try_state::<Arc<preview::PreviewServer>>() {
+                    p.stop();
+                }
                 if let Some(ed) = window.app_handle().get_webview_window("menu-editor") {
                     let _ = ed.destroy();
                 }
@@ -787,6 +793,8 @@ fn main() {
             burn::startup_burn,
             burn::open_folder,
             title_frame,
+            preview::preview_stream,
+            preview::preview_stop,
             source_frame,
             detect_crop,
             menu_editor::check_layout,

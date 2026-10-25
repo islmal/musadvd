@@ -393,3 +393,7 @@ export const sourceFrame = (path: string, atSecs: number, width: number) => invo
 /** Black bars of a video (inside the section, if given). */
 export const detectCrop = (path: string, startSecs: number | null, endSecs: number | null) =>
   invoke<Crop>("detect_crop", { path, startSecs, endSecs });
+/** Registers a video for the live player; returns the stream URL (append `?t=<secs>&a=<audio index>`). */
+export const previewStream = (path: string) => invoke<string>("preview_stream", { path });
+/** Kills the running preview ffmpeg. */
+export const previewStop = () => invoke<void>("preview_stop");

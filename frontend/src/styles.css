@@ -2117,31 +2117,46 @@ input.time {
   width: 96px;
 }
 
-.trim-frames {
-  display: flex;
-  gap: 12px;
-  margin-top: 10px;
+.edit-player {
+  margin-bottom: 8px;
 }
 
-.trim-frames figure {
-  margin: 0;
-  flex: 1;
-  min-width: 0;
-}
-
-.trim-frame {
+.edit-player video {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
-  object-fit: contain;
   background: #000;
   border-radius: 4px;
 }
 
-.trim-frames figcaption {
-  text-align: center;
-  color: var(--muted);
-  font-size: 12px;
+.player-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.trim-playhead,
+.trim-chapter {
+  position: absolute;
+  pointer-events: none;
+}
+
+.trim-playhead {
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+}
+
+.trim-chapter {
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--muted);
 }
 
 .crop-layout {
@@ -2265,8 +2280,6 @@ input.time {
   border-radius: 4px;
 }
 
-@media (max-width: 760px) {
-  .trim-frames {
-    flex-direction: column;
-  }
+#btn-split-undo[hidden] {
+  display: none;
 }
