@@ -296,6 +296,19 @@ fn io_err(p: &Path, e: &dyn std::fmt::Display) -> LayoutError {
     LayoutError(vec![format!("{}: {e}", p.display())])
 }
 
+/// Highlight shape of an overlay mask (grey shape on black, transparent = off); `None` if nothing lights up.
+fn mask_coverage(img: &RgbaImage) -> Option<menu::Coverage> {
+    let mut cov = menu::Coverage::new(img.width(), img.height());
+    let mut lit = false;
+    for (i, p) in img.pixels().enumerate() {
+        if p[3] >= 128 && (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3 > 16 {
+            cov.data[i] = 1.0;
+            lit = true;
+        }
+    }
+    lit.then_some(cov)
+}
+
 /// Highlight picture of one button state: glyph shape for text, frame for everything else.
 fn highlight_image(rect: Rect, cov: Option<&menu::Coverage>, origin: (i64, i64), color: [u8; 3], alpha: u8) -> RgbaImage {
     let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
@@ -381,7 +394,12 @@ fn render_page(
             }
             Content::Image { src, fit } => {
                 let src_img = image::open(src).map_err(|err| io_err(Path::new(src), &err))?.to_rgba8();
-                let img = rotate(fit_image(&src_img, bw, bh, *fit, frame.pixel_aspect, e.rotation % 180 == 90), e.rotation);
+                let fitted = fit_image(&src_img, bw, bh, *fit, frame.pixel_aspect, e.rotation % 180 == 90);
+                // An invisible image button is a template overlay mask: its bright, opaque pixels are the highlight.
+                if e.action.is_some() && e.opacity == 0.0 {
+                    text_cov = mask_coverage(&fitted);
+                }
+                let img = rotate(fitted, e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
             }
             Content::Video { title, start_secs, fit } => {
@@ -650,6 +668,16 @@ mod tests {
         assert_eq!(a.len(), 6);
         assert_eq!(a[3], hdmv::set_stream(0x8002_0000 | 0x4000));
         assert_eq!(a[5], hdmv::set_stream(0x8002_0000));
+    }
+
+    #[test]
+    fn overlay_masks_light_their_bright_opaque_pixels() {
+        let mut img = RgbaImage::new(4, 2);
+        assert!(mask_coverage(&img).is_none(), "fully transparent: frame highlight instead");
+        img.put_pixel(1, 0, image::Rgba([200, 200, 200, 255]));
+        img.put_pixel(2, 0, image::Rgba([0, 0, 0, 255]));
+        let cov = mask_coverage(&img).unwrap();
+        assert_eq!((cov.at(1, 0), cov.at(2, 0), cov.at(0, 0)), (1.0, 0.0, 0.0));
     }
 
     #[test]

@@ -93,3 +93,67 @@ fn all_open_style_templates_parse() {
     }
     assert!(count > 0, "no .ini templates found in {}", dir.display());
 }
+
+/// Every real template becomes a valid Blu-ray menu set that renders (PNG layers, IG object budget).
+#[test]
+fn all_templates_become_valid_blu_ray_menus() {
+    use convertx_rust::author::{ClipSource, MenuFrame, PlaybackOptions};
+    use convertx_rust::bd::BdRate;
+    use convertx_rust::bd_menu;
+    use convertx_rust::bd_template::layout_from_template;
+    use convertx_rust::encoder::{Aspect, MenuLayer};
+    use convertx_rust::layout::{validate_bd, LayoutTitle};
+
+    let root = Path::new(r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates");
+    if !root.is_dir() {
+        eprintln!("skipping: {} not found", root.display());
+        return;
+    }
+    let titles: Vec<LayoutTitle> = (1..=3)
+        .map(|n| LayoutTitle {
+            label: format!("Titel {n}"),
+            chapters: 7,
+            duration_secs: 600.0,
+            clip: ClipSource { path: "a.mkv".into(), start_secs: 10.0, has_audio: true },
+            audio_sources: vec![1, 2],
+            subtitle_sources: vec![3, 4],
+        })
+        .collect();
+    let frame = MenuFrame::square(1920, 1080);
+    let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+    let out = std::env::temp_dir().join(format!("bd-real-templates-{}", std::process::id()));
+    let mut count = 0;
+    for style in std::fs::read_dir(root).unwrap().flatten().filter(|e| e.path().is_dir()) {
+        for ini in std::fs::read_dir(style.path()).unwrap().flatten().map(|e| e.path()) {
+            if !ini.extension().is_some_and(|e| e.eq_ignore_ascii_case("ini")) {
+                continue;
+            }
+            let name = ini.display().to_string();
+            let Ok(template) = Template::load(&ini) else { continue };
+            if template.pages.is_empty() {
+                continue; // "no menu"
+            }
+            // Rendering 1080p layers is slow in debug builds: the pillarbox variant only runs once.
+            let aspects: &[Aspect] = if count == 0 { &[Aspect::Standard] } else { &[Aspect::Wide] };
+            for &aspect in aspects {
+                let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                validate_bd(&layout, &titles, frame).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let nav = bd_menu::plan(&layout, &titles, &bd_menu::traits(&layout, &titles, frame), PlaybackOptions::default());
+                let dir = out.join(format!("{count}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                let pages = bd_menu::render_pages(&layout, &titles, frame, rate, &nav, &dir, 10.0)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_eq!(pages.len(), layout.menus.len(), "{name}");
+                for layer in pages.iter().flat_map(|p| &p.media.layers) {
+                    if let MenuLayer::Image(png) = layer {
+                        assert!(png.is_file(), "{name}: missing {}", png.display());
+                    }
+                }
+                count += 1;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    assert!(count > 0, "no templates found below {}", root.display());
+}

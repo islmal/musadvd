@@ -522,10 +522,9 @@ function renderFooter() {
         ? `${base} · Video ${fmtNum(calc.videoKbps)} kbps${calc.clamp === "max" ? " (Maximum)" : ""}`
         : `${base} – passt nicht! ${hint}`;
   }
-  // A Blu-ray without editor layout has no menu (autoplay).
   const menusReady =
     state.menuMode === "template"
-      ? isBluray() || !!state.template
+      ? !!state.template
       : !!state.customLayout && state.layoutErrors.length === 0 && !layoutIsStale();
   const canConvert =
     state.titles.length > 0 &&
@@ -539,7 +538,7 @@ function renderFooter() {
   if (motionToggle) {
     motionToggle.disabled = state.menuMode === "custom" || isBluray();
     motionToggle.title = isBluray()
-      ? "Blu-ray hat kein Menü"
+      ? "Blu-ray-Menüs bewegen sich, wenn die Vorlage Video-Slots hat"
       : state.menuMode === "custom"
         ? "Beim eigenen Menü bestimmen Videos/Ton im Layout, ob ein Menü sich bewegt"
         : "";
@@ -988,7 +987,7 @@ function renderCustomMenuTab(): HTMLElement {
 function renderTemplateTab() {
   const outer = h("div", { class: "template-tab" });
   const modes: ["template" | "custom", string][] = [
-    ["template", isBluray() ? "Ohne Menü (Autoplay)" : "ConvertX-Vorlage"],
+    ["template", "ConvertX-Vorlage"],
     ["custom", "Eigenes Menü (Editor)"],
   ];
   outer.append(
@@ -1017,12 +1016,7 @@ function renderTemplateTab() {
     ),
   );
   if (state.menuMode === "custom") outer.append(renderCustomMenuTab());
-  else if (isBluray()) {
-    outer.append(
-      h("div", { class: "empty" }, `${isAvchd() ? "AVCHD" : "Blu-ray"}: ohne Menü (Autoplay)`),
-      h("p", { class: "hint" }, "Jedes Video bekommt eine eigene Playlist (mit eigener Bildrate und den Kapiteln des Videos); nach dem Einlegen der Disc laufen sie nacheinander ab, zwischen zwei Videos gibt es eine kurze Pause. ConvertX-Vorlagen gibt es dafür nicht – „Eigenes Menü (Editor)“ erzeugt echte Menüs (HDMV)."),
-    );
-  } else outer.append(renderTemplateChoice());
+  else outer.append(renderTemplateChoice());
   return outer;
 }
 
@@ -1313,7 +1307,7 @@ async function convert() {
         crop: t.crop,
       })),
       disc: currentDisc(),
-      template: state.menuMode === "template" && !isBluray() ? state.template : "",
+      template: state.menuMode === "template" ? state.template : "",
       output: state.output.trim(),
       twoPass: state.twoPass,
       motionMenu: state.motion,

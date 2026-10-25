@@ -1,9 +1,7 @@
 # STATUS — convertx-rust
 
-> State as of **2026-10-25**. Architecture and context only; file tree, line counts, dependencies
-> and git state are in `SYSTEM_STATE.txt` (`~/.claude/scripts/generate_state.sh`). Build commands
-> and conventions: `CLAUDE.md`. The pre-2026-10-25 long-form STATUS (module tables, full
-> changelog since 2026-10-14) is in git history (`git show 5c1154f:STATUS.md`).
+> State as of **2026-10-25**. Architecture/context only; file tree, dependencies, git state:
+> `SYSTEM_STATE.txt` (`~/.claude/scripts/generate_state.sh`); build + conventions: `CLAUDE.md`.
 
 ## 1. Mission & Out-of-Scope
 
@@ -19,8 +17,7 @@ layer break, IMAPI2 burner; no mkisofs/libcdio); **deterministic authoring** (al
 before writing); **native on Windows** (tools from `bin/` first, `CREATE_NO_WINDOW`); **honest UI**
 (unsupported settings flagged, progress + ETA for every long step, cancel kills all children).
 
-**Out of scope / not implemented:** BD-J, Blu-ray pop-up menus, ConvertX templates on Blu-ray,
-HEVC/UHD output (HEVC is input only), custom size for BD, multi-session, 8.3 camcorder AVCHD layout
+**Out of scope / not implemented:** BD-J, Blu-ray pop-up menus, text outlines and template intro/outro animation on Blu-ray, HEVC/UHD output (HEVC is input only), custom size for BD, multi-session, 8.3 camcorder AVCHD layout
 (ours = BDMV on DVD media), MP2/TrueHD/E-AC-3 output, LPCM on DVD-Video, multi-angle, seamless
 branching, DVD-Audio, CSS, region coding, DVD-R DL layer break (drive default).
 
@@ -39,7 +36,9 @@ with the CLI through `burner::burn_video_ts`.
 per title libx264 or `h264_nvenc` High@4.1 → MKV → one tsMuxeR run per title (own playlist + clip, own
 frame rate) → our own `index.bdmv`/`MovieObject.bdmv` (`hdmv.rs`, `bd_menu.rs`) → own UDF 2.50 writer
 (`udf250.rs`, metadata partition, no ISO bridge). Menus: same `CustomLayout` on a 1920×1080 canvas;
-buttons become an **IGS** stream (`igs.rs`). AVCHD = same pipeline on DVD-5/9 media with AVCHD limits.
+buttons become an **IGS** stream (`igs.rs`). ConvertX templates reach it through `bd_template.rs`: page
+coordinates are scaled to 1920×1080 (4:3 pillarboxed), `ML_*` buttons are translated to `layout::Action`s
+(not DVD registers) and `bd_menu::plan` turns those into HDMV commands; a template without pages = no menu. AVCHD = same pipeline on DVD-5/9 media with AVCHD limits.
 
 **Burn Studio**: `burn-studio` window; GUI and CLI share `burner/studio.rs`; sources (file, BIN, read,
 on-the-fly image through `ringbuf.rs`) → backend `imapi` (default) or `direct` (`mmcwrite.rs`, own MMC
@@ -86,8 +85,8 @@ only (same source, different trim).
 
 ## 3. Roadmap & Known Issues
 
-**Last recorded test run (2026-10-25):** `cargo test --workspace` 370 passed, 0 failed; `npm run build`
-green. Not re-run during the STATUS condensation.
+**Last recorded test run (2026-10-25):** `cargo test --workspace` 0 failed (370 before + 5 new BD-template
+tests), Unix compile check green; `npm run build` not re-run.
 
 **Next (prioritised)**
 1. Check the live player in a real built window (only the dev app via CDP so far): 4K HEVC proxy
@@ -113,6 +112,9 @@ green. Not re-run during the STATUS condensation.
   layer-break exclusive-access change made the next write succeed).
 - Live player: 480p ultrafast proxy, ~0.5–1 s delay per seek, no frame stepping, audio = first selected
   track; split on a Blu-ray violates `bd_single_video` (conversion blocked).
+- BD templates: video slots always move (no stills); captions generic ("Kapitel n"); highlights = caption
+  glyphs or overlay mask (invisible image button, `bd_menu::mask_coverage`); 16:9 unless aspect policy is
+  4:3; GUI size estimate ignores template menus; explicit video starts are not offset by a trim.
 - Blu-ray: short pause between titles (one playlist each); menu clips use title 1's frame rate; PGS
   subtitles on a cropped title keep the uncropped position; titles with fewer tracks get silent/empty
   filler tracks; text subtitles rendered by tsMuxeR (Arial, fixed); Top Menu → first title menu.
@@ -124,6 +126,11 @@ green. Not re-run during the STATUS condensation.
 
 ## 4. Milestone Changelog (last 10)
 
+- **2026-10-25 – ConvertX templates on Blu-ray:** `bd_template.rs` turns a template into a `CustomLayout`
+  (scaling, `ML_*` → `Action`, pagination incl. chapter/settings pages), wired into `bd::build_bd`. Verified:
+  unit tests (288 lib), all real templates validate + render (~25 min debug), Unix check green. VLC test bugs
+  fixed (offset, root background, chapter clips, icon highlight fit); user confirmed buttons, highlights and
+  root background video work in VLC. Not tested on a standalone player.
 - **2026-10-25 – Workflow change:** STATUS condensed to 4 sections; file/dependency facts moved to the
   generated `SYSTEM_STATE.txt` (git-ignored); build/conventions moved to `CLAUDE.md`. Verified: script
   run, STATUS ≤ 150 lines.
@@ -138,13 +145,6 @@ green. Not re-run during the STATUS condensation.
 - **2026-10-24 – Burn Studio hang fix:** ring cancel `ConnectionAborted`, real burner errors no longer
   masked, step context in IMAPI errors, layer break without exclusive access. Verified: burner tests
   130/130; DVD+R DL write then succeeded (user report).
-- **2026-10-24 – Burn Studio M5:** plan complete as far as possible without hardware. 338/338 tests.
 - **2026-10-24 – Burn Studio M4:** shared operations layer `studio.rs`, CLI subcommands (`read-disc`,
   `verify-disc`, `build-iso`, `iso-label`, `ifo-layerbreak`, `drive-info`), Tauri commands/events,
   `burn-studio` window. Verified: 338 tests, browser run with mocked `invoke`.
-- **2026-10-24 – Burn Studio M3b:** direct MMC write engine `mmcwrite.rs` (opt-in). 331/331 tests,
-  all with a fake drive; never on real hardware.
-- **2026-10-24 – Burn Studio M3a:** MMC command layer (IMAPI-Ex + SPTI transports), drive info,
-  standby/tray guards, `burn_source` with ring buffer, graph telemetry. 317/317 tests; no real write.
-- **2026-10-24 – Burn Studio M2:** generic UDF/ISO/Joliet tree writer, builder, sources, ring buffer,
-  reader, verifier; DVD image byte-identical (golden MD5 test). 288/288 tests.

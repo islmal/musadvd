@@ -630,7 +630,7 @@ pub fn chapter_starts(info: &MediaInfo, interval_secs: f64, min_video_secs: f64)
 /// Finds a page with `style` in the main template or, failing that, in a sibling template in the
 /// same folder. Siblings of the same design family (sharing a background image with the main
 /// template) are preferred.
-fn find_page_source(main: &Template, main_path: &Path, style: &str) -> Option<(Template, PathBuf)> {
+pub(crate) fn find_page_source(main: &Template, main_path: &Path, style: &str) -> Option<(Template, PathBuf)> {
     let dir = main_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     if page_by_style(main, style).is_some() {
         return Some((main.clone(), dir));

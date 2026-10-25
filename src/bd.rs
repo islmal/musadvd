@@ -36,6 +36,9 @@ use crate::tools::{ToolError, Toolchain};
 /// real limit anyway. shortcut: not measured yet, set after the real-GPU run.
 const NVENC_MAX_JOBS: usize = 4;
 
+/// Parallel encodes of moving menus. shortcut: not measured, raise once RAM use per menu is known.
+const MOTION_MENU_MAX_JOBS: usize = 2;
+
 /// Frame rate of one Blu-ray title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BdRate {
@@ -306,6 +309,33 @@ fn write_navigation(bdmv: &Path, nav: &BdNav) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Source time of each chapter's sample frame (3 s in, like the DVD chapter thumbnails).
+fn chapter_samples(titles: &[BdTitle]) -> Vec<Vec<f64>> {
+    titles
+        .iter()
+        .map(|t| t.chapters.iter().map(|&c| t.info.trim_start() + (c + 3.0).min((t.info.duration_secs - 0.5).max(0.0))).collect())
+        .collect()
+}
+
+/// What the menu layout may refer to: the selected titles.
+fn layout_titles(titles: &[BdTitle]) -> Vec<crate::layout::LayoutTitle> {
+    titles
+        .iter()
+        .map(|t| crate::layout::LayoutTitle {
+            label: t.label.clone(),
+            chapters: t.chapters.len(),
+            duration_secs: t.info.duration_secs,
+            clip: ClipSource {
+                path: t.info.path.clone(),
+                start_secs: t.info.trim_start() + (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
+                has_audio: !t.info.audio.is_empty(),
+            },
+            audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
+            subtitle_sources: t.subs.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+        })
+        .collect()
+}
+
 /// Renders, encodes and muxes the menus of a custom layout into `<work>/BD/BDMV` as playlists /
 /// clips `0..count`; the titles follow with higher numbers (see [`bd_menu`]).
 #[allow(clippy::too_many_arguments)]
@@ -323,21 +353,7 @@ async fn build_menus(
     let template = |e: crate::layout::LayoutError| BuildError::Template(e.to_string());
     let (fw, fh) = opts.resolution.frame_size(TvStandard::Pal);
     let frame = MenuFrame::square(fw, fh);
-    let layout_titles: Vec<crate::layout::LayoutTitle> = titles
-        .iter()
-        .map(|t| crate::layout::LayoutTitle {
-            label: t.label.clone(),
-            chapters: t.chapters.len(),
-            duration_secs: t.info.duration_secs,
-            clip: ClipSource {
-                path: t.info.path.clone(),
-                start_secs: t.info.trim_start() + (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
-                has_audio: !t.info.audio.is_empty(),
-            },
-            audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
-            subtitle_sources: t.subs.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
-        })
-        .collect();
+    let layout_titles = layout_titles(titles);
     crate::layout::validate_bd(layout, &layout_titles, frame).map_err(template)?;
     let traits = bd_menu::traits(layout, &layout_titles, frame);
     let nav = bd_menu::plan(layout, &layout_titles, &traits, opts.playback);
@@ -370,7 +386,9 @@ async fn build_menus(
             Ok(())
         }));
     }
-    run_limited(jobs.min(count).max(1), encode, cancel, |e| {
+    // Every moving menu decodes several 1080p clips at once (~1 GB each): template menus have many pages.
+    let menu_jobs = if motion > 0 { jobs.min(MOTION_MENU_MAX_JOBS) } else { jobs };
+    run_limited(menu_jobs.min(count).max(1), encode, cancel, |e| {
         if let JobEvent::Finished { finished, total, .. } = e {
             log(Event::Progress { label: format!("Menüs kodieren ({finished}/{total})"), fraction: finished as f64 / total as f64 });
         }
@@ -551,10 +569,35 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // 3. Menus ---------------------------------------------------------------------------------
     cancel.check()?;
     log(Event::Phase(BuildPhase::Menus));
-    let menus = match &opts.custom_layout {
+    let template_layout;
+    let menu_layout = match (&opts.custom_layout, opts.template.as_os_str().is_empty()) {
+        (Some(layout), _) => {
+            log(Event::Step(format!("Eigenes Menü-Layout: {} Menü(s)", layout.menus.len())));
+            Some(layout)
+        }
+        (None, false) => {
+            let tpl = crate::template::Template::load(&opts.template)
+                .map_err(|e| BuildError::Template(format!("Menü-Vorlage {}: {e}", opts.template.display())))?;
+            if tpl.pages.is_empty() {
+                log(Event::Step("Menü-Vorlage ohne Seiten: Blu-ray ohne Menü".into()));
+                None
+            } else {
+                let aspect = if opts.aspect_policy == crate::dvd::AspectPolicy::Standard { Aspect::Standard } else { Aspect::Wide };
+                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles), &vec![None; titles.len()], &chapter_samples(&titles), aspect)
+                    .map_err(|e| BuildError::Template(e.to_string()))?;
+                for w in notes {
+                    warn(log, w);
+                }
+                template_layout = built;
+                log(Event::Step(format!("Menü-Vorlage: {} Menü(s)", template_layout.menus.len())));
+                Some(&template_layout)
+            }
+        }
+        (None, true) => None,
+    };
+    let menus = match menu_layout {
         Some(layout) => {
             log(Event::Eta(Eta::new(JobPhase::Menus, None, None, None)));
-            log(Event::Step(format!("Eigenes Menü-Layout: {} Menü(s)", layout.menus.len())));
             let stage = build_menus(&tools, layout, &titles, opts, menu_rate, &work, heavy_jobs, log).await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
@@ -564,9 +607,6 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         None => {
             log(Event::Eta(Eta { phase_label: "Kein Menü (Blu-ray)".into(), ..Eta::new(JobPhase::Menus, None, None, None) }));
             log(Event::Step("Blu-ray: ohne Menü (Autoplay)".into()));
-            if !opts.template.as_os_str().is_empty() {
-                warn(log, "Blu-ray-Menüs gibt es nur mit dem Menü-Editor – die Menü-Vorlage wird ignoriert".into());
-            }
             None
         }
     };

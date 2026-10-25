@@ -809,7 +809,7 @@ fn layer<'c>(bg: &'c mut RgbaImage, fg: &'c mut Option<RgbaImage>) -> &'c mut Rg
 
 /// Template button a graphic belongs to: same location and `param` (a button's thumbnail,
 /// frame and caption share them), falling back to an identical rectangle.
-fn button_of_graphic(page: &Page, g: &Graphic) -> Option<usize> {
+pub(crate) fn button_of_graphic(page: &Page, g: &Graphic) -> Option<usize> {
     let same_loc = |b: &&crate::template::Button| b.location.eq_ignore_ascii_case(&g.location);
     page.buttons
         .iter()

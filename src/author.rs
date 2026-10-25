@@ -505,11 +505,11 @@ fn upper(s: &str) -> String {
     s.to_ascii_uppercase()
 }
 
-fn count_loc(page: &Page, locs: &[&str]) -> usize {
+pub(crate) fn count_loc(page: &Page, locs: &[&str]) -> usize {
     page.buttons.iter().filter(|b| locs.contains(&upper(&b.location).as_str())).count()
 }
 
-const TITLE_ITEMS: &[&str] = &["ML_PLAY_EPISODE", "ML_PLAY_SERIES_EPISODE", "ML_PLAY_BONUS"];
+pub(crate) const TITLE_ITEMS: &[&str] = &["ML_PLAY_EPISODE", "ML_PLAY_SERIES_EPISODE", "ML_PLAY_BONUS"];
 
 /// Number of item buttons (titles/chapters) a page shows.
 pub fn items_per_page(page: &Page) -> usize {
