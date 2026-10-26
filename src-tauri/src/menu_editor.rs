@@ -15,6 +15,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrackRef {
     pub source: u32,
+    #[serde(default)]
+    pub label: String,
 }
 
 /// A project title as the editor knows it (further fields of the frontend are ignored).
@@ -41,6 +43,8 @@ fn layout_titles(titles: &[EditorTitle]) -> Vec<LayoutTitle> {
             clip: ClipSource { path: t.path.clone().into(), start_secs: (t.duration_secs * 0.1).min(300.0), has_audio: true },
             audio_sources: t.audio_tracks.iter().map(|a| a.source).collect(),
             subtitle_sources: t.subtitle_tracks.iter().map(|s| s.source).collect(),
+            audio_labels: t.audio_tracks.iter().map(|a| a.label.clone()).collect(),
+            subtitle_labels: t.subtitle_tracks.iter().map(|s| s.label.clone()).collect(),
         })
         .collect()
 }

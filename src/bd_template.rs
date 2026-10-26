@@ -170,14 +170,14 @@ impl Nav<'_> {
             (Kind::Settings, "ML_SET_AUD") => {
                 let i = item(count_loc(page, &["ML_SET_AUD"]));
                 let source = *lt?.audio_sources.get(i)?;
-                Some(Mapped { action: Some(Action::SetAudio { source }), label: Some(format!("Tonspur {}", i + 1)), ..Mapped::default() })
+                Some(Mapped { action: Some(Action::SetAudio { source }), label: lt?.audio_labels.get(i).cloned(), ..Mapped::default() })
             }
             (Kind::Settings, "ML_SET_STT") => {
                 let i = item(count_loc(page, &["ML_SET_STT"]));
                 let source = *lt?.subtitle_sources.get(i)?;
                 Some(Mapped {
                     action: Some(Action::SetSubtitle { source: Some(source) }),
-                    label: Some(format!("Untertitel {}", i + 1)),
+                    label: lt?.subtitle_labels.get(i).cloned(),
                     ..Mapped::default()
                 })
             }
@@ -573,6 +573,8 @@ mod tests {
             clip: ClipSource { path: "a.mkv".into(), start_secs: 10.0, has_audio: true },
             audio_sources: audio.to_vec(),
             subtitle_sources: subs.to_vec(),
+            audio_labels: audio.iter().map(|a| format!("Aud{a}")).collect(),
+            subtitle_labels: subs.iter().map(|s| format!("Sub{s}")).collect(),
         }
     }
 
@@ -685,6 +687,24 @@ mod tests {
                 menu_to("root-2")
             ]
         );
+    }
+
+    #[test]
+    fn settings_buttons_carry_the_track_labels() {
+        let (l, _) = build(&five());
+        let texts: Vec<String> = l
+            .menus
+            .iter()
+            .find(|m| m.id == "set-2")
+            .unwrap()
+            .elements
+            .iter()
+            .filter_map(|e| match &e.content {
+                Content::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts[..3], ["Aud1", "Aud2", "Sub5"]);
     }
 
     #[test]

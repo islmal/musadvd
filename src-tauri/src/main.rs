@@ -30,7 +30,7 @@ use convertx_rust::config::{AppSettings, UNSUPPORTED_CHOICES};
 use convertx_rust::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
 use convertx_rust::encoder::{ac3_settings, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget};
 use convertx_rust::menu::{UiLang, DEFAULT_MOTION_SECS};
-use convertx_rust::probe::{self, language_name, SubtitleKind};
+use convertx_rust::probe::{self, language_name, SubtitleKind, TrackLabelMode};
 use convertx_rust::template::Template;
 use convertx_rust::tools::Toolchain;
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,8 @@ struct AudioTrack {
     channel_layout: String,
     language: Option<String>,
     language_name: String,
+    /// Track name by the label mode setting (no channel suffix).
+    display_label: String,
     title: Option<String>,
     default: bool,
     /// AC-3 bitrate and layout on the DVD.
@@ -119,6 +121,8 @@ struct AudioTrack {
 #[serde(rename_all = "camelCase")]
 struct AudioChoice {
     kbps: u32,
+    /// `display_label` plus this plan's channel layout (what the disc menu shows).
+    label: String,
     layout: String,
     copy: bool,
     /// `ac3`, `dts` or `lpcm`.
@@ -139,9 +143,10 @@ struct AudioPlans {
     avchd: AudioModes,
 }
 
-fn audio_choice(out: AudioOut) -> AudioChoice {
+fn audio_choice(out: AudioOut, base: &str, mode: TrackLabelMode) -> AudioChoice {
     AudioChoice {
         kbps: out.kbps(),
+        label: probe::with_layout(base, out.layout_label(), mode),
         layout: out.layout_label().into(),
         copy: matches!(out, AudioOut::Copy { .. }),
         codec: match out.kind() {
@@ -153,11 +158,11 @@ fn audio_choice(out: AudioOut) -> AudioChoice {
     }
 }
 
-fn audio_plans(a: &probe::AudioStream) -> AudioPlans {
+fn audio_plans(a: &probe::AudioStream, base: &str, mode: TrackLabelMode) -> AudioPlans {
     let modes = |t| AudioModes {
-        auto: audio_choice(plan_audio(a, t, AudioMode::Auto, false)),
-        ac3: audio_choice(plan_audio(a, t, AudioMode::Ac3, false)),
-        lpcm: audio_choice(plan_audio(a, t, AudioMode::Lpcm, false)),
+        auto: audio_choice(plan_audio(a, t, AudioMode::Auto, false), base, mode),
+        ac3: audio_choice(plan_audio(a, t, AudioMode::Ac3, false), base, mode),
+        lpcm: audio_choice(plan_audio(a, t, AudioMode::Lpcm, false), base, mode),
     };
     AudioPlans { dvd: modes(AudioTarget::Dvd), bluray: modes(AudioTarget::Bluray), avchd: modes(AudioTarget::Avchd) }
 }
@@ -171,6 +176,7 @@ struct SubtitleTrack {
     kind: String,
     language: Option<String>,
     language_name: String,
+    display_label: String,
     title: Option<String>,
     forced: bool,
     supported: bool,
@@ -204,6 +210,9 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
     let tools = toolchain(&state).await?;
     let p = PathBuf::from(&path);
     let info = probe::probe(&tools.ffprobe, &p).await.map_err(|e| e.to_string())?;
+    let label_mode = TrackLabelMode::from_setting(&state.settings().track_label_mode);
+    let audio_labels = probe::audio_labels(&info, label_mode);
+    let subtitle_labels = probe::subtitle_labels(&info, label_mode);
     let chapter_settings = state.settings().chapters();
     let chapters = dvd::chapter_starts(&info, chapter_settings.interval_secs, chapter_settings.min_video_secs)
         .into_iter()
@@ -226,7 +235,8 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
         audio: info
             .audio
             .iter()
-            .map(|a| {
+            .enumerate()
+            .map(|(n, a)| {
                 let (kbps, ch) = ac3_settings(a.channels);
                 AudioTrack {
                     index: a.index,
@@ -234,23 +244,26 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                     channels: a.channels,
                     channel_layout: a.channel_layout.clone(),
                     language_name: language_name(a.language.as_deref()),
+                    display_label: audio_labels[n].clone(),
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,
                     ac3_kbps: kbps,
                     dvd_layout: if ch == 6 { "5.1".into() } else { "Stereo".into() },
-                    plans: audio_plans(a),
+                    plans: audio_plans(a, &audio_labels[n], label_mode),
                 }
             })
             .collect(),
         subtitles: info
             .subtitles
             .iter()
-            .map(|s| SubtitleTrack {
+            .enumerate()
+            .map(|(n, s)| SubtitleTrack {
                 index: s.index,
                 codec: s.codec.clone(),
                 kind: if s.kind == SubtitleKind::Text { "text".into() } else { "bitmap".into() },
                 language_name: language_name(s.language.as_deref()),
+                display_label: subtitle_labels[n].clone(),
                 language: s.language.clone(),
                 title: s.title.clone(),
                 forced: s.forced,
@@ -953,7 +966,10 @@ mod tests {
             sample_rate: Some(48_000),
             profile: None,
         };
-        let p = audio_plans(&ac3);
+        let p = audio_plans(&ac3, "Spanisch - Latino", TrackLabelMode::SmartMetadata);
+        // The label carries the plan's own layout: the DVD plan is 5.1 AC-3 too, LPCM on AVCHD is stereo.
+        assert_eq!(p.dvd.auto.label, "Spanisch - Latino (5.1)");
+        assert_eq!(p.avchd.lpcm.label, "Spanisch - Latino (Stereo)");
         // 640 kbps AC-3 is copied on Blu-ray/AVCHD but re-encoded to 448 kbps for the DVD.
         assert_eq!((p.dvd.auto.copy, p.dvd.auto.kbps), (false, 448));
         assert_eq!((p.bluray.auto.copy, p.bluray.auto.kbps, p.avchd.auto.copy), (true, 640, true));

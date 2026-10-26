@@ -14,6 +14,7 @@ use crate::encoder::{AudioMode, Deinterlace, MenuAudio, ScaleFilter, ScaleMode, 
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::menu::TextOverflow;
+use crate::probe::TrackLabelMode;
 use crate::tools::ProcessPriority;
 
 /// Choices for the string settings (first entry = default).
@@ -27,6 +28,8 @@ pub const PROCESS_PRIORITIES: &[&str] = &["Normal", "BelowNormal", "Idle"];
 pub const MENU_AUDIO_MODES: &[&str] = &["title", "silence", "file"];
 /// How audio tracks are written: copy compliant AC-3/DTS, always AC-3, LPCM.
 pub const AUDIO_MODES: &[&str] = &["auto", "ac3", "lpcm"];
+/// How audio/subtitle tracks are named (see `probe::TrackLabelMode`).
+pub const TRACK_LABEL_MODES: &[&str] = &["smart", "language", "generic"];
 /// "Videobearbeitung": how the picture is fitted into the frame, the swscale algorithm, deinterlacing.
 pub const SCALE_MODES: &[&str] = &["letterbox", "panscan", "stretch"];
 pub const SCALE_FILTERS: &[&str] = &["bicubic", "bilinear", "lanczos"];
@@ -90,6 +93,8 @@ pub struct AppSettings {
     pub force_first_subtitle: bool,
     /// See [`AUDIO_MODES`].
     pub audio_mode: String,
+    /// See [`TRACK_LABEL_MODES`].
+    pub track_label_mode: String,
     /// See [`SCALE_MODES`].
     pub scale_mode: String,
     /// See [`SCALE_FILTERS`].
@@ -152,6 +157,7 @@ impl Default for AppSettings {
             default_subtitle_language: String::new(),
             force_first_subtitle: false,
             audio_mode: AUDIO_MODES[0].into(),
+            track_label_mode: TRACK_LABEL_MODES[0].into(),
             scale_mode: SCALE_MODES[0].into(),
             scale_filter: SCALE_FILTERS[0].into(),
             deinterlace: DEINTERLACE_MODES[0].into(),
@@ -627,6 +633,7 @@ impl AppSettings {
         self.encoding_profile = choice(&self.encoding_profile, ENCODING_PROFILES);
         self.process_priority = choice(&self.process_priority, PROCESS_PRIORITIES);
         self.audio_mode = choice(&self.audio_mode, AUDIO_MODES);
+        self.track_label_mode = choice(&self.track_label_mode, TRACK_LABEL_MODES);
         self.scale_mode = choice(&self.scale_mode, SCALE_MODES);
         self.scale_filter = choice(&self.scale_filter, SCALE_FILTERS);
         self.deinterlace = choice(&self.deinterlace, DEINTERLACE_MODES);
@@ -779,6 +786,7 @@ impl AppSettings {
             "lpcm" => AudioMode::Lpcm,
             _ => AudioMode::Auto,
         };
+        opts.track_label_mode = TrackLabelMode::from_setting(&self.track_label_mode);
         opts.video = self.video_processing();
         opts.loudnorm = self.loudnorm;
         opts.hw_decode = self.hw_decode;
@@ -895,6 +903,8 @@ mod tests {
         assert_eq!(s.chapter_naming_template, "Kapitel #<c>");
         assert_eq!(s.default_audio_language, "");
         assert_eq!(s.default_subtitle_language, "en");
+        assert_eq!(AppSettings { track_label_mode: "bogus".into(), ..AppSettings::default() }.sanitized().track_label_mode, "smart");
+        assert_eq!(AppSettings { track_label_mode: "generic".into(), ..AppSettings::default() }.sanitized().track_label_mode, "generic");
     }
 
     #[test]

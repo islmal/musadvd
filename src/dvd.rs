@@ -28,7 +28,7 @@ use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingP
 use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
 use crate::menu_anim;
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
-use crate::probe::{self, language_matches, language_name, MediaInfo, ProbeError, SubtitleKind};
+use crate::probe::{self, language_matches, MediaInfo, ProbeError, SubtitleKind, TrackLabelMode};
 use crate::template::{Page, Template};
 use crate::tools::{ProcessPriority, RawStream, ToolError, Toolchain};
 
@@ -352,6 +352,8 @@ pub struct BuildOptions {
     pub process_priority: ProcessPriority,
     /// How audio tracks are written (copy compliant AC-3/DTS, always AC-3, LPCM).
     pub audio_mode: AudioMode,
+    /// How audio/subtitle tracks are named on menu buttons and in reports.
+    pub track_label_mode: TrackLabelMode,
     /// Scaling method, filter and deinterlacing ("Videobearbeitung").
     pub video: VideoProcessing,
     /// EBU R128 loudness normalisation of every audio track (forces a re-encode).
@@ -606,6 +608,7 @@ struct TitlePlan {
     chapter_titles: Vec<Option<String>>,
     aspect: Aspect,
     audio_mode: AudioMode,
+    track_label_mode: TrackLabelMode,
     video: VideoProcessing,
     loudnorm: bool,
     /// Length of the motion menus that play this title's clip (limits how late the clip may start).
@@ -640,22 +643,13 @@ impl TitlePlan {
     }
 
     fn audio_labels(&self) -> Vec<String> {
-        self.audio
-            .iter()
-            .zip(self.audio_outs())
-            .map(|(&i, out)| format!("{} {}", language_name(self.info.audio[i].language.as_deref()), out.layout_label()))
-            .collect()
+        let all = probe::audio_labels(&self.info, self.track_label_mode);
+        self.audio.iter().zip(self.audio_outs()).map(|(&i, out)| probe::with_layout(&all[i], &out.layout_label(), self.track_label_mode)).collect()
     }
 
     fn subtitle_labels(&self) -> Vec<String> {
-        self.subtitles
-            .iter()
-            .map(|&i| {
-                let s = &self.info.subtitles[i];
-                let forced = if s.forced { " (forced)" } else { "" };
-                format!("{}{forced}", language_name(s.language.as_deref()))
-            })
-            .collect()
+        let all = probe::subtitle_labels(&self.info, self.track_label_mode);
+        self.subtitles.iter().map(|&i| all[i].clone()).collect()
     }
 }
 
@@ -1103,6 +1097,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
             audio_mode: opts.audio_mode,
+            track_label_mode: opts.track_label_mode,
             video: opts.video,
             loudnorm: opts.loudnorm,
             motion_secs: opts.motion_duration.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(menu::DEFAULT_MOTION_SECS),
@@ -1155,6 +1150,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 clip: t.clip(),
                 audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
                 subtitle_sources: t.subtitles.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+                audio_labels: t.audio_labels(),
+                subtitle_labels: t.subtitle_labels(),
                 }
             })
             .collect();

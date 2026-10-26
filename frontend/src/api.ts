@@ -24,6 +24,8 @@ export interface AudioTrack {
   channelLayout: string;
   language: string | null;
   languageName: string;
+  /** Track name by the label mode setting (computed by the engine). */
+  displayLabel: string;
   title: string | null;
   default: boolean;
   ac3Kbps: number;
@@ -35,6 +37,8 @@ export interface AudioTrack {
 /** Bitrate, layout and whether the track is copied, for one disc format and audio mode. */
 export interface AudioChoice {
   kbps: number;
+  /** `displayLabel` plus this plan's channel layout: the name on the disc menu. */
+  label: string;
   layout: string;
   copy: boolean;
   codec: "ac3" | "dts" | "lpcm";
@@ -64,6 +68,7 @@ export interface SubtitleTrack {
   kind: "text" | "bitmap";
   language: string | null;
   languageName: string;
+  displayLabel: string;
   title: string | null;
   forced: boolean;
   supported: boolean;
@@ -243,6 +248,7 @@ export interface AppSettings {
   menu_animations: boolean;
   fast_encode: boolean;
   audio_mode: "auto" | "ac3" | "lpcm";
+  track_label_mode: "smart" | "language" | "generic";
   scale_mode: "letterbox" | "panscan" | "stretch";
   scale_filter: "bicubic" | "bilinear" | "lanczos";
   deinterlace: "auto" | "yadif" | "off";

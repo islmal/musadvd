@@ -333,6 +333,9 @@ pub struct LayoutTitle {
     pub audio_sources: Vec<u32>,
     /// Source stream indices of the subtitles on the disc, in DVD stream order.
     pub subtitle_sources: Vec<u32>,
+    /// Final menu button labels of `audio_sources` / `subtitle_sources` (same order).
+    pub audio_labels: Vec<String>,
+    pub subtitle_labels: Vec<String>,
 }
 
 /// All problems of a layout (German, for the UI).
@@ -1294,6 +1297,8 @@ mod tests {
                 clip: ClipSource { path: format!("film{i}.mkv").into(), start_secs: 60.0, has_audio: true },
                 audio_sources: vec![1, 2],
                 subtitle_sources: vec![3],
+                audio_labels: vec![],
+                subtitle_labels: vec![],
             })
             .collect()
     }

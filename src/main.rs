@@ -152,6 +152,9 @@ enum Command {
         /// uncompressed audio (Blu-ray/AVCHD; DVD falls back to AC-3).
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// Track names on menu buttons: smart (language + file title), language only, or generic (Tonspur 1).
+        #[arg(long, value_enum, default_value = "smart")]
+        track_labels: TrackLabelsArg,
         /// Normalise the loudness of all audio tracks (EBU R128, -23 LUFS).
         #[arg(long)]
         loudnorm: bool,
@@ -310,6 +313,23 @@ impl From<AudioArg> for convertx_rust::encoder::AudioMode {
             AudioArg::Auto => Self::Auto,
             AudioArg::Ac3 => Self::Ac3,
             AudioArg::Lpcm => Self::Lpcm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TrackLabelsArg {
+    Smart,
+    Language,
+    Generic,
+}
+
+impl From<TrackLabelsArg> for convertx_rust::probe::TrackLabelMode {
+    fn from(a: TrackLabelsArg) -> Self {
+        match a {
+            TrackLabelsArg::Smart => Self::SmartMetadata,
+            TrackLabelsArg::Language => Self::LanguageOnly,
+            TrackLabelsArg::Generic => Self::Generic,
         }
     }
 }
@@ -777,6 +797,7 @@ fn main() -> ExitCode {
             no_hw_encode,
             no_menu_animations,
             audio,
+            track_labels,
             loudnorm,
             scale,
             scale_filter,
@@ -849,6 +870,7 @@ fn main() -> ExitCode {
                 bd_hw_encode: !no_hw_encode,
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
+                track_label_mode: track_labels.into(),
                 loudnorm,
                 video: convertx_rust::encoder::VideoProcessing {
                     scale: match scale {

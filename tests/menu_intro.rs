@@ -297,6 +297,8 @@ fn real_template_ig_display_sets_fit_the_budget() {
             clip: ClipSource { path: "a.mkv".into(), start_secs: 10.0, has_audio: true },
             audio_sources: vec![1, 2, 3],
             subtitle_sources: vec![4, 5, 6],
+            audio_labels: vec![],
+            subtitle_labels: vec![],
         })
         .collect();
     let groups: Vec<Vec<usize>> = titles.iter().map(|t| vec![t.chapters]).collect();

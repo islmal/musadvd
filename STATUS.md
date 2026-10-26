@@ -63,6 +63,7 @@ only (same source, different trim).
 - Audio (`encoder::plan_audio`, `audio_mode` auto/ac3/lpcm): compliant AC-3/DTS are stream-copied, the
   rest → AC-3; real per-track kbps feed the bitrate plan. LPCM only on BD (`pcm_s24le` → `pcm_bluray`)
   and AVCHD (stereo 16 bit).
+- **Track labels** (`probe::{audio,subtitle}_labels`, setting `track_label_mode` smart/language/generic): the engine alone names tracks (tag cleaning `clean_tag`, numbered over ALL streams of the file); GUI shows `displayLabel` and `AudioChoice.label` (+ channel layout of the plan), DVD/BD menus use `LayoutTitle.audio_labels`/`subtitle_labels`. A mode change re-probes loaded titles.
 - Trim = ffmpeg *input* options via `MediaInfo::input_args()` in every run; crop right after the
   deinterlacer; EBU R128 loudnorm in two runs (`Toolchain::ffmpeg_report`).
 - **Merge groups** (`StreamSelection::merge_with_previous`, `dvd::groups`): encoding stays per file; a
@@ -100,8 +101,7 @@ only (same source, different trim).
 
 ## 3. Roadmap & Known Issues
 
-**Last recorded test run (2026-10-26):** `cargo test --workspace`: no failures seen (lib 324, incl. the
-preview stream test), Unix burner check and `npm run build` ok. Merge UI and merged motion chapter menus not checked by hand.
+**Last recorded test run (2026-10-26):** `cargo test --workspace`: all green (lib 331), Unix burner check and `npm run build` ok. Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
 **Next (prioritised)**
 1. Live player hardening **acceptance** in the release window (4K HEVC HDR smooth + colours, crop, DVD source without combing, CSP `media-src` under `http://tauri.localhost`); only then consider `-hwaccel` → docs/plans/2026-10-26-live-player-hardening.md
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
@@ -140,10 +140,8 @@ preview stream test), Unix burner check and `npm run build` ok. Merge UI and mer
   conversion blocked until fixed). Merge: no GUI pre-check of track counts, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
-- **2026-10-26 – Live player hardening:** 8-bit proxy, HDR detection + tonemapping (also in DVD/BD encodes),
-  shared `source_chain`, crop per stream token. Verified: unit tests (HDR chains, preview filter), stream
-  integration test with PQ HEVC (h264, yuv420p, 480p; ultrafast reports Constrained Baseline, not High 10);
-  not yet in the release window.
+- **2026-10-26 – Smart track labels:** see Key design decisions; DVD report labels are now "Deutsch (5.1)". Dev profile `opt-level = 2` (tests 3 min -> ~1 min for template rendering). Verified: workspace tests, Unix check, `npm run build`; not by hand in the GUI/VLC.
+- **2026-10-26 – Live player hardening:** 8-bit proxy, HDR tonemapping (also in encodes), shared `source_chain`. Verified: unit + stream tests; not in the release window.
 - **2026-10-26 – Template menu intros on DVD:** see Key design decisions. Verified: `tests/menu_intro.rs` DVD (cell 2 at T, `hli_ss` 0 in cell 1); not in a player.
 - **2026-10-26 – Template menu intros on BD/AVCHD:** see Key design decisions. Fixed in VLC checks: float `==` after
   `clip()` (`same_box`), chapter menus skipping the intro, `clip_at` 25 s clamp. Verified: intros seen in VLC.

@@ -56,3 +56,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
 ] }
 windows-core = "0.62"
+
+# Tests render 1080p menu layers and encode small clips; unoptimized builds take minutes for that.
+[profile.dev]
+opt-level = 2
