@@ -148,17 +148,47 @@ pub struct VideoProcessing {
     pub deinterlace: Deinterlace,
 }
 
-/// Shared chain: deinterlacer, user crop, `fps`, scale, bars/crop to the coded `frame`.
+/// Deinterlacer chosen by `vp` for this source, if any.
+fn deint_filter(v: &VideoStream, vp: VideoProcessing) -> Option<String> {
+    match vp.deinterlace {
+        Deinterlace::Auto if v.is_interlaced() => Some("bwdif=mode=send_frame".to_string()),
+        Deinterlace::Yadif => Some("yadif=mode=send_frame".to_string()),
+        _ => None,
+    }
+}
+
+/// PQ/HLG to BT.709 SDR (only for HDR sources).
+fn tonemap_filter(v: &VideoStream) -> Option<&'static str> {
+    v.hdr.then_some("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
+}
+
+/// Head shared by encode and preview: deinterlacer, tonemap (HDR only), user crop.
+fn source_chain(v: &VideoStream, vp: VideoProcessing) -> Vec<String> {
+    let mut f: Vec<String> = deint_filter(v, vp).into_iter().collect();
+    f.extend(tonemap_filter(v).map(String::from));
+    f.extend(crop_filter(v));
+    f
+}
+
+/// Filter chain of the live player: 8-bit 480p square-pixel picture of the cut/cropped source.
+/// Tonemapping runs after the downscale (real-time at 4K); the encode tonemaps first, the small
+/// difference is acceptable for a preview.
+pub fn preview_filter(v: &VideoStream, vp: VideoProcessing, height: u32) -> String {
+    let mut f: Vec<String> = deint_filter(v, vp).into_iter().collect();
+    f.extend(crop_filter(v));
+    let w = (v.display_aspect * height as f64 / 2.0).round() as u32 * 2;
+    f.push(format!("scale={w}:{height}:flags={}", vp.filter.flag()));
+    f.extend(tonemap_filter(v).map(String::from));
+    f.push("setsar=1".to_string());
+    f.push("format=yuv420p".to_string());
+    f.join(",")
+}
+
+/// Shared chain: [`source_chain`], `fps`, scale, bars/crop to the coded `frame`.
 /// Returns the filters before the aspect tag (`setdar`/`setsar`) and `format`.
 fn fit_chain(v: &VideoStream, aspect: Aspect, frame: (u32, u32), fps: &str, matrix: &str, vp: VideoProcessing) -> Vec<String> {
     let (fw, fh) = frame;
-    let mut f = Vec::new();
-    match vp.deinterlace {
-        Deinterlace::Auto if v.is_interlaced() => f.push("bwdif=mode=send_frame".to_string()),
-        Deinterlace::Yadif => f.push("yadif=mode=send_frame".to_string()),
-        _ => {}
-    }
-    f.extend(crop_filter(v));
+    let mut f = source_chain(v, vp);
     f.push(format!("fps={fps}"));
     let flags = format!("flags={}:out_color_matrix={matrix}:out_range=tv", vp.filter.flag());
     match vp.scale {
@@ -1104,6 +1134,11 @@ pub enum MenuAudio {
 /// the moving sample clips overlaid at their slots, the transparent `foreground` (frames,
 /// captions, icons drawn above the slots) and AC-3 sound from `audio` (`None` = silence),
 /// encoded as a `duration_secs` long DVD MPEG-2 program stream of the TV standard `tv`.
+///
+/// `intro_secs` (whole GOPs, see `menu_anim::dvd_intro_frames`): the page opens with an intro of raw
+/// RGBA frames read from `pipe:0` (`Toolchain::ffmpeg_piped`) that covers the first `intro_secs`;
+/// a closed GOP starts at that mark, where the author splits the VOB into the intro and the page
+/// cell, and the sound crossfades there like on Blu-ray.
 #[allow(clippy::too_many_arguments)]
 pub fn motion_menu_args(
     tv: TvStandard,
@@ -1112,6 +1147,7 @@ pub fn motion_menu_args(
     slots: &[VideoSlot],
     duration_secs: f64,
     audio: Option<&ClipSource>,
+    intro_secs: Option<f64>,
     output: &Path,
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
@@ -1149,21 +1185,7 @@ pub fn motion_menu_args(
     let mut f: Vec<String> = vec![format!("[0:v]fps={rate},format=rgba,setsar=1[base]")];
     let mut cur = "base".to_string();
     for (i, s) in slots.iter().enumerate() {
-        let fit = if s.letterbox {
-            format!(
-                "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
-                w = s.width,
-                h = s.height
-            )
-        } else {
-            format!("scale={}:{}", s.width, s.height)
-        };
-        // Square pixels first, so anamorphic sources keep their display aspect.
-        f.push(format!(
-            "[{}:v]fps={rate},scale=trunc(ih*dar/2)*2:ih,setsar=1,{fit},setsar=1,format=rgba,\
-             trim=duration={d},setpts=PTS-STARTPTS[clip{i}]",
-            i + 1
-        ));
+        f.push(format!("[{}:v]{},trim=duration={d},setpts=PTS-STARTPTS[clip{i}]", i + 1, dvd_slot_filters(rate, s)));
         f.push(format!("[{cur}][clip{i}]overlay=x={}:y={}:format=rgb:eof_action=repeat[m{i}]", s.x, s.y));
         cur = format!("m{i}");
     }
@@ -1172,27 +1194,71 @@ pub fn motion_menu_args(
         f.push(format!("[{cur}][fg]overlay=0:0:format=rgb[mfg]"));
         cur = "mfg".into();
     }
+    // The intro covers everything below it until its last frame, then the page underneath shows.
+    if intro_secs.is_some() {
+        f.push(format!("[{}:v]setsar=1[intro]", audio_input + 1));
+        f.push(format!("[{cur}][intro]overlay=0:0:format=rgb:eof_action=pass[mi]"));
+        cur = "mi".into();
+    }
     f.push(format!("[{cur}]format=yuv420p,setdar=4/3[vout]"));
     if audio.is_some() {
-        let fade_out = (duration_secs - 1.0).max(0.0);
-        f.push(format!(
-            "[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
-             atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5,afade=t=out:st={fade_out:.3}:d=1[aout]"
-        ));
+        menu_sound_filters(&mut f, audio_input, &d, duration_secs, intro_secs);
     } else {
         f.push(format!("[{audio_input}:a]asetpts=N/SR/TB[aout]"));
     }
+    // Last input: the intro frames (the caller writes them as `-f rawvideo` to stdin).
+    if intro_secs.is_some() {
+        let (w, h) = tv.size();
+        a.extend(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"].map(OsString::from));
+        a.extend([format!("{w}x{h}"), "-r".into(), rate.into(), "-i".into(), "pipe:0".into()].map(OsString::from));
+    }
 
     a.extend(["-filter_complex".into(), f.join(";").into()]);
-    a.extend(
-        [
-            "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
-            "-b:v", "5000k", "-maxrate", "8000k", "-c:a", "ac3", "-b:a", "192k",
-        ]
-        .map(OsString::from),
-    );
+    a.extend(["-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3"].map(OsString::from));
+    if let Some(t) = intro_secs {
+        // Rounded down like on Blu-ray; a closed GOP so the loop cell never refers back into the intro
+        // (the encoder only allows that without scene-change detection).
+        a.extend(["-force_key_frames".into(), format!("{:.6}", (t * 1e6).floor() / 1e6).into(), "-flags".into(), "+cgop".into(), "-sc_threshold".into(), "1000000000".into()]);
+    }
+    a.extend(["-b:v", "5000k", "-maxrate", "8000k", "-c:a", "ac3", "-b:a", "192k"].map(OsString::from));
     a.push(output.as_os_str().to_owned());
     a
+}
+
+/// Filter chain (without labels, ending in RGBA) turning a clip into the pictures of a DVD menu slot.
+/// Square pixels first, so anamorphic sources keep their display aspect.
+fn dvd_slot_filters(rate: &str, s: &VideoSlot) -> String {
+    let fit = if s.letterbox {
+        format!(
+            "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
+            w = s.width,
+            h = s.height
+        )
+    } else {
+        format!("scale={}:{}", s.width, s.height)
+    };
+    format!("fps={rate},scale=trunc(ih*dar/2)*2:ih,setsar=1,{fit},setsar=1,format=rgba")
+}
+
+/// Helper pass of the DVD intro: the first `frames` pictures of a slot, made exactly like the page
+/// graph makes them (so the loop continues them without a seam), as raw RGBA on stdout.
+pub fn dvd_slot_stream(tv: TvStandard, slot: &VideoSlot, frames: usize) -> crate::tools::RawStream {
+    let mut args: Vec<OsString> = ["-stream_loop", "-1", "-ss"].map(OsString::from).into();
+    args.extend([format!("{:.3}", slot.clip.start_secs).into(), "-i".into(), slot.clip.path.as_os_str().to_owned()]);
+    args.extend(["-vf".into(), dvd_slot_filters(tv.frame_rate(), slot).into(), "-frames:v".into(), frames.to_string().into()]);
+    args.extend(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"].map(OsString::from));
+    crate::tools::RawStream { args, frame_bytes: slot.width as usize * slot.height as usize * 4 }
+}
+
+/// Helper pass of the DVD intro: `frames` pictures of the page's fill colour as raw RGBA, the base
+/// the intro frames are composited on.
+pub fn dvd_background_stream(tv: TvStandard, rgb: [u8; 3], frames: usize) -> crate::tools::RawStream {
+    let (w, h) = tv.size();
+    let src = format!("color=c=0x{:02x}{:02x}{:02x}:s={w}x{h}:r={}", rgb[0], rgb[1], rgb[2], tv.frame_rate());
+    let mut args: Vec<OsString> = ["-f", "lavfi", "-i"].map(OsString::from).into();
+    args.extend([src.into(), "-frames:v".into(), frames.to_string().into()]);
+    args.extend(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"].map(OsString::from));
+    crate::tools::RawStream { args, frame_bytes: w as usize * h as usize * 4 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1463,6 +1529,27 @@ pub fn intro_background_stream(frame: &MenuFrame, rate: BdRate, media: &CustomMe
     crate::tools::RawStream { args: a, frame_bytes: frame.width as usize * frame.height as usize * 4 }
 }
 
+/// Filters (ending in `[aout]`) turning the menu sound input into a loop that restarts cleanly.
+/// Without intro the sound fades in and out. With an intro of `t` seconds the restart jumps from
+/// the clip's end back to the mark `t`: the last `x` seconds fade from the clip's own end into the
+/// sound at [t - x, t], so the signal continues.
+fn menu_sound_filters(f: &mut Vec<String>, audio_input: usize, d: &str, duration_secs: f64, intro_secs: Option<f64>) {
+    let head = format!("[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo");
+    match intro_secs {
+        Some(t) => {
+            let x = t.min(0.5);
+            f.push(format!("{head},asplit=2[am][as]"));
+            f.push(format!("[as]atrim=start={:.6}:end={t:.6},asetpts=N/SR/TB[tail]", t - x));
+            f.push(format!("[am]atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5[main]"));
+            f.push(format!("[main][tail]acrossfade=d={x:.6}:c1=tri:c2=tri[aout]"));
+        }
+        None => {
+            let fade_out = (duration_secs - 1.0).max(0.0);
+            f.push(format!("{head},atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5,afade=t=out:st={fade_out:.3}:d=1[aout]"));
+        }
+    }
+}
+
 /// Inputs and `-filter_complex` of a custom menu (everything before the output options);
 /// the graph ends in `[vout]` and `[aout]`.
 fn custom_menu_graph(
@@ -1520,22 +1607,7 @@ fn custom_menu_graph(
     match audio {
         Some(src) => {
             clip_input(&mut a, src);
-            let head = format!("[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo");
-            match intro_secs {
-                // The restart jumps from the clip's end back to the mark `t`: the last `x` seconds
-                // fade from the clip's own end into the sound at [t - x, t], so the signal continues.
-                Some(t) => {
-                    let x = t.min(0.5);
-                    f.push(format!("{head},asplit=2[am][as]"));
-                    f.push(format!("[as]atrim=start={:.6}:end={t:.6},asetpts=N/SR/TB[tail]", t - x));
-                    f.push(format!("[am]atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5[main]"));
-                    f.push(format!("[main][tail]acrossfade=d={x:.6}:c1=tri:c2=tri[aout]"));
-                }
-                None => {
-                    let fade_out = (duration_secs - 1.0).max(0.0);
-                    f.push(format!("{head},atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5,afade=t=out:st={fade_out:.3}:d=1[aout]"));
-                }
-            }
+            menu_sound_filters(&mut f, audio_input, &d, duration_secs, intro_secs);
         }
         None => {
             a.extend(["-f", "lavfi", "-t", &d, "-i", "anullsrc=r=48000:cl=stereo"].map(OsString::from));
@@ -1583,6 +1655,7 @@ mod tests {
             fps: 23.976,
             field_order: field_order.into(),
             crop: None,
+            hdr: false,
         }
     }
 
@@ -1740,7 +1813,7 @@ mod tests {
     fn motion_menu_graph() {
         let slots = [slot(95, true, true), slot(273, false, false)];
         let menu_audio = ClipSource { path: "title1.mkv".into(), start_secs: 30.0, has_audio: true };
-        let a = motion_menu_args(TvStandard::Pal, Path::new("bg.png"), Some(Path::new("fg.png")), &slots, 25.0, Some(&menu_audio), Path::new("m.mpg"));
+        let a = motion_menu_args(TvStandard::Pal, Path::new("bg.png"), Some(Path::new("fg.png")), &slots, 25.0, Some(&menu_audio), None, Path::new("m.mpg"));
         let s = joined(&a);
         assert!(s.starts_with("-y -loop 1 -framerate 25 -t 25.000 -i bg.png"), "{s}");
         assert!(s.contains("-stream_loop -1 -ss 12.500 -t 25.000 -i src95.mkv"));
@@ -1763,17 +1836,34 @@ mod tests {
 
     #[test]
     fn motion_menu_silence() {
-        let a = motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[slot(0, false, true)], 8.0, None, Path::new("m.mpg"));
+        let a = motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[slot(0, false, true)], 8.0, None, None, Path::new("m.mpg"));
         let s = joined(&a);
         assert!(s.contains("-f lavfi -t 8.000 -i anullsrc=r=48000:cl=stereo"), "{s}");
         assert!(s.contains("[2:a]asetpts=N/SR/TB[aout]"), "silence is input 2 (no foreground)");
         assert!(!s.contains("[fg]"));
         // Clips with sound do not change the menu sound any more: silence stays silence.
-        let silent = joined(&motion_menu_args(TvStandard::Pal, Path::new("b"), None, &[slot(0, true, true)], 8.0, None, Path::new("m")));
+        let silent = joined(&motion_menu_args(TvStandard::Pal, Path::new("b"), None, &[slot(0, true, true)], 8.0, None, None, Path::new("m")));
         assert!(silent.contains("anullsrc") && !silent.contains("aresample"));
-        let ntsc = joined(&motion_menu_args(TvStandard::Ntsc, Path::new("b"), None, &[slot(0, true, true)], 8.0, None, Path::new("m")));
+        let ntsc = joined(&motion_menu_args(TvStandard::Ntsc, Path::new("b"), None, &[slot(0, true, true)], 8.0, None, None, Path::new("m")));
         assert!(ntsc.contains("-framerate 30000/1001") && ntsc.contains("-target ntsc-dvd"), "{ntsc}");
         assert!(ntsc.contains("fps=30000/1001"));
+    }
+
+    #[test]
+    fn motion_menu_intro_reads_frames_from_the_pipe() {
+        let audio = ClipSource { path: "a.mp3".into(), start_secs: 0.0, has_audio: true };
+        let a = joined(&motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[slot(0, false, true)], 28.0, Some(&audio), Some(3.0), Path::new("m.mpg")));
+        assert!(a.contains("-f rawvideo -pix_fmt rgba -s 720x576 -r 25 -i pipe:0"), "{a}");
+        assert!(a.contains("[mi]format=yuv420p") && a.contains("eof_action=pass"), "{a}");
+        assert!(a.contains("acrossfade=d=0.500000"), "{a}");
+        assert!(a.contains("-force_key_frames 3.000000 -flags +cgop -sc_threshold 1000000000"), "{a}");
+        let ntsc = joined(&motion_menu_args(TvStandard::Ntsc, Path::new("bg.png"), None, &[], 4.0, None, Some(3.0), Path::new("m.mpg")));
+        assert!(ntsc.contains("-s 720x480 -r 30000/1001 -i pipe:0"), "{ntsc}");
+        let plain = joined(&motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[], 4.0, None, None, Path::new("m.mpg")));
+        assert!(!plain.contains("pipe:0") && !plain.contains("force_key_frames") && !plain.contains("cgop"), "{plain}");
+        let bg = dvd_background_stream(TvStandard::Pal, [1, 2, 255], 75);
+        assert_eq!(bg.frame_bytes, 720 * 576 * 4);
+        assert!(joined(&bg.args).contains("color=c=0x0102ff:s=720x576:r=25"));
     }
 
     #[test]
@@ -1942,6 +2032,31 @@ mod tests {
         c.crop = Some(crate::probe::CropRect { x: 0, y: 100, w: 1920, h: 800 });
         assert!(chain(&c, Deinterlace::Auto).starts_with("bwdif=mode=send_frame,crop=1920:800:0:100,fps=25,"));
         assert!(chain(&c, Deinterlace::Off).starts_with("crop=1920:800:0:100,fps=25,"));
+    }
+
+    #[test]
+    fn hdr_is_tonemapped_before_scaling() {
+        let mut v = video(3840, 2160, 16.0 / 9.0, "progressive");
+        v.hdr = true;
+        let vp = VideoProcessing::default();
+        let tm = tonemap_filter(&v).unwrap();
+        let r = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        for f in [video_filter(&v, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, vp), bd_video_filter(&v, r, Resolution::Hd1080, vp)] {
+            assert!(f.starts_with(&format!("{tm},fps=")), "{f}");
+        }
+        // The player tonemaps after its downscale.
+        assert!(preview_filter(&v, vp, 480).starts_with(&format!("scale=854:480:flags=bicubic,{tm},setsar=1")));
+    }
+
+    #[test]
+    fn preview_filter_chain() {
+        let mut v = video(1920, 1080, 16.0 / 9.0, "tt");
+        v.crop = Some(crate::probe::CropRect { x: 0, y: 100, w: 1920, h: 800 });
+        v.display_aspect = 2.4;
+        assert_eq!(
+            preview_filter(&v, VideoProcessing::default(), 480),
+            "bwdif=mode=send_frame,crop=1920:800:0:100,scale=1152:480:flags=bicubic,setsar=1,format=yuv420p"
+        );
     }
 
     #[test]

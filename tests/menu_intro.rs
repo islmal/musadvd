@@ -691,3 +691,121 @@ mod build {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// DVD: template intro as a first cell without buttons
+// ---------------------------------------------------------------------------
+
+mod dvd {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use convertx_rust::author::TvStandard;
+    use convertx_rust::calculator::DiscType;
+    use convertx_rust::dvd::{self, BuildOptions, ChapterSettings};
+    use convertx_rust::menu::UiLang;
+    use convertx_rust::tools::Toolchain;
+
+    const TEMPLATES: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style";
+
+    /// One VOBU of a menu VOB: (VOB id, cell id, start PTM, hli_ss) read from its NAV pack.
+    struct Vobu {
+        vob: u16,
+        cell: u8,
+        ptm: u32,
+        hli_ss: u16,
+    }
+
+    fn nav_packs(vob: &[u8]) -> Vec<Vobu> {
+        let be = |s: &[u8], at: usize, n: usize| s[at..at + n].iter().fold(0u32, |v, &b| v << 8 | b as u32);
+        vob.chunks_exact(2048)
+            .filter(|s| s[0x26..0x2A] == [0, 0, 1, 0xBF] && s[0x2C] == 0x00 && s[0x400..0x404] == [0, 0, 1, 0xBF])
+            .map(|s| Vobu { vob: be(s, 0x41F - 0, 2) as u16, cell: s[0x422], ptm: be(s, 0x39, 4), hli_ss: be(s, 0x8D, 2) as u16 & 3 })
+            .collect()
+    }
+
+    fn run(name: &str, tv: TvStandard, motion: bool) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let Ok(tools) = rt.block_on(Toolchain::detect()) else { return eprintln!("skipping: tools missing") };
+        let template = Path::new(TEMPLATES).join("Open_Style.ini");
+        if !template.is_file() {
+            return eprintln!("skipping: {} not found", template.display());
+        }
+        let dir: PathBuf = std::env::temp_dir().join(format!("cx_dvd_intro_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        let st = Command::new(&tools.ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=6"])
+            .args(["-f", "lavfi", "-i", "sine=f=440:duration=6", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(st.success());
+
+        let opts = BuildOptions {
+            inputs: vec![clip],
+            disc: DiscType::Dvd5,
+            template,
+            output: dir.join("out"),
+            no_subtitles: true,
+            chapters: ChapterSettings { interval_secs: 2.0, ..Default::default() },
+            ui_lang: UiLang::De,
+            keep_work: true,
+            fast_encode: true,
+            menu_animations: true,
+            motion_menu: motion,
+            motion_duration: Some(3.0),
+            tv_standard: tv,
+            ..Default::default()
+        };
+        let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));
+        let xml = &report.authoring_xml;
+        assert!(xml.contains(r#"<cell start="0" end=""#), "the template has an intro: {xml}");
+        assert_eq!(xml.contains("jump cell 2;"), motion, "{xml}");
+        assert!(!motion || !xml.contains("jump cell 1;") || xml.contains("</vob>"));
+
+        let mut checked = 0;
+        for name in ["VIDEO_TS.VOB", "VTS_01_0.VOB"] {
+            let bytes = std::fs::read(report.video_ts.join(name)).unwrap();
+            let vobus = nav_packs(&bytes);
+            assert!(!vobus.is_empty(), "{name}: no NAV packs found");
+            let mut ids: Vec<u16> = vobus.iter().map(|v| v.vob).collect();
+            ids.dedup();
+            for id in ids {
+                let cells: Vec<&Vobu> = vobus.iter().filter(|v| v.vob == id).collect();
+                if !cells.iter().any(|v| v.cell == 2) {
+                    continue; // a menu page without intro
+                }
+                let first = cells[0].ptm;
+                let c2 = cells.iter().find(|v| v.cell == 2).unwrap();
+                let t = (c2.ptm - first) as f64 / 90_000.0;
+                assert!((t - 3.0).abs() < 0.1, "{name} vob {id}: cell 2 starts at {t} s");
+                for v in &cells {
+                    match v.cell {
+                        1 => assert_eq!(v.hli_ss, 0, "{name} vob {id}: buttons during the intro"),
+                        2 => assert_ne!(v.hli_ss, 0, "{name} vob {id}: no buttons in the page cell"),
+                        c => panic!("cell {c}"),
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no intro menu found in the VOBs");
+        let log = std::fs::read_to_string(report.work_dir.as_ref().unwrap().join("dvdauthor.log")).unwrap();
+        assert!(!log.contains("Discontinuity"), "{log}");
+        if std::env::var_os("CX_KEEP").is_none() {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn pal_still_menus_hold_the_page_after_the_intro() {
+        run("pal", TvStandard::Pal, false);
+    }
+
+    #[test]
+    fn ntsc_motion_menus_loop_the_page_cell() {
+        run("ntsc", TvStandard::Ntsc, true);
+    }
+}

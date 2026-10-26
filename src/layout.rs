@@ -68,7 +68,7 @@ pub struct CustomLayout {
     pub canvas: Canvas,
     #[serde(default)]
     pub highlight: Highlight,
-    /// Play the menus' intro animations (Blu-ray only; `false` = the finished pages straight away).
+    /// Play the menus' intro animations (layouts of the menu editor: Blu-ray only; `false` = the finished pages straight away).
     #[serde(default = "yes")]
     pub animations: bool,
     pub menus: Vec<CustomMenu>,
@@ -1180,7 +1180,7 @@ fn render_custom_page(
     let xml_path = out_dir.join(format!("{prefix}_spumux.xml"));
     highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
     select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
-    std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons)).map_err(|e| io(&xml_path, &e))?;
+    std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, 0.0)).map_err(|e| io(&xml_path, &e))?;
     let files = MenuPageFiles {
         background: out_dir.join(&hl_name),
         highlight: out_dir.join(&hl_name),
@@ -1192,6 +1192,8 @@ fn render_custom_page(
         motion_secs: moving.then_some(secs),
         audio,
         custom: Some(CustomMenuMedia { background, overlay: menu.background.overlay, layers }),
+        intro: None,
+        intro_fill: [0; 3],
     };
     Ok(PageOutput { files, buttons, motion: moving, warnings })
 }
@@ -1240,6 +1242,7 @@ pub fn build_custom_menus(
                     entry: (n == 1).then(|| "title".to_string()),
                     motion,
                     pre: None,
+                    intro_secs: None,
                 };
                 vmgm_menus.push(spec.clone());
                 pages.push((spec, files));
@@ -1252,6 +1255,7 @@ pub fn build_custom_menus(
                     entry: list.is_empty().then(|| "root".to_string()),
                     motion,
                     pre: Some(RESET_DISPATCH.to_string()),
+                    intro_secs: None,
                 };
                 list.push(spec.clone());
                 pages.push((spec, files));

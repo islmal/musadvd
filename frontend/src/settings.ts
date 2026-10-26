@@ -262,7 +262,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
         check(
           "menu_animations",
           "Menü-Animationen (Intro)",
-          "Spielt bei Blu-ray/AVCHD-Menüs aus ConvertX-Vorlagen das Intro der Seiten (Ein-/Ausblenden, Zoomen) ab, bevor die Buttons erscheinen. Aus: die fertigen Seiten stehen sofort. Weiterblättern innerhalb eines Menüs spielt das Intro nicht erneut.",
+          "Spielt bei Menüs aus ConvertX-Vorlagen (DVD, Blu-ray, AVCHD) das Intro der Seiten (Ein-/Ausblenden, Zoomen) ab, bevor die Buttons erscheinen. Aus: die fertigen Seiten stehen sofort. Bei Blu-ray/AVCHD spielt das Weiterblättern innerhalb eines Menüs das Intro nicht erneut, bei DVD schon.",
         ),
         check(
           "bd_hw_encode",

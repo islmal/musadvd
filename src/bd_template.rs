@@ -12,14 +12,13 @@ use crate::author::{count_loc, title_page_of, MAX_CHAPTERS, TITLE_ITEMS};
 use crate::dvd::find_page_source;
 use crate::encoder::{Aspect, Fit};
 use crate::layout::{
-    Action, Background, ButtonColors, Canvas, Content, CustomLayout, CustomMenu, Element, ElementKey, Highlight, LayoutError,
+    Action, Background, ButtonColors, Canvas, Content, CustomLayout, CustomMenu, Element, Highlight, LayoutError,
     LayoutTitle, MenuRole, MenuSound, LAYOUT_VERSION,
 };
+use crate::menu_anim;
 use crate::menu::{button_of_graphic, localize, page_by_style, resolve_resource, UiLang};
 use crate::template::{Button, DelphiColor, Graphic, Page, Template, TextStyle};
 
-/// Longest intro played (templates use 3 s).
-const MAX_INTRO_SECS: f64 = 10.0;
 const CANVAS_W: f64 = 1920.0;
 const CANVAS_H: f64 = 1080.0;
 
@@ -257,30 +256,6 @@ fn element(id: String, content: Content, (x, y, w, h): (f64, f64, f64, f64), opa
     Element { id, content, x, y, w, h, rotation: 0, opacity, action: None, highlight: None, group: None, intro: Vec::new() }
 }
 
-/// Intro keys of a graphic whose final box is `rect` (page coordinates): the owning block's box
-/// moves and fades per key, the graphic keeps its place inside the block (a zoom about the block's
-/// own corner). Empty when nothing moves or the box cannot be mapped.
-fn intro_keys(g: &Graphic, rect: (f64, f64, f64, f64), frame: &TemplateFrame) -> Vec<ElementKey> {
-    let (bx, by, bw, bh) = (g.block_rect.0 as f64, g.block_rect.1 as f64, g.block_rect.2 as f64, g.block_rect.3 as f64);
-    if g.intro.is_empty() || bw < 1.0 || bh < 1.0 {
-        return Vec::new();
-    }
-    let final_opacity = g.alpha as f32 / 255.0;
-    let keys: Vec<ElementKey> = g
-        .intro
-        .iter()
-        .map(|k| {
-            let (sx, sy) = (k.w as f64 / bw, k.h as f64 / bh);
-            let (x, y, w, h) = frame.rect(k.x as f64 + (rect.0 - bx) * sx, k.y as f64 + (rect.1 - by) * sy, rect.2 * sx, rect.3 * sy);
-            let opacity = k.alpha.map_or(final_opacity, |a| a as f32 / 255.0 * g.gfx_alpha as f32 / 255.0);
-            ElementKey { t: k.t, x, y, w, h, opacity }
-        })
-        .collect();
-    let (x, y, w, h) = frame.rect(rect.0, rect.1, rect.2, rect.3);
-    let moves = keys.iter().any(|k| (k.x - x).abs() > 0.5 || (k.y - y).abs() > 0.5 || (k.w - w).abs() > 0.5 || (k.h - h).abs() > 0.5 || (k.opacity - final_opacity).abs() > 0.004);
-    if moves { keys } else { Vec::new() }
-}
-
 /// Whether `clip` left the box alone. Not `==`: it recomputes the size as `(x + w) - x`, which is
 /// not bit-identical to `w`, and such graphics would silently lose their intro keys.
 fn same_box(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
@@ -382,7 +357,7 @@ impl Nav<'_> {
             let mut e = element(format!("g{}", out.len()), content, r, g.alpha as f32 / 255.0);
             // A box cut by the canvas edge would not match the keys: such a graphic just appears.
             if same_box(r, full) {
-                e.intro = intro_keys(g, rect, &frame);
+                e.intro = menu_anim::graphic_keys(g, rect, |x, y, w, h| frame.rect(x, y, w, h));
             }
             out.push(e);
         }
@@ -524,7 +499,7 @@ pub fn layout_from_template(
             background: Background::default(),
             duration_secs: None,
             audio: MenuSound::None,
-            intro_secs: intro_end.map(|t| t.max(src.page.intro_duration).clamp(0.5, MAX_INTRO_SECS)),
+            intro_secs: intro_end.map(|t| menu_anim::intro_length(t, src.page.intro_duration)),
             elements,
         });
     };
