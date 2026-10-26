@@ -575,6 +575,7 @@ mod menus {
             action: Some(action),
             highlight: None,
             group: None,
+            intro: Vec::new(),
         }
     }
 
@@ -587,6 +588,7 @@ mod menus {
             background: Background { color: "#102040".into(), ..Background::default() },
             duration_secs: None,
             audio: MenuSound::None,
+            intro_secs: None,
             elements,
         }
     }
@@ -597,6 +599,7 @@ mod menus {
             version: 1,
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),
+            animations: true,
             menus: vec![
                 menu("main", MenuRole::Title, None, vec![
                     button(200.0, "Film 1", Action::PlayTitle { title: 1 }),

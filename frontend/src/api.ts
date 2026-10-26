@@ -240,6 +240,7 @@ export interface AppSettings {
   force_first_subtitle: boolean;
   hw_decode: boolean;
   bd_hw_encode: boolean;
+  menu_animations: boolean;
   fast_encode: boolean;
   audio_mode: "auto" | "ac3" | "lpcm";
   scale_mode: "letterbox" | "panscan" | "stretch";

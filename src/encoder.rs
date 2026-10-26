@@ -1292,6 +1292,35 @@ fn rotate_filter(rotation: u32) -> Option<&'static str> {
     }
 }
 
+/// Filter chain (without input label) turning a clip into a video layer's pictures: `width`×`height`
+/// is the layer's box on the frame, rotated clockwise by `rotation`; the result is RGBA.
+fn video_layer_filters(frame: &MenuFrame, rate: &str, width: u32, height: u32, rotation: u32, fit: Fit) -> String {
+    // Fit into the unrotated box, then rotate into the layout box.
+    let (bw, bh) = if rotation % 180 == 90 { (height, width) } else { (width, height) };
+    // Stretch fills the box as it is; the other fits keep the picture's proportions.
+    let pixels = if fit == Fit::Stretch { "setsar=1".to_string() } else { menu_pixels_for(frame.pixel_aspect, rotation % 180 == 90) };
+    let mut chain = format!("fps={rate},{pixels},{}", fit_filter(fit, bw, bh, "black"));
+    if let Some(r) = rotate_filter(rotation) {
+        chain.push(',');
+        chain.push_str(r);
+    }
+    chain.push_str(",setsar=1,format=rgba");
+    chain
+}
+
+/// Helper pass of the intro: the first `frames` pictures of a video layer made exactly like the page
+/// graph makes them (same chain, so the loop continues them without a seam), as raw RGBA on stdout.
+/// `None` for layers that are no video.
+pub fn intro_slot_stream(frame: &MenuFrame, rate: BdRate, layer: &MenuLayer, frames: usize) -> Option<crate::tools::RawStream> {
+    let MenuLayer::Video { clip, width, height, rotation, fit, .. } = layer else { return None };
+    let mut args: Vec<OsString> = ["-stream_loop", "-1", "-ss"].map(OsString::from).into();
+    args.extend([format!("{:.3}", clip.start_secs).into(), "-i".into(), clip.path.as_os_str().to_owned()]);
+    args.extend(["-vf".into(), video_layer_filters(frame, &rate.ffmpeg(), *width, *height, *rotation, *fit).into()]);
+    args.extend(["-frames:v".into(), frames.to_string().into()]);
+    args.extend(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"].map(OsString::from));
+    Some(crate::tools::RawStream { args, frame_bytes: *width as usize * *height as usize * 4 })
+}
+
 /// Arguments compiling a custom (menu editor) page: the background (colour, still or clip,
 /// optionally Gaussian-blurred), then every layer in order – transparent PNGs with the static
 /// elements and moving clips at their boxes (fitted, rotated in 90° steps, faded by their
@@ -1306,7 +1335,7 @@ pub fn custom_menu_args(
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
     let frame = MenuFrame::from(tv);
-    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3");
+    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3", None);
     a.extend(
         [
             "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
@@ -1320,21 +1349,32 @@ pub fn custom_menu_args(
 
 /// Blu-ray menu clip: the same graph on a square-pixel HD frame, encoded as H.264 + AC-3 (the
 /// settings of the title encodes, at a fixed 8 Mbit/s) for tsMuxeR.
+///
+/// `intro_secs` (a whole number of frames, see `menu_anim::intro_frames`): the page opens with an
+/// intro of raw RGBA frames read from `pipe:0` (`Toolchain::ffmpeg_piped`) that covers the first
+/// `intro_secs` of the clip, which then goes on as the loop; a keyframe is forced where the loop
+/// starts and the audio fades into the sound at that point, so the restart is level-continuous.
+/// `duration_secs` is the whole clip (intro + loop).
 pub fn bd_custom_menu_args(
     frame: &MenuFrame,
     rate: BdRate,
     media: &CustomMenuMedia,
     duration_secs: f64,
     audio: Option<&ClipSource>,
+    intro_secs: Option<f64>,
     output: &Path,
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
-    let mut a = custom_menu_graph(frame, &rate.ffmpeg(), media, duration_secs, audio, "16/9");
+    let mut a = custom_menu_graph(frame, &rate.ffmpeg(), media, duration_secs, audio, "16/9", intro_secs);
     let mut x264 = String::from("slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1");
     if rate.fake_interlaced {
         x264.push_str(":fake-interlaced=1:pic-struct=1");
     }
     a.extend(["-map", "[vout]", "-map", "[aout]", "-t", &d].map(OsString::from));
+    if let Some(t) = intro_secs {
+        // Rounded down: the keyframe lands on the first frame at or after the mark, never one later.
+        a.extend(["-force_key_frames".into(), format!("{:.6}", (t * 1e6).floor() / 1e6).into()]);
+    }
     a.extend(["-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.1", "-bluray-compat", "1"].map(OsString::from));
     a.extend(["-b:v", "8000k", "-maxrate", "15000k", "-bufsize", "15000k"].map(OsString::from));
     a.extend(["-g".into(), rate.keyint().to_string().into(), "-bf".into(), "3".into(), "-x264-params".into(), x264.into()]);
@@ -1344,31 +1384,24 @@ pub fn bd_custom_menu_args(
     a
 }
 
-/// Inputs and `-filter_complex` of a custom menu (everything before the output options);
-/// the graph ends in `[vout]` and `[aout]`.
-fn custom_menu_graph(
-    frame: &MenuFrame,
-    rate: &str,
-    media: &CustomMenuMedia,
-    duration_secs: f64,
-    audio: Option<&ClipSource>,
-    dar: &str,
-) -> Vec<OsString> {
-    let d = format!("{duration_secs:.3}");
-    let (fw, fh) = (frame.width, frame.height);
-    let mut a: Vec<OsString> = vec!["-y".into()];
-    let still = |a: &mut Vec<OsString>, png: &Path| {
-        a.extend(["-loop", "1", "-framerate", rate, "-t", &d, "-i"].map(OsString::from));
-        a.push(png.as_os_str().to_owned());
-    };
-    let clip_input = |a: &mut Vec<OsString>, clip: &ClipSource| {
-        a.extend(["-stream_loop", "-1", "-ss", &format!("{:.3}", clip.start_secs), "-t", &d, "-i"].map(OsString::from));
-        a.push(clip.path.as_os_str().to_owned());
-    };
-    let square = menu_pixels_for(frame.pixel_aspect, false);
-    let mut f: Vec<String> = Vec::new();
+/// `-loop`ed still picture input.
+fn still_input(a: &mut Vec<OsString>, rate: &str, d: &str, png: &Path) {
+    a.extend(["-loop", "1", "-framerate", rate, "-t", d, "-i"].map(OsString::from));
+    a.push(png.as_os_str().to_owned());
+}
 
-    // Input 0: background, then the shading over it.
+/// Looping clip input starting at the clip's own start.
+fn clip_input_args(a: &mut Vec<OsString>, d: &str, clip: &ClipSource) {
+    a.extend(["-stream_loop", "-1", "-ss", &format!("{:.3}", clip.start_secs), "-t", d, "-i"].map(OsString::from));
+    a.push(clip.path.as_os_str().to_owned());
+}
+
+/// The page background: colour, still or clip (optionally blurred) plus its shading. Pushes input 0
+/// onto `a` and the filters onto `f`; the result is the RGBA stream `[bg]`. Used by the page graph
+/// and by the intro's helper pass, so both make the same pictures.
+fn background_chain(frame: &MenuFrame, rate: &str, media: &CustomMenuMedia, d: &str, a: &mut Vec<OsString>, f: &mut Vec<String>) {
+    let (fw, fh) = (frame.width, frame.height);
+    let square = menu_pixels_for(frame.pixel_aspect, false);
     let blur = |b: f32| if b > 0.0 { format!(",gblur=sigma={b:.1}") } else { String::new() };
     // Applied before the conversion to RGBA (vignette) resp. right after it (dim).
     let (pre_rgba, post_rgba) = match media.overlay {
@@ -1386,7 +1419,7 @@ fn custom_menu_graph(
             f.push(format!("[0:v]{pre}format=rgba{post_rgba},setsar=1[{bg_label}]"));
         }
         MenuBackground::Image { path, blur: b } => {
-            still(&mut a, path);
+            still_input(a, rate, d, path);
             f.push(format!(
                 "[0:v]fps={rate},{square},{}{}{pre_rgba},format=rgba{post_rgba},setsar=1[{bg_label}]",
                 fit_filter(Fit::Cover, fw, fh, "black"),
@@ -1394,7 +1427,7 @@ fn custom_menu_graph(
             ));
         }
         MenuBackground::Video { clip, blur: b } => {
-            clip_input(&mut a, clip);
+            clip_input_args(a, d, clip);
             f.push(format!(
                 "[0:v]fps={rate},{square},{}{}{pre_rgba},format=rgba{post_rgba},setsar=1,trim=duration={d},setpts=PTS-STARTPTS[{bg_label}]",
                 fit_filter(Fit::Cover, fw, fh, "black"),
@@ -1412,6 +1445,44 @@ fn custom_menu_graph(
         ));
         f.push("[bg0][shade]overlay=0:0:format=rgb[bg]".to_string());
     }
+}
+
+/// Helper pass of the intro: the first `frames` pictures of the page background (the same chain as
+/// the page graph: picture / clip, blur, shading) as raw RGBA on stdout, the base the intro frames
+/// are composited on.
+pub fn intro_background_stream(frame: &MenuFrame, rate: BdRate, media: &CustomMenuMedia, frames: usize) -> crate::tools::RawStream {
+    let rate_s = rate.ffmpeg();
+    // A little longer than needed; `-frames:v` ends the stream.
+    let d = format!("{:.3}", frames as f64 / rate.fps_f64() + 1.0);
+    let mut a: Vec<OsString> = Vec::new();
+    let mut f: Vec<String> = Vec::new();
+    background_chain(frame, &rate_s, media, &d, &mut a, &mut f);
+    a.extend(["-filter_complex".into(), f.join(";").into()]);
+    a.extend(["-map", "[bg]", "-frames:v"].map(OsString::from));
+    a.extend([frames.to_string().into(), "-f".into(), "rawvideo".into(), "-pix_fmt".into(), "rgba".into(), "pipe:1".into()]);
+    crate::tools::RawStream { args: a, frame_bytes: frame.width as usize * frame.height as usize * 4 }
+}
+
+/// Inputs and `-filter_complex` of a custom menu (everything before the output options);
+/// the graph ends in `[vout]` and `[aout]`.
+fn custom_menu_graph(
+    frame: &MenuFrame,
+    rate: &str,
+    media: &CustomMenuMedia,
+    duration_secs: f64,
+    audio: Option<&ClipSource>,
+    dar: &str,
+    intro_secs: Option<f64>,
+) -> Vec<OsString> {
+    let d = format!("{duration_secs:.3}");
+    let (fw, fh) = (frame.width, frame.height);
+    let mut a: Vec<OsString> = vec!["-y".into()];
+    let still = |a: &mut Vec<OsString>, png: &Path| still_input(a, rate, &d, png);
+    let clip_input = |a: &mut Vec<OsString>, clip: &ClipSource| clip_input_args(a, &d, clip);
+    let mut f: Vec<String> = Vec::new();
+
+    // Input 0: background, then the shading over it (ends in `[bg]`).
+    background_chain(frame, rate, media, &d, &mut a, &mut f);
 
     // Inputs 1..=n: layers, overlaid bottom to top.
     let mut cur = "bg".to_string();
@@ -1425,16 +1496,7 @@ fn custom_menu_graph(
             }
             MenuLayer::Video { clip, x, y, width, height, rotation, fit, opacity } => {
                 clip_input(&mut a, clip);
-                // Fit into the unrotated box, then rotate into the layout box.
-                let (bw, bh) = if rotation % 180 == 90 { (*height, *width) } else { (*width, *height) };
-                // Stretch fills the box as it is; the other fits keep the picture's proportions.
-                let pixels = if *fit == Fit::Stretch { "setsar=1".to_string() } else { menu_pixels_for(frame.pixel_aspect, rotation % 180 == 90) };
-                let mut chain = format!("[{input}:v]fps={rate},{pixels},{}", fit_filter(*fit, bw, bh, "black"));
-                if let Some(r) = rotate_filter(*rotation) {
-                    chain.push(',');
-                    chain.push_str(r);
-                }
-                chain.push_str(",setsar=1,format=rgba");
+                let mut chain = format!("[{input}:v]{}", video_layer_filters(frame, rate, *width, *height, *rotation, *fit));
                 if *opacity < 1.0 {
                     chain.push_str(&format!(",colorchannelmixer=aa={:.3}", opacity.clamp(0.0, 1.0)));
                 }
@@ -1445,23 +1507,45 @@ fn custom_menu_graph(
         }
         cur = format!("m{i}");
     }
+    // The intro covers everything below it until its last frame, then the page underneath shows.
+    let audio_input = media.layers.len() + 1;
+    if intro_secs.is_some() {
+        f.push(format!("[{}:v]setsar=1[intro]", audio_input + 1));
+        f.push(format!("[{cur}][intro]overlay=0:0:format=rgb:eof_action=pass[mi]"));
+        cur = "mi".to_string();
+    }
     f.push(format!("[{cur}]format=yuv420p,setdar={dar}[vout]"));
 
-    // Last input: the menu sound or silence.
-    let audio_input = media.layers.len() + 1;
+    // Next input: the menu sound or silence.
     match audio {
         Some(src) => {
             clip_input(&mut a, src);
-            let fade_out = (duration_secs - 1.0).max(0.0);
-            f.push(format!(
-                "[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
-                 atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5,afade=t=out:st={fade_out:.3}:d=1[aout]"
-            ));
+            let head = format!("[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo");
+            match intro_secs {
+                // The restart jumps from the clip's end back to the mark `t`: the last `x` seconds
+                // fade from the clip's own end into the sound at [t - x, t], so the signal continues.
+                Some(t) => {
+                    let x = t.min(0.5);
+                    f.push(format!("{head},asplit=2[am][as]"));
+                    f.push(format!("[as]atrim=start={:.6}:end={t:.6},asetpts=N/SR/TB[tail]", t - x));
+                    f.push(format!("[am]atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5[main]"));
+                    f.push(format!("[main][tail]acrossfade=d={x:.6}:c1=tri:c2=tri[aout]"));
+                }
+                None => {
+                    let fade_out = (duration_secs - 1.0).max(0.0);
+                    f.push(format!("{head},atrim=duration={d},asetpts=N/SR/TB,afade=t=in:d=0.5,afade=t=out:st={fade_out:.3}:d=1[aout]"));
+                }
+            }
         }
         None => {
             a.extend(["-f", "lavfi", "-t", &d, "-i", "anullsrc=r=48000:cl=stereo"].map(OsString::from));
             f.push(format!("[{audio_input}:a]asetpts=N/SR/TB[aout]"));
         }
+    }
+    // Last input: the intro frames (the caller writes them as `-f rawvideo` to stdin).
+    if intro_secs.is_some() {
+        a.extend(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"].map(OsString::from));
+        a.extend([format!("{fw}x{fh}"), "-r".into(), rate.to_string(), "-i".into(), "pipe:0".into()].map(OsString::from));
     }
 
     a.extend(["-filter_complex".into(), f.join(";").into()]);
@@ -2168,4 +2252,80 @@ mod tests {
         assert_eq!(c, Crop { top: 132, bottom: 132, left: 0, right: 0 });
         assert_eq!(union_crop(&[], (1920, 1080)), Crop::default());
     }
+    #[test]
+    fn bd_menu_with_intro_overlays_piped_frames_and_crossfades_the_loop_audio() {
+        let clip = ClipSource { path: "music.mp3".into(), start_secs: 0.0, has_audio: true };
+        let media = CustomMenuMedia {
+            background: MenuBackground::Color([0, 0, 0]),
+            overlay: BackgroundOverlay::None,
+            layers: vec![MenuLayer::Image("l0.png".into())],
+        };
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let frame = MenuFrame::square(1920, 1080);
+        let t = 72.0 * 1001.0 / 24000.0;
+        let a = joined(&bd_custom_menu_args(&frame, rate, &media, t + 20.0, Some(&clip), Some(t), Path::new("m.mkv")));
+        // The intro is the last input, read from stdin as raw RGBA, and covers the page until it ends.
+        assert!(a.contains("-f rawvideo -pix_fmt rgba -s 1920x1080 -r 24000/1001 -i pipe:0"), "{a}");
+        assert!(a.ends_with("m.mkv") && a.rfind("pipe:0") > a.rfind("music.mp3"), "{a}");
+        assert!(a.contains("[3:v]setsar=1[intro];[m0][intro]overlay=0:0:format=rgb:eof_action=pass[mi];[mi]format=yuv420p"), "{a}");
+        // A keyframe where the loop starts (rounded down to the microsecond).
+        assert!(a.contains("-force_key_frames 3.003000"), "{a}");
+        // The exact crossfade of the plan: clip tail -> sound at [T-X, T], no fade-out.
+        assert!(a.contains("asplit=2[am][as];[as]atrim=start=2.503000:end=3.003000,asetpts=N/SR/TB[tail];"), "{a}");
+        assert!(a.contains("[am]atrim=duration=23.003,asetpts=N/SR/TB,afade=t=in:d=0.5[main];[main][tail]acrossfade=d=0.500000:c1=tri:c2=tri[aout]"), "{a}");
+        assert!(!a.contains("afade=t=out"), "{a}");
+        // Without intro the old chain and no extra input.
+        let a = joined(&bd_custom_menu_args(&frame, rate, &media, 20.0, Some(&clip), None, Path::new("m.mkv")));
+        assert!(!a.contains("pipe:0") && !a.contains("force_key_frames") && a.contains("afade=t=out:st=19.000:d=1[aout]"), "{a}");
+    }
+
+    #[test]
+    fn intro_slot_stream_makes_the_same_pictures_as_the_page_graph() {
+        let rate = BdRate { fps: (25, 1), fake_interlaced: true };
+        let frame = MenuFrame::square(1920, 1080);
+        let layer = MenuLayer::Video {
+            clip: ClipSource { path: "movie.mkv".into(), start_secs: 12.5, has_audio: true },
+            x: 10,
+            y: 20,
+            width: 160,
+            height: 90,
+            rotation: 0,
+            fit: Fit::Contain,
+            opacity: 0.5,
+        };
+        let s = intro_slot_stream(&frame, rate, &layer, 75).unwrap();
+        assert_eq!(s.frame_bytes, 160 * 90 * 4);
+        let a = joined(&s.args);
+        assert!(a.starts_with("-stream_loop -1 -ss 12.500 -i movie.mkv -vf fps=25,"), "{a}");
+        assert!(a.contains(&video_layer_filters(&frame, "25", 160, 90, 0, Fit::Contain)) && a.ends_with("-frames:v 75 -f rawvideo -pix_fmt rgba pipe:1"), "{a}");
+        assert!(intro_slot_stream(&frame, rate, &MenuLayer::Image("x.png".into()), 75).is_none());
+    }
+
+    #[test]
+    fn intro_background_stream_uses_the_page_background_chain() {
+        let rate = BdRate { fps: (25, 1), fake_interlaced: true };
+        let frame = MenuFrame::square(1920, 1080);
+        let media = CustomMenuMedia {
+            background: MenuBackground::Image { path: "bg.jpg".into(), blur: 8.0 },
+            overlay: BackgroundOverlay::Dim,
+            layers: vec![MenuLayer::Image("l0.png".into())],
+        };
+        let s = intro_background_stream(&frame, rate, &media, 75);
+        assert_eq!(s.frame_bytes, 1920 * 1080 * 4);
+        let a = joined(&s.args);
+        // The very filters of the page graph, then raw frames of the first 75 pictures.
+        let page = joined(&bd_custom_menu_args(&frame, rate, &media, 10.0, None, None, Path::new("m.mkv")));
+        let chain = "[0:v]fps=25,scale=trunc(ih*dar*1.000000/2)*2:ih,setsar=1,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=8.0,format=rgba,colorchannelmixer=rr=0.6:gg=0.6:bb=0.6,setsar=1[bg]";
+        assert!(a.contains(chain) && page.contains(chain), "{a}");
+        assert!(a.ends_with("-map [bg] -frames:v 75 -f rawvideo -pix_fmt rgba pipe:1"), "{a}");
+        // A clip background loops from its own start; the shading is part of the chain.
+        let clip = CustomMenuMedia {
+            background: MenuBackground::Video { clip: ClipSource { path: "m.mkv".into(), start_secs: 4.0, has_audio: true }, blur: 0.0 },
+            overlay: BackgroundOverlay::BottomDark,
+            layers: vec![],
+        };
+        let a = joined(&intro_background_stream(&frame, rate, &clip, 75).args);
+        assert!(a.starts_with("-stream_loop -1 -ss 4.000 -t ") && a.contains("[bg0][shade]overlay=0:0:format=rgb[bg]"), "{a}");
+    }
+
 }

@@ -13,8 +13,9 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 #[derive(Debug)]
@@ -140,6 +141,15 @@ async fn drive_ffmpeg_stderr(
         }
     }
     log
+}
+
+/// A raw RGBA stream a helper ffmpeg writes for [`Toolchain::ffmpeg_piped`].
+#[derive(Debug, Clone)]
+pub struct RawStream {
+    /// Complete ffmpeg arguments, ending in `-f rawvideo -pix_fmt rgba pipe:1`.
+    pub args: Vec<OsString>,
+    /// Bytes of one frame (`width * height * 4`).
+    pub frame_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +394,104 @@ impl Toolchain {
         } else {
             Err(ToolError::Failed { tool: "ffmpeg".into(), status: status.to_string(), log: tail(&log, 30) })
         }
+    }
+
+    /// ffmpeg encoding a raw RGBA video it reads from `pipe:0` (`args` declare it with
+    /// `-f rawvideo -pix_fmt rgba -s WxH -r R -i pipe:0`), with the frames made on the fly: frame `i`
+    /// is `compose(i, current frames of the streams)`. Each of `streams` is a helper ffmpeg (complete
+    /// `args` ending in `pipe:1`) writing raw frames of `frame_bytes` bytes to its stdout. Frames are
+    /// made 8 at a time on the rayon pool and written in order; nothing touches the disk.
+    pub async fn ffmpeg_piped(
+        &self,
+        args: &[OsString],
+        streams: &[RawStream],
+        frames: usize,
+        duration_secs: f64,
+        compose: Arc<dyn Fn(usize, &[&[u8]]) -> Vec<u8> + Send + Sync>,
+        mut progress: impl FnMut(FfmpegProgress),
+    ) -> Result<(), ToolError> {
+        const CHUNK: usize = 8;
+        let io = |tool: &str| {
+            let tool = tool.to_string();
+            move |error| ToolError::Io { tool: tool.clone(), error }
+        };
+        let mut main = self.ffmpeg_command(args);
+        main.stdin(Stdio::piped());
+        let mut main_child = main.spawn().map_err(io("ffmpeg"))?;
+        // Taken out of the Option at the end: only dropping the handle closes the pipe (EOF for ffmpeg).
+        let mut stdin = main_child.stdin.take();
+        let stderr = main_child.stderr.take().expect("piped stderr");
+
+        let mut readers = Vec::new();
+        for s in streams {
+            let mut cmd = self.command(&self.ffmpeg);
+            cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]).args(&s.args).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = cmd.spawn().map_err(io("ffmpeg"))?;
+            let out = child.stdout.take().expect("piped stdout");
+            let mut err = child.stderr.take().expect("piped stderr");
+            let log = tokio::spawn(async move {
+                let mut text = String::new();
+                let _ = err.read_to_string(&mut text).await;
+                text
+            });
+            readers.push((child, out, log, s.frame_bytes));
+        }
+
+        let feed = async {
+            let mut next = 0;
+            while next < frames {
+                let n = CHUNK.min(frames - next);
+                let mut raw: Vec<Vec<Vec<u8>>> = Vec::with_capacity(readers.len());
+                for (_, out, _, bytes) in readers.iter_mut() {
+                    let mut got = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let mut buf = vec![0u8; *bytes];
+                        out.read_exact(&mut buf).await.map_err(|error| ToolError::Io { tool: "ffmpeg (Intro-Videos)".into(), error })?;
+                        got.push(buf);
+                    }
+                    raw.push(got);
+                }
+                let compose = compose.clone();
+                let made: Vec<Vec<u8>> = tokio::task::spawn_blocking(move || {
+                    use rayon::prelude::*;
+                    (0..n)
+                        .into_par_iter()
+                        .map(|i| {
+                            let slots: Vec<&[u8]> = raw.iter().map(|s| s[i].as_slice()).collect();
+                            compose(next + i, &slots)
+                        })
+                        .collect()
+                })
+                .await
+                .map_err(|e| ToolError::Failed { tool: "intro compositing".into(), status: "panic".into(), log: e.to_string() })?;
+                for frame in made {
+                    stdin.as_mut().expect("open until the end").write_all(&frame).await.map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
+                }
+                next += n;
+            }
+            drop(stdin.take());
+            Ok(())
+        };
+        let (fed, log) = tokio::join!(feed, drive_ffmpeg_stderr(stderr, duration_secs, &mut progress));
+        let status = main_child.wait().await.map_err(io("ffmpeg"))?;
+        // A helper that failed explains the short read better than the encoder it starved.
+        let mut helper_error = None;
+        for (mut child, _, logs, _) in readers {
+            let _ = child.kill().await;
+            let text = logs.await.unwrap_or_default();
+            if helper_error.is_none() && !text.trim().is_empty() {
+                helper_error = Some(ToolError::Failed { tool: "ffmpeg (Intro-Videos)".into(), status: "error".into(), log: tail(&text, 30) });
+            }
+        }
+        if let (Err(_), Some(e)) = (&fed, helper_error) {
+            return Err(e);
+        }
+        if !status.success() {
+            return Err(ToolError::Failed { tool: "ffmpeg".into(), status: status.to_string(), log: tail(&log, 30) });
+        }
+        fed?;
+        progress(FfmpegProgress { fraction: 1.0, ..Default::default() });
+        Ok(())
     }
 
     /// ffmpeg writing an MPEG program stream to its stdout (`args` must end with `pipe:1`),

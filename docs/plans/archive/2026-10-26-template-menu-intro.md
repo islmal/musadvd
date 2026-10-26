@@ -4,6 +4,30 @@ Status: planned 2026-10-26. Scope: ConvertX template **intro** on BD/AVCHD via `
 Not in scope: outro (only the dispatcher hook), DVD templates (own renderer in `menu.rs`),
 skipping the intro by key press.
 
+## NON-NEGOTIABLE CONSTRAINTS (do not change, do not "simplify" on errors)
+
+These were decided by the user after review. If one of them causes a bug, fix the bug inside the
+constraint; never replace the mechanism. Stop and ask the user instead of deviating.
+
+1. **No intro frames on disk.** Intro frames go Rust → ffmpeg as `-f rawvideo -pix_fmt rgba
+   -s WxH -r R -i pipe:0` over **stdin**; background/slot frames come ffmpeg → Rust as `rawvideo
+   rgba` over **stdout**. Forbidden: PNG/BMP/any image sequence files, temp video files for the
+   intro, `eval=frame`, `geq`, per-frame filter expressions. The static element layers that exist
+   today (one PNG per layer, not per frame) stay as they are.
+2. **Exact audio crossfade at the loop end** (pages with intro and audio), with `D = T + L`,
+   `X = min(0.5, T)`:
+   ```
+   [a]asplit=2[m][s];
+   [s]atrim=start=T-X:end=T,asetpts=N/SR/TB[tail];
+   [m]atrim=duration=D,asetpts=N/SR/TB,afade=t=in:d=0.5[main];
+   [main][tail]acrossfade=d=X:c1=tri:c2=tri[aout]
+   ```
+   Output length stays `D`; its last `X` s fade from the clip's own end into the audio of
+   `[T−X, T]`, so the restart at mark `T` continues the signal. No `afade=t=out` on these pages,
+   no hard cut. Pages without intro keep today's audio chain byte for byte.
+3. **IGS composition PTS = exactly T**, IG display set ≤ `IG_BUDGET` (below).
+4. **One continuous encode per page** (background, video slots, audio); the intro is only overlaid.
+
 ## Findings (template data)
 
 Every block has `blocks\ItemN\Anim\ItemK` keyframes: `Origin=MNUP_INTRO|MNUP_OUTRO`,
@@ -103,8 +127,7 @@ titles get 0 through the dispatcher. Pages without intro keep their current comm
 
 ## Steps
 
-1. Spikes: (a) tsMuxeR packet order of the IG display set vs. the EP entry of mark 1 (packet level);
-   (b) register-operand `JumpObject`/`JumpTitle` encoding (fallback: compare chain in the dispatcher).
+1. Spikes 1a and 1b: **done** (see results below; `tests/menu_intro.rs`, `hdmv::jump_*_op`).
 2. Parser + test. 3. Layout fields + bd_template mapping. 4. `menu_anim.rs`. 5. Piped ffmpeg +
    encoder graph. 6. bd_menu navigation + hdmv operands. 7. bd.rs muxing, meta, IGS PTS.
 8. Opt-out settings/GUI/CLI. 9. Full workspace run + Unix check.
@@ -118,14 +141,73 @@ titles get 0 through the dispatcher. Pages without intro keep their current comm
   Top Menu resets GPR3; **regression:** no intro / `animations=false` → menu objects, title numbers
   and playlists unchanged.
 - `hdmv`: register-operand jump bytes (I-flag 0) against libbluray's layout.
-- `tests/menu_intro.rs` (skips without tools): Spike 1a packet test (kept as regression guard);
-  seam frame N−1 vs N ≤ 2 on static areas; video slot continuity; audio at the clip end matches the
-  audio at `T` (crossfade); MPLS has 2 marks.
+- `tests/menu_intro.rs` (skips without tools): Spike 1a packet test and the IG budget test (both
+  exist, keep them green); seam frame N−1 vs N ≤ 2 on static areas; video slot continuity; MPLS has
+  2 marks; **audio:** decode the clip's AC-3 to PCM, the last 20 ms correlate with the source audio
+  at `[T−20 ms, T]` (crossfade target reached) and no sample jump > 0.05 full scale in the last
+  `X` s; **no files:** the work dir contains no intro frame files after a build (assert on the
+  directory listing – guards constraint 1).
 - `tests/bluray.rs`: template build with intro → valid navigation; opt-out → identical to a build
   without animation data.
 - `cargo test --workspace`, `npm run build`, Unix check. Manual (roadmap): VLC – buttons after the
   mark jump, paging skips the intro, Top Menu replays it.
 
-## Spike 1a result
+## Spike 1a result (2026-10-26, tsMuxeR 2.7.0, ffmpeg 9.0.1) – PASSED
 
-(filled in by the spike run)
+`tests/menu_intro.rs::ig_display_set_starts_behind_the_entry_point_of_the_intro_mark` (kept as
+regression guard). Clip: 1080 colour menu `T + 2 s`, `-force_key_frames T`, SUP with ICS PTS = T,
+`--custom-chapters=0;T`; checked at 25p-as-1080i and 23.976, with a 1.5 MB (noise) and a sparse IG
+display set, before and after `bd_patch::patch_menu`:
+
+- MPLS mark 1 = clip start + T exactly; the EP entry before it is the video PES presented exactly
+  at T (EP-map PTS only keep bits 9..32 – compare via the PES, not the EP PTS).
+- First IG PES starts 20 packets **behind** that entry point (SPN 689 vs 669 / 683 vs 663); no IG
+  packet before T at all; ICS PTS = T exactly.
+- tsMuxeR schedules the display set from the keyframe on: it arrives completely **333–383 ms
+  before** the frame at T is presented (video lead 500 ms from `--vbv-len=500`), even for 1.5 MB.
+  So buttons are ready on the first loop frame after `PlayPLatMark(pl, 1)`.
+- Not modelled: the player's own ODS decode time (expected well inside the ~330 ms margin).
+
+Consequence: architecture stands as planned (IGS PTS = T).
+
+## IG display-set budget (hardware buffer safety)
+
+Risk raised in review: a 1.5 MB display set (12 Mbit) needs ~375 ms at a 32 Mbit/s decoder, more
+than the 333 ms lead. The 1.5 MB set was a synthetic worst case (noise objects). Measured with the
+real templates (`tests/menu_intro.rs::real_template_ig_display_sets_fit_the_budget`, all 19
+templates, one full page of every kind): **max 81 KB, median 38–48 KB**.
+
+Rule: **`IG_BUDGET = 256 KiB`** per display set (2.1 Mbit: 131 ms at the 16 Mbit/s IG transport
+rate, 66 ms at a 32 Mbit/s decoder → ≥ 2.5× headroom against the 333 ms lead).
+
+- The test asserts it for every real template page (regression guard).
+- Implementation (step 7, `bd_menu::render_page`): after building the `IgMenu`, if
+  `igs::build_sup(&ig).len() > IG_BUDGET`, re-render the button objects with a reduced palette
+  (`ALPHA_STEPS` 16 → 4, then 2: fewer anti-aliasing levels = longer RLE runs) and crop every
+  object to the bounding box of its non-transparent pixels. Still over → German warning
+  ("Menü „…“: Button-Grafiken sehr groß – Buttons erscheinen auf manchen Playern verzögert") and
+  keep the smallest version. Unit test with an oversized fake menu: size shrinks, warning appears.
+- The animation itself is in the video, never in the IG stream; the display set is static.
+
+## Spike 1b result (2026-10-26) – PASSED
+
+- libbluray `hdmv_vm.c` (`_hdmv_step`): `_fetch_operands()` runs for **every** command before the
+  group switch; `imm_op1 = 0` reads `dst` from the register (`_read_reg`, GPR or PSR), and
+  `INSN_JUMP_OBJECT` / `INSN_JUMP_TITLE` use that `dst`. `PlayPLatMark(pl, GPR1)` uses the same
+  path and already works in VLC with our BD menus.
+- `src/hdmv.rs`: `jump_object_op(Op)` / `jump_title_op(Op)` added; unit test
+  `register_operand_jumps` checks the bytes (`21 00 … 05` / `21 01 … 05`) and that the immediate
+  form equals `jump_object` / `jump_title`.
+- Use them in DISPATCH as `jump_object_op(Op::Gpr(5))` / `jump_title_op(Op::Gpr(5))`.
+
+**Documented fallback** (only if the manual VLC/player check of the dispatcher fails; it changes
+nothing outside DISPATCH): replace commands 5/6 by compare chains over all targets,
+```
+; menus (k = every menu object id)            ; titles (n = 1..=title count)
+cmp GPR5 == k ; JumpObject(k)                 cmp GPR5 == n ; JumpTitle(n)
+```
+placed under the `GPR4` branch they belong to (2 commands per target, objects stay < 1000
+commands for 400 menus + titles).
+
+Remaining manual checks (roadmap, not automatable here): VLC – buttons after the mark jump, paging
+skips the intro, Top Menu replays it, dispatcher jumps reach titles and menus.

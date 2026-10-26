@@ -260,6 +260,11 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           "Mehrere Videos werden sonst zu einer Playlist zusammengefasst, die nach dem Einlegen komplett abläuft. Ist die Option an, lässt sich die Blu-ray-Konvertierung nur mit einem Video starten.",
         ),
         check(
+          "menu_animations",
+          "Menü-Animationen (Intro)",
+          "Spielt bei Blu-ray/AVCHD-Menüs aus ConvertX-Vorlagen das Intro der Seiten (Ein-/Ausblenden, Zoomen) ab, bevor die Buttons erscheinen. Aus: die fertigen Seiten stehen sofort. Weiterblättern innerhalb eines Menüs spielt das Intro nicht erneut.",
+        ),
+        check(
           "bd_hw_encode",
           "Hardware-Encoding (NVIDIA NVENC) für Blu-ray",
           "Kodiert Blu-ray-Videos mit der NVIDIA-Grafikkarte statt mit x264 – deutlich schneller. Fällt automatisch auf x264 zurück, wenn NVENC nicht funktioniert (Treiber ≥ 610 nötig). 1080i-Bildraten (25 / 29,97 Bilder/s) bleiben bei x264.",

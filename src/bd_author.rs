@@ -134,9 +134,12 @@ fn offset_options(offset: usize) -> String {
 
 /// Meta file of one menu clip: video, its AC-3 sound and the Interactive Graphics stream (an
 /// `.sup` that `bd_patch` turns from PGS into IG after muxing). Menu `offset` is its playlist /
-/// clip number.
-pub fn menu_meta_text(mkv: &str, sup: Option<&str>, offset: usize) -> String {
-    let mut out = format!("MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --vbv-len=500{}
+/// clip number. With `intro_secs` the playlist gets a second mark where the loop behind the intro
+/// starts (the menu object restarts at it).
+pub fn menu_meta_text(mkv: &str, sup: Option<&str>, offset: usize, intro_secs: Option<f64>) -> String {
+    // Rounded up to the millisecond: a mark before the keyframe would restart the intro.
+    let marks = intro_secs.map_or_else(String::new, |t| format!(" --custom-chapters=00:00:00.000;{}", chapter_time((t * 1000.0 - 1e-6).ceil() / 1000.0)));
+    let mut out = format!("MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr{marks} --vbv-len=500{}
 ", offset_options(offset));
     out.push_str(&format!("V_MPEG4/ISO/AVC, \"{mkv}\", insertSEI, contSPS, track=1
 "));
@@ -236,10 +239,14 @@ mod tests {
 
     #[test]
     fn menu_meta() {
-        let menu = menu_meta_text("menu_01.mkv", Some("menu_01.sup"), 1);
+        let menu = menu_meta_text("menu_01.mkv", Some("menu_01.sup"), 1, None);
         assert!(menu.lines().next().unwrap().ends_with("--mplsOffset=1 --m2tsOffset=1"));
         assert!(menu.contains(r#"S_HDMV/PGS, "menu_01.sup", lang=und"#));
-        assert!(!menu_meta_text("m.mkv", None, 0).contains("PGS"));
+        assert!(!menu_meta_text("m.mkv", None, 0, None).contains("PGS"));
+        let intro = menu_meta_text("m.mkv", None, 0, Some(3.003));
+        assert!(intro.lines().next().unwrap().contains("--vbr --custom-chapters=00:00:00.000;00:00:03.003 --vbv-len=500"));
+        // Never before the keyframe at the loop start.
+        assert!(menu_meta_text("m.mkv", None, 0, Some(3.0447083)).contains(";00:00:03.045"));
     }
 
     #[test]

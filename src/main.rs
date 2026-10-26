@@ -145,6 +145,9 @@ enum Command {
         /// Blu-ray: do not use NVIDIA NVENC for H.264 (always x264).
         #[arg(long)]
         no_hw_encode: bool,
+        /// Blu-ray/AVCHD: skip the intro animations of template menus.
+        #[arg(long)]
+        no_menu_animations: bool,
         /// Audio: auto copies compliant AC-3/DTS tracks, ac3 always re-encodes, lpcm writes
         /// uncompressed audio (Blu-ray/AVCHD; DVD falls back to AC-3).
         #[arg(long, value_enum, default_value = "auto")]
@@ -772,6 +775,7 @@ fn main() -> ExitCode {
             jobs,
             hw_decode,
             no_hw_encode,
+            no_menu_animations,
             audio,
             loudnorm,
             scale,
@@ -843,6 +847,7 @@ fn main() -> ExitCode {
                 parallel_jobs: jobs.map(usize::from),
                 hw_decode,
                 bd_hw_encode: !no_hw_encode,
+                menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
                 loudnorm,
                 video: convertx_rust::encoder::VideoProcessing {

@@ -365,6 +365,14 @@ async fn build_menus(
 ) -> Result<MenuStage, BuildError> {
     let cancel = &opts.cancel;
     let template = |e: crate::layout::LayoutError| BuildError::Template(e.to_string());
+    // The setting switches the layout's intros off; without intro data nothing else changes.
+    let silent;
+    let layout = if layout.animations && !opts.menu_animations {
+        silent = crate::layout::CustomLayout { animations: false, ..layout.clone() };
+        &silent
+    } else {
+        layout
+    };
     let (fw, fh) = opts.resolution.frame_size(TvStandard::Pal);
     let frame = MenuFrame::square(fw, fh);
     let layout_titles = layout_titles(titles, groups);
@@ -377,29 +385,50 @@ async fn build_menus(
     let warnings: Vec<String> = pages.iter().flat_map(|p| p.warnings.clone()).collect();
     let count = pages.len();
     let motion = pages.iter().filter(|p| p.moving).count();
+    let intros = pages.iter().filter(|p| p.intro.is_some()).count();
 
     cancel.check()?;
     log(Event::Phase(BuildPhase::MenuEncoding));
-    log(Event::Step(format!("{count} Menüs kodieren, davon {motion} bewegt ({jobs} parallel)")));
+    log(Event::Step(format!("{count} Menüs kodieren, davon {motion} bewegt, {intros} mit Intro ({jobs} parallel)")));
     let mut encode: Vec<Job<()>> = Vec::new();
     for (i, page) in pages.iter().enumerate() {
         if let Some(ig) = &page.igs {
             let sup = work.join(format!("menu_{:02}.sup", i + 1));
             std::fs::write(&sup, crate::igs::build_sup(ig)).at(&sup)?;
         }
+        let intro = page.intro.as_ref();
         let args = encoder::bd_custom_menu_args(
             &frame,
             rate,
             &page.media,
             page.secs,
             page.audio.as_ref(),
+            intro.map(|i| i.secs),
             &work.join(format!("menu_{:02}.mkv", i + 1)),
         );
         let (tools, secs) = (tools.clone(), page.secs);
-        encode.push(job(move |_| async move {
-            tools.ffmpeg(&args, secs, |_| {}).await?;
-            Ok(())
-        }));
+        match intro {
+            // The intro frames go ffmpeg -> Rust (slot videos) -> ffmpeg over pipes, never to disk.
+            Some(intro) => {
+                // Stream 0 is the page background, the slot videos follow.
+                let streams: Vec<crate::tools::RawStream> = std::iter::once(encoder::intro_background_stream(&frame, rate, &page.media, intro.frames))
+                    .chain(intro.slots.iter().filter_map(|&l| encoder::intro_slot_stream(&frame, rate, &page.media.layers[l], intro.frames)))
+                    .collect();
+                let (sprites, frames, end, size) = (intro.sprites.clone(), intro.frames, intro.end, (fw, fh));
+                let compose = std::sync::Arc::new(move |k: usize, streams: &[&[u8]]| {
+                    let (background, slots) = streams.split_first().expect("background stream");
+                    crate::menu_anim::composite_frame(size.0, size.1, background, &sprites, slots, crate::menu_anim::frame_time(k, frames, end))
+                });
+                encode.push(job(move |_| async move {
+                    tools.ffmpeg_piped(&args, &streams, frames, secs, compose, |_| {}).await?;
+                    Ok(())
+                }));
+            }
+            None => encode.push(job(move |_| async move {
+                tools.ffmpeg(&args, secs, |_| {}).await?;
+                Ok(())
+            })),
+        }
     }
     // Every moving menu decodes several 1080p clips at once (~1 GB each): template menus have many pages.
     let menu_jobs = if motion > 0 { jobs.min(MOTION_MENU_MAX_JOBS) } else { jobs };
@@ -416,7 +445,7 @@ async fn build_menus(
         cancel.check()?;
         let sup = page.igs.as_ref().map(|_| format!("menu_{:02}.sup", i + 1));
         let meta = format!("bd_menu_{:02}.meta", i + 1);
-        std::fs::write(work.join(&meta), crate::bd_author::menu_meta_text(&format!("menu_{:02}.mkv", i + 1), sup.as_deref(), i)).at(work)?;
+        std::fs::write(work.join(&meta), crate::bd_author::menu_meta_text(&format!("menu_{:02}.mkv", i + 1), sup.as_deref(), i, page.intro.as_ref().map(|n| n.secs))).at(work)?;
         let out = cancellable(cancel, tools.tsmuxer(work, &meta, "BD")).await?;
         std::fs::write(work.join(format!("{meta}.log")), out).at(work)?;
         let name = format!("{i:05}");

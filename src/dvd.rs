@@ -323,6 +323,9 @@ pub struct BuildOptions {
     pub hw_decode: bool,
     /// Blu-ray: encode H.264 with NVIDIA NVENC when it works (1080i rates and failures use x264).
     pub bd_hw_encode: bool,
+    /// Blu-ray/AVCHD: play the intro animations of a ConvertX template's menu pages (off = the
+    /// finished pages straight away, as without animation data).
+    pub menu_animations: bool,
     /// 2-pass video encoding (ConvertX's "2-pass encoding" checkbox): slower, more exact size.
     pub two_pass: bool,
     /// Draft encoding without trellis quantisation: about 40 % faster, slightly lower quality.
@@ -604,6 +607,8 @@ struct TitlePlan {
     audio_mode: AudioMode,
     video: VideoProcessing,
     loudnorm: bool,
+    /// Length of the motion menus that play this title's clip (limits how late the clip may start).
+    motion_secs: f64,
     stem: String,
     thumbnail: Option<PathBuf>,
     chapter_thumbs: Vec<Option<PathBuf>>,
@@ -619,8 +624,8 @@ impl TitlePlan {
         ClipSource {
             path: self.info.path.clone(),
             // Positions inside the title; the file is read from the trimmed start on. Clamped so the clip never
-            // loops: `-stream_loop` at the end of a 4K file takes minutes (shortcut: assumes the default menu length).
-            start_secs: self.info.trim_start() + start_secs.min((self.info.duration_secs - menu::DEFAULT_MOTION_SECS).max(0.0)),
+            // loops: `-stream_loop` at the end of a 4K file takes minutes.
+            start_secs: self.info.trim_start() + start_secs.min((self.info.duration_secs - self.motion_secs).max(0.0)),
             has_audio: !self.info.audio.is_empty(),
         }
     }
@@ -1099,6 +1104,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             audio_mode: opts.audio_mode,
             video: opts.video,
             loudnorm: opts.loudnorm,
+            motion_secs: opts.motion_duration.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(menu::DEFAULT_MOTION_SECS),
             stem: format!("title_{:02}", i + 1),
             thumbnail: None,
             chapter_thumbs: Vec::new(),

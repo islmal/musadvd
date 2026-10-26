@@ -12,12 +12,14 @@ use crate::author::{count_loc, title_page_of, MAX_CHAPTERS, TITLE_ITEMS};
 use crate::dvd::find_page_source;
 use crate::encoder::{Aspect, Fit};
 use crate::layout::{
-    Action, Background, ButtonColors, Canvas, Content, CustomLayout, CustomMenu, Element, Highlight, LayoutError, LayoutTitle,
-    MenuRole, MenuSound, LAYOUT_VERSION,
+    Action, Background, ButtonColors, Canvas, Content, CustomLayout, CustomMenu, Element, ElementKey, Highlight, LayoutError,
+    LayoutTitle, MenuRole, MenuSound, LAYOUT_VERSION,
 };
 use crate::menu::{button_of_graphic, localize, page_by_style, resolve_resource, UiLang};
 use crate::template::{Button, DelphiColor, Graphic, Page, Template, TextStyle};
 
+/// Longest intro played (templates use 3 s).
+const MAX_INTRO_SECS: f64 = 10.0;
 const CANVAS_W: f64 = 1920.0;
 const CANVAS_H: f64 = 1080.0;
 
@@ -252,7 +254,37 @@ fn text_rect(g: &Graphic, style: Option<&TextStyle>) -> (f64, f64, f64, f64) {
 }
 
 fn element(id: String, content: Content, (x, y, w, h): (f64, f64, f64, f64), opacity: f32) -> Element {
-    Element { id, content, x, y, w, h, rotation: 0, opacity, action: None, highlight: None, group: None }
+    Element { id, content, x, y, w, h, rotation: 0, opacity, action: None, highlight: None, group: None, intro: Vec::new() }
+}
+
+/// Intro keys of a graphic whose final box is `rect` (page coordinates): the owning block's box
+/// moves and fades per key, the graphic keeps its place inside the block (a zoom about the block's
+/// own corner). Empty when nothing moves or the box cannot be mapped.
+fn intro_keys(g: &Graphic, rect: (f64, f64, f64, f64), frame: &TemplateFrame) -> Vec<ElementKey> {
+    let (bx, by, bw, bh) = (g.block_rect.0 as f64, g.block_rect.1 as f64, g.block_rect.2 as f64, g.block_rect.3 as f64);
+    if g.intro.is_empty() || bw < 1.0 || bh < 1.0 {
+        return Vec::new();
+    }
+    let final_opacity = g.alpha as f32 / 255.0;
+    let keys: Vec<ElementKey> = g
+        .intro
+        .iter()
+        .map(|k| {
+            let (sx, sy) = (k.w as f64 / bw, k.h as f64 / bh);
+            let (x, y, w, h) = frame.rect(k.x as f64 + (rect.0 - bx) * sx, k.y as f64 + (rect.1 - by) * sy, rect.2 * sx, rect.3 * sy);
+            let opacity = k.alpha.map_or(final_opacity, |a| a as f32 / 255.0 * g.gfx_alpha as f32 / 255.0);
+            ElementKey { t: k.t, x, y, w, h, opacity }
+        })
+        .collect();
+    let (x, y, w, h) = frame.rect(rect.0, rect.1, rect.2, rect.3);
+    let moves = keys.iter().any(|k| (k.x - x).abs() > 0.5 || (k.y - y).abs() > 0.5 || (k.w - w).abs() > 0.5 || (k.h - h).abs() > 0.5 || (k.opacity - final_opacity).abs() > 0.004);
+    if moves { keys } else { Vec::new() }
+}
+
+/// Whether `clip` left the box alone. Not `==`: it recomputes the size as `(x + w) - x`, which is
+/// not bit-identical to `w`, and such graphics would silently lose their intro keys.
+fn same_box(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6 && (a.2 - b.2).abs() < 1e-6 && (a.3 - b.3).abs() < 1e-6
 }
 
 fn fit_of(padding: &str) -> Fit {
@@ -345,8 +377,14 @@ impl Nav<'_> {
                 }
                 _ => continue,
             };
-            let Some(r) = clip(frame.rect(rect.0, rect.1, rect.2, rect.3)) else { continue };
-            out.push(element(format!("g{}", out.len()), content, r, g.alpha as f32 / 255.0));
+            let full = frame.rect(rect.0, rect.1, rect.2, rect.3);
+            let Some(r) = clip(full) else { continue };
+            let mut e = element(format!("g{}", out.len()), content, r, g.alpha as f32 / 255.0);
+            // A box cut by the canvas edge would not match the keys: such a graphic just appears.
+            if same_box(r, full) {
+                e.intro = intro_keys(g, rect, &frame);
+            }
+            out.push(e);
         }
 
         // Buttons last (on top), the template's default button first so it is selected initially.
@@ -476,6 +514,8 @@ pub fn layout_from_template(
     let mut menus = Vec::new();
     let mut add = |src: &Source, kind: Kind, title: u32, page_no: u32, pages: u32, name: String, warnings: &mut Vec<String>| {
         let ctx = Ctx { kind, title, page_no, pages };
+        let elements = nav.page_elements(ctx, src, aspect, thumbnails, warnings);
+        let intro_end = elements.iter().flat_map(|e| e.intro.iter().map(|k| k.t)).fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
         menus.push(CustomMenu {
             id: menu_id(kind, title, page_no),
             name,
@@ -484,7 +524,8 @@ pub fn layout_from_template(
             background: Background::default(),
             duration_secs: None,
             audio: MenuSound::None,
-            elements: nav.page_elements(ctx, src, aspect, thumbnails, warnings),
+            intro_secs: intro_end.map(|t| t.max(src.page.intro_duration).clamp(0.5, MAX_INTRO_SECS)),
+            elements,
         });
     };
     for n in 1..=nav.title_pages {
@@ -525,6 +566,7 @@ pub fn layout_from_template(
         version: LAYOUT_VERSION,
         canvas: Canvas { width: CANVAS_W as u32, height: CANVAS_H as u32 },
         highlight: Highlight::default(),
+        animations: true,
         menus,
     };
     Ok((layout, warnings))
@@ -786,4 +828,75 @@ mod tests {
         // Several Root menus per title (root + chapter pages) are fine: the root menu is the title's own.
         assert_eq!(nav.objects.len(), 2 + l.menus.len() + titles.len());
     }
+    #[test]
+    fn clipping_an_inside_box_keeps_it_the_same_box() {
+        let full = (1234.567_f64, 800.654_f64, 321.098_f64, 123.456_f64);
+        let r = clip(full).unwrap();
+        assert!(same_box(r, full));
+        assert!(!same_box(clip((1800.0, 0.0, 300.0, 50.0)).unwrap(), (1800.0, 0.0, 300.0, 50.0)), "a box cut by the edge differs");
+    }
+
+    #[test]
+    fn block_animation_becomes_element_keys_in_canvas_coordinates() {
+        let ini = r"[CXT]
+[CXT\pages\Item0]
+name=P
+style=MNUS_TITLE
+Width=720
+Height=576
+intro_duration=3
+[CXT\pages\Item0\blocks\Item0]
+Left=50
+Top=106
+Width=68
+Height=54
+Alpha=255
+[CXT\pages\Item0\blocks\Item0\Gfx\Item0]
+value=Hallo
+gfx_type=GT_TEXT
+Left=0
+Top=0
+Width=68
+Height=54
+[CXT\pages\Item0\blocks\Item0\Anim\Item0]
+Origin=MNUP_INTRO
+TimeStamp=1
+alpha=2147483647
+left=84
+top=133
+height=0
+width=0
+[CXT\pages\Item0\blocks\Item0\Anim\Item1]
+Origin=MNUP_INTRO
+TimeStamp=2
+alpha=2147483647
+left=50
+top=106
+height=54
+width=68
+[CXT\pages\Item0\blocks\Item1]
+Left=0
+Top=0
+Width=100
+Height=40
+[CXT\pages\Item0\blocks\Item1\Gfx\Item0]
+value=Still
+gfx_type=GT_TEXT
+Width=100
+Height=40
+";
+        let tpl = Template::parse(ini).unwrap();
+        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide).unwrap();
+        assert!(l.animations);
+        let m = &l.menus[0];
+        assert_eq!(m.intro_secs, Some(3.0), "the page's intro length wins over the last key");
+        let moving: Vec<&Element> = m.elements.iter().filter(|e| !e.intro.is_empty()).collect();
+        assert_eq!(moving.len(), 1, "a block without keys does not animate");
+        let (sx, sy) = (1920.0 / 720.0, 1080.0 / 576.0);
+        let [from, to] = moving[0].intro[..] else { panic!("two keys") };
+        assert_eq!((from.t, from.x, from.y, from.w, from.h, from.opacity), (1.0, 84.0 * sx, 133.0 * sy, 0.0, 0.0, 1.0));
+        assert_eq!((to.t, to.x, to.y, to.w, to.h), (2.0, moving[0].x, moving[0].y, moving[0].w, moving[0].h));
+        assert!((to.x - 50.0 * sx).abs() < 1e-9 && (to.w - 68.0 * sx).abs() < 1e-9);
+    }
+
 }

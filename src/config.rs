@@ -73,6 +73,8 @@ pub struct AppSettings {
     pub hw_decode: bool,
     /// Blu-ray: encode with NVIDIA NVENC when available (falls back to x264).
     pub bd_hw_encode: bool,
+    /// Blu-ray/AVCHD: play the intro animations of template menus.
+    pub menu_animations: bool,
     /// Draft encoding without trellis quantisation (about 40 % faster, slightly lower quality).
     pub fast_encode: bool,
     // Automatic chapters
@@ -140,6 +142,7 @@ impl Default for AppSettings {
             process_priority: PROCESS_PRIORITIES[0].into(),
             hw_decode: false,
             bd_hw_encode: true,
+            menu_animations: true,
             fast_encode: false,
             auto_chapter_enabled: true,
             auto_chapter_interval_seconds: 300,
@@ -775,6 +778,7 @@ impl AppSettings {
         opts.loudnorm = self.loudnorm;
         opts.hw_decode = self.hw_decode;
         opts.bd_hw_encode = self.bd_hw_encode;
+        opts.menu_animations = self.menu_animations;
         opts.fast_encode = self.fast_encode;
         if opts.project_name.is_none() && !self.default_volume_label.is_empty() {
             opts.project_name = Some(self.default_volume_label.clone());
@@ -996,6 +1000,7 @@ mod burn_settings_tests {
         assert!(AppSettings::default().bd_hw_encode, "NVENC is on by default");
         let old: AppSettings = serde_json::from_str(r#"{"hw_decode":true}"#).unwrap();
         assert!(old.bd_hw_encode, "settings files without the field keep the default");
+        assert!(old.menu_animations && opts.menu_animations, "menu intros are on by default");
         assert_eq!(opts.project_name.as_deref(), Some("URLAUB_AM_MEER_2025_"), "default project name");
         // An explicit project name wins.
         let mut opts = BuildOptions { project_name: Some("Mein Film".into()), ..BuildOptions::default() };

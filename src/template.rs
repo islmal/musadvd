@@ -291,6 +291,30 @@ pub struct Graphic {
     pub style: String,
     /// `stretch` or `letterbox`.
     pub padding: String,
+    /// The graphic's own `Alpha` (the block's alpha is not part of it).
+    pub gfx_alpha: u8,
+    /// Final box of the owning block (`Left`, `Top`, `Width`, `Height`) in page coordinates.
+    pub block_rect: (i32, i32, u32, u32),
+    /// Keyframes of the block's intro / outro (`blocks\ItemN\Anim\ItemK`), by time.
+    pub intro: Vec<AnimKey>,
+    pub outro: Vec<AnimKey>,
+}
+
+/// Value `Anim` keys use for "keep the block's own value".
+const ANIM_INHERIT: i64 = 2147483647;
+
+/// One keyframe of a block animation: the block's box and opacity `t` seconds into the phase.
+/// Before the first key the value holds, between two keys it is linear.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AnimKey {
+    pub t: f64,
+    /// Block box (inherited values are already replaced by the block's own).
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// `None` = the block's own alpha.
+    pub alpha: Option<u8>,
 }
 
 impl Template {
@@ -496,6 +520,8 @@ fn parse_page(ini: &IniDocument, i: usize) -> Result<Page, TemplateError> {
         let block = ini.section(&block_path);
         let block_num = |k: &str| block.map_or(0, |s| opt_num(s, k, 0));
         let block_alpha = block.map_or(255, |s| opt_num(s, "Alpha", 255u8));
+        let block_rect = (block_num("Left"), block_num("Top"), block_num("Width") as u32, block_num("Height") as u32);
+        let (intro, outro) = parse_anim(ini, &block_path, block_rect);
         let gfx_prefix = format!(r"{block_path}\Gfx");
         for g in ini.item_indices(&gfx_prefix) {
             let Some(gfx) = ini.section(&format!(r"{gfx_prefix}\Item{g}")) else { continue };
@@ -515,6 +541,10 @@ fn parse_page(ini: &IniDocument, i: usize) -> Result<Page, TemplateError> {
                 alpha: ((block_alpha as u32 * opt_num(gfx, "Alpha", 255u8) as u32) / 255) as u8,
                 style: opt_string(gfx, "Style"),
                 padding: opt_string(gfx, "PaddingMethod"),
+                gfx_alpha: opt_num(gfx, "Alpha", 255u8),
+                block_rect,
+                intro: intro.clone(),
+                outro: outro.clone(),
             });
         }
     }
@@ -544,6 +574,36 @@ fn parse_page(ini: &IniDocument, i: usize) -> Result<Page, TemplateError> {
         buttons,
         color_schemes,
     })
+}
+
+/// Intro and outro keyframes of one block, sorted by time (stable, so equal times keep file order).
+fn parse_anim(ini: &IniDocument, block_path: &str, (bx, by, bw, bh): (i32, i32, u32, u32)) -> (Vec<AnimKey>, Vec<AnimKey>) {
+    let prefix = format!(r"{block_path}\Anim");
+    let (mut intro, mut outro) = (Vec::new(), Vec::new());
+    for k in ini.item_indices(&prefix) {
+        let Some(sec) = ini.section(&format!(r"{prefix}\Item{k}")) else { continue };
+        let pick = |key: &str, own: i32| match sec.get(key).and_then(|v| v.trim().parse::<i64>().ok()) {
+            Some(v) if v != ANIM_INHERIT => v.clamp(-100_000, 100_000) as i32,
+            _ => own,
+        };
+        let alpha = sec.get("alpha").and_then(|v| v.trim().parse::<i64>().ok()).filter(|&a| a != ANIM_INHERIT).map(|a| a.clamp(0, 255) as u8);
+        let key = AnimKey {
+            t: opt_float(sec, "TimeStamp").max(0.0),
+            x: pick("left", bx),
+            y: pick("top", by),
+            w: pick("width", bw as i32),
+            h: pick("height", bh as i32),
+            alpha,
+        };
+        match sec.get("Origin").map(|o| o.trim().to_ascii_uppercase()).as_deref() {
+            Some("MNUP_INTRO") => intro.push(key),
+            Some("MNUP_OUTRO") => outro.push(key),
+            _ => {}
+        }
+    }
+    intro.sort_by(|a, b| a.t.total_cmp(&b.t));
+    outro.sort_by(|a, b| a.t.total_cmp(&b.t));
+    (intro, outro)
 }
 
 fn parse_button(index: usize, sec: &IniSection) -> Result<Button, TemplateError> {
@@ -588,6 +648,57 @@ mod tests {
 [CXT\\pages\\Item0\\buttons\\Item0]\r\nLeft=1\r\nTop=2\r\nWidth=3\r\nHeight=4\r\nlocation=ML_PLAY_EPISODE\r\n\
 [CXT\\pages\\Item0\\buttons\\color_schemes\\Item0]\r\nselection_pattern=#CCFF00@200\r\naction_background=Black@0\r\n\
 [CXT\\pages\\Item0\\blocks\\Item0\\Gfx\\Item0]\r\nvalue=..\\bg.jpg\r\nLocation=ML_PAGE_BACKGROUND\r\n";
+
+    #[test]
+    fn anim_keys_inherit_the_block_and_split_intro_from_outro() {
+        let ini = r"[CXT]
+[CXT\pages\Item0]
+Width=720
+Height=576
+[CXT\pages\Item0\blocks\Item0]
+Left=50
+Top=106
+Width=68
+Height=54
+Alpha=200
+[CXT\pages\Item0\blocks\Item0\Gfx\Item0]
+Left=4
+Top=5
+Alpha=128
+gfx_type=GT_BITMAP
+[CXT\pages\Item0\blocks\Item0\Anim\Item1]
+Origin=MNUP_INTRO
+TimeStamp=2
+alpha=2147483647
+left=50
+top=106
+height=54
+width=68
+[CXT\pages\Item0\blocks\Item0\Anim\Item0]
+Origin=MNUP_INTRO
+TimeStamp=1
+alpha=0
+left=84
+top=133
+height=0
+width=0
+[CXT\pages\Item0\blocks\Item0\Anim\Item2]
+Origin=MNUP_OUTRO
+TimeStamp=0,5
+alpha=2147483647
+left=2147483647
+top=2147483647
+height=2147483647
+width=2147483647
+";
+        let t = Template::parse(ini).unwrap();
+        let g = &t.pages[0].graphics[0];
+        assert_eq!((g.gfx_alpha, g.alpha, g.block_rect), (128, 100, (50, 106, 68, 54)));
+        assert_eq!(g.intro.len(), 2);
+        assert_eq!(g.intro[0], AnimKey { t: 1.0, x: 84, y: 133, w: 0, h: 0, alpha: Some(0) });
+        assert_eq!(g.intro[1], AnimKey { t: 2.0, x: 50, y: 106, w: 68, h: 54, alpha: None });
+        assert_eq!(g.outro, [AnimKey { t: 0.5, x: 50, y: 106, w: 68, h: 54, alpha: None }]);
+    }
 
     #[test]
     fn decimal_comma() {

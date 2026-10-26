@@ -54,6 +54,9 @@ fn version_1() -> u32 {
 fn one() -> f32 {
     1.0
 }
+fn yes() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +68,9 @@ pub struct CustomLayout {
     pub canvas: Canvas,
     #[serde(default)]
     pub highlight: Highlight,
+    /// Play the menus' intro animations (Blu-ray only; `false` = the finished pages straight away).
+    #[serde(default = "yes")]
+    pub animations: bool,
     pub menus: Vec<CustomMenu>,
 }
 
@@ -139,6 +145,10 @@ pub struct CustomMenu {
     pub duration_secs: Option<f64>,
     #[serde(default)]
     pub audio: MenuSound,
+    /// Blu-ray: length of the intro the elements' [`Element::intro`] keys run in (the keys of a
+    /// template page). `None` = no intro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro_secs: Option<f64>,
     /// Bottom to top.
     #[serde(default)]
     pub elements: Vec<Element>,
@@ -207,6 +217,22 @@ pub struct Element {
     /// Editor-only grouping (elements sharing an id move together); ignored by the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Intro keyframes by time (empty = the element is just there). Before the first key the first
+    /// value holds, after the last one the last key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intro: Vec<ElementKey>,
+}
+
+/// Box and opacity of an element `t` seconds into the intro (canvas coordinates; the box may lie
+/// partly or wholly outside the canvas or have no size).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ElementKey {
+    pub t: f64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub opacity: f32,
 }
 
 fn default_font() -> String {
@@ -1291,6 +1317,7 @@ mod tests {
             action,
             highlight: None,
             group: None,
+            intro: Vec::new(),
         }
     }
 
@@ -1303,12 +1330,13 @@ mod tests {
             background: Background::default(),
             duration_secs: None,
             audio: MenuSound::None,
+            intro_secs: None,
             elements,
         }
     }
 
     fn layout(menus: Vec<CustomMenu>) -> CustomLayout {
-        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), menus }
+        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, menus }
     }
 
     #[test]

@@ -2,13 +2,16 @@
 //! every menu into a background clip description plus an Interactive Graphics stream.
 //!
 //! Disc structure: playlist `i` / clip `i` for menu `i` (layout order), then one playlist per
-//! title. Movie objects: 0 First Play, 1 Top Menu, `2 + i` menu `i`, then one per title.
+//! title. Movie objects: 0 First Play, 1 Top Menu, `2 + i` menu `i`, then one per title, then (only
+//! if a page has an intro) the dispatcher.
 //! Registers: `GPR1` chapter mark the next title object starts at, `GPR2` play-all flag,
-//! `GPR6` scratch. Only HDMV (no BD-J, no pop-up menu).
+//! `GPR6` scratch; with intros also `GPR3` entry (0 fresh, 1 paged: skip the intro), `GPR4`/`GPR5`
+//! kind and index of the dispatcher's target, `GPR7` current page (hook for outros).
+//! Only HDMV (no BD-J, no pop-up menu).
 
 use std::path::{Path, PathBuf};
 
-use image::RgbaImage;
+use image::{imageops, RgbaImage};
 
 use crate::author::{self, ButtonAction, ClipSource, MenuButton, MenuFrame, Navigation, PlaybackOptions, Rect};
 use crate::bd::BdRate;
@@ -17,24 +20,54 @@ use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
     bd_button_rect, button_colors, clip_of, element_name, fit_image, frame_box, frame_font_size, parse_color, rotate, Action,
-    Content, CustomLayout, CustomMenu, LayoutError, LayoutTitle, MenuRole, MenuSound,
+    Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
 use crate::menu;
+use crate::menu_anim::{self, Intro, Pixels, Sprite};
 
 const MARK: u32 = 1;
 const FLAG: u32 = 2;
+const ENTRY: u32 = 3;
+const NEXT_KIND: u32 = 4;
+const NEXT_INDEX: u32 = 5;
 const TMP: u32 = 6;
+const PAGE: u32 = 7;
+
+/// Targets of the dispatcher (`GPR4`).
+const KIND_TITLE: u32 = 1;
+const KIND_MENU: u32 = 2;
+const KIND_PAGED: u32 = 3;
 
 /// Menu clips of a still menu last this long (the playlist item then waits forever).
 pub const STILL_SECS: f64 = 1.0;
 /// Decoded IG objects must fit the 16 MiB object buffer.
 const IG_OBJECT_BUDGET: u64 = 16 * 1024 * 1024;
+/// Largest IG display set (`.sup` bytes) of a page with an intro. tsMuxeR has the set complete
+/// 333 ms before the frame at the loop mark is shown (measured in `tests/menu_intro.rs`); 256 KiB
+/// takes 131 ms at the 16 Mbit/s IG transport rate, so the buttons are there on that frame.
+/// Real templates stay below 81 KB.
+pub const IG_BUDGET: usize = 256 * 1024;
 
 /// Properties of a menu the navigation depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuTraits {
     pub moving: bool,
     pub has_buttons: bool,
+    /// The page opens with an intro animation (and is `moving`).
+    pub intro: bool,
+}
+
+/// Menu id without its page suffix (`chap-1-p2` → `chap-1`): pages of one menu share it.
+fn page_family(id: &str) -> &str {
+    match id.rsplit_once("-p") {
+        Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => id,
+    }
+}
+
+/// Whether `menu` plays an intro: the layout allows animations and an element has keys.
+pub fn has_intro(layout: &CustomLayout, menu: &CustomMenu) -> bool {
+    layout.animations && menu.intro_secs.is_some_and(|s| s > 0.0) && menu.elements.iter().any(|e| !e.intro.is_empty())
 }
 
 /// Sound of a menu: the clip to use and a warning if a requested title has no audio.
@@ -58,12 +91,14 @@ pub fn traits(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame) -
         .menus
         .iter()
         .map(|m| {
-            let moving = m.background.video.is_some()
+            let intro = has_intro(layout, m);
+            let moving = intro
+                || m.background.video.is_some()
                 || m.elements.iter().any(|e| matches!(e.content, Content::Video { .. }))
                 || menu_audio(m, titles).0.is_some();
             let has_buttons =
                 m.elements.iter().any(|e| e.action.is_some() && bd_button_rect(e, layout.canvas, frame).is_some());
-            MenuTraits { moving, has_buttons }
+            MenuTraits { moving, has_buttons, intro }
         })
         .collect()
 }
@@ -97,6 +132,10 @@ pub fn title_playlist(menus: usize, t: u32) -> u32 {
 pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits], opts: PlaybackOptions, groups: &[Vec<usize>]) -> BdNav {
     let m_count = layout.menus.len();
     let t_count: usize = groups.iter().map(Vec::len).sum();
+    // With intros every button that leaves a menu goes through the dispatcher object (last), which
+    // tells the next menu whether to play its intro.
+    let intro = traits.iter().any(|t| t.intro);
+    let dispatch_obj = (2 + m_count + t_count) as u32;
     // HDMV title number of the first file of each entry (index = entry number - 1).
     let first_of: Vec<u32> = groups
         .iter()
@@ -133,7 +172,11 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
 
     // Titles are entered with JumpTitle (not JumpObject): libbluray only switches its current title on
     // that, and VLC hides the time display while the current title is an interactive one (menu/FP).
-    let go = |jump: Command, mark: u32, flag: u32| vec![hdmv::mov(MARK, Op::Imm(mark)), hdmv::mov(FLAG, Op::Imm(flag)), jump];
+    let via_dispatcher = |kind: u32, index: u32| {
+        vec![hdmv::mov(NEXT_KIND, Op::Imm(kind)), hdmv::mov(NEXT_INDEX, Op::Imm(index)), hdmv::jump_object(dispatch_obj)]
+    };
+    let to_title = |n: u32| if intro { via_dispatcher(KIND_TITLE, n) } else { vec![hdmv::jump_title(n)] };
+    let go = |jump: Vec<Command>, mark: u32, flag: u32| [vec![hdmv::mov(MARK, Op::Imm(mark)), hdmv::mov(FLAG, Op::Imm(flag))], jump].concat();
 
     let mut commands = Vec::new();
     for m in &layout.menus {
@@ -144,8 +187,8 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 continue;
             };
             let cmds = match action {
-                Action::PlayAll => go(hdmv::jump_title(1), 0, 1),
-                Action::PlayTitle { title } => go(hdmv::jump_title(first_file(*title as u32)), 0, 0),
+                Action::PlayAll => go(to_title(1), 0, 1),
+                Action::PlayTitle { title } => go(to_title(first_file(*title as u32)), 0, 0),
                 Action::PlayChapter { title, chapter } => {
                     // Chapters run across the merged files: find the file and its local mark.
                     let mut local = chapter - 1;
@@ -157,7 +200,15 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                         }
                         local -= n as u32;
                     }
-                    go(hdmv::jump_title(first_file(*title as u32) + file as u32), local, 0)
+                    go(to_title(first_file(*title as u32) + file as u32), local, 0)
+                }
+                Action::Menu { menu } if intro => {
+                    let target = by_id(menu);
+                    // Next / previous page of the same menu: no intro again. Role and title are not enough: a
+                    // title's root and chapter menus share both but are different menus.
+                    let (to, from) = (&layout.menus[target], m);
+                    let paged = to.role == from.role && to.title == from.title && page_family(&to.id) == page_family(&from.id);
+                    via_dispatcher(if paged { KIND_PAGED } else { KIND_MENU }, menu_obj(target))
                 }
                 Action::Menu { menu } => vec![hdmv::jump_object(menu_obj(by_id(menu)))],
                 Action::SetAudio { source } => {
@@ -189,14 +240,37 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
     let mut objects = Vec::new();
     // First Play.
     let start = if opts.auto_start { hdmv::jump_title(1) } else { hdmv::jump_object(menu_obj(first_title_menu)) };
-    objects.push(MovieObject { commands: go(start, 0, 0), resume: false });
-    // Top Menu.
-    objects.push(MovieObject { commands: vec![hdmv::jump_object(menu_obj(first_title_menu))], resume: false });
+    objects.push(MovieObject { commands: go(vec![start], 0, 0), resume: false });
+    // Top Menu: always a fresh entry.
+    let mut top = Vec::new();
+    if intro {
+        top.push(hdmv::mov(ENTRY, Op::Imm(0)));
+    }
+    top.push(hdmv::jump_object(menu_obj(first_title_menu)));
+    objects.push(MovieObject { commands: top, resume: false });
     // Menus: a still shows its single clip forever; a motion menu restarts its clip (the selected
     // button lives in PSR10, so it survives the loop) after selecting the first button once.
     for (i, t) in traits.iter().enumerate() {
         let pl = i as u32;
-        let cmds = if t.moving {
+        let cmds = if t.intro {
+            // Fresh entry: intro + first loop, then loop from the mark behind the intro. After
+            // paging: straight to the loop (the intro never plays twice in a row).
+            let mut c = vec![hdmv::mov(PAGE, Op::Imm(i as u32))];
+            if t.has_buttons {
+                c.push(hdmv::set_button_page(1));
+            }
+            let at = c.len() as u32;
+            c.extend([
+                hdmv::compare(Op::Gpr(ENTRY), Cmp::Eq, Op::Imm(1)),
+                hdmv::goto(at + 4),
+                hdmv::play_pl(pl),
+                hdmv::goto(at + 5),
+                hdmv::mov(ENTRY, Op::Imm(0)),
+                hdmv::play_pl_at_mark(Op::Imm(pl), Op::Imm(1)),
+                hdmv::goto(at + 5),
+            ]);
+            c
+        } else if t.moving {
             let first = if t.has_buttons { vec![hdmv::set_button_page(1)] } else { vec![] };
             let at = first.len() as u32;
             [first, vec![hdmv::play_pl(pl), hdmv::goto(at)]].concat()
@@ -243,6 +317,21 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
             objects.push(MovieObject { commands: c, resume: false });
         }
     }
+    if intro {
+        // Only a paging jump keeps the entry flag; titles and other menus start fresh.
+        objects.push(MovieObject {
+            commands: vec![
+                hdmv::mov(ENTRY, Op::Imm(0)),
+                hdmv::compare(Op::Gpr(NEXT_KIND), Cmp::Eq, Op::Imm(KIND_TITLE)),
+                hdmv::goto(6),
+                hdmv::compare(Op::Gpr(NEXT_KIND), Cmp::Eq, Op::Imm(KIND_PAGED)),
+                hdmv::mov(ENTRY, Op::Imm(1)),
+                hdmv::jump_object_op(Op::Gpr(NEXT_INDEX)),
+                hdmv::jump_title_op(Op::Gpr(NEXT_INDEX)),
+            ],
+            resume: false,
+        });
+    }
     BdNav { objects, title_objects: (1..=t_count).map(|t| title_obj(t) as u16).collect(), commands }
 }
 
@@ -273,10 +362,13 @@ pub fn plan_without_menus(titles: usize) -> BdNav {
 pub struct BdPage {
     pub media: CustomMenuMedia,
     pub audio: Option<ClipSource>,
+    /// Length of the clip: the loop, plus the intro in front of it if there is one.
     pub secs: f64,
     pub moving: bool,
     /// `None` for a menu without buttons.
     pub igs: Option<IgMenu>,
+    /// Intro frames to composite (`secs` then covers intro + loop).
+    pub intro: Option<Intro>,
     pub warnings: Vec<String>,
 }
 
@@ -295,9 +387,10 @@ pub fn frame_rate_code(rate: BdRate) -> u8 {
 /// Alpha steps of the highlight palette (text edges keep their anti-aliasing).
 const ALPHA_STEPS: u32 = 16;
 
-#[derive(Default)]
 struct Palette {
     entries: Vec<[u8; 4]>,
+    /// Alpha levels (`ALPHA_STEPS`, or fewer to shrink the display set).
+    steps: u32,
 }
 
 impl Palette {
@@ -306,7 +399,7 @@ impl Palette {
         if px[3] == 0 {
             return Some(0);
         }
-        let a = ((px[3] as u32 * ALPHA_STEPS + 127) / 255).max(1) * 255 / ALPHA_STEPS;
+        let a = ((px[3] as u32 * self.steps + 127) / 255).max(1) * 255 / self.steps;
         let key = [px[0], px[1], px[2], a as u8];
         match self.entries.iter().position(|e| *e == key) {
             Some(i) => Some(i as u8 + 1),
@@ -324,6 +417,8 @@ struct Draw<'a> {
     menu: &'a CustomMenu,
     titles: &'a [LayoutTitle],
     frame: MenuFrame,
+    /// The page plays its intro (see [`has_intro`]).
+    intro: bool,
 }
 
 fn io_err(p: &Path, e: &dyn std::fmt::Display) -> LayoutError {
@@ -372,7 +467,96 @@ fn highlight_image(rect: Rect, cov: Option<&menu::Coverage>, origin: (i64, i64),
     img
 }
 
-/// Renders menu `index`: static layers (PNG), the IG stream data and the clip description.
+/// One button's highlight pictures before they become IG objects.
+struct Pending {
+    rect: Rect,
+    selected: RgbaImage,
+    activated: RgbaImage,
+    element: usize,
+}
+
+/// Bounding box `(x, y, w, h)` of the non-transparent pixels of both pictures.
+fn opaque_bounds(a: &RgbaImage, b: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for img in [a, b] {
+        for (x, y, p) in img.enumerate_pixels() {
+            if p[3] != 0 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    (x1 > x0).then(|| (x0, y0, x1 - x0, y1 - y0))
+}
+
+/// IG palette, objects and (possibly cropped) button rectangles of a page.
+struct IgSet {
+    pal: Palette,
+    objects: Vec<IgObject>,
+    rects: Vec<Rect>,
+}
+
+/// Palette-indexes and run-length encodes the button pictures: `steps` alpha levels, `crop` cuts every
+/// object to its non-transparent bounding box.
+fn ig_set(pending: &[Pending], steps: u32, crop: bool, menu_name: &str) -> Result<IgSet, LayoutError> {
+    let mut pal = Palette { entries: Vec::new(), steps };
+    let mut objects = Vec::new();
+    let mut rects = Vec::new();
+    let mut budget = 0u64;
+    for (i, p) in pending.iter().enumerate() {
+        let (mut rect, mut pics) = (p.rect, [p.selected.clone(), p.activated.clone()]);
+        if let Some((x, y, w, h)) = crop.then(|| opaque_bounds(&p.selected, &p.activated)).flatten() {
+            pics = pics.map(|img| imageops::crop_imm(&img, x, y, w, h).to_image());
+            rect = Rect { x0: rect.x0 + x, y0: rect.y0 + y, x1: rect.x0 + x + w, y1: rect.y0 + y + h };
+        }
+        let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
+        for (k, img) in pics.iter().enumerate() {
+            let mut px = Vec::with_capacity((w * h) as usize);
+            for q in img.pixels() {
+                let Some(idx) = pal.index(q.0) else {
+                    return Err(LayoutError(vec![format!("Menü „{menu_name}“: zu viele verschiedene Button-Farben für die Blu-ray-Palette (255)")]));
+                };
+                px.push(idx);
+            }
+            budget += w as u64 * h as u64;
+            objects.push(IgObject { id: (2 * i + k) as u16, width: w as u16, height: h as u16, rle: igs::rle_encode(&px, w as usize, h as usize) });
+        }
+        rects.push(rect);
+    }
+    if budget > IG_OBJECT_BUDGET {
+        return Err(LayoutError(vec![format!(
+            "Menü „{menu_name}“: die Button-Grafiken sind zu groß für den Blu-ray-Speicher ({} MiB, max. 16) – kleinere Buttons verwenden",
+            budget / 1024 / 1024
+        )]));
+    }
+    Ok(IgSet { pal, objects, rects })
+}
+
+/// Builds the IG menu with `build(alpha steps, crop)`, trying coarser versions (fewer anti-aliasing
+/// levels, cropped objects: longer RLE runs) until the display set is within `limit` bytes. Returns the
+/// first that fits, else the smallest, and whether one fit.
+fn fit_budget(mut build: impl FnMut(u32, bool) -> Result<IgMenu, LayoutError>, limit: usize) -> Result<(IgMenu, bool), LayoutError> {
+    let mut best: Option<(IgMenu, usize)> = None;
+    for (steps, crop) in [(ALPHA_STEPS, false), (4, true), (2, true)] {
+        let ig = build(steps, crop)?;
+        let size = igs::build_sup(&ig).len();
+        if size <= limit {
+            return Ok((ig, true));
+        }
+        if best.as_ref().is_none_or(|b| size < b.1) {
+            best = Some((ig, size));
+        }
+    }
+    Ok((best.expect("at least one attempt").0, false))
+}
+
+/// Box of an element in frame pixels (keys scale like [`frame_box`], but stay fractional).
+fn frame_key(k: &ElementKey, canvas: Canvas, frame: MenuFrame) -> ElementKey {
+    let (sx, sy) = (frame.width as f64 / canvas.width as f64, frame.height as f64 / canvas.height as f64);
+    ElementKey { x: k.x * sx, y: k.y * sy, w: k.w * sx, h: k.h * sy, ..*k }
+}
+
+/// Renders menu `index`: static layers (PNG), the IG stream data and the clip description. A page
+/// with an intro also gets the sprites its intro frames are composited from.
 #[allow(clippy::too_many_arguments)]
 fn render_page(
     d: &Draw,
@@ -401,18 +585,20 @@ fn render_page(
     };
     let alpha = (layout.highlight.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
 
-    struct Pending {
-        rect: Rect,
-        selected: RgbaImage,
-        activated: RgbaImage,
-        element: usize,
-    }
+    let mut sprites: Vec<Sprite> = Vec::new();
+    let mut slots: Vec<usize> = Vec::new();
     let mut pending: Vec<Pending> = Vec::new();
     for (n, e) in menu.elements.iter().enumerate() {
         let (x, y, w, h) = frame_box(e, canvas, frame);
         let (bw, bh) = if e.rotation % 180 == 90 { (h, w) } else { (w, h) };
         let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         let mut text_cov = None;
+        // Sprite of this element: its keys only apply to unrotated elements.
+        let sprite = |pixels: Pixels| {
+            let keys = if e.rotation == 0 { e.intro.iter().map(|k| frame_key(k, canvas, frame)).collect() } else { Vec::new() };
+            Sprite { pixels, rect: (x as f64, y as f64, w as f64, h as f64), opacity: e.opacity, keys }
+        };
+        let visible = e.opacity > 0.0 || !e.intro.is_empty();
         match &e.content {
             Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
                 let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, frame), *bold, *italic, *wrap, align, bw, bh);
@@ -424,6 +610,9 @@ fn render_page(
                 menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
                 let img = rotate(img, e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                if d.intro && visible {
+                    sprites.push(sprite(Pixels::Image(img)));
+                }
                 text_cov = Some(cov);
             }
             Content::Image { src, fit } => {
@@ -435,9 +624,16 @@ fn render_page(
                 }
                 let img = rotate(fitted, e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                if d.intro && visible {
+                    sprites.push(sprite(Pixels::Image(img)));
+                }
             }
             Content::Video { title, start_secs, fit } => {
                 flush(&mut current, &mut layers)?;
+                if d.intro && visible {
+                    sprites.push(sprite(Pixels::Slot { index: slots.len(), width: w, height: h }));
+                    slots.push(layers.len());
+                }
                 layers.push(MenuLayer::Video {
                     clip: clip_of(d.titles, *title, *start_secs),
                     x: x.max(0) as u32,
@@ -468,25 +664,26 @@ fn render_page(
     }
     flush(&mut current, &mut layers)?;
 
-    // IG stream: palette, objects, buttons with their neighbours.
-    let mut pal = Palette::default();
-    let mut objects = Vec::new();
-    let mut budget = 0u64;
-    let mut buttons: Vec<MenuButton> = Vec::new();
-    for (i, p) in pending.iter().enumerate() {
-        let (w, h) = (p.rect.x1 - p.rect.x0, p.rect.y1 - p.rect.y0);
-        for (k, img) in [&p.selected, &p.activated].into_iter().enumerate() {
-            let mut px = Vec::with_capacity((w * h) as usize);
-            for q in img.pixels() {
-                let Some(idx) = pal.index(q.0) else {
-                    return Err(LayoutError(vec![format!("Menü „{}“: zu viele verschiedene Button-Farben für die Blu-ray-Palette (255)", menu.name)]));
-                };
-                px.push(idx);
-            }
-            budget += w as u64 * h as u64;
-            objects.push(IgObject { id: (2 * i + k) as u16, width: w as u16, height: h as u16, rle: igs::rle_encode(&px, w as usize, h as usize) });
+    // The intro: whole frames, ending where the loop (mark 1, IG composition) starts.
+    let intro = d.intro.then(|| {
+        let frames = menu_anim::intro_frames(menu.intro_secs.unwrap_or(0.0), rate);
+        let ticks = menu_anim::intro_ticks(frames, rate);
+        let end = sprites.iter().flat_map(|s| s.keys.iter().map(|k| k.t)).fold(0.0f64, f64::max);
+        Intro {
+            frames,
+            secs: ticks as f64 / 90_000.0,
+            ticks,
+            end,
+            sprites: std::mem::take(&mut sprites),
+            slots: std::mem::take(&mut slots),
         }
-        buttons.push(MenuButton {
+    });
+
+    // IG stream: palette, objects, buttons with their neighbours.
+    let mut buttons: Vec<MenuButton> = pending
+        .iter()
+        .enumerate()
+        .map(|(i, p)| MenuButton {
             name: format!("b{}", i + 1),
             template_index: p.element,
             location: "CUSTOM".into(),
@@ -496,40 +693,34 @@ fn render_page(
             thumbnail: None,
             clip: None,
             nav: Navigation::default(),
-        });
-    }
-    if budget > IG_OBJECT_BUDGET {
-        return Err(LayoutError(vec![format!(
-            "Menü „{}“: die Button-Grafiken sind zu groß für den Blu-ray-Speicher ({} MiB, max. 16) – kleinere Buttons verwenden",
-            menu.name,
-            budget / 1024 / 1024
-        )]));
-    }
-    author::compute_navigation(&mut buttons);
-    let id_of = |name: &Option<String>| name.as_ref().and_then(|n| n[1..].parse::<u16>().ok()).unwrap_or(0);
-    let ig_buttons: Vec<IgButton> = pending
-        .iter()
-        .enumerate()
-        .map(|(i, p)| IgButton {
-            id: i as u16 + 1,
-            x: p.rect.x0 as u16,
-            y: p.rect.y0 as u16,
-            up: id_of(&buttons[i].nav.up),
-            down: id_of(&buttons[i].nav.down),
-            left: id_of(&buttons[i].nav.left),
-            right: id_of(&buttons[i].nav.right),
-            selected: (2 * i) as u16,
-            activated: (2 * i + 1) as u16,
-            commands: commands[p.element].clone().unwrap_or_default(),
         })
         .collect();
-    let igs = (!ig_buttons.is_empty()).then(|| {
+    author::compute_navigation(&mut buttons);
+    let id_of = |name: &Option<String>| name.as_ref().and_then(|n| n[1..].parse::<u16>().ok()).unwrap_or(0);
+    let make_ig = |steps: u32, crop: bool| -> Result<IgMenu, LayoutError> {
+        let IgSet { pal, objects, rects } = ig_set(&pending, steps, crop, &menu.name)?;
+        let ig_buttons: Vec<IgButton> = pending
+            .iter()
+            .enumerate()
+            .map(|(i, p)| IgButton {
+                id: i as u16 + 1,
+                x: rects[i].x0 as u16,
+                y: rects[i].y0 as u16,
+                up: id_of(&buttons[i].nav.up),
+                down: id_of(&buttons[i].nav.down),
+                left: id_of(&buttons[i].nav.left),
+                right: id_of(&buttons[i].nav.right),
+                selected: (2 * i) as u16,
+                activated: (2 * i + 1) as u16,
+                commands: commands[p.element].clone().unwrap_or_default(),
+            })
+            .collect();
         let mut palette = vec![[16u8, 128, 128, 0]; 256];
         for (i, e) in pal.entries.iter().enumerate() {
             let [y, cr, cb] = igs::rgb_to_ycrcb(e[0], e[1], e[2]);
             palette[i + 1] = [y, cr, cb, e[3]];
         }
-        IgMenu {
+        Ok(IgMenu {
             width: fw as u16,
             height: fh as u16,
             frame_rate_code: frame_rate_code(rate),
@@ -537,9 +728,21 @@ fn render_page(
             palette,
             buttons: ig_buttons,
             objects,
-            pts: 0,
+            // The buttons appear with the first frame of the loop.
+            pts: intro.as_ref().map_or(0, |i| i.ticks as u32),
+        })
+    };
+    let igs = if pending.is_empty() {
+        None
+    } else if intro.is_some() {
+        let (ig, fits) = fit_budget(make_ig, IG_BUDGET)?;
+        if !fits {
+            warnings.push("Button-Grafiken sehr groß – Buttons erscheinen auf manchen Playern verzögert".into());
         }
-    });
+        Some(ig)
+    } else {
+        Some(make_ig(ALPHA_STEPS, false)?)
+    };
 
     let background = match (&menu.background.video, &menu.background.image) {
         (Some(v), _) => MenuBackground::Video { clip: clip_of(d.titles, v.title, v.start_secs), blur: menu.background.blur },
@@ -550,14 +753,18 @@ fn render_page(
     warnings.extend(warn);
     let moving = matches!(background, MenuBackground::Video { .. })
         || layers.iter().any(|l| matches!(l, MenuLayer::Video { .. }))
-        || audio.is_some();
-    let secs = if moving { menu.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0) } else { STILL_SECS };
+        || audio.is_some()
+        || intro.is_some();
+    let loop_secs = if moving { menu.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0) } else { STILL_SECS };
+    // A page with an intro is one clip: the intro, then the loop.
+    let secs = loop_secs + intro.as_ref().map_or(0.0, |i| i.secs);
     Ok(BdPage {
         media: CustomMenuMedia { background, overlay: menu.background.overlay, layers },
         audio,
         secs,
         moving,
         igs,
+        intro,
         warnings,
     })
 }
@@ -577,7 +784,7 @@ pub fn render_pages(
         .iter()
         .enumerate()
         .map(|(i, menu)| {
-            let d = Draw { layout, menu, titles, frame };
+            let d = Draw { layout, menu, titles, frame, intro: has_intro(layout, menu) };
             let mut page = render_page(&d, &nav.commands[i], true, rate, out_dir, &format!("bm{:02}", i + 1), default_secs)?;
             // A still menu selects its first button through the ICS (no loop that could reset it).
             if !page.moving {
@@ -594,7 +801,7 @@ pub fn render_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{Background, Canvas, Element, Highlight};
+    use crate::layout::{Background, Canvas, Element, ElementKey, Highlight};
 
     fn title(chapters: usize) -> LayoutTitle {
         LayoutTitle {
@@ -618,6 +825,7 @@ mod tests {
             opacity: 1.0,
             highlight: None,
             group: None,
+            intro: Vec::new(),
             content: Content::Text {
                 text: "Play".into(),
                 font: "Arial".into(),
@@ -642,6 +850,7 @@ mod tests {
             background: Background::default(),
             duration_secs: None,
             audio: MenuSound::None,
+            intro_secs: None,
             elements,
         }
     }
@@ -651,6 +860,7 @@ mod tests {
             version: 1,
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),
+            animations: true,
             menus: vec![
                 menu("main", MenuRole::Title, None, vec![
                     button(100.0, 100.0, Action::PlayTitle { title: 1 }),
@@ -670,7 +880,7 @@ mod tests {
     fn nav(opts: PlaybackOptions) -> BdNav {
         let l = layout();
         let t = [title(5), title(5)];
-        let tr = [MenuTraits { moving: false, has_buttons: true }, MenuTraits { moving: true, has_buttons: true }];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }, MenuTraits { moving: true, has_buttons: true, intro: false }];
         plan(&l, &t, &tr, opts, &[vec![5], vec![5]])
     }
 
@@ -678,7 +888,7 @@ mod tests {
     fn merged_nav(opts: PlaybackOptions) -> BdNav {
         let l = layout();
         let t = [title(5), title(5)];
-        let tr = [MenuTraits { moving: false, has_buttons: true }, MenuTraits { moving: true, has_buttons: true }];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }, MenuTraits { moving: true, has_buttons: true, intro: false }];
         plan(&l, &t, &tr, opts, &[vec![2, 3], vec![5]])
     }
 
@@ -715,7 +925,7 @@ mod tests {
             button(0.0, 0.0, Action::PlayChapter { title: 1, chapter: 5 }),
         ];
         let t = [title(5), title(5)];
-        let tr = [MenuTraits { moving: false, has_buttons: true }, MenuTraits { moving: true, has_buttons: true }];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }, MenuTraits { moving: true, has_buttons: true, intro: false }];
         let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![2, 3], vec![5]]);
         let go = |mark, title| [hdmv::mov(1, Op::Imm(mark)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(title)];
         assert_eq!(cmds(&n, 0, 0), &go(1, 1), "chapter 2 is the last mark of file 1");
@@ -816,7 +1026,7 @@ mod tests {
         let t = [title(5), title(5)];
         crate::layout::validate_bd(&l, &t, frame).unwrap();
         let tr = traits(&l, &t, frame);
-        assert_eq!(tr[0], MenuTraits { moving: false, has_buttons: true });
+        assert_eq!(tr[0], MenuTraits { moving: false, has_buttons: true, intro: false });
         let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
         let dir = std::env::temp_dir().join(format!("bdmenu-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -845,4 +1055,183 @@ mod tests {
         assert_eq!(n.objects[2].commands, vec![hdmv::play_pl(0), hdmv::jump_title(2)]);
         assert_eq!(n.objects[4].commands, vec![hdmv::play_pl(2)], "the last title just ends");
     }
+    /// "main" and "main-p2" are title pages (paging between them), "set" is a settings page; the first
+    /// and the last have a decorative element that fades in.
+    fn intro_layout() -> CustomLayout {
+        let mut l = layout();
+        l.menus.push(menu("main-p2", MenuRole::Title, None, vec![button(100.0, 100.0, Action::Menu { menu: "main".into() })]));
+        let mut fade = button(900.0, 900.0, Action::PlayAll);
+        fade.action = None;
+        fade.intro = vec![
+            ElementKey { t: 0.0, x: 900.0, y: 900.0, w: 400.0, h: 100.0, opacity: 0.0 },
+            ElementKey { t: 2.0, x: 900.0, y: 900.0, w: 400.0, h: 100.0, opacity: 1.0 },
+        ];
+        for i in [0, 2] {
+            l.menus[i].elements.push(fade.clone());
+            l.menus[i].intro_secs = Some(2.0);
+        }
+        l
+    }
+
+    fn intro_nav(l: &CustomLayout) -> (Vec<MenuTraits>, BdNav) {
+        let t = [title(5), title(5)];
+        let tr = traits(l, &t, MenuFrame::square(1920, 1080));
+        let nav = plan(l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        (tr, nav)
+    }
+
+    #[test]
+    fn intro_pages_enter_through_the_dispatcher() {
+        let l = intro_layout();
+        let (tr, n) = intro_nav(&l);
+        assert_eq!(tr.iter().map(|t| (t.moving, t.intro)).collect::<Vec<_>>(), [(true, true), (false, false), (true, true)]);
+        // 0 FP, 1 TM, 2..=4 menus, 5/6 titles, 7 dispatcher.
+        assert_eq!(n.objects.len(), 8);
+        assert_eq!(n.title_objects, vec![5, 6], "title numbers do not move");
+        let to = |kind, index| [hdmv::mov(4, Op::Imm(kind)), hdmv::mov(5, Op::Imm(index)), hdmv::jump_object(7)];
+        // Titles: mark and flag as before, then the dispatcher instead of JumpTitle.
+        assert_eq!(cmds(&n, 0, 0), [&[hdmv::mov(1, Op::Imm(0)), hdmv::mov(2, Op::Imm(0))][..], &to(1, 1)].concat());
+        // Settings are another menu (fresh entry), the next page of the same menu is paged.
+        assert_eq!(cmds(&n, 0, 3), &to(2, 3));
+        assert_eq!(cmds(&n, 2, 0), &to(3, 2));
+        assert_eq!(n.objects[1].commands, vec![hdmv::mov(3, Op::Imm(0)), hdmv::jump_object(2)], "Top Menu always replays the intro");
+        assert_eq!(
+            n.objects[7].commands,
+            vec![
+                hdmv::mov(3, Op::Imm(0)),
+                hdmv::compare(Op::Gpr(4), Cmp::Eq, Op::Imm(1)),
+                hdmv::goto(6),
+                hdmv::compare(Op::Gpr(4), Cmp::Eq, Op::Imm(3)),
+                hdmv::mov(3, Op::Imm(1)),
+                hdmv::jump_object_op(Op::Gpr(5)),
+                hdmv::jump_title_op(Op::Gpr(5)),
+            ]
+        );
+        // Intro page: remember the page, play intro + loop, or (paged) go straight to the loop.
+        assert_eq!(
+            n.objects[2].commands,
+            vec![
+                hdmv::mov(7, Op::Imm(0)),
+                hdmv::set_button_page(1),
+                hdmv::compare(Op::Gpr(3), Cmp::Eq, Op::Imm(1)),
+                hdmv::goto(6),
+                hdmv::play_pl(0),
+                hdmv::goto(7),
+                hdmv::mov(3, Op::Imm(0)),
+                hdmv::play_pl_at_mark(Op::Imm(0), Op::Imm(1)),
+                hdmv::goto(7),
+            ]
+        );
+        // A still page without intro keeps its commands.
+        assert_eq!(n.objects[3].commands, vec![hdmv::play_pl(1)]);
+    }
+
+    #[test]
+    fn a_roots_chapter_menu_is_another_menu_not_a_page_of_it() {
+        let mut l = intro_layout();
+        // Root and chapter menus of a title share role and title, like the template translation makes them.
+        l.menus.push(menu("root-1", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::Menu { menu: "chap-1-p1".into() })]));
+        l.menus.push(menu("chap-1-p1", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::Menu { menu: "chap-1-p2".into() })]));
+        l.menus.push(menu("chap-1-p2", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::Menu { menu: "root-1".into() })]));
+        let (_, n) = intro_nav(&l);
+        let to = |kind, index| [hdmv::mov(4, Op::Imm(kind)), hdmv::mov(5, Op::Imm(index)), hdmv::jump_object(10)];
+        assert_eq!(cmds(&n, 3, 0), &to(2, 6), "root -> chapters: fresh entry, intro plays");
+        assert_eq!(cmds(&n, 4, 0), &to(3, 7), "chapter page 1 -> 2: paged");
+        assert_eq!(cmds(&n, 5, 0), &to(2, 5), "chapters -> root: fresh entry");
+    }
+
+    #[test]
+    fn without_intros_the_navigation_is_unchanged() {
+        let mut off = intro_layout();
+        off.animations = false;
+        let mut bare = intro_layout();
+        for m in &mut bare.menus {
+            m.intro_secs = None;
+            m.elements.iter_mut().for_each(|e| e.intro.clear());
+        }
+        let (tr, n) = intro_nav(&off);
+        assert!(tr.iter().all(|t| !t.intro));
+        assert_eq!(n, intro_nav(&bare).1, "animations=false plays like a layout without animation data");
+        assert_eq!(n.objects.len(), 7);
+        assert_eq!(cmds(&n, 0, 0)[2], hdmv::jump_title(1));
+    }
+
+    #[test]
+    fn intro_page_is_one_clip_with_the_buttons_at_the_loop_mark() {
+        let l = intro_layout();
+        let frame = MenuFrame::square(1920, 1080);
+        let t = [title(5), title(5)];
+        let (_, nav) = intro_nav(&l);
+        let dir = std::env::temp_dir().join(format!("bdmenu-intro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let pages = render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let intro = pages[0].intro.as_ref().expect("intro");
+        // 2 s = 48 frames of 1001/24000 s.
+        assert_eq!((intro.frames, intro.ticks), (48, 180_180));
+        assert_eq!(pages[0].secs, 10.0 + intro.secs);
+        assert_eq!(pages[0].igs.as_ref().unwrap().pts as u64, intro.ticks, "composition at exactly T");
+        assert!(pages[0].moving && pages[2].intro.is_some() && pages[1].intro.is_none());
+        assert_eq!(pages[1].igs.as_ref().unwrap().pts, 0);
+        assert!(intro.sprites.iter().any(|s| !s.keys.is_empty()));
+        assert!(intro.sprites.iter().all(|s| s.opacity > 0.0 || !s.keys.is_empty()));
+        assert!(igs::build_sup(pages[0].igs.as_ref().unwrap()).len() <= IG_BUDGET);
+        // Opt-out: same page, no intro, no extra length.
+        let mut off = l.clone();
+        off.animations = false;
+        let (_, nav) = intro_nav(&off);
+        let dir = std::env::temp_dir().join(format!("bdmenu-intro-off-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = render_pages(&off, &t, frame, rate, &nav, &dir, 10.0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(plain[0].intro.is_none() && plain[0].igs.as_ref().unwrap().pts == 0 && plain[0].secs == STILL_SECS);
+    }
+
+    #[test]
+    fn oversized_display_sets_shrink_and_are_flagged_when_they_cannot() {
+        // Size of the fake set by (alpha steps, crop): coarser and cropped is smaller.
+        let sizes = |steps: u32| match steps {
+            16 => 4000,
+            4 => 1500,
+            _ => 700,
+        };
+        let build = |steps: u32, _crop: bool| {
+            Ok(IgMenu {
+                width: 8,
+                height: 8,
+                frame_rate_code: 1,
+                default_selected: None,
+                palette: vec![[16, 128, 128, 0]; 256],
+                buttons: vec![],
+                objects: vec![IgObject { id: 0, width: 1, height: 1, rle: vec![0u8; sizes(steps)] }],
+                pts: 0,
+            })
+        };
+        let size = |ig: &IgMenu| igs::build_sup(ig).len();
+        let full = size(&build(16, false).unwrap());
+        let (ig, fits) = fit_budget(build, full + 1).unwrap();
+        assert!(fits && size(&ig) == full, "within the limit: the original");
+        let (ig, fits) = fit_budget(build, full - 3000).unwrap();
+        assert!(fits && size(&ig) < full, "shrunk to fit");
+        let (ig, fits) = fit_budget(build, 10).unwrap();
+        assert!(!fits && size(&ig) == full - 3300, "nothing fits: the smallest version is kept");
+    }
+
+    #[test]
+    fn cropping_keeps_the_picture_and_moves_the_object() {
+        let mut a = RgbaImage::new(10, 6);
+        a.put_pixel(3, 2, image::Rgba([255, 0, 0, 255]));
+        a.put_pixel(5, 3, image::Rgba([255, 0, 0, 9]));
+        let b = RgbaImage::new(10, 6);
+        assert_eq!(opaque_bounds(&a, &b), Some((3, 2, 3, 2)));
+        assert_eq!(opaque_bounds(&b, &b), None);
+        let p = Pending { rect: Rect { x0: 100, y0: 50, x1: 110, y1: 56 }, selected: a, activated: b, element: 0 };
+        let uncropped = ig_set(std::slice::from_ref(&p), 16, false, "m").unwrap();
+        let cropped = ig_set(std::slice::from_ref(&p), 16, true, "m").unwrap();
+        assert_eq!(cropped.rects[0], Rect { x0: 103, y0: 52, x1: 106, y1: 54 });
+        assert_eq!(uncropped.rects[0], p.rect);
+        assert_eq!((cropped.objects[0].width, cropped.objects[0].height), (3, 2));
+    }
+
 }

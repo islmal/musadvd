@@ -16,6 +16,7 @@ pub mod hdmv;
 pub mod igs;
 pub mod layout;
 pub mod menu;
+pub mod menu_anim;
 pub mod probe;
 pub mod subpic;
 pub mod template;

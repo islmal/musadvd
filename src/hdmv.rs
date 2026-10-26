@@ -56,6 +56,14 @@ pub fn jump_object(obj: u32) -> Command {
 pub fn jump_title(title: u32) -> Command {
     cmd(0, 1, 1, Some(Op::Imm(title)), None)
 }
+/// `JumpObject` / `JumpTitle` to the object / title held in `target` (libbluray fetches every
+/// operand with `imm_op1 = 0` from its register, like `PlayPLatMark`'s).
+pub fn jump_object_op(target: Op) -> Command {
+    cmd(0, 1, 0, Some(target), None)
+}
+pub fn jump_title_op(target: Op) -> Command {
+    cmd(0, 1, 1, Some(target), None)
+}
 pub fn call_object(obj: u32) -> Command {
     cmd(0, 1, 2, Some(Op::Imm(obj)), None)
 }
@@ -173,6 +181,17 @@ pub fn index_bdmv(first_play: u16, top_menu: u16, titles: &[u16]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_operand_jumps() {
+        // byte 0: op_cnt 1, group branch, sub-group jump; byte 1: imm_op1 clear, option 0 / 1.
+        assert_eq!(jump_object_op(Op::Gpr(5)), [0x21, 0x00, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0]);
+        assert_eq!(jump_title_op(Op::Gpr(5)), [0x21, 0x01, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0]);
+        assert_eq!(jump_object_op(Op::Imm(7)), jump_object(7));
+        assert_eq!(jump_title_op(Op::Imm(3)), jump_title(3));
+        // Same operand form as the register mark of PlayPLatMark (in use since the BD menus).
+        assert_eq!(play_pl_at_mark(Op::Imm(0), Op::Gpr(1))[1] & 0xC0, 0x80);
+    }
 
     #[test]
     fn command_bytes_match_tsmuxer_output() {

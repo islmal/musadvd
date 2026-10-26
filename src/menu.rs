@@ -593,6 +593,10 @@ pub(crate) fn text_coverage(
             alpha: 255,
             style: String::new(),
             padding: String::new(),
+            gfx_alpha: 255,
+            block_rect: (0, 0, 0, 0),
+            intro: Vec::new(),
+            outro: Vec::new(),
         };
         let line_cov = rasterize_text(&fonts, &style, line, &g, (cov.width, cov.height), TextOverflow::Truncate);
         for (d, v) in cov.data.iter_mut().zip(line_cov.data) {

@@ -157,3 +157,28 @@ fn all_templates_become_valid_blu_ray_menus() {
     let _ = std::fs::remove_dir_all(&out);
     assert!(count > 0, "no templates found below {}", root.display());
 }
+
+/// Intro keys of the real Open_Style page: the video stamp of block 2 zooms in from its centre.
+#[test]
+fn open_style_block_two_zooms_in_during_the_intro() {
+    use convertx_rust::template::AnimKey;
+    let Some(dir) = template_dir() else { return };
+    let t = Template::load(dir.join("Open_Style.ini")).unwrap();
+    let g = t.pages[0].graphics.iter().find(|g| g.block == 2).expect("block 2");
+    assert_eq!(
+        g.intro,
+        [
+            AnimKey { t: 1.0, x: 84, y: 133, w: 0, h: 0, alpha: None },
+            AnimKey { t: 2.0, x: 50, y: 106, w: 68, h: 54, alpha: None },
+        ]
+    );
+    assert_eq!(g.outro.len(), 3);
+    assert_eq!(g.block_rect, (50, 106, 68, 54));
+    // Every template parses with sorted keys.
+    for entry in std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "ini")) {
+        let t = Template::load(entry.path()).unwrap();
+        for g in t.pages.iter().flat_map(|p| &p.graphics) {
+            assert!(g.intro.windows(2).all(|w| w[0].t <= w[1].t), "{}", entry.path().display());
+        }
+    }
+}
