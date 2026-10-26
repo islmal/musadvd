@@ -44,7 +44,9 @@ on-the-fly image through `ringbuf.rs`) → backend `imapi` (default) or `direct`
 commands over SPTI) → graph telemetry (`.ibg`). Tauri side (`burn_studio.rs`) only wraps commands/events.
 
 **Live player** ("Schnitt & Bild"): `src-tauri/src/preview.rs` = loopback HTTP server streaming a 480p
-fMP4 proxy from ffmpeg (one child, token per file); seek = new stream. Split-by-chapters is GUI state
+8-bit High H.264 fMP4 proxy from ffmpeg (one child, token per file; the file is probed once per token
+with the crop applied, a crop change = new token); filters come from `encoder::preview_filter`
+(deinterlace, crop, scale, then tonemap for HDR); seek = new stream. Split-by-chapters is GUI state
 only (same source, different trim).
 
 **Key design decisions**
@@ -71,6 +73,8 @@ only (same source, different trim).
   their menu audio from the first chapter's own clip (file + start).
 - **Video processing** (`encoder::VideoProcessing`, settings `scale_mode/scale_filter/deinterlace`):
   one shared `fit_chain` builds DVD and BD filters; `flags=` per `scale` (default bicubic, was lanczos).
+  `source_chain` (deinterlace → HDR tonemap → crop) is the head shared with the live player; HDR (PQ/HLG,
+  `VideoStream.hdr`) is tonemapped to SDR before `fps`/scale in every encode.
 - Layer break: smallest title-cell start with L0 % 16 == 0 that fits, else zero padding before a titleset IFO + `TT_SRPT` patch.
 - Custom-layout navigation registers: DVD `g1` play-all, `g2` titleset dispatch, `g3` VMGM router; BD
   `GPR1` chapter mark, `GPR2` play-all. BD titles are entered with `JumpTitle` (VLC timebar), menus with
@@ -96,10 +100,10 @@ only (same source, different trim).
 
 ## 3. Roadmap & Known Issues
 
-**Last recorded test run (2026-10-26):** full workspace `cargo test --workspace --no-fail-fast` green
-(lib 321, `menu_intro` 8 incl. DVD intro); `npm run build` ok. Merge UI and merged motion chapter menus not checked by hand.
+**Last recorded test run (2026-10-26):** `cargo test --workspace`: no failures seen (lib 324, incl. the
+preview stream test), Unix burner check and `npm run build` ok. Merge UI and merged motion chapter menus not checked by hand.
 **Next (prioritised)**
-1. [planned] Live player hardening (8-bit proxy, HDR tonemapping, release-window acceptance) → docs/plans/2026-10-26-live-player-hardening.md
+1. Live player hardening **acceptance** in the release window (4K HEVC HDR smooth + colours, crop, DVD source without combing, CSP `media-src` under `http://tauri.localhost`); only then consider `-hwaccel` → docs/plans/2026-10-26-live-player-hardening.md
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
    on DVD+R, DTS/LPCM BD audio; JumpTitle behaviour in VLC 3.0.23 (timebar, Menu key, title end →
    menu/loop/play-all).
@@ -118,7 +122,7 @@ only (same source, different trim).
   (user reports).
 - DVD+R DL via IMAPI failed once with "Featureseite … nicht als aktuell gekennzeichnet" (cause open; the
   layer-break exclusive-access change made the next write succeed).
-- Live player: 480p ultrafast proxy, ~0.5–1 s delay per seek, no frame stepping, audio = first selected
+- Live player: tonemapping on 4K real-time and loopback stream under the release origin unverified; 480p ultrafast proxy, ~0.5–1 s delay per seek, no frame stepping, audio = first selected
   track; split on a Blu-ray violates `bd_single_video` (conversion blocked).
 - BD intros: seen in VLC only (not on a standalone player: mark-restart, IG timing); `BuildOptions::default` has
   `menu_animations` off; outro keys ignored.
@@ -133,18 +137,14 @@ only (same source, different trim).
 - Half D1/SIF force 4:3; image writer aborts on non-DVD file names in `VIDEO_TS`; the subtitle font path
   is Windows-only; settings files from before 2026-10-15 keep their stored job count.
 - Removing/reordering/merging videos breaks a custom layout's title references (`titlesKey` changes,
-  conversion blocked until fixed). Merge: no GUI pre-check of track counts, live player ignores the new
-  video filters, mixed audio formats in a group re-encode all tracks (not only the differing one).
+  conversion blocked until fixed). Merge: no GUI pre-check of track counts, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
-- **2026-10-26 – Template menu intros on DVD:** see Key design decisions. Verified: lib 321, `tests/menu_intro.rs`
-  DVD (PAL still, NTSC motion: cell 2 at T, `hli_ss` 0 in cell 1, ≠0 in cell 2), intro frames viewed; not in a player.
+- **2026-10-26 – Live player hardening:** 8-bit proxy, HDR detection + tonemapping (also in DVD/BD encodes),
+  shared `source_chain`, crop per stream token. Verified: unit tests (HDR chains, preview filter), stream
+  integration test with PQ HEVC (h264, yuv420p, 480p; ultrafast reports Constrained Baseline, not High 10);
+  not yet in the release window.
+- **2026-10-26 – Template menu intros on DVD:** see Key design decisions. Verified: `tests/menu_intro.rs` DVD (cell 2 at T, `hli_ss` 0 in cell 1); not in a player.
 - **2026-10-26 – Template menu intros on BD/AVCHD:** see Key design decisions. Fixed in VLC checks: float `==` after
-  `clip()` (`same_box`), chapter menus skipping the intro (`page_family`), `TitlePlan::clip_at` 25 s clamp.
-  Verified: full workspace green, e2e tests, intros seen in VLC.
-- **2026-10-26 – Item-less main menus (Cinema, TV Series):** no `ML_PLAY_*` buttons on the title page → one
-  main page showing title 1; series: episode menu (`MNUS_SERIES_EPISODES`, all titles); else bonus menu
-  (titles 2..); chapter/settings buttons jump into title 1's menus (`entry ptt/audio` on DVD). DVD + BD.
-  Verified: 299 lib tests, all 19 templates build as DVD + AVCHD, menus viewed; not in a player.
-- **2026-10-25 – Merge groups + video processing:** `groups()` shared by DVD/BD, multi-`<vob>` titles,
-  chained BD playlists, settings page "Videobearbeitung". Verified: unit + `build_dvd`/`bluray` tests, Unix check.
+  `clip()` (`same_box`), chapter menus skipping the intro, `clip_at` 25 s clamp. Verified: intros seen in VLC.
+- **2026-10-26 – Item-less main menus (Cinema, TV Series):** one main page showing title 1, episode/bonus menus. DVD + BD. Verified: 299 lib tests, 19 templates build; not in a player.
