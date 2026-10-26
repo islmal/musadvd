@@ -145,7 +145,7 @@ enum Command {
         /// Blu-ray: do not use NVIDIA NVENC for H.264 (always x264).
         #[arg(long)]
         no_hw_encode: bool,
-        /// Blu-ray/AVCHD: skip the intro animations of template menus.
+        /// Skip the intro animations of template menus.
         #[arg(long)]
         no_menu_animations: bool,
         /// Audio: auto copies compliant AC-3/DTS tracks, ac3 always re-encodes, lpcm writes

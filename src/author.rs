@@ -809,12 +809,15 @@ pub struct MenuSpec {
     /// Extra `pre` commands of this PGC (after the domain's own). With an empty `vob` the PGC
     /// is command-only (a dispatcher): it runs these commands and shows nothing.
     pub pre: Option<String>,
+    /// Template intro: the VOB starts with an intro of this many seconds (cell 1, no buttons), the
+    /// page proper (buttons, loop or still) is cell 2 and starts there.
+    pub intro_secs: Option<f64>,
 }
 
 impl MenuSpec {
     /// A command-only PGC (no video, no buttons) running `commands`.
     pub fn commands(commands: impl Into<String>, entry: Option<&str>) -> Self {
-        MenuSpec { vob: String::new(), buttons: vec![], entry: entry.map(str::to_string), motion: false, pre: Some(commands.into()) }
+        MenuSpec { vob: String::new(), buttons: vec![], entry: entry.map(str::to_string), motion: false, pre: Some(commands.into()), intro_secs: None }
     }
 
     pub fn is_command_only(&self) -> bool {
@@ -924,7 +927,17 @@ fn write_menus(
                 xml_escape(&b.action.command(ctx))
             );
         }
-        if menu.motion {
+        if let Some(t) = menu.intro_secs {
+            // Intro = cell 1 (no buttons: the SPU starts with cell 2), the page = cell 2.
+            let _ = writeln!(x, r#"{indent}    <vob file="{}">"#, xml_escape(&menu.vob));
+            let _ = writeln!(x, r#"{indent}      <cell start="0" end="{t:.3}" program="1"/>"#);
+            let pause = if menu.motion { "" } else { r#" pause="inf""# };
+            let _ = writeln!(x, r#"{indent}      <cell start="{t:.3}"{pause}/>"#);
+            let _ = writeln!(x, "{indent}    </vob>");
+            if menu.motion {
+                let _ = writeln!(x, "{indent}    <post>jump cell 2;</post>");
+            }
+        } else if menu.motion {
             // Seamless loop: replaying the cell does not re-run the PGC's pre commands.
             let _ = writeln!(x, r#"{indent}    <vob file="{}"/>"#, xml_escape(&menu.vob));
             let _ = writeln!(x, "{indent}    <post>jump cell 1;</post>");
@@ -1092,16 +1105,50 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
     Ok(x)
 }
 
+/// Offsets inside a 2048-byte NAV-pack sector: the PCI packet follows the 0x26 PES header, its
+/// highlight info (`hli`, 189 bytes, `hli_ss` first) starts at PCI byte 0x60; the DSI packet's
+/// `vobu_vob_idn` / `vobu_c_idn` sit at 0x41F / 0x422.
+const NAV_HLI: std::ops::Range<usize> = 0x8D..0x8D + 189;
+
+/// dvdauthor copies a menu's button info into the NAV pack of every VOBU, also those of an intro
+/// cell (cell 1 of a VOB that has a cell 2), where the buttons must not be active yet. Clears the
+/// highlight info there (the VOBUs then look like those of a menu without buttons). Returns the
+/// number of NAV packs changed.
+pub fn strip_intro_buttons(vob: &mut [u8]) -> usize {
+    let is_nav = |s: &[u8]| s[0x26..0x2A] == [0, 0, 1, 0xBF] && s[0x2C] == 0 && s[0x400..0x404] == [0, 0, 1, 0xBF];
+    let id = |s: &[u8]| (u16::from_be_bytes([s[0x41F], s[0x420]]), s[0x422]);
+    let with_intro: std::collections::HashSet<u16> =
+        vob.chunks_exact(2048).filter(|s| is_nav(s)).map(id).filter(|&(_, cell)| cell > 1).map(|(v, _)| v).collect();
+    let mut n = 0;
+    for s in vob.chunks_exact_mut(2048).filter(|s| is_nav(s)) {
+        let (v, cell) = id(s);
+        if cell == 1 && with_intro.contains(&v) {
+            s[NAV_HLI].fill(0);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// `HH:MM:SS.mmm` of `secs`, rounded up to the millisecond.
+fn spu_time(secs: f64) -> String {
+    let ms = (secs * 1000.0 - 1e-6).ceil().max(0.0) as u64;
+    format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+}
+
 /// Generates the `spumux` XML that muxes the highlight/select PNGs into a menu MPEG
 /// and defines button geometry and navigation.
-pub fn spumux_xml(tv: TvStandard, highlight_png: &str, select_png: &str, buttons: &[MenuButton]) -> String {
+/// `start_secs` is where the buttons appear (after a template intro), rounded up to the millisecond
+/// so the subpicture never lands in the intro's last VOBU.
+pub fn spumux_xml(tv: TvStandard, highlight_png: &str, select_png: &str, buttons: &[MenuButton], start_secs: f64) -> String {
     let mut x = String::new();
     let _ = writeln!(x, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     let _ = writeln!(x, r#"<subpictures format="{}">"#, tv.spumux_format());
     let _ = writeln!(x, "  <stream>");
     let _ = writeln!(
         x,
-        r#"    <spu start="00:00:00.00" force="yes" highlight="{}" select="{}">"#,
+        r#"    <spu start="{}" force="yes" highlight="{}" select="{}">"#,
+        spu_time(start_secs),
         xml_escape(highlight_png),
         xml_escape(select_png)
     );
@@ -1262,12 +1309,12 @@ mod tests {
             tv: TvStandard::Pal,
             title_pre: None,
             vmgm_menus: vec![
-                MenuSpec { vob: "menu.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None },
-                MenuSpec { vob: "menu_2.mpg".into(), buttons: vec![b], entry: None, motion: false, pre: None },
+                MenuSpec { vob: "menu.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None, intro_secs: None },
+                MenuSpec { vob: "menu_2.mpg".into(), buttons: vec![b], entry: None, motion: false, pre: None, intro_secs: None },
             ],
             titlesets: vec![
                 TitlesetSpec {
-                    menus: vec![MenuSpec { vob: "ts1_menu.mpg".into(), buttons: vec![c], entry: Some("root".into()), motion: true, pre: None }],
+                    menus: vec![MenuSpec { vob: "ts1_menu.mpg".into(), buttons: vec![c], entry: Some("root".into()), motion: true, pre: None, intro_secs: None }],
                     title: title("a&b.mpg", "16:9"),
                     main_menu_page: 1,
                 },
@@ -1318,7 +1365,7 @@ mod tests {
             tv: TvStandard::Pal,
             title_pre: None,
             vmgm_menus: (0..pages)
-                .map(|i| MenuSpec { vob: format!("m{i}.mpg"), buttons: vec![b.clone()], entry: None, motion: false, pre: None })
+                .map(|i| MenuSpec { vob: format!("m{i}.mpg"), buttons: vec![b.clone()], entry: None, motion: false, pre: None, intro_secs: None })
                 .collect(),
             titlesets: (1..=MAX_TITLES)
                 .map(|n| TitlesetSpec {
@@ -1349,11 +1396,11 @@ mod tests {
             playback: opts,
             tv: TvStandard::Pal,
             title_pre: None,
-            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None }],
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None, intro_secs: None }],
             titlesets: (1..=titles)
                 .map(|n| TitlesetSpec {
                     menus: if ts_menus {
-                        vec![MenuSpec { vob: format!("ts{n}.mpg"), buttons: vec![b.clone()], entry: Some("root".into()), motion: false, pre: None }]
+                        vec![MenuSpec { vob: format!("ts{n}.mpg"), buttons: vec![b.clone()], entry: Some("root".into()), motion: false, pre: None, intro_secs: None }]
                     } else {
                         vec![]
                     },
@@ -1404,7 +1451,7 @@ mod tests {
     fn single_title_without_main_menu() {
         let ts = |menus: bool, force: bool| TitlesetSpec {
             menus: if menus {
-                vec![MenuSpec { vob: "ts.mpg".into(), buttons: vec![], entry: Some("root".into()), motion: false, pre: None }]
+                vec![MenuSpec { vob: "ts.mpg".into(), buttons: vec![], entry: Some("root".into()), motion: false, pre: None, intro_secs: None }]
             } else {
                 vec![]
             },
@@ -1447,7 +1494,7 @@ mod tests {
         let layout = DvdLayout {
             dest: "DVD".into(),
             menu_aspect: "4:3".into(),
-            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![], entry: Some("title".into()), motion: false, pre: None }],
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![], entry: Some("title".into()), motion: false, pre: None, intro_secs: None }],
             titlesets: vec![TitlesetSpec { menus: vec![], title: TitleSpec::placeholder(1), main_menu_page: 1 }],
             playback: PlaybackOptions::default(),
             tv: TvStandard::Ntsc,
@@ -1459,13 +1506,65 @@ mod tests {
     }
 
     #[test]
+    fn intro_cell_loses_its_buttons() {
+        let nav = |vob: u16, cell: u8| {
+            let mut s = vec![0u8; 2048];
+            s[0x26..0x2A].copy_from_slice(&[0, 0, 1, 0xBF]);
+            s[0x400..0x404].copy_from_slice(&[0, 0, 1, 0xBF]);
+            s[0x41F..0x421].copy_from_slice(&vob.to_be_bytes());
+            s[0x422] = cell;
+            s[0x8D] = 1;
+            s
+        };
+        // VOB 1 has an intro (cells 1, 2), VOB 2 is a plain one-cell menu.
+        let mut vob = [nav(1, 1), nav(1, 1), nav(1, 2), nav(2, 1)].concat();
+        assert_eq!(strip_intro_buttons(&mut vob), 2);
+        let hli: Vec<u8> = vob.chunks(2048).map(|s| s[0x8D]).collect();
+        assert_eq!(hli, [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn intro_menu_has_two_cells() {
+        let mk = |motion: bool| DvdLayout {
+            dest: "DVD".into(),
+            menu_aspect: "4:3".into(),
+            playback: PlaybackOptions::default(),
+            tv: TvStandard::Pal,
+            title_pre: None,
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![button("b1", 0, 0, 10, 10)], entry: Some("title".into()), motion, pre: None, intro_secs: Some(3.0) }],
+            titlesets: vec![TitlesetSpec {
+                menus: vec![],
+                title: TitleSpec {
+                    vobs: vec![VobSpec { file: "a.mpg".into(), chapters: vec!["0".into()] }],
+                    label: "A".into(),
+                    aspect: "4:3".into(),
+                    audio_langs: vec![None],
+                    audio_formats: vec!["ac3".into()],
+                    subtitle_langs: vec![],
+                    force_subtitle: false,
+                },
+                main_menu_page: 1,
+            }],
+        };
+        let x = dvdauthor_xml(&mk(true)).unwrap();
+        assert_eq!(x.matches("<cell ").count(), 2);
+        assert!(x.contains(r#"<cell start="0" end="3.000" program="1"/>"#) && x.contains(r#"<cell start="3.000"/>"#));
+        assert!(x.contains("<post>jump cell 2;</post>") && !x.contains("jump cell 1;"));
+        let still = dvdauthor_xml(&mk(false)).unwrap();
+        assert!(still.contains(r#"<cell start="3.000" pause="inf"/>"#) && !still.contains("jump cell"));
+    }
+
+    #[test]
     fn spumux_xml_buttons() {
         let mut bs = vec![button("b1", 52, 108, 668, 134), button("b2", 52, 142, 668, 168)];
         compute_navigation(&mut bs);
-        let x = spumux_xml(TvStandard::Pal, "hl.png", "sel.png", &bs);
+        let x = spumux_xml(TvStandard::Pal, "hl.png", "sel.png", &bs, 0.0);
         assert!(x.contains(r#"<subpictures format="PAL">"#));
-        assert!(spumux_xml(TvStandard::Ntsc, "hl.png", "sel.png", &bs).contains(r#"<subpictures format="NTSC">"#));
-        assert!(x.contains(r#"highlight="hl.png" select="sel.png""#));
+        assert!(spumux_xml(TvStandard::Ntsc, "hl.png", "sel.png", &bs, 0.0).contains(r#"<subpictures format="NTSC">"#));
+        assert!(x.contains(r#"<spu start="00:00:00.000" force="yes" highlight="hl.png" select="sel.png">"#));
+        assert!(spumux_xml(TvStandard::Pal, "hl.png", "sel.png", &bs, 3.0).contains(r#"<spu start="00:00:03.000""#));
+        assert_eq!(spu_time(3.0004), "00:00:03.001", "rounded up, never into the intro");
+        assert_eq!(spu_time(3723.5), "01:02:03.500");
         assert!(x.contains(r#"<button name="b1" x0="52" y0="108" x1="668" y1="134" up="b1" down="b2" left="b1" right="b1"/>"#));
     }
 }

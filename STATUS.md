@@ -16,7 +16,7 @@ layer break, IMAPI2 burner; no mkisofs/libcdio); **deterministic authoring** (al
 before writing); **native on Windows** (tools from `bin/` first, `CREATE_NO_WINDOW`); **honest UI**
 (unsupported settings flagged, progress + ETA for every long step, cancel kills all children).
 
-**Out of scope / not implemented:** BD-J, Blu-ray pop-up menus, text outlines, template *outro* animation, intro on DVD, HEVC/UHD output (HEVC is input only), custom size for BD, multi-session, 8.3 camcorder AVCHD layout
+**Out of scope / not implemented:** BD-J, Blu-ray pop-up menus, text outlines, template *outro* animation, HEVC/UHD output (HEVC is input only), custom size for BD, multi-session, 8.3 camcorder AVCHD layout
 (ours = BDMV on DVD media), MP2/TrueHD/E-AC-3 output, LPCM on DVD-Video, multi-angle, seamless
 branching, DVD-Audio, CSS, region coding, DVD-R DL layer break (drive default).
 
@@ -54,6 +54,10 @@ only (same source, different trim).
   background RGBA on stdout, slot videos likewise, Rust composites (`menu_anim`, rayon) onto it and pipes
   rawvideo to the main encode (`Toolchain::ffmpeg_piped`); loop audio crossfaded. Entry through a
   dispatcher object (GPR3–5,7). Off via `animations`/`menu_animations`/`--no-menu-animations`.
+- **Template menu intro (DVD)**: same sprites/compositor as BD, but template pages are not `CustomLayout`s:
+  `menu::render_page` redraws each graphic on a scratch layer → `menu_anim::Sprite` (`RenderOptions.intro`). One VOB, two cells (intro, page; `jump cell 2` or `pause=inf`), SPU at T, T = whole GOPs, closed GOP (`-sc_threshold` required).
+  **dvdauthor writes the HLI into every NAV pack, ignoring the SPU start** → `author::strip_intro_buttons`
+  zeroes it in cell 1 after authoring. Intro replays on paging.
 - Audio (`encoder::plan_audio`, `audio_mode` auto/ac3/lpcm): compliant AC-3/DTS are stream-copied, the
   rest → AC-3; real per-track kbps feed the bitrate plan. LPCM only on BD (`pcm_s24le` → `pcm_bluray`)
   and AVCHD (stereo 16 bit).
@@ -93,9 +97,9 @@ only (same source, different trim).
 ## 3. Roadmap & Known Issues
 
 **Last recorded test run (2026-10-26):** full workspace `cargo test --workspace --no-fail-fast` green
-(lib 316); `npm run build` ok. Merge UI and merged motion chapter menus not checked by hand.
+(lib 321, `menu_intro` 8 incl. DVD intro); `npm run build` ok. Merge UI and merged motion chapter menus not checked by hand.
 **Next (prioritised)**
-1. Live player in a real built window (dev app via CDP only): 4K HEVC proxy, audio track, split + undo.
+1. [planned] Live player hardening (8-bit proxy, HDR tonemapping, release-window acceptance) → docs/plans/2026-10-26-live-player-hardening.md
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
    on DVD+R, DTS/LPCM BD audio; JumpTitle behaviour in VLC 3.0.23 (timebar, Menu key, title end →
    menu/loop/play-all).
@@ -133,18 +137,14 @@ only (same source, different trim).
   video filters, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
-
-- **2026-10-26 – Template menu intros on BD/AVCHD:** see Key design decisions. VLC check found ~70 % of graphics
-  without intro keys (float `==` after `clip()` in `bd_template.rs` → `same_box`); fixed; chapter menus also skipped the intro (root→chapters counted as "paging": same role+title; now `page_family` of the id). Re-checked in VLC (AVCHD, all menu types): intros work. Also fixed `TitlePlan::clip_at`
-  (hard-coded 25 s clamp → `motion_secs`, broke `ntsc::menu_sound_per_video`). Verified: full workspace
-  run green, e2e tests, Open_Style intro viewed.
+- **2026-10-26 – Template menu intros on DVD:** see Key design decisions. Verified: lib 321, `tests/menu_intro.rs`
+  DVD (PAL still, NTSC motion: cell 2 at T, `hli_ss` 0 in cell 1, ≠0 in cell 2), intro frames viewed; not in a player.
+- **2026-10-26 – Template menu intros on BD/AVCHD:** see Key design decisions. Fixed in VLC checks: float `==` after
+  `clip()` (`same_box`), chapter menus skipping the intro (`page_family`), `TitlePlan::clip_at` 25 s clamp.
+  Verified: full workspace green, e2e tests, intros seen in VLC.
 - **2026-10-26 – Item-less main menus (Cinema, TV Series):** no `ML_PLAY_*` buttons on the title page → one
   main page showing title 1; series: episode menu (`MNUS_SERIES_EPISODES`, all titles); else bonus menu
   (titles 2..); chapter/settings buttons jump into title 1's menus (`entry ptt/audio` on DVD). DVD + BD.
   Verified: 299 lib tests, all 19 templates build as DVD + AVCHD, menus viewed; not in a player.
 - **2026-10-25 – Merge groups + video processing:** `groups()` shared by DVD/BD, multi-`<vob>` titles,
   chained BD playlists, settings page "Videobearbeitung". Verified: unit + `build_dvd`/`bluray` tests, Unix check.
-- **2026-10-25 – ConvertX templates on Blu-ray:** `bd_template.rs` (scaling, `ML_*` → `Action`, pagination).
-  Verified: 288 lib tests, all real templates render; buttons/highlights confirmed in VLC.
-- **2026-10-25 – Live player, chapter at playhead, split into titles:** `preview.rs` loopback fMP4 stream.
-  Verified: 370 tests, dev app via CDP.

@@ -1,4 +1,4 @@
-//! Intro animation of a template menu page on Blu-ray: keyframe interpolation and the per-frame
+//! Intro animation of a template menu page (Blu-ray and DVD): keyframe interpolation and the per-frame
 //! compositing of the intro (see `docs/plans/archive/2026-10-26-template-menu-intro.md`).
 //!
 //! The intro is a stream of opaque RGBA frames that `encoder` overlays on the first `T` seconds of
@@ -10,8 +10,10 @@
 use image::imageops::{self, FilterType};
 use image::RgbaImage;
 
+use crate::author::TvStandard;
 use crate::bd::BdRate;
 use crate::layout::ElementKey;
+use crate::template::Graphic;
 
 /// `(x, y, w, h)` in frame pixels.
 pub type Rect = (f64, f64, f64, f64);
@@ -52,6 +54,57 @@ pub struct Intro {
     pub sprites: Vec<Sprite>,
     /// Layer (index in the page's `MenuLayer`s) of each slot stream.
     pub slots: Vec<usize>,
+}
+
+/// Longest intro played (templates use 3 s).
+const MAX_INTRO_SECS: f64 = 10.0;
+
+/// Intro length of a page: its last key or its declared `intro_duration`, whichever is longer.
+pub fn intro_length(last_key: f64, page_secs: f64) -> f64 {
+    last_key.max(page_secs).clamp(0.5, MAX_INTRO_SECS)
+}
+
+/// Intro keys of a graphic whose final box is `rect` (page coordinates): the owning block's box
+/// moves and fades per key, the graphic keeps its place inside the block (a zoom about the block's
+/// own corner). `map` converts a page box to frame pixels. Empty when nothing moves or the box
+/// cannot be mapped.
+pub fn graphic_keys(g: &Graphic, rect: Rect, map: impl Fn(f64, f64, f64, f64) -> Rect) -> Vec<ElementKey> {
+    let (bx, by, bw, bh) = (g.block_rect.0 as f64, g.block_rect.1 as f64, g.block_rect.2 as f64, g.block_rect.3 as f64);
+    if g.intro.is_empty() || bw < 1.0 || bh < 1.0 {
+        return Vec::new();
+    }
+    let final_opacity = g.alpha as f32 / 255.0;
+    let keys: Vec<ElementKey> = g
+        .intro
+        .iter()
+        .map(|k| {
+            let (sx, sy) = (k.w as f64 / bw, k.h as f64 / bh);
+            let (x, y, w, h) = map(k.x as f64 + (rect.0 - bx) * sx, k.y as f64 + (rect.1 - by) * sy, rect.2 * sx, rect.3 * sy);
+            let opacity = k.alpha.map_or(final_opacity, |a| a as f32 / 255.0 * g.gfx_alpha as f32 / 255.0);
+            ElementKey { t: k.t, x, y, w, h, opacity }
+        })
+        .collect();
+    let (x, y, w, h) = map(rect.0, rect.1, rect.2, rect.3);
+    let moves = keys.iter().any(|k| (k.x - x).abs() > 0.5 || (k.y - y).abs() > 0.5 || (k.w - w).abs() > 0.5 || (k.h - h).abs() > 0.5 || (k.opacity - final_opacity).abs() > 0.004);
+    if moves { keys } else { Vec::new() }
+}
+
+/// Frame rate of a DVD menu (no fake interlacing).
+pub fn dvd_rate(tv: TvStandard) -> BdRate {
+    BdRate { fps: if tv == TvStandard::Ntsc { (30000, 1001) } else { (25, 1) }, fake_interlaced: false }
+}
+
+/// DVD frames per GOP: the cell boundary of an intro must be a VOBU start, so the intro is a whole
+/// number of GOPs (3 s fits both standards exactly).
+pub fn dvd_gop(tv: TvStandard) -> usize {
+    if tv == TvStandard::Ntsc { 18 } else { 15 }
+}
+
+/// Frames of an intro of about `secs` seconds on DVD, rounded up to whole GOPs.
+pub fn dvd_intro_frames(secs: f64, tv: TvStandard) -> usize {
+    let (r, gop) = (dvd_rate(tv), dvd_gop(tv));
+    let exact = secs * r.fps.0 as f64 / r.fps.1 as f64;
+    ((exact - 1e-6).ceil().max(1.0) as usize).div_ceil(gop) * gop
 }
 
 /// Whole frames of an intro of about `secs` seconds. Even if needed so that `frames / fps` is a
@@ -165,6 +218,16 @@ mod tests {
         assert_eq!(lerp(&keys, fb, 1.5), ((20.0, 0.0, 20.0, 20.0), 0.5));
         assert_eq!(lerp(&keys, fb, 2.0), ((30.0, 0.0, 40.0, 40.0), 1.0));
         assert_eq!(lerp(&keys, fb, 9.0), ((30.0, 0.0, 40.0, 40.0), 1.0));
+    }
+
+    #[test]
+    fn dvd_intro_is_whole_gops() {
+        assert_eq!(dvd_intro_frames(3.0, TvStandard::Pal), 75);
+        assert_eq!(dvd_intro_frames(3.0, TvStandard::Ntsc), 90);
+        assert_eq!(dvd_intro_frames(3.1, TvStandard::Pal), 90);
+        assert_eq!(dvd_intro_frames(0.5, TvStandard::Ntsc), 18);
+        assert_eq!(intro_length(1.0, 3.0), 3.0);
+        assert_eq!(intro_length(20.0, 0.0), 10.0);
     }
 
     #[test]

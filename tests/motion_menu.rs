@@ -182,7 +182,7 @@ fn overlay_pipeline_produces_dvd_mpeg() {
     ];
     let out = dir.join("menu_raw.mpg");
     // 4 s menu from a 2 s source: the clip has to loop.
-    let args = encoder::motion_menu_args(TvStandard::Pal, &base, Some(&fg), &slots, 4.0, None, &out);
+    let args = encoder::motion_menu_args(TvStandard::Pal, &base, Some(&fg), &slots, 4.0, None, None, &out);
     rt.block_on(tools.ffmpeg(&args, 4.0, |_| {})).unwrap();
 
     let (codecs, duration) = probe(&tools, &out);

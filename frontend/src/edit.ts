@@ -148,6 +148,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   let base = 0;
   let seq = 0;
   let streamUrl: Promise<string> | null = null;
+  let streamCrop = "";
   const pos = () => base + (video.currentTime || 0);
   const paintPlayhead = () => {
     playhead.style.left = `${(clamp(pos(), 0, dur) / dur) * 100}%`;
@@ -158,7 +159,11 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     const mine = ++seq;
     const at = clamp(secs, 0, Math.max(0, dur - 0.1));
     try {
-      streamUrl ??= previewStream(t.meta.path);
+      // The stream bakes the crop in: a changed crop needs a new token.
+      const cropKey = JSON.stringify(t.crop);
+      if (cropKey !== streamCrop) streamUrl = null;
+      streamCrop = cropKey;
+      streamUrl ??= previewStream(t.meta.path, t.crop);
       const url = await streamUrl;
       await previewStop();
       if (mine !== seq) return;

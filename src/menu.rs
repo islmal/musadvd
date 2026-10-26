@@ -26,6 +26,7 @@ use crate::author::{
     TitleSpec, TitlesetSpec, TvStandard,
 };
 use crate::encoder::VideoSlot;
+use crate::menu_anim::{self, Intro, Pixels, Sprite};
 use crate::template::{ColorScheme, DelphiColor, Graphic, Page, Template, TextStyle};
 
 #[derive(Debug)]
@@ -716,6 +717,10 @@ pub struct RenderedPage {
     pub video_slots: Vec<VideoSlot>,
     pub highlight: IndexedImage,
     pub select: IndexedImage,
+    /// `RenderOptions::intro`: the page's intro, if any graphic moves.
+    pub intro: Option<Intro>,
+    /// Page fill colour (the base the intro frames are composited on).
+    pub fill: [u8; 3],
     pub warnings: Vec<String>,
 }
 
@@ -775,6 +780,8 @@ pub struct RenderOptions<'a> {
     pub menu_audio: Option<&'a ClipSource>,
     /// Chapter menus: every page starts the sound at the first chapter it shows.
     pub audio_from_first_chapter: bool,
+    /// Collects the page's `[MNUP_INTRO]` animation as sprites (see [`RenderedPage::intro`]).
+    pub intro: bool,
 }
 
 impl<'a> RenderOptions<'a> {
@@ -793,6 +800,7 @@ impl<'a> RenderOptions<'a> {
             tv: TvStandard::default(),
             menu_audio: None,
             audio_from_first_chapter: false,
+            intro: false,
         }
     }
 }
@@ -854,6 +862,18 @@ pub fn render_page(
     // that ffmpeg puts above the clips (frames, captions and icons stay on top).
     let mut fg: Option<RgbaImage> = None;
     let mut slots: Vec<VideoSlot> = Vec::new();
+    // Output frame (PAL 720x576 / NTSC 720x480); pages of another size are scaled to it.
+    let (out_w, out_h) = opts.tv.size();
+    let (sx, sy) = (out_w as f64 / pw as f64, out_h as f64 / ph as f64);
+    let scale_slot = |s: &VideoSlot| VideoSlot {
+        x: (s.x as f64 * sx).round() as u32,
+        y: (s.y as f64 * sy).round() as u32,
+        width: ((s.width as f64 * sx).round() as u32).max(2),
+        height: ((s.height as f64 * sy).round() as u32).max(2),
+        ..s.clone()
+    };
+    let to_frame_box = |x: f64, y: f64, w: f64, h: f64| (x * sx, y * sy, w * sx, h * sy);
+    let mut sprites: Vec<Sprite> = Vec::new();
 
     for g in &page.graphics {
         let owner = button_of_graphic(page, g);
@@ -863,6 +883,17 @@ pub fn render_page(
         }
         if g.width == 0 || g.height == 0 {
             continue;
+        }
+        // Intro: the graphic is drawn a second time, unfaded, alone on a transparent page.
+        let mut scratch = opts.intro.then(|| RgbaImage::new(pw, ph));
+        macro_rules! paint {
+            ($f:expr) => {{
+                let f = $f;
+                f(layer(&mut bg, &mut fg), g.alpha);
+                if let Some(sc) = scratch.as_mut() {
+                    f(sc, 255);
+                }
+            }};
         }
         let video_source = match visible_button {
             Some(b) => b.thumbnail.as_deref(),
@@ -885,11 +916,23 @@ pub fn render_page(
                     clip: clip_source.cloned().expect("checked above"),
                 });
                 fg.get_or_insert_with(|| RgbaImage::new(pw, ph));
+                if opts.intro {
+                    let fs = scale_slot(slots.last().expect("just pushed"));
+                    sprites.push(Sprite {
+                        pixels: Pixels::Slot { index: slots.len() - 1, width: fs.width, height: fs.height },
+                        rect: (fs.x as f64, fs.y as f64, fs.width as f64, fs.height as f64),
+                        opacity: g.alpha as f32 / 255.0,
+                        keys: menu_anim::graphic_keys(g, (g.x as f64, g.y as f64, g.width as f64, g.height as f64), to_frame_box),
+                    });
+                }
             }
             "GT_VIDEO" => {
                 let Some(path) = video_source else { continue };
                 match load_fitted(path, g.width, g.height, &g.padding) {
-                    Ok((img, ox, oy)) => blit(layer(&mut bg, &mut fg), &img, g.x as i64 + ox as i64, g.y as i64 + oy as i64, g.alpha),
+                    Ok((img, ox, oy)) => {
+                        let (x, y) = (g.x as i64 + ox as i64, g.y as i64 + oy as i64);
+                        paint!(|d: &mut RgbaImage, a: u8| blit(d, &img, x, y, a));
+                    }
                     Err(e) => warnings.push(format!("{}: {e}", path.display())),
                 }
             }
@@ -898,7 +941,7 @@ pub fn render_page(
                 match load_fitted(&path, g.width, g.height, &g.padding) {
                     Ok((img, ox, oy)) => {
                         let (x, y) = (g.x as i64 + ox as i64, g.y as i64 + oy as i64);
-                        blit(layer(&mut bg, &mut fg), &img, x, y, g.alpha);
+                        paint!(|d: &mut RgbaImage, a: u8| blit(d, &img, x, y, a));
                         if let Some(o) = owner {
                             button_bitmap.insert(o, (img, x, y));
                         }
@@ -935,21 +978,24 @@ pub fn render_page(
                 if let Some(shadow) = style.shadow.as_ref().and_then(DelphiColor::rgba) {
                     if style.shadow_offset != 0 {
                         let (dx, dy) = shadow_offset(style);
-                        blend_coverage(layer(&mut bg, &mut fg), &outline, shadow, dx, dy, g.alpha);
+                        paint!(|d: &mut RgbaImage, a: u8| blend_coverage(d, &outline, shadow, dx, dy, a));
                     }
                 }
                 if style.outline_size > 0 {
                     if let Some(oc) = style.outline.as_ref().and_then(DelphiColor::rgba) {
-                        blend_coverage(layer(&mut bg, &mut fg), &outline, oc, 0, 0, g.alpha);
+                        paint!(|d: &mut RgbaImage, a: u8| blend_coverage(d, &outline, oc, 0, 0, a));
                     }
                 }
                 let tc = style.text.as_ref().and_then(DelphiColor::rgba).unwrap_or([255, 255, 255, 255]);
-                blend_coverage(layer(&mut bg, &mut fg), &cov, tc, 0, 0, g.alpha);
+                paint!(|d: &mut RgbaImage, a: u8| blend_coverage(d, &cov, tc, 0, 0, a));
                 if let Some(o) = owner {
                     button_text.insert(o, (cov, outline));
                 }
             }
             _ => {}
+        }
+        if let Some(sprite) = scratch.and_then(|sc| intro_sprite(&sc, g, (sx, sy))) {
+            sprites.push(sprite);
         }
     }
 
@@ -1064,7 +1110,6 @@ pub fn render_page(
     }
 
     // Scale to the output frame (PAL 720x576 / NTSC 720x480) if the page has another size.
-    let (out_w, out_h) = opts.tv.size();
     let to_frame = |img: RgbaImage| {
         if (pw, ph) == (out_w, out_h) {
             img
@@ -1074,17 +1119,7 @@ pub fn render_page(
     };
     let background = to_frame(bg);
     let foreground = fg.map(to_frame);
-    let (sx, sy) = (out_w as f64 / pw as f64, out_h as f64 / ph as f64);
-    let video_slots = slots
-        .into_iter()
-        .map(|s| VideoSlot {
-            x: (s.x as f64 * sx).round() as u32,
-            y: (s.y as f64 * sy).round() as u32,
-            width: ((s.width as f64 * sx).round() as u32).max(2),
-            height: ((s.height as f64 * sy).round() as u32).max(2),
-            ..s
-        })
-        .collect();
+    let video_slots: Vec<VideoSlot> = slots.iter().map(scale_slot).collect();
     let highlight = resize_nearest(&mask, out_w, out_h);
     let select = IndexedImage { palette: act_pal, ..highlight.clone() };
 
@@ -1102,7 +1137,50 @@ pub fn render_page(
         }
     }
 
-    Ok(RenderedPage { background, foreground, video_slots, highlight, select, warnings })
+    let intro = page_intro(sprites, video_slots.len(), page, opts.tv);
+    Ok(RenderedPage { background, foreground, video_slots, highlight, select, intro, fill: [fill[0], fill[1], fill[2]], warnings })
+}
+
+/// The graphic drawn alone on `scratch` (page size) as a sprite on the output frame: cropped to its
+/// pixels, scaled by `scale`, with the intro keys of `g` (the box it is cropped to stands in for the
+/// graphic's own, so a zoom about the block corner still lands right). `None` if nothing was drawn.
+fn intro_sprite(scratch: &RgbaImage, g: &Graphic, (sx, sy): (f64, f64)) -> Option<Sprite> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for (x, y, p) in scratch.enumerate_pixels() {
+        if p[3] > 0 {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    let (fw, fh) = (((w as f64 * sx).round() as u32).max(1), ((h as f64 * sy).round() as u32).max(1));
+    let crop = imageops::crop_imm(scratch, x0, y0, w, h).to_image();
+    let pixels = if (fw, fh) == (w, h) { crop } else { imageops::resize(&crop, fw, fh, FilterType::Lanczos3) };
+    let page_box = (x0 as f64, y0 as f64, w as f64, h as f64);
+    let map = |x: f64, y: f64, w: f64, h: f64| (x * sx, y * sy, w * sx, h * sy);
+    Some(Sprite {
+        pixels: Pixels::Image(pixels),
+        rect: (x0 as f64 * sx, y0 as f64 * sy, fw as f64, fh as f64),
+        opacity: g.alpha as f32 / 255.0,
+        keys: menu_anim::graphic_keys(g, page_box, map),
+    })
+}
+
+/// The intro of a page, if some sprite moves: whole GOPs long, `slots` slot streams after the background.
+fn page_intro(sprites: Vec<Sprite>, slots: usize, page: &Page, tv: TvStandard) -> Option<Intro> {
+    let end = sprites.iter().flat_map(|s| s.keys.iter().map(|k| k.t)).reduce(f64::max)?;
+    let rate = menu_anim::dvd_rate(tv);
+    let frames = menu_anim::dvd_intro_frames(menu_anim::intro_length(end, page.intro_duration), tv);
+    Some(Intro {
+        frames,
+        secs: frames as f64 * rate.fps.1 as f64 / rate.fps.0 as f64,
+        ticks: menu_anim::intro_ticks(frames, rate),
+        end,
+        sprites,
+        slots: (0..slots).collect(),
+    })
 }
 
 fn resize_nearest(img: &IndexedImage, w: u32, h: u32) -> IndexedImage {
@@ -1169,6 +1247,11 @@ pub struct MenuPageFiles {
     /// Custom (menu editor) page: background and layers for [`crate::encoder::custom_menu_args`];
     /// `background`/`foreground`/`video_slots` are unused then.
     pub custom: Option<crate::encoder::CustomMenuMedia>,
+    /// Template intro (`RenderOptions::intro`): `motion_secs` then covers intro + page, and the
+    /// first `secs` come from composited frames instead of the page files.
+    pub intro: Option<Intro>,
+    /// Page fill colour under the intro's sprites.
+    pub intro_fill: [u8; 3],
 }
 
 impl MenuPageFiles {
@@ -1257,10 +1340,16 @@ fn render_menu_page(
             spumux_xml: out_dir.join(format!("spumux_{prefix}{s}.xml")),
             vob: format!("{prefix}{s}.mpg"),
             foreground: rendered.foreground.as_ref().map(|_| out_dir.join(format!("{prefix}_fg{s}.png"))),
-            motion_secs: motion_page.then(|| motion_duration(page, opts.motion_duration)),
+            // An intro page is a video even as a still page (intro + 1 s held on its last frame).
+            motion_secs: match &rendered.intro {
+                Some(i) => Some(i.secs + if motion_page { motion_duration(page, opts.motion_duration) } else { 1.0 }),
+                None => motion_page.then(|| motion_duration(page, opts.motion_duration)),
+            },
             audio: audio.filter(|_| motion_page),
             video_slots: rendered.video_slots,
             custom: None,
+            intro_fill: rendered.fill,
+            intro: rendered.intro,
         };
         rendered.background.save(&files.background)?;
         if let (Some(fg), Some(path)) = (&rendered.foreground, &files.foreground) {
@@ -1268,13 +1357,15 @@ fn render_menu_page(
         }
         rendered.highlight.write_png(&files.highlight)?;
         rendered.select.write_png(&files.select)?;
-        std::fs::write(&files.spumux_xml, author::spumux_xml(opts.tv, &hl_name, &sel_name, &buttons))?;
+        let intro_secs = files.intro.as_ref().map(|i| i.secs);
+        std::fs::write(&files.spumux_xml, author::spumux_xml(opts.tv, &hl_name, &sel_name, &buttons, intro_secs.unwrap_or(0.0)))?;
         let spec = MenuSpec {
             vob: files.vob.clone(),
             buttons,
             entry: if n == 1 { entry.map(str::to_string) } else { None },
-            motion: files.is_motion(),
+            motion: motion_page,
             pre: None,
+            intro_secs,
         };
         Ok(((spec, files), warnings))
     }

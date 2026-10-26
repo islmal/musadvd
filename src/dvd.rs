@@ -26,10 +26,11 @@ use crate::author::{
 };
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
 use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
+use crate::menu_anim;
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
 use crate::probe::{self, language_matches, language_name, MediaInfo, ProbeError, SubtitleKind};
 use crate::template::{Page, Template};
-use crate::tools::{ProcessPriority, ToolError, Toolchain};
+use crate::tools::{ProcessPriority, RawStream, ToolError, Toolchain};
 
 /// DVD-Video limits per title.
 pub const MAX_AUDIO_STREAMS: usize = 8;
@@ -323,7 +324,7 @@ pub struct BuildOptions {
     pub hw_decode: bool,
     /// Blu-ray: encode H.264 with NVIDIA NVENC when it works (1080i rates and failures use x264).
     pub bd_hw_encode: bool,
-    /// Blu-ray/AVCHD: play the intro animations of a ConvertX template's menu pages (off = the
+    /// Play the intro animations of a ConvertX template's menu pages (off = the
     /// finished pages straight away, as without animation data).
     pub menu_animations: bool,
     /// 2-pass video encoding (ConvertX's "2-pass encoding" checkbox): slower, more exact size.
@@ -1344,6 +1345,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     audio_from_first_chapter: suffix == "chap",
                     text_overflow: opts.text_overflow,
                     tv,
+                    intro: opts.menu_animations,
                     ..RenderOptions::still(dir)
                 };
                 let prefix = format!("ts{:02}_{suffix}", i + 1);
@@ -1406,6 +1408,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     motion_duration: opts.motion_duration,
                     text_overflow: opts.text_overflow,
                     tv,
+                    intro: opts.menu_animations,
                     menu_audio: main_menu_audio.as_ref(),
                     ..RenderOptions::still(&main_dir)
                 },
@@ -1426,6 +1429,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         motion_duration: opts.motion_duration,
                         text_overflow: opts.text_overflow,
                         tv,
+                        intro: opts.menu_animations,
                         menu_audio: main_menu_audio.as_ref(),
                         ..RenderOptions::still(&main_dir)
                     },
@@ -1449,6 +1453,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         motion_duration: opts.motion_duration,
                         text_overflow: opts.text_overflow,
                         tv,
+                        intro: opts.menu_animations,
                         menu_audio: main_menu_audio.as_ref(),
                         ..RenderOptions::still(&main_dir)
                     },
@@ -1524,11 +1529,29 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         &files.video_slots,
                         secs,
                         audio.as_ref(),
+                        files.intro.as_ref().map(|i| i.secs),
                         &work.join(&raw),
                     ),
                     None => encoder::menu_still_args(tv, &files.background, &work.join(&raw)),
                 };
-                tools.ffmpeg(&args, files.motion_secs.unwrap_or(1.0), |_| {}).await?;
+                let secs = files.motion_secs.unwrap_or(1.0);
+                match &files.intro {
+                    // The intro frames go ffmpeg -> Rust (slot videos) -> ffmpeg over pipes, never to disk.
+                    Some(intro) => {
+                        // Stream 0 is the page background, the slot videos follow.
+                        let streams: Vec<RawStream> = std::iter::once(encoder::dvd_background_stream(tv, files.intro_fill, intro.frames))
+                            .chain(files.video_slots.iter().map(|s| encoder::dvd_slot_stream(tv, s, intro.frames)))
+                            .collect();
+                        let (sprites, frames, end) = (intro.sprites.clone(), intro.frames, intro.end);
+                        let (w, h) = tv.size();
+                        let compose = Arc::new(move |k: usize, streams: &[&[u8]]| {
+                            let (background, slots) = streams.split_first().expect("background stream");
+                            menu_anim::composite_frame(w, h, background, &sprites, slots, menu_anim::frame_time(k, frames, end))
+                        });
+                        tools.ffmpeg_piped(&args, &streams, frames, secs, compose, |_| {}).await?;
+                    }
+                    None => tools.ffmpeg(&args, secs, |_| {}).await?,
+                }
                 let xml = files.spumux_xml.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
                 let spu_log = tools.spumux(&work, &xml, &raw, &vob, 0).await?;
                 std::fs::write(work.join(format!("{xml}.log")), spu_log).at(&work)?;
@@ -1753,6 +1776,19 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     let dvd_log = cancellable(cancel, tools.dvdauthor(&work, "dvdauthor.xml")).await?;
     cancel.check()?;
     std::fs::write(work.join("dvdauthor.log"), &dvd_log)?;
+    if stage.pages.iter().any(|(spec, _)| spec.intro_secs.is_some()) {
+        // Menu domain VOBs: VIDEO_TS.VOB (VMGM) and VTS_nn_0.VOB (titleset menus).
+        let menu_vobs = std::fs::read_dir(work.join("DVD").join("VIDEO_TS"))?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case("VIDEO_TS.VOB") || (n.len() == 12 && n.to_ascii_uppercase().ends_with("_0.VOB"))));
+        for path in menu_vobs {
+            let mut bytes = std::fs::read(&path).at(&path)?;
+            if author::strip_intro_buttons(&mut bytes) > 0 {
+                std::fs::write(&path, bytes).at(&path)?;
+            }
+        }
+    }
     for line in dvd_log.lines().filter(|l| l.contains("WARN")) {
         warn(log, format!("dvdauthor: {}", line.trim()));
     }

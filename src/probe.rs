@@ -86,6 +86,8 @@ pub struct VideoStream {
     /// Picture section to keep (see [`apply_crop`]); `display_aspect` already is the aspect of
     /// that section, `width`/`height` stay those of the source frame.
     pub crop: Option<CropRect>,
+    /// PQ (`smpte2084`) or HLG (`arib-std-b67`) transfer: needs tonemapping to SDR.
+    pub hdr: bool,
 }
 
 impl VideoStream {
@@ -190,6 +192,7 @@ struct RawStream {
     r_frame_rate: Option<String>,
     avg_frame_rate: Option<String>,
     field_order: Option<String>,
+    color_transfer: Option<String>,
     channels: Option<u32>,
     channel_layout: Option<String>,
     duration: Option<String>,
@@ -262,6 +265,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                     fps,
                     field_order: s.field_order.unwrap_or_default(),
                     crop: None,
+                    hdr: matches!(s.color_transfer.as_deref(), Some("smpte2084" | "arib-std-b67")),
                 });
             }
             Some("audio") => info.audio.push(AudioStream {
@@ -493,6 +497,15 @@ mod tests {
       ],
       "format": {"duration": "5400.123000"}
     }"#;
+
+    #[test]
+    fn detects_hdr_transfer() {
+        let hdr = |t: &str| {
+            let json = format!(r#"{{"streams": [{{"index": 0, "codec_name": "hevc", "codec_type": "video", "width": 3840, "height": 2160, "color_transfer": "{t}"}}]}}"#);
+            parse_ffprobe_json(Path::new("x.mkv"), &json).unwrap().video.unwrap().hdr
+        };
+        assert_eq!((hdr("smpte2084"), hdr("arib-std-b67"), hdr("bt709")), (true, true, false));
+    }
 
     #[test]
     fn parses_ffprobe_json() {

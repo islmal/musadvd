@@ -73,7 +73,7 @@ pub struct AppSettings {
     pub hw_decode: bool,
     /// Blu-ray: encode with NVIDIA NVENC when available (falls back to x264).
     pub bd_hw_encode: bool,
-    /// Blu-ray/AVCHD: play the intro animations of template menus.
+    /// Play the intro animations of template menus.
     pub menu_animations: bool,
     /// Draft encoding without trellis quantisation (about 40 % faster, slightly lower quality).
     pub fast_encode: bool,
@@ -727,6 +727,27 @@ impl AppSettings {
         }
     }
 
+    /// Scaling, filter and deinterlacing choices (also used by the live player).
+    pub fn video_processing(&self) -> VideoProcessing {
+        VideoProcessing {
+            scale: match self.scale_mode.as_str() {
+                "panscan" => ScaleMode::PanScan,
+                "stretch" => ScaleMode::Stretch,
+                _ => ScaleMode::Letterbox,
+            },
+            filter: match self.scale_filter.as_str() {
+                "bilinear" => ScaleFilter::Bilinear,
+                "lanczos" => ScaleFilter::Lanczos,
+                _ => ScaleFilter::Bicubic,
+            },
+            deinterlace: match self.deinterlace.as_str() {
+                "yadif" => Deinterlace::Yadif,
+                "off" => Deinterlace::Off,
+                _ => Deinterlace::Auto,
+            },
+        }
+    }
+
     /// Transfers the settings the engine implements onto build options.
     pub fn apply_to(&self, opts: &mut BuildOptions) {
         opts.playback = self.playback();
@@ -758,23 +779,7 @@ impl AppSettings {
             "lpcm" => AudioMode::Lpcm,
             _ => AudioMode::Auto,
         };
-        opts.video = VideoProcessing {
-            scale: match self.scale_mode.as_str() {
-                "panscan" => ScaleMode::PanScan,
-                "stretch" => ScaleMode::Stretch,
-                _ => ScaleMode::Letterbox,
-            },
-            filter: match self.scale_filter.as_str() {
-                "bilinear" => ScaleFilter::Bilinear,
-                "lanczos" => ScaleFilter::Lanczos,
-                _ => ScaleFilter::Bicubic,
-            },
-            deinterlace: match self.deinterlace.as_str() {
-                "yadif" => Deinterlace::Yadif,
-                "off" => Deinterlace::Off,
-                _ => Deinterlace::Auto,
-            },
-        };
+        opts.video = self.video_processing();
         opts.loudnorm = self.loudnorm;
         opts.hw_decode = self.hw_decode;
         opts.bd_hw_encode = self.bd_hw_encode;
