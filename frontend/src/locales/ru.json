@@ -988,6 +988,7 @@
  "engine.subtitle": "Субтитры",
  "engine.unknown": "Неизвестно",
  "engine.root": "Корневое",
+ "engine.err_menu_too_complex": "Меню с {buttons} кнопками не удаётся разделить на цветовые группы (превышен лимит поиска) – пожалуйста, упростите кнопки или цвета",
  "engine.phase_menus": "Создание меню",
  "engine.phase_encoding": "Кодирование видео",
  "engine.phase_authoring": "Мультиплексирование VOB (авторинг)",

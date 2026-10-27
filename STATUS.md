@@ -9,9 +9,12 @@ Clean-room Rust reimplementation of *VSO ConvertXToDVD 7*: arbitrary videos in �
 optionally burnt. Three deliverables: engine library (`src/`), CLI (`src/main.rs`), German/English desktop GUI
 (Tauri 2 + vanilla TS, `src-tauri/` + `frontend/`), plus **Burn Studio** (ImgBurn replacement window).
 
-Principles: **clean room** (only ConvertX *template files* are read, never its code); **few, proven
-black boxes** (ffmpeg CLI, self-built dvdauthor/spumux, tsMuxeR – everything else is own Rust: template
-parser, compositor, subpicture masks, navigation, bitrate model, UDF 1.02/ISO 9660 + UDF 2.50 writers,
+Principles: **clean room w.r.t. ConvertX** (only its *template files* are read, never its code) – this does
+NOT apply to `src/spumux.rs`: that is a **port of dvdauthor's GPL spumux**, derived from a Ghidra decompile
+of `bin/spumux.exe` (via `rea`) and checked byte for byte against it; treat it as GPL-derived when deciding
+the project licence; **few, proven
+black boxes** (ffmpeg CLI, self-built dvdauthor, spumux for FreeType text only, tsMuxeR – everything else is own Rust: template
+parser, compositor, subpicture masks, subpicture muxer, navigation, bitrate model, UDF 1.02/ISO 9660 + UDF 2.50 writers,
 layer break, IMAPI2 burner; no mkisofs/libcdio); **deterministic authoring** (all disc addresses planned
 before writing); **native on Windows** (tools from `bin/` first, `CREATE_NO_WINDOW`); **honest UI**
 (unsupported settings flagged, progress + ETA for every long step, cancel kills all children).
@@ -24,9 +27,9 @@ branching, DVD-Audio, CSS, region coding, DVD-R DL layer break (drive default).
 
 **DVD job – five phases** (`eta::JobPhase`, "Phase n/5"): probe (ffprobe JSON) → plan titles (one
 titleset per menu entry = merge group) → **[1] menus** (ConvertX template via `template.rs`/`menu.rs`, or custom JSON
-layout from the WYSIWYG editor via `layout.rs`; masks → spumux) → bitrate from the *real* menu size →
+layout from the WYSIWYG editor via `layout.rs`; masks → native `spumux.rs`) → bitrate from the *real* menu size →
 **[2] videos** (parallel, one ffmpeg run writes MPEG-2 + AC-3 straight into a DVD program stream, piped
-through spumux per subtitle) → **[3] authoring** (`author.rs` → dvdauthor XML → `VIDEO_TS`) →
+through one subtitle stage per stream: native for bitmap subs, spumux.exe for text subs) → **[3] authoring** (`author.rs` → dvdauthor XML → `VIDEO_TS`) →
 **[4] ISO** (`burner::create_disc_image`: own UDF 1.02 + ISO 9660 bridge, layer break) → **[5] burn**
 (IMAPI2 / growisofs). Phases 1–3 = `dvd::build_dvd`; 4–5 = burn dialog (`src-tauri/src/burn.rs`), shared
 with the CLI through `burner::burn_video_ts`.
@@ -60,6 +63,16 @@ only (same source, different trim).
   `menu::render_page` redraws each graphic on a scratch layer → `menu_anim::Sprite` (`RenderOptions.intro`). One VOB, two cells (intro, page; `jump cell 2` or `pause=inf`), SPU at T, T = whole GOPs, closed GOP (`-sc_threshold` required).
   **dvdauthor writes the HLI into every NAV pack, ignoring the SPU start** → `author::strip_intro_buttons`
   zeroes it in cell 1 after authoring. Intro replays on paging.
+- **Subpicture muxing is hybrid** (`spumux.rs`, wired in `Toolchain::spumux` for menus and
+  `ffmpeg_spumux_pipeline` for titles): menu masks (highlight/select + buttons) and bitmap subtitles are
+  muxed natively; `spumux.exe` runs only for FreeType text subtitles (`<textsub>`) and as fallback when the
+  native code returns `Unsupported` (odd/oversized masks, >16 colours; menus only – a title pipe cannot be
+  replayed). Per SPU it inserts a `dvdauthor-data` 0xBE sector (PTS, CLUT as YCrCb, tag 2 group lanes, tag 3
+  buttons + nav; dvdauthor reads it instead of an SPU palette) plus the 0xBD sectors at SCR ≥ PTS−150 ms and
+  rewrites SCRs (`max(in, prev+43886)`). Copied quirks: pixel values by first raster appearance, even crop,
+  transparent slot forced to 0, default nav = nearest button within 90°. Button grouping is a 3^N search
+  (`pick_groups`) capped at `MAX_GROUP_TRIALS`; beyond it `TooComplex` aborts the build. Golden tests:
+  `tests/spumux_native.rs` (needs `bin/spumux.exe`, ffmpeg).
 - Audio (`encoder::plan_audio`, `audio_mode` auto/ac3/lpcm): compliant AC-3/DTS are stream-copied, the
   rest → AC-3; real per-track kbps feed the bitrate plan. LPCM only on BD (`pcm_s24le` → `pcm_bluray`)
   and AVCHD (stereo 16 bit).
@@ -114,7 +127,9 @@ only (same source, different trim).
    no batch mode.
 4. Remaining burn tests: DVD-RW/DVD+RW with old content (erase/overwrite), DVD+R DL with a DVD-9 layer
    break; one real CLI burn; a real BD burn + standalone-player test (incl. NVENC discs, IGS menus).
-5. Polish: show harmonised BD tracks; E-AC-3/TrueHD pass-through; seamless BD join; stream-copy trim;
+5. Drop `spumux.exe`: render text subtitles natively (`ab_glyph`, as `menu.rs`); check native menus on a
+   standalone player; golden tests with masks from real templates (current ones are synthetic).
+6. Polish: show harmonised BD tracks; E-AC-3/TrueHD pass-through; seamless BD join; stream-copy trim;
    DVD LPCM muxer; per-title audio mode; Ctrl+C for `build-dvd`.
 
 **Known issues / limitations**
@@ -134,6 +149,7 @@ only (same source, different trim).
 - Blu-ray: short pause between titles (one playlist each); menu clips use title 1's frame rate; PGS
   subtitles on a cropped title keep the uncropped position; titles with fewer tracks get silent/empty
   filler tracks; text subtitles rendered by tsMuxeR (Arial, fixed); Top Menu → first title menu.
+- Native muxer gaps: button attribute byte always 0; a row ≥ 1440 bits skips that subtitle (spumux aborts).
 - Bitmap subtitles: 3 opaque colours (k-means) + hard transparency; DVB/XSUB/teletext/VobSub-on-BD
   skipped with a warning.
 - Half D1/SIF force 4:3; image writer aborts on non-DVD file names in `VIDEO_TS`; the subtitle font path
@@ -142,7 +158,9 @@ only (same source, different trim).
   conversion blocked until fixed). Merge: no GUI pre-check of track counts, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
-- **2026-10-27 – Release workflow + in-app updater:** `.github/workflows/release.yml` (tag `v*` = `tauri.conf.json` version) builds the signed NSIS installer via tauri-action (ffmpeg 9.0.1 fetched from gyan.dev, MSVC) and uploads `latest.json`; `tauri-plugin-updater` checks it at GUI start (`main.ts checkForUpdate`, prompt, passive install). Needs repo secret `TAURI_SIGNING_PRIVATE_KEY` (key in `~/.tauri/convertx-rust.key`, pubkey in `tauri.conf.json`; losing it breaks updates). Never run in CI; update flow untested.
+- **2026-10-27 – Typed spumux `MenuTooComplex` error path:** `SpumuxError::TooComplex` -> `ToolError::MenuTooComplex` -> `BuildError::MenuTooComplex` (manual `From<ToolError>`), localised via `BuildError::message(ui_lang)` (GUI + CLI) from `engine.err_menu_too_complex`. Verified: new unit test in `dvd.rs`, `cargo test --workspace`, `check-i18n`, `npm run build`, gui + Unix check; not with a real 12-button menu build.
+- **2026-10-27 – Native subpicture muxer (hybrid pipeline):** `src/spumux.rs` ports spumux (Ghidra decompile) for menu masks and bitmap subtitles; `spumux.exe` remains for text subtitles + fallback. Verified: 9 golden tests byte-identical to `bin/spumux.exe` (subtitles: overlap/open end/crop/multi-sector; menus: default+explicit nav, opaque palettes, 2-group case), unit tests incl. trial limit, `custom_menu` (dvdauthor accepts it, disc colours checked), `bitmap_subs`, `real_templates`, `menu_intro`, `motion_menu`, `ntsc`, Unix check. Not checked on a standalone player.
+- **2026-10-27 – Release workflow + in-app updater:** `.github/workflows/release.yml` (tag `v*` = `tauri.conf.json` version) builds the signed NSIS installer via tauri-action (latest ffmpeg release build fetched from gyan.dev (9.0.1 URL is gone), MSVC) and uploads `latest.json`; `tauri-plugin-updater` checks it at GUI start (`main.ts checkForUpdate`, prompt, passive install). Needs repo secret `TAURI_SIGNING_PRIVATE_KEY` (key in `~/.tauri/convertx-rust.key`, pubkey in `tauri.conf.json`; losing it breaks updates). Never run in CI; update flow untested.
 - **2026-10-27 – Runtime-loaded locale files:** no embedded JSON anymore; `UiLang` code struct, cached leaked catalogs, `get_available_languages`/`get_locale_data`, CLI `--ui-lang` any code. Verified: `cargo test --workspace`, gui + Unix check, `npm run build` (hint text absent from bundle); not clicked through in the real GUI.
 - **2026-10-27 – i18n German/English/Russian + audio track rename:** see Key design decisions. Own audio names: `StreamSelection.audio_names` -> `MediaInfo.audio_names` -> `probe::audio_labels` (GUI input in the Audio tab, session only, not persisted). Verified: workspace tests, gui + Unix check, `npm run build`, browser smoke test with mocked backend; not by hand in the Tauri GUI or a real conversion; Cyrillic glyphs in template menu fonts unchecked.
 - **2026-10-26 – Live player hardening:** 8-bit proxy, HDR tonemapping (also in encodes), shared `source_chain`. Verified: unit + stream tests; not in the release window.

@@ -362,7 +362,7 @@ fn button_colours_and_word_wrap_reach_the_disc() {
     let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));
     let work = report.work_dir.as_ref().unwrap();
     let log = std::fs::read_to_string(work.join("cm01_spumux.xml.log")).unwrap();
-    assert!(log.contains("PNG had 4 colors") && log.contains("1 subtitles added"), "{log}");
+    assert!(log.contains("1 subtitles added"), "{log}");
 
     // On the disc: pixel values 1, 2, 3 carry the three (selected, activated) pairs.
     let (pairs, groups) = disc_button_colours(&report.video_ts);

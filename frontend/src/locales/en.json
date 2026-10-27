@@ -988,6 +988,7 @@
  "engine.subtitle": "Subtitle",
  "engine.unknown": "Unknown",
  "engine.root": "Root",
+ "engine.err_menu_too_complex": "The menu with {buttons} buttons cannot be split into colour groups (search limit exceeded) – please simplify the buttons or colours",
  "engine.phase_menus": "Creating menus",
  "engine.phase_encoding": "Encoding videos",
  "engine.phase_authoring": "Multiplexing VOBs (authoring)",

@@ -21,11 +21,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # ffmpeg/ffprobe are git-ignored (~220 MB each); fetch the same build as local dev.
-      - name: Fetch ffmpeg 9.0.1 full build
+      # ffmpeg/ffprobe are git-ignored (~220 MB each); gyan.dev only keeps the latest release (9.0.x) under a stable URL.
+      - name: Fetch ffmpeg full build
         shell: pwsh
         run: |
-          curl.exe -L --fail -o ffmpeg.7z https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-full_build.7z
+          curl.exe -L --fail -o ffmpeg.7z https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z
+          if ($LASTEXITCODE) { exit 1 }
           7z x ffmpeg.7z -offmpeg-extract
           Copy-Item ffmpeg-extract\*\bin\ffmpeg.exe bin\
           Copy-Item ffmpeg-extract\*\bin\ffprobe.exe bin\

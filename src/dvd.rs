@@ -57,11 +57,24 @@ pub enum BuildError {
     /// The build was cancelled ([`CancelToken::cancel`]).
     Cancelled,
     DoesNotFit { disc: DiscType, plan: Box<BitratePlan> },
+    /// A menu's buttons cannot be split into colour groups; the text is localised in [`BuildError::message`].
+    MenuTooComplex { buttons: usize },
+}
+
+impl BuildError {
+    /// User-facing text in the UI language; errors without a locale key fall back to `Display`.
+    pub fn message(&self, ui: UiLang) -> String {
+        match self {
+            BuildError::MenuTooComplex { buttons } => tf!(ui, "err_menu_too_complex", buttons = buttons),
+            _ => self.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            BuildError::MenuTooComplex { .. } => write!(f, "{}", self.message(UiLang::EN)),
             BuildError::Io(e) => write!(f, "I/O error: {e}"),
             BuildError::File { path, error } => write!(f, "{}: {error}", path.display()),
             BuildError::Tool(e) => write!(f, "{e}"),
@@ -247,7 +260,16 @@ macro_rules! from_err {
         }
     )*};
 }
-from_err!(std::io::Error => Io, ToolError => Tool, ProbeError => Probe, MenuError => Menu, AuthorError => Author, CalcError => Calc);
+from_err!(std::io::Error => Io, ProbeError => Probe, MenuError => Menu, AuthorError => Author, CalcError => Calc);
+
+impl From<ToolError> for BuildError {
+    fn from(e: ToolError) -> Self {
+        match e {
+            ToolError::MenuTooComplex { buttons } => BuildError::MenuTooComplex { buttons },
+            e => BuildError::Tool(e),
+        }
+    }
+}
 
 /// DVD aspect ratio of the titles ("Seitenverhältnis").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1840,6 +1862,17 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn menu_too_complex_is_typed_and_localised() {
+        let e = BuildError::from(ToolError::MenuTooComplex { buttons: 12 });
+        assert!(matches!(e, BuildError::MenuTooComplex { buttons: 12 }));
+        let de = e.message(UiLang::DE);
+        assert!(de.contains("12") && !de.contains("engine.") && !de.contains("err_menu_too_complex"), "{de}");
+        assert_ne!(e.message(UiLang::EN), de);
+        let f = ToolError::Failed { tool: "x".into(), status: String::new(), log: String::new() };
+        assert!(matches!(BuildError::from(f), BuildError::Tool(_)));
+    }
+
     use super::*;
     use crate::probe::Chapter;
 

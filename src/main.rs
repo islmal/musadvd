@@ -973,7 +973,7 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!();
-                    eprintln!("error: {e}");
+                    eprintln!("error: {}", e.message(opts.ui_lang));
                     ExitCode::FAILURE
                 }
             }

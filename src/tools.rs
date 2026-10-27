@@ -23,6 +23,8 @@ pub enum ToolError {
     NotFound(String),
     Io { tool: String, error: std::io::Error },
     Failed { tool: String, status: String, log: String },
+    /// Menu button colour grouping gave up; localised where it is shown ([`crate::dvd::BuildError::message`]).
+    MenuTooComplex { buttons: usize },
 }
 
 impl fmt::Display for ToolError {
@@ -31,6 +33,7 @@ impl fmt::Display for ToolError {
             ToolError::NotFound(t) => write!(f, "{t}"),
             ToolError::Io { tool, error } => write!(f, "cannot run {tool}: {error}"),
             ToolError::Failed { tool, status, log } => write!(f, "{tool} failed ({status}):\n{log}"),
+            ToolError::MenuTooComplex { buttons } => write!(f, "button group search exceeded its limit ({buttons} buttons)"),
         }
     }
 }
@@ -304,6 +307,26 @@ impl Toolchain {
             let f = if write { std::fs::File::create(&p) } else { std::fs::File::open(&p) };
             f.map_err(|error| ToolError::Io { tool: tool.clone(), error })
         };
+        // Bitmap subtitles and menu masks are muxed natively; whatever the native code does not
+        // reproduce (text subtitles, odd masks) still goes to spumux.
+        if let Ok(text) = std::fs::read_to_string(dir.join(xml)) {
+            if crate::spumux::handles_xml(&text) || crate::spumux::is_menu_xml(&text) {
+                let defs = crate::spumux::parse_xml(&text, dir)
+                    .map_err(|e| ToolError::Failed { tool: tool.clone(), status: String::new(), log: e.to_string() })?;
+                let (input, output) = (open(dir.join(input), false)?, open(dir.join(output), true)?);
+                let id = stream as u8;
+                let run = tokio::task::spawn_blocking(move || crate::spumux::mux(input, output, defs, id)).await;
+                match run {
+                    Ok(Ok(s)) => {
+                        return Ok(format!("INFO: {} subtitles added, {} subtitles skipped, offset: {:.2}\n", s.added, s.skipped, s.offset as f64 / 90000.0))
+                    }
+                    Ok(Err(crate::spumux::SpumuxError::Unsupported(_))) => {}
+                    Ok(Err(crate::spumux::SpumuxError::TooComplex(n))) => return Err(ToolError::MenuTooComplex { buttons: n }),
+                    Ok(Err(e)) => return Err(ToolError::Failed { tool, status: String::new(), log: e.to_string() }),
+                    Err(e) => return Err(ToolError::Failed { tool, status: String::new(), log: e.to_string() }),
+                }
+            }
+        }
         let mut cmd = self.command(&self.spumux);
         cmd.args(["-s", &stream.to_string(), "-m", "dvd", xml])
             .env("HOME", dir)
@@ -495,8 +518,10 @@ impl Toolchain {
     }
 
     /// ffmpeg writing an MPEG program stream to its stdout (`args` must end with `pipe:1`),
-    /// piped through one `spumux` per `(xml, stream)` stage into `dir/output` – no intermediate
-    /// files. Without stages ffmpeg's stdout goes straight into the file. Returns the spumux logs.
+    /// piped through one subtitle stage per `(xml, stream)` into `dir/output` – no intermediate
+    /// files. Bitmap subtitle streams are muxed natively ([`crate::spumux`]), text subtitles still
+    /// go through the external `spumux`. Without stages ffmpeg's stdout goes straight into the
+    /// file. Returns the stage logs.
     pub async fn ffmpeg_spumux_pipeline(
         &self,
         args: &[OsString],
@@ -519,37 +544,65 @@ impl Toolchain {
             ffmpeg.stdout(Stdio::piped());
         }
         let mut ff_child = ffmpeg.spawn().map_err(io("ffmpeg"))?;
-        let mut upstream = ff_child.stdout.take();
+        let mut upstream = ff_child.stdout.take().map(|s| owned_file(s)).transpose().map_err(io("ffmpeg"))?;
         let mut spumux = Vec::new();
         for (n, (xml, stream)) in stages.iter().enumerate() {
-            let input: Stdio = upstream.take().expect("piped stdout").try_into().map_err(io("spumux"))?;
+            let last = n + 1 == stages.len();
+            let input = upstream.take().expect("piped stdout");
+            let tool = format!("spumux ({xml})");
+            // Bitmap subtitles are muxed natively; only text rendering still needs spumux.
+            let native = std::fs::read_to_string(dir.join(xml)).ok().filter(|t| crate::spumux::handles_xml(t));
+            if let Some(text) = native {
+                let fail = |e: crate::spumux::SpumuxError| ToolError::Failed { tool: tool.clone(), status: String::new(), log: e.to_string() };
+                let defs = crate::spumux::parse_xml(&text, dir).map_err(fail)?;
+                let sink: Box<dyn std::io::Write + Send> = if last {
+                    Box::new(out_file.take().unwrap())
+                } else {
+                    let (reader, writer) = std::io::pipe().map_err(io("spumux"))?;
+                    upstream = Some(owned_file(reader).map_err(io("spumux"))?);
+                    Box::new(writer)
+                };
+                let id = *stream as u8;
+                let task = tokio::task::spawn_blocking(move || crate::spumux::mux(input, sink, defs, id));
+                spumux.push(Stage::Native(tool, task));
+                continue;
+            }
             let mut cmd = self.command(&self.spumux);
-            cmd.args(["-s", &stream.to_string(), "-m", "dvd", xml]).env("HOME", dir).current_dir(dir).stdin(input).stderr(Stdio::piped());
-            if n + 1 == stages.len() {
+            cmd.args(["-s", &stream.to_string(), "-m", "dvd", xml]).env("HOME", dir).current_dir(dir).stdin(Stdio::from(input)).stderr(Stdio::piped());
+            if last {
                 cmd.stdout(out_file.take().unwrap());
             } else {
                 cmd.stdout(Stdio::piped());
             }
             let mut child = cmd.spawn().map_err(io("spumux"))?;
-            upstream = child.stdout.take();
+            upstream = child.stdout.take().map(owned_file).transpose().map_err(io("spumux"))?;
             let mut stderr = child.stderr.take().expect("piped stderr");
             let log_task = tokio::spawn(async move {
                 let mut s = String::new();
                 let _ = stderr.read_to_string(&mut s).await;
                 s
             });
-            spumux.push((format!("spumux ({xml})"), child, log_task));
+            spumux.push(Stage::External(tool, child, log_task));
         }
         let stderr = ff_child.stderr.take().expect("piped stderr");
         let ff_log = drive_ffmpeg_stderr(stderr, duration_secs, &mut progress).await;
         let ff_status = ff_child.wait().await.map_err(io("ffmpeg"))?;
         let mut logs = Vec::new();
         let mut spumux_error = None;
-        for (tool, mut child, log_task) in spumux {
-            let status = child.wait().await.map_err(io(&tool))?;
-            let log = log_task.await.unwrap_or_default();
-            if !status.success() && spumux_error.is_none() {
-                spumux_error = Some(ToolError::Failed { tool, status: status.to_string(), log: tail(&log, 30) });
+        for stage in spumux {
+            let (tool, ok, status, log) = match stage {
+                Stage::External(tool, mut child, log_task) => {
+                    let status = child.wait().await.map_err(io(&tool))?;
+                    (tool, status.success(), status.to_string(), log_task.await.unwrap_or_default())
+                }
+                Stage::Native(tool, task) => match task.await {
+                    Ok(Ok(s)) => (tool, true, String::new(), format!("INFO: {} subtitles added, {} subtitles skipped, offset: {:.2}\n", s.added, s.skipped, s.offset as f64 / 90000.0)),
+                    Ok(Err(e)) => (tool, false, String::new(), e.to_string()),
+                    Err(e) => (tool, false, String::new(), e.to_string()),
+                },
+            };
+            if !ok && spumux_error.is_none() {
+                spumux_error = Some(ToolError::Failed { tool, status, log: tail(&log, 30) });
             }
             logs.push(log);
         }
@@ -605,6 +658,39 @@ impl Toolchain {
         } else {
             Err(nvenc_failure_reason(&String::from_utf8_lossy(&out.stderr)))
         }
+    }
+}
+
+/// One link of the ffmpeg → subtitle chain: an external `spumux` or the native multiplexer.
+enum Stage {
+    External(String, tokio::process::Child, tokio::task::JoinHandle<String>),
+    Native(String, tokio::task::JoinHandle<Result<crate::spumux::Stats, crate::spumux::SpumuxError>>),
+}
+
+/// A pipe end as a blocking `File` (child stdout or `io::pipe` reader).
+fn owned_file(pipe: impl IntoOwnedFile) -> std::io::Result<std::fs::File> {
+    pipe.into_owned_file()
+}
+
+trait IntoOwnedFile {
+    fn into_owned_file(self) -> std::io::Result<std::fs::File>;
+}
+
+impl IntoOwnedFile for tokio::process::ChildStdout {
+    fn into_owned_file(self) -> std::io::Result<std::fs::File> {
+        #[cfg(windows)]
+        return Ok(self.into_owned_handle()?.into());
+        #[cfg(unix)]
+        return Ok(self.into_owned_fd()?.into());
+    }
+}
+
+impl IntoOwnedFile for std::io::PipeReader {
+    fn into_owned_file(self) -> std::io::Result<std::fs::File> {
+        #[cfg(windows)]
+        return Ok(std::os::windows::io::OwnedHandle::from(self).into());
+        #[cfg(unix)]
+        return Ok(std::os::fd::OwnedFd::from(self).into());
     }
 }
 

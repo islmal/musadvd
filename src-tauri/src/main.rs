@@ -754,7 +754,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                     },
                     Err(e) => ConversionDone {
                         ok: false,
-                        message: e.to_string(),
+                        message: e.message(opts.ui_lang),
                         video_ts: None,
                         project_name: None,
                         size_mb: None,

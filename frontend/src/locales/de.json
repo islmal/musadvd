@@ -988,6 +988,7 @@
  "engine.subtitle": "Untertitel",
  "engine.unknown": "Unbekannt",
  "engine.root": "Root",
+ "engine.err_menu_too_complex": "Menü mit {buttons} Buttons lässt sich nicht in Farbgruppen aufteilen (Suchlimit überschritten) – bitte Buttons/Farben vereinfachen",
  "engine.phase_menus": "Menüs erstellen",
  "engine.phase_encoding": "Videos encodieren",
  "engine.phase_authoring": "VOBs multiplexen (Authoring)",
