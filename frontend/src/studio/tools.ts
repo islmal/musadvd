@@ -4,8 +4,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { openLayerBreak } from "./layerbreak";
 import { el, fmtSectors, modal } from "./ui";
+import { fmtNumber, t } from "../i18n";
 
-const IMAGE_FILTER = [{ name: "Disc-Images", extensions: ["iso"] }];
+const IMAGE_FILTER = [{ name: t("studio.tools.discImages"), extensions: ["iso"] }];
 
 async function pickImage(): Promise<string | null> {
   const p = await open({ multiple: false, filters: IMAGE_FILTER });
@@ -14,7 +15,7 @@ async function pickImage(): Promise<string | null> {
 
 /** A path row: read-only text with a "…" button. */
 function pathRow(initial: string, pick: () => Promise<string | null>, onChange: (p: string) => void) {
-  const input = el("input", { type: "text", readOnly: true, value: initial, placeholder: "Datei wählen …" });
+  const input = el("input", { type: "text", readOnly: true, value: initial, placeholder: t("studio.tools.dateiWaehlen") });
   const row = el(
     "span",
     { class: "opt-input wide" },
@@ -44,11 +45,11 @@ export function openLabelTool() {
   const body = el(
     "div",
     { class: "opt-group" },
-    el("p", { class: "hint" }, "Ändert die Bezeichnung direkt im Image (ISO 9660, Joliet und UDF; Prüfsummen werden neu berechnet). Erlaubt sind A–Z, 0–9 und _."),
+    el("p", { class: "hint" }, t("studio.tools.aendertDieBezeichnungDirekt")),
     el(
       "label",
       { class: "opt-row" },
-      el("span", { class: "opt-label" }, "Image"),
+      el("span", { class: "opt-label" }, t("studio.tools.image")),
       pathRow(
         "",
         pickImage,
@@ -63,17 +64,17 @@ export function openLabelTool() {
         },
       ),
     ),
-    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, "Volume-Label"), label),
+    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, t("studio.tools.volumeLabel")), label),
     msg,
   );
-  modal("Volume-Label ändern", body, [
-    { label: "Abbrechen" },
+  modal(t("studio.tools.volumeLabelAendern"), body, [
+    { label: t("studio.tools.abbrechen") },
     {
-      label: "Ändern",
+      label: t("studio.tools.aendern"),
       primary: true,
       onClick: async () => {
         if (!iso) {
-          msg.textContent = "Bitte zuerst ein Image wählen.";
+          msg.textContent = t("studio.tools.bitteZuerstEinImage");
           return false;
         }
         try {
@@ -89,22 +90,22 @@ export function openLabelTool() {
 }
 
 export async function openIfoTool() {
-  const p = await open({ multiple: false, filters: IMAGE_FILTER, title: "DVD-Video-Image (.iso) wählen – oder „Abbrechen“ und Ordner wählen" });
+  const p = await open({ multiple: false, filters: IMAGE_FILTER, title: t("studio.tools.dvdVideoImageIso") });
   if (typeof p === "string") return void openLayerBreak(p);
-  const dir = await open({ directory: true, title: "Ordner mit VIDEO_TS wählen" });
+  const dir = await open({ directory: true, title: t("studio.tools.ordnerMitVideoTs") });
   if (typeof dir === "string") void openLayerBreak(dir);
 }
 
 export function openSidecarTool() {
   let image = "";
   let layerBreak: number | null = null;
-  const lb = el("input", { type: "number", min: "1", placeholder: "Sektoren auf Schicht 0" });
+  const lb = el("input", { type: "number", min: "1", placeholder: t("studio.tools.sektorenAufSchicht0") });
   lb.addEventListener("change", () => (layerBreak = lb.value ? Number(lb.value) : null));
   const msg = el("p", { class: "hint" });
   const write = async (kind: "dvd" | "cue" | "mds") => {
-    if (!image) return void (msg.textContent = "Bitte zuerst ein Image wählen.");
+    if (!image) return void (msg.textContent = t("studio.tools.bitteZuerstEinImage"));
     try {
-      msg.textContent = `Geschrieben: ${await api.sidecarWrite(kind, image, layerBreak)}`;
+      msg.textContent = t("studio.tools.geschrieben", { api: await api.sidecarWrite(kind, image, layerBreak) });
     } catch (e) {
       msg.textContent = String(e);
     }
@@ -112,48 +113,48 @@ export function openSidecarTool() {
   const body = el(
     "div",
     { class: "opt-group" },
-    el("p", { class: "hint" }, "Schreibt eine Layout-Datei neben das Image: .dvd (nur Dual Layer), .cue (eine Datenspur) oder .mds (Alcohol/Daemon Tools – Kompatibilität nicht geprüft)."),
-    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, "Image"), pathRow("", pickImage, (p) => (image = p))),
-    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, "Layerwechsel"), lb, el("small", { class: "opt-hint" }, "Leer lassen bei einer Schicht.")),
+    el("p", { class: "hint" }, t("studio.tools.schreibtEineLayoutDatei")),
+    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, t("studio.tools.image")), pathRow("", pickImage, (p) => (image = p))),
+    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, t("studio.tools.layerwechsel")), lb, el("small", { class: "opt-hint" }, t("studio.tools.leerLassenBeiEiner"))),
     el(
       "div",
       { class: "opt-input" },
-      ...(["dvd", "cue", "mds"] as const).map((k) => el("button", { class: "btn", onclick: () => void write(k) }, `.${k} schreiben`)),
+      ...(["dvd", "cue", "mds"] as const).map((k) => el("button", { class: "btn", onclick: () => void write(k) }, t("studio.tools.writeExt", { k }))),
     ),
     msg,
   );
-  modal("Layout-Dateien schreiben", body);
+  modal(t("studio.tools.layoutDateienSchreiben"), body);
 }
 
 export function renderDriveInfo(v: api.DriveView, into: HTMLElement) {
   const rows: [string, string][] = [];
   const m = v.media;
   if (m) {
-    rows.push(["Disc", m.present ? `${m.physical} (${m.blank ? "leer" : "beschrieben"}${m.writable ? "" : ", nicht beschreibbar"})` : "keine Disc"]);
-    if (m.present) rows.push(["Kapazität", `${fmtSectors(m.total_sectors)}, frei ${fmtSectors(m.free_sectors)}`]);
-  } else if (v.mediaError) rows.push(["Disc", v.mediaError]);
+    rows.push([t("studio.tools.disc"), m.present ? `${m.physical} (${m.blank ? t("common.blank") : t("common.written")}${m.writable ? "" : ", " + t("common.notWritable")})` : t("studio.tools.keineDisc")]);
+    if (m.present) rows.push([t("studio.tools.capacity"), t("studio.tools.capacityValue", { total: fmtSectors(m.total_sectors), free: fmtSectors(m.free_sectors) })]);
+  } else if (v.mediaError) rows.push([t("studio.tools.disc"), v.mediaError]);
   const d = v.details;
   if (d) {
-    rows.push(["Laufwerk", `${d.vendor} ${d.model} ${d.firmware}`.trim()]);
-    rows.push(["Aktuelles Profil", `${d.current_profile_name || "—"}${d.ready ? "" : " (nicht bereit)"}`]);
-    if (d.book_type) rows.push(["Book-Typ", d.book_type]);
-    if (d.media_id) rows.push(["Media-ID", d.media_id]);
-    if (d.disc_status) rows.push(["Disc-Status", d.disc_status]);
-    if (d.layer_break) rows.push(["Layerwechsel", `Sektor ${d.layer_break.toLocaleString("de-DE")}`]);
-    if (d.write_speeds_kbps.length) rows.push(["Schreibgeschwindigkeiten", d.write_speeds_kbps.map((k) => `${k} kB/s`).join(", ")]);
-    rows.push(["Unterstützte Profile", d.profiles.map((p) => p.name).join(", ")]);
-    d.notes.forEach((n) => rows.push(["Hinweis", n]));
-    rows.push(["Book-Typ ändern", "nicht unterstützt (herstellerspezifisch)"]);
-  } else if (v.detailsError) rows.push(["MMC-Abfrage", v.detailsError]);
+    rows.push([t("studio.tools.drive"), `${d.vendor} ${d.model} ${d.firmware}`.trim()]);
+    rows.push([t("studio.tools.currentProfile"), `${d.current_profile_name || "—"}${d.ready ? "" : ` (${t("common.notReady")})`}`]);
+    if (d.book_type) rows.push([t("studio.tools.bookTyp"), d.book_type]);
+    if (d.media_id) rows.push([t("studio.tools.mediaId"), d.media_id]);
+    if (d.disc_status) rows.push([t("studio.tools.discStatus"), d.disc_status]);
+    if (d.layer_break) rows.push([t("studio.tools.layerBreak"), t("studio.tools.sektor", { d: fmtNumber(d.layer_break) })]);
+    if (d.write_speeds_kbps.length) rows.push([t("studio.tools.schreibgeschwindigkeiten"), d.write_speeds_kbps.map((k) => `${k} kB/s`).join(", ")]);
+    rows.push([t("studio.tools.unterstuetzteProfile"), d.profiles.map((p) => p.name).join(", ")]);
+    d.notes.forEach((n) => rows.push([t("studio.tools.hinweis"), n]));
+    rows.push([t("studio.tools.changeBookType"), t("studio.tools.nichtUnterstuetztHerstellerspezifisch")]);
+  } else if (v.detailsError) rows.push([t("studio.tools.mmcAbfrage"), v.detailsError]);
   into.replaceChildren(
     el("table", { class: "studio-table" }, el("tbody", {}, ...rows.map(([k, val]) => el("tr", {}, el("th", {}, k), el("td", {}, val))))),
   );
 }
 
 export async function openDriveInfo(driveId: string | null) {
-  const body = el("div", {}, el("p", { class: "hint" }, "Wird abgefragt …"));
-  modal("Laufwerks- und Disc-Info", body, undefined, true);
-  if (!driveId) return void (body.textContent = "Kein Laufwerk gewählt.");
+  const body = el("div", {}, el("p", { class: "hint" }, t("studio.tools.wirdAbgefragt")));
+  modal(t("studio.tools.laufwerksUndDiscInfo"), body, undefined, true);
+  if (!driveId) return void (body.textContent = t("studio.tools.keinLaufwerkGewaehlt"));
   try {
     renderDriveInfo(await api.driveInfo(driveId), body);
   } catch (e) {
@@ -167,25 +168,25 @@ export function openAutoSpeed(settings: api.StudioSettings, save: () => void) {
   const list = el("div", { class: "opt-group" });
   const render = () => {
     list.replaceChildren(
-      el("p", { class: "hint" }, "Greift bei Geschwindigkeit „Auto“: erste passende Zeile gewinnt (Media-ID enthält den Text, Laufwerk enthält den Text oder ist leer). Die Geschwindigkeit wird auf die nächste unterstützte gerundet."),
+      el("p", { class: "hint" }, t("studio.tools.greiftBeiGeschwindigkeitAuto")),
       ...rules.map((r, i) =>
         el(
           "div",
           { class: "speed-rule" },
-          el("input", { type: "text", value: r.media_id, placeholder: "Media-ID, z. B. CMC MAG", onchange: (e: Event) => (r.media_id = (e.target as HTMLInputElement).value) }),
-          el("input", { type: "text", value: r.drive, placeholder: "Laufwerk (leer = alle)", onchange: (e: Event) => (r.drive = (e.target as HTMLInputElement).value) }),
+          el("input", { type: "text", value: r.media_id, placeholder: t("studio.tools.mediaIdZB"), onchange: (e: Event) => (r.media_id = (e.target as HTMLInputElement).value) }),
+          el("input", { type: "text", value: r.drive, placeholder: t("studio.tools.laufwerkLeerAlle"), onchange: (e: Event) => (r.drive = (e.target as HTMLInputElement).value) }),
           el("input", { type: "text", value: r.speed, class: "short", placeholder: "max / 8", onchange: (e: Event) => (r.speed = (e.target as HTMLInputElement).value) }),
-          el("button", { class: "btn icon", title: "Zeile entfernen", onclick: () => (rules.splice(i, 1), render()) }, "✕"),
+          el("button", { class: "btn icon", title: t("studio.tools.zeileEntfernen"), onclick: () => (rules.splice(i, 1), render()) }, "✕"),
         ),
       ),
-      el("button", { class: "btn", onclick: () => (rules.push({ media_id: "", drive: "", speed: "max" }), render()) }, "＋ Regel"),
+      el("button", { class: "btn", onclick: () => (rules.push({ media_id: "", drive: "", speed: "max" }), render()) }, t("studio.tools.regel")),
     );
   };
   render();
-  modal("Auto-Geschwindigkeit", list, [
-    { label: "Abbrechen" },
+  modal(t("studio.tools.autoGeschwindigkeit"), list, [
+    { label: t("studio.tools.abbrechen") },
     {
-      label: "Speichern",
+      label: t("studio.tools.speichern"),
       primary: true,
       onClick: () => {
         settings.auto_speed = rules.filter((r) => r.media_id.trim());

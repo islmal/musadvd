@@ -92,8 +92,8 @@ enum Command {
         #[arg(long)]
         menu_title: Option<String>,
         /// Language of fixed menu texts.
-        #[arg(long, value_enum, default_value = "de")]
-        ui_lang: Lang,
+        #[arg(long, default_value = "de")]
+        ui_lang: String,
         /// Keep the work directory (<output>/.convertx-work: intermediate MPEGs, menu PNGs, logs).
         #[arg(long)]
         keep_work: bool,
@@ -271,12 +271,6 @@ impl From<Profile> for EncodingProfile {
             Profile::Lp => EncodingProfile::Lp,
         }
     }
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Lang {
-    De,
-    En,
 }
 
 fn parse_positive_secs(s: &str) -> Result<f64, String> {
@@ -816,6 +810,13 @@ fn main() -> ExitCode {
                 eprintln!("error: --template oder --layout angeben (nur Blu-rays kommen ohne Menü aus)");
                 return ExitCode::FAILURE;
             }
+            let ui_lang = ui_lang.trim().to_ascii_lowercase();
+            let languages = convertx_rust::i18n::available_languages();
+            if !languages.iter().any(|(code, _)| *code == ui_lang) {
+                let codes: Vec<&str> = languages.iter().map(|(code, _)| code.as_str()).collect();
+                eprintln!("error: unbekannte Sprache '{ui_lang}' (verfügbar: {})", codes.join(", "));
+                return ExitCode::FAILURE;
+            }
             let custom_layout = match layout.as_deref().map(convertx_rust::layout::CustomLayout::load) {
                 Some(Err(e)) => {
                     eprintln!("error: {e}");
@@ -842,10 +843,7 @@ fn main() -> ExitCode {
                 no_subtitles: no_subs,
                 chapters: dvd::ChapterSettings { interval_secs: chapter_minutes * 60.0, ..Default::default() },
                 menu_title,
-                ui_lang: match ui_lang {
-                    Lang::De => UiLang::De,
-                    Lang::En => UiLang::En,
-                },
+                ui_lang: UiLang::new(&ui_lang),
                 keep_work,
                 two_pass,
                 fast_encode: fast,

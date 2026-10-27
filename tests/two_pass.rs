@@ -50,6 +50,7 @@ fn fake_info() -> MediaInfo {
         subtitles: vec![],
         chapters: vec![],
         trim: None,
+        audio_names: Default::default(),
     }
 }
 
@@ -245,7 +246,7 @@ fn build_dvd_two_pass_leaves_no_logs() {
         no_subtitles: false,
         chapters: dvd::ChapterSettings { interval_secs: 300.0, ..Default::default() },
         menu_title: None,
-        ui_lang: UiLang::De,
+        ui_lang: UiLang::DE,
         keep_work: true, // even with kept intermediates the pass logs must be gone
         two_pass: true,
         motion_menu: false,

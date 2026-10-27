@@ -314,7 +314,7 @@ fn real_template_ig_display_sets_fit_the_budget() {
                 continue;
             }
             let samples: Vec<Vec<f64>> = titles.iter().map(|t| (0..t.chapters).map(|c| c as f64 * 20.0).collect()).collect();
-            let (layout, _) = convertx_rust::bd_template::layout_from_template(&tpl, &ini, &titles, &vec![None; titles.len()], &samples, Aspect::Wide).unwrap();
+            let (layout, _) = convertx_rust::bd_template::layout_from_template(&tpl, &ini, &titles, &vec![None; titles.len()], &samples, Aspect::Wide, &convertx_rust::dvd::ChapterSettings::default(), convertx_rust::menu::UiLang::DE).unwrap();
             let traits = bd_menu::traits(&layout, &titles, frame);
             let nav = bd_menu::plan(&layout, &titles, &traits, PlaybackOptions::default(), &groups);
             let pages = bd_menu::render_pages(&layout, &titles, frame, rate, &nav, &out, 25.0).unwrap();
@@ -752,7 +752,7 @@ mod dvd {
             output: dir.join("out"),
             no_subtitles: true,
             chapters: ChapterSettings { interval_secs: 2.0, ..Default::default() },
-            ui_lang: UiLang::De,
+            ui_lang: UiLang::DE,
             keep_work: true,
             fast_encode: true,
             menu_animations: true,

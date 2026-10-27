@@ -94,7 +94,7 @@ fn builds_dvd_with_submenus() {
         no_subtitles: false,
         chapters: dvd::ChapterSettings { interval_secs: 300.0, ..Default::default() },
         menu_title: Some("Test".into()),
-        ui_lang: UiLang::De,
+        ui_lang: UiLang::DE,
         keep_work: false,
         two_pass: false,
         motion_menu: false,

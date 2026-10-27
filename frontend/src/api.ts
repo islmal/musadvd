@@ -143,6 +143,8 @@ export interface InputConfig {
   crop?: Crop | null;
   /** Play together with the previous input behind one menu entry. */
   mergeWithPrevious?: boolean;
+  /** Own audio track names by ffprobe stream index. */
+  audioNames?: Record<number, string>;
 }
 
 export interface ConversionConfig {
@@ -248,6 +250,7 @@ export interface AppSettings {
   menu_animations: boolean;
   fast_encode: boolean;
   audio_mode: "auto" | "ac3" | "lpcm";
+  ui_language: string;
   track_label_mode: "smart" | "language" | "generic";
   scale_mode: "letterbox" | "panscan" | "stretch";
   scale_filter: "bicubic" | "bilinear" | "lanczos";
@@ -275,6 +278,8 @@ export const defaultSettings = () => invoke<AppSettings>("default_settings");
 /** Saves and returns the sanitized settings. */
 export const saveSettings = (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings });
 export const settingsInfo = () => invoke<SettingsInfo>("settings_info");
+export const availableLanguages = () => invoke<{ code: string; name: string }[]>("get_available_languages");
+export const localeData = (lang: string) => invoke<Record<string, string>>("get_locale_data", { lang });
 
 export const onBuildEvent = (cb: (e: BuildEvent) => void): Promise<UnlistenFn> =>
   listen<BuildEvent>("convert-event", (e) => cb(e.payload));

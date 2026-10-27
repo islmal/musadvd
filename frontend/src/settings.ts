@@ -3,6 +3,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { defaultSettings, saveSettings, type AppSettings, type SettingsInfo } from "./api";
 import { DEFAULT_LABEL, MAX_LABEL, sanitizeLabel } from "./label";
+import { t } from "./i18n";
 
 type Child = Node | string | null | undefined | false;
 
@@ -23,30 +24,10 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return e;
 }
 
-const LANGUAGES: [string, string][] = [
-  ["", "Keine Vorgabe (Reihenfolge der Quelle)"],
-  ["de", "Deutsch"],
-  ["en", "Englisch"],
-  ["fr", "Französisch"],
-  ["es", "Spanisch"],
-  ["it", "Italienisch"],
-  ["nl", "Niederländisch"],
-  ["pt", "Portugiesisch"],
-  ["pl", "Polnisch"],
-  ["cs", "Tschechisch"],
-  ["hu", "Ungarisch"],
-  ["ru", "Russisch"],
-  ["uk", "Ukrainisch"],
-  ["tr", "Türkisch"],
-  ["el", "Griechisch"],
-  ["sv", "Schwedisch"],
-  ["da", "Dänisch"],
-  ["no", "Norwegisch"],
-  ["fi", "Finnisch"],
-  ["ja", "Japanisch"],
-  ["zh", "Chinesisch"],
-  ["ko", "Koreanisch"],
-  ["ar", "Arabisch"],
+/** Language choices for the audio/subtitle defaults (names in the UI language). */
+const languages = (): [string, string][] => [
+  ["", t("settings.noLanguagePreference")],
+  ...["de", "en", "fr", "es", "it", "nl", "pt", "pl", "cs", "hu", "ru", "uk", "tr", "el", "sv", "da", "no", "fi", "ja", "zh", "ko", "ar"].map((c): [string, string] => [c, t(`lang.${c}`)]),
 ];
 
 /** `m:ss` / `h:mm:ss` for a number of seconds. */
@@ -65,34 +46,34 @@ function parseDuration(text: string): number | null {
 
 type PageId = "general" | "output" | "tv" | "encoding" | "video" | "menu" | "chapters" | "subtitles" | "audio" | "burn";
 
-const TREE: { id: PageId; label: string; children?: { id: PageId; label: string }[] }[] = [
-  { id: "general", label: "Allgemein" },
+const treeNodes = (): { id: PageId; label: string; children?: { id: PageId; label: string }[] }[] => [
+  { id: "general", label: t("settings.allgemein") },
   {
     id: "output",
-    label: "Ausgabe",
+    label: t("settings.ausgabe"),
     children: [
-      { id: "tv", label: "TV Format" },
-      { id: "encoding", label: "Enkodierung" },
-      { id: "video", label: "Videobearbeitung" },
+      { id: "tv", label: t("settings.tvFormat") },
+      { id: "encoding", label: t("settings.enkodierung") },
+      { id: "video", label: t("settings.videobearbeitung") },
     ],
   },
-  { id: "menu", label: "Menü Optionen" },
-  { id: "chapters", label: "Kapitel" },
-  { id: "subtitles", label: "Untertitel" },
-  { id: "audio", label: "Audio" },
-  { id: "burn", label: "Brennen" },
+  { id: "menu", label: t("settings.menueOptionen") },
+  { id: "chapters", label: t("settings.kapitel") },
+  { id: "subtitles", label: t("settings.untertitel") },
+  { id: "audio", label: t("settings.audio") },
+  { id: "burn", label: t("settings.brennen") },
 ];
 
 /**
  * Opens the settings dialog on a copy of `current`. `onSaved` receives the stored settings;
  * "Abbrechen" changes nothing.
  */
-export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: (s: AppSettings) => void) {
+export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguages: { code: string; name: string }[], onSaved: (s: AppSettings) => void) {
   let draft: AppSettings = structuredClone(current);
   let page: PageId = "general";
   const previousFocus = document.activeElement as HTMLElement | null;
 
-  const tree = el("nav", { class: "settings-tree", "aria-label": "Einstellungsbereiche" });
+  const tree = el("nav", { class: "settings-tree", "aria-label": t("settings.einstellungsbereiche") });
   const body = el("div", { class: "settings-page" });
   const error = el("div", { class: "settings-error", role: "alert" });
 
@@ -135,7 +116,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           return el(
             "option",
             { value, selected: draft[key] === value, disabled: unsupported && draft[key] !== value },
-            unsupported ? `${text} (noch nicht unterstützt)` : text,
+            unsupported ? t("settings.nochNichtUnterstuetzt", { text }) : text,
           );
         }),
         // A stored value that is not in the list stays visible.
@@ -163,7 +144,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
             const v = Math.round(Number(input.value));
             if (!Number.isFinite(v) || v < min || v > max) {
               input.value = String(draft[key]);
-              error.textContent = `${label}: erlaubt sind ${min} bis ${max} ${unit}.`;
+              error.textContent = t("settings.allowedRange", { label, min, max, unit });
               return;
             }
             error.textContent = "";
@@ -193,7 +174,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
             const v = parseDuration(input.value);
             if (v === null || v < min || v > max) {
               input.value = fmtDuration(draft[key] as number);
-              error.textContent = `${label}: Format m:ss, zwischen ${fmtDuration(min)} und ${fmtDuration(max)}.`;
+              error.textContent = t("settings.formatMSsZwischen", { label, fmtDuration: fmtDuration(min), fmtDuration2: fmtDuration(max) });
               return;
             }
             error.textContent = "";
@@ -201,7 +182,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
             input.value = fmtDuration(v);
           },
         }),
-        el("span", { class: "unit" }, "Min."),
+        el("span", { class: "unit" }, t("settings.min")),
       ),
       hint ? el("small", { class: "opt-hint" }, hint) : null,
     );
@@ -213,201 +194,205 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
   const pages: Record<PageId, () => HTMLElement[]> = {
     general: () => [
       group(
-        "Verarbeitung",
+        t("settings.language"),
+        select("ui_language", t("settings.uiLanguage"), uiLanguages.map((l): [string, string] => [l.code, l.name]), t("settings.uiLanguageHint")),
+      ),
+      group(
+        t("settings.verarbeitung"),
         number(
           "max_concurrent_encodes",
-          "Gleichzeitige Encodings",
+          t("settings.gleichzeitigeEncodings"),
           1,
           64,
-          "Prozesse",
-          `Dieser Rechner hat ${info.cpuCount} logische Kerne; Standard ist die Hälfte (${Math.max(1, Math.floor(info.cpuCount / 2))}). Jeder ffmpeg-Prozess nutzt selbst mehrere Kerne – mehr parallele Encodings brauchen vor allem mehr Arbeitsspeicher und Festplattentempo.`,
+          t("settings.prozesse"),
+          t("settings.dieserRechnerHatLogische", { cpuCount: info.cpuCount, max: Math.max(1, Math.floor(info.cpuCount / 2)) }),
         ),
-        select("process_priority", "Prozesspriorität", [
-          ["Normal", "Normal"],
-          ["BelowNormal", "Niedriger als normal"],
-          ["Idle", "Leerlauf (nur wenn der PC nichts anderes tut)"],
+        select("process_priority", t("settings.prozessprioritaet"), [
+          ["Normal", t("settings.normal")],
+          ["BelowNormal", t("settings.niedrigerAlsNormal")],
+          ["Idle", t("settings.leerlaufNurWennDer")],
         ]),
       ),
     ],
     output: () => [
-      note("Einstellungen für das erzeugte DVD-Video bzw. die Blu-ray. Unterpunkte: TV Format, Enkodierung und Videobearbeitung."),
-      group("Aktuell", el("p", {}, `${draft.tv_standard} · ${draft.dvd_resolution} · Blu-ray ${draft.bd_resolution}${draft.bd_single_video ? " (ein Video)" : ""} · Seitenverhältnis ${draft.aspect_ratio_policy} · Profil ${draft.encoding_profile}${draft.fast_encode ? " · schnell" : ""}`)),
+      note(t("settings.einstellungenFuerDasErzeugte")),
+      group(t("settings.aktuell"), el("p", {}, t("settings.bluRaySeitenverhaeltnisProfil", { tv_standard: draft.tv_standard, dvd_resolution: draft.dvd_resolution, bd_resolution: draft.bd_resolution, draft: draft.bd_single_video ? t("settings.einVideo") : "", aspect_ratio_policy: draft.aspect_ratio_policy, encoding_profile: draft.encoding_profile, draft2: draft.fast_encode ? t("settings.draftSuffix") : "" }))),
     ],
     tv: () => [
       group(
-        "TV Format",
-        select("tv_standard", "TV-Norm", [
-          ["PAL", "PAL (720×576, 25 Bilder/s)"],
-          ["NTSC", "NTSC (720×480, 29,97 Bilder/s)"],
+        t("settings.tvFormat"),
+        select("tv_standard", t("settings.tvNorm"), [
+          ["PAL", t("settings.pal72057625Bilder")],
+          ["NTSC", t("settings.ntsc7204802997")],
         ]),
-        select("dvd_resolution", "Auflösung", [
-          ["Full D1", "Full D1 (720×576)"],
-          ["Half D1", "Half D1 (352×576, NTSC 352×480)"],
-          ["SIF", "SIF (352×288, NTSC 352×240)"],
+        select("dvd_resolution", t("settings.aufloesung"), [
+          ["Full D1", t("settings.fullD1720576")],
+          ["Half D1", t("settings.halfD1352576Ntsc")],
+          ["SIF", t("settings.sif352288Ntsc352240")],
         ]),
-        note("Menüs und Titel werden in der gewählten Norm erzeugt (NTSC: 720×480, 29,97 Bilder/s). Half D1 und SIF gelten nur für die Titel – Menüs bleiben in voller Auflösung. Diese Titel sind immer 4:3; Breitbild-Videos bekommen schwarze Balken."),
+        note(t("settings.menuesUndTitelWerden")),
       ),
       group(
-        "Blu-ray",
-        select("bd_resolution", "Blu-ray-Auflösung", [
+        t("settings.bluRay"),
+        select("bd_resolution", t("settings.bluRayAufloesung"), [
           ["1080p", "1080p (1920×1080)"],
           ["720p", "720p (1280×720)"],
         ]),
-        note("Blu-ray-Titel sind immer 16:9 mit quadratischen Pixeln (BT.709); 4:3-Videos bekommen seitliche Balken. Kinofilme (23,976/24 Bilder/s) behalten ihre Bildrate; sonst gilt die TV-Norm: 1080p mit 25 bzw. 29,97 Bildern/s (als 1080i markiert), 720p mit 50 bzw. 59,94 Bildern/s. Die Bildrate ist für die ganze Disc einheitlich."),
+        note(t("settings.bluRayTitelSind")),
         check(
           "bd_single_video",
-          "Nur ein Video pro Blu-ray (keine Playlist)",
-          "Mehrere Videos werden sonst zu einer Playlist zusammengefasst, die nach dem Einlegen komplett abläuft. Ist die Option an, lässt sich die Blu-ray-Konvertierung nur mit einem Video starten.",
+          t("settings.nurEinVideoPro"),
+          t("settings.mehrereVideosWerdenSonst"),
         ),
         check(
           "menu_animations",
-          "Menü-Animationen (Intro)",
-          "Spielt bei Menüs aus ConvertX-Vorlagen (DVD, Blu-ray, AVCHD) das Intro der Seiten (Ein-/Ausblenden, Zoomen) ab, bevor die Buttons erscheinen. Aus: die fertigen Seiten stehen sofort. Bei Blu-ray/AVCHD spielt das Weiterblättern innerhalb eines Menüs das Intro nicht erneut, bei DVD schon.",
+          t("settings.menueAnimationenIntro"),
+          t("settings.spieltBeiMenuesAus"),
         ),
         check(
           "bd_hw_encode",
-          "Hardware-Encoding (NVIDIA NVENC) für Blu-ray",
-          "Kodiert Blu-ray-Videos mit der NVIDIA-Grafikkarte statt mit x264 – deutlich schneller. Fällt automatisch auf x264 zurück, wenn NVENC nicht funktioniert (Treiber ≥ 610 nötig). 1080i-Bildraten (25 / 29,97 Bilder/s) bleiben bei x264.",
+          t("settings.hardwareEncodingNvidiaNvenc"),
+          t("settings.kodiertBluRayVideos"),
         ),
       ),
     ],
     encoding: () => [
       group(
-        "Enkodierung",
+        t("settings.enkodierung"),
         select(
           "encoding_profile",
-          "Profil",
+          t("settings.profil"),
           [
-            ["Auto", "Automatisch (Bitrate passend zur Disc)"],
-            ["SP_Short", "SP – kurze Laufzeit, höchste Qualität (bis 8.500 kbps)"],
-            ["MP_Medium", "MP – mittlere Laufzeit (bis 6.000 kbps)"],
-            ["LP_Long", "LP – lange Laufzeit (bis 4.000 kbps)"],
+            ["Auto", t("settings.automatischBitratePassendZur")],
+            ["SP_Short", t("settings.spKurzeLaufzeitHoechste")],
+            ["MP_Medium", t("settings.mpMittlereLaufzeitBis")],
+            ["LP_Long", t("settings.lpLangeLaufzeitBis")],
           ],
-          "„Automatisch“ verteilt den Platz der Disc auf alle Videos (Bitrate 1.000–8.500 kbps, Blu-ray 4.000–35.000 kbps). MP und LP begrenzen die Bitrate – kurze Projekte werden dann kleiner (Blu-ray: SP bis 35.000, MP bis 20.000, LP bis 12.000 kbps). Bei LP werden DVD-Titel unter 3.000 kbps automatisch in Half D1 kodiert.",
+          t("settings.automatischVerteiltDenPlatz"),
         ),
         number(
           "target_size_mb",
-          "Benutzerdefinierte Zielgröße",
+          t("settings.benutzerdefinierteZielgroesse"),
           100,
           20000,
           "MB",
-          "Wird verwendet, wenn unten links als Medium „Benutzerdefiniert“ gewählt ist (nur DVD). DVD-5 = 4.300 MB, DVD-9 = 7.950 MB, BD-25 = 22.900 MB, BD-50 = 45.800 MB.",
+          t("settings.wirdVerwendetWennUnten"),
         ),
       ),
       group(
-        "Leistung",
+        t("settings.leistung"),
         check(
           "hw_decode",
-          "GPU-Decoding verwenden (CUDA / D3D11VA / QSV)",
-          "Die Quellvideos werden auf der Grafikkarte dekodiert, wenn ein funktionierender Decoder gefunden wird – sonst automatisch auf der CPU. Entlastet die CPU bei vielen parallelen Encodes; bei 4K-Material ohne CUDA kann es langsamer sein.",
+          t("settings.gpuDecodingVerwendenCuda"),
+          t("settings.dieQuellvideosWerdenAuf"),
         ),
         check(
           "fast_encode",
-          "Schnelles Encoding (Entwurf)",
-          "Verzichtet auf Trellis-Quantisierung: etwa 40 % schneller, bei minimal geringerer Bildqualität. Für Testläufe und Entwürfe.",
+          t("settings.schnellesEncodingEntwurf"),
+          t("settings.verzichtetAufTrellisQuantisierung"),
         ),
       ),
     ],
     video: () => [
       group(
-        "Videobearbeitung",
+        t("settings.videobearbeitung"),
         select(
           "aspect_ratio_policy",
-          "Seitenverhältnis der DVD",
+          t("settings.seitenverhaeltnisDerDvd"),
           [
-            ["Auto", "Automatisch (nach Quelle)"],
-            ["4:3", "Immer 4:3"],
-            ["16:9", "Immer 16:9"],
+            ["Auto", t("settings.automatischNachQuelle")],
+            ["4:3", t("settings.immer43")],
+            ["16:9", t("settings.immer169")],
           ],
-          "Abweichende Quellen bekommen schwarze Balken (Letterbox bzw. Pillarbox).",
+          t("settings.abweichendeQuellenBekommenSchwarze"),
         ),
         select(
           "scale_mode",
-          "Video Skaliermethode",
+          t("settings.videoSkaliermethode"),
           [
-            ["letterbox", "Letterbox (Standard)"],
-            ["panscan", "Pan & Scan (Zuschneiden)"],
-            ["stretch", "Strecken"],
+            ["letterbox", t("settings.letterboxStandard")],
+            ["panscan", t("settings.panScanZuschneiden")],
+            ["stretch", t("settings.strecken")],
           ],
-          "Letterbox: das Bild behält sein Seitenverhältnis, der Rest wird schwarz. Pan & Scan: das Bild füllt das ganze Bild aus, der Überstand wird mittig abgeschnitten. Strecken: das Bild wird ohne Rücksicht auf das Seitenverhältnis verzerrt.",
+          t("settings.letterboxDasBildBehaelt"),
         ),
         select(
           "scale_filter",
-          "Skalierungsfilter",
+          t("settings.skalierungsfilter"),
           [
-            ["bilinear", "Bilinear (schnell)"],
-            ["bicubic", "Bikubisch (Standard)"],
-            ["lanczos", "Lanczos (hohe Qualität)"],
+            ["bilinear", t("settings.bilinearSchnell")],
+            ["bicubic", t("settings.bikubischStandard")],
+            ["lanczos", t("settings.lanczosHoheQualitaet")],
           ],
-          "Algorithmus, mit dem das Bild vergrößert oder verkleinert wird.",
+          t("settings.algorithmusMitDemDas"),
         ),
         select(
           "deinterlace",
-          "Video-Deinterlacing",
+          t("settings.videoDeinterlacing"),
           [
-            ["auto", "Automatisch (bwdif)"],
-            ["yadif", "Immer deinterlacen (yadif)"],
-            ["off", "Nie deinterlacen"],
+            ["auto", t("settings.automatischBwdif")],
+            ["yadif", t("settings.immerDeinterlacenYadif")],
+            ["off", t("settings.nieDeinterlacen")],
           ],
-          "Automatisch: nur Videos, die als Halbbilder (interlaced) markiert sind. „Nie“ kann Kammartefakte erzeugen, wenn Halbbild-Material skaliert wird.",
+          t("settings.automatischNurVideosDie"),
         ),
       ),
     ],
     menu: () => [
       group(
-        "Wiedergabe",
-        check("auto_start_playback", "Wiedergabe automatisch starten", "Die DVD beginnt beim Einlegen sofort mit dem ersten Video."),
-        check("play_sequentially", "Videos nacheinander abspielen", "Nach jedem Video folgt direkt das nächste, ohne Umweg über das Menü."),
+        t("settings.wiedergabe"),
+        check("auto_start_playback", t("settings.wiedergabeAutomatischStarten"), t("settings.dieDvdBeginntBeim")),
+        check("play_sequentially", t("settings.videosNacheinanderAbspielen"), t("settings.nachJedemVideoFolgt")),
         check(
           "loop_playback",
-          "Endlosschleife",
-          draft.play_sequentially ? "Nach dem letzten Video beginnt die DVD wieder beim ersten." : "Ein Video wird wiederholt; „Alle abspielen“ beginnt nach dem letzten wieder von vorn.",
+          t("settings.endlosschleife"),
+          draft.play_sequentially ? t("settings.nachDemLetztenVideo") : t("settings.einVideoWirdWiederholt"),
         ),
         check(
           "return_to_title_menu_after_title",
-          "Nach der Wiedergabe zum Titelmenü zurückkehren",
+          t("settings.nachDerWiedergabeZum"),
           draft.loop_playback
-            ? "Ohne Wirkung, solange die Endlosschleife aktiv ist."
-            : "Sonst geht es zurück in das eigene Menü des Videos (Kapitel/Einstellungen).",
+            ? t("settings.ohneWirkungSolangeDie")
+            : t("settings.sonstGehtEsZurueck"),
           draft.loop_playback,
         ),
       ),
       group(
-        "Menüstruktur",
-        check("skip_root_menu", "Hauptmenü des Videos überspringen", "Kein Root-Menü pro Video (Kapitel, Einstellungen, Zurück, Wiedergabe) – das Video öffnet direkt sein Kapitelmenü."),
-        check("no_title_menu_for_single_title", "Kein Titelmenü bei nur einem Video erstellen", "Die DVD startet dann direkt im Menü bzw. mit dem Video."),
+        t("settings.menuestruktur"),
+        check("skip_root_menu", t("settings.hauptmenueDesVideosUeberspringen"), t("settings.keinRootMenuePro")),
+        check("no_title_menu_for_single_title", t("settings.keinTitelmenueBeiNur"), t("settings.dieDvdStartetDann")),
       ),
       group(
-        "Text",
-        select("text_overflow_action", "Wenn ein Text zu lang ist", [
-          ["reduce_font_size", "Schrift verkleinern (bis 50 %), dann kürzen"],
-          ["truncate", "Mit „…“ kürzen, Schriftgröße beibehalten"],
+        t("settings.text"),
+        select("text_overflow_action", t("settings.wennEinTextZu"), [
+          ["reduce_font_size", t("settings.schriftVerkleinernBis50")],
+          ["truncate", t("settings.mitKuerzenSchriftgroesseBeibehalten")],
         ]),
       ),
       group(
-        "Menü-Ton (Motion Menu)",
+        t("settings.menueTonMotionMenu"),
         select(
           "menu_audio",
-          "Ton aller Menüseiten",
+          t("settings.tonAllerMenueseiten"),
           [
-            ["title", "Hauptmenü stumm, Videomenüs mit eigenem Ton"],
-            ["silence", "Alle Menüs stumm"],
-            ["file", "Hauptmenü mit eigener Audiodatei, Videomenüs mit eigenem Ton"],
+            ["title", t("settings.hauptmenueStummVideomenuesMit")],
+            ["silence", t("settings.alleMenuesStumm")],
+            ["file", t("settings.hauptmenueMitEigenerAudiodatei")],
           ],
-          "Das Menü eines Videos (Root, Kapitel, Einstellungen) spielt immer den Ton dieses Videos – Kapitelseiten ab ihrem ersten Kapitel.",
+          t("settings.dasMenueEinesVideos"),
         ),
         draft.menu_audio === "file"
           ? el(
               "div",
               { class: "opt-row" },
-              el("span", { class: "opt-label" }, "Audiodatei für das Hauptmenü"),
+              el("span", { class: "opt-label" }, t("settings.audiodateiFuerDasHauptmenue")),
               el(
                 "span",
                 { class: "opt-input wide" },
                 el("input", {
                   type: "text",
                   value: draft.menu_audio_file,
-                  placeholder: "MP3, WAV, FLAC, AC3 …",
+                  placeholder: t("settings.mp3WavFlacAc3"),
                   spellcheck: false,
                   oninput: (e: Event) => {
                     draft.menu_audio_file = (e.target as HTMLInputElement).value;
@@ -417,11 +402,11 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
                   "button",
                   {
                     class: "btn icon",
-                    title: "Datei wählen",
+                    title: t("settings.dateiWaehlen"),
                     onclick: async () => {
                       const file = await open({
-                        title: "Menü-Audio wählen",
-                        filters: [{ name: "Audio", extensions: ["mp3", "wav", "flac", "ogg", "m4a", "aac", "ac3", "wma", "opus"] }],
+                        title: t("settings.menueAudioWaehlen"),
+                        filters: [{ name: t("settings.audio"), extensions: ["mp3", "wav", "flac", "ogg", "m4a", "aac", "ac3", "wma", "opus"] }],
                       });
                       if (typeof file === "string") {
                         draft.menu_audio_file = file;
@@ -441,24 +426,24 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
       const example = draft.chapter_naming_template.includes("<c>") ? draft.chapter_naming_template.replace("<c>", "3") : "—";
       return [
         group(
-          "Automatische Kapitel",
-          check("auto_chapter_enabled", "Kapitel automatisch erzeugen", "Nur für Videos ohne eigene Kapitelmarken."),
-          duration("auto_chapter_interval_seconds", "Ein Kapitel alle", 30, 3600, off),
+          t("settings.automatischeKapitel"),
+          check("auto_chapter_enabled", t("settings.kapitelAutomatischErzeugen"), t("settings.nurFuerVideosOhne")),
+          duration("auto_chapter_interval_seconds", t("settings.einKapitelAlle"), 30, 3600, off),
           duration(
             "auto_chapter_min_video_length_seconds",
-            "Nur bei Videos länger als",
+            t("settings.nurBeiVideosLaenger"),
             0,
             24 * 3600,
             off,
-            "Kürzere Videos bekommen nur ein Kapitel.",
+            t("settings.kuerzereVideosBekommenNur"),
           ),
         ),
         group(
-          "Kapitelnamen",
+          t("settings.kapitelnamen"),
           el(
             "label",
             { class: "opt-row" },
-            el("span", { class: "opt-label" }, "Vorlage"),
+            el("span", { class: "opt-label" }, t("settings.vorlage")),
             el("input", {
               type: "text",
               value: draft.chapter_naming_template,
@@ -468,64 +453,64 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
                 const ex = body.querySelector(".chapter-example");
                 if (ex) {
                   ex.textContent = draft.chapter_naming_template.includes("<c>")
-                    ? `Beispiel: ${draft.chapter_naming_template.replace("<c>", "3")}`
-                    : "Die Vorlage muss <c> für die Kapitelnummer enthalten.";
+                    ? t("settings.beispiel", { draft: draft.chapter_naming_template.replace("<c>", "3") })
+                    : t("settings.dieVorlageMussC");
                 }
               },
             }),
-            el("small", { class: "opt-hint chapter-example" }, `Beispiel: ${example}`),
+            el("small", { class: "opt-hint chapter-example" }, t("settings.beispiel2", { example })),
           ),
-          note("<c> wird durch die Kapitelnummer ersetzt. Gilt für Kapitel ohne eigenen Titel. Bereits geladene Videos behalten ihre Kapitelliste."),
+          note(t("settings.cWirdDurchDie")),
         ),
       ];
     },
     subtitles: () => [
       group(
-        "Untertitel",
-        select("default_subtitle_language", "Bevorzugte Sprache", LANGUAGES, "Untertitel in dieser Sprache werden zur ersten Untertitelspur der DVD."),
-        check("force_first_subtitle", "Ersten Untertitel automatisch einblenden", "Sonst sind Untertitel beim Start ausgeschaltet."),
+        t("settings.untertitel"),
+        select("default_subtitle_language", t("settings.bevorzugteSprache"), languages(), t("settings.untertitelInDieserSprache")),
+        check("force_first_subtitle", t("settings.erstenUntertitelAutomatischEinblenden"), t("settings.sonstSindUntertitelBeim")),
       ),
     ],
     audio: () => [
       group(
-        "Audio",
-        select("default_audio_language", "Bevorzugte Sprache", LANGUAGES, "Tonspuren in dieser Sprache werden zur ersten (Standard-)Tonspur der DVD."),
+        t("settings.audio"),
+        select("default_audio_language", t("settings.bevorzugteSprache"), languages(), t("settings.tonspurenInDieserSprache")),
         select(
           "audio_mode",
-          "Audio-Modus",
+          t("settings.audioModus"),
           [
-            ["auto", "Automatisch (AC-3/DTS kopieren)"],
-            ["ac3", "Immer AC-3"],
-            ["lpcm", "LPCM (unkomprimiert)"],
+            ["auto", t("settings.automatischAc3Dts")],
+            ["ac3", t("settings.immerAc3")],
+            ["lpcm", t("settings.lpcmUnkomprimiert")],
           ],
-          "Automatisch: passende AC-3-/DTS-Spuren werden verlustfrei übernommen (DVD: AC-3 bis 448 kbps, DTS-Kern; Blu-ray: AC-3 bis 640 kbps, DTS/DTS-HD; AVCHD: AC-3), alles andere wird zu AC-3. LPCM gibt es für Blu-ray (bis 8 Kanäle, 24 Bit) und AVCHD (Stereo, 16 Bit); auf der DVD wird stattdessen AC-3 geschrieben. Geschnittene Videos und normalisierte Spuren werden immer neu kodiert.",
+          t("settings.automatischPassendeAc3"),
         ),
         select(
           "track_label_mode",
-          "Spurnamen in Menüs",
+          t("settings.spurnamenInMenues"),
           [
-            ["smart", "Intelligent (Sprache + Titel)"],
-            ["language", "Nur Sprache"],
-            ["generic", "Generisch (Tonspur 1)"],
+            ["smart", t("settings.intelligentSpracheTitel")],
+            ["language", t("settings.nurSprache")],
+            ["generic", t("settings.generischTonspur1")],
           ],
-          "Intelligent: Spuren gleicher Sprache bleiben unterscheidbar (201eSpanisch - Latino201c, sonst 201eSpanisch (2)201c). Gilt für die Spurliste und die Einstellungsmenüs der Disc.",
+          t("settings.intelligentSpurenGleicherSprache"),
         ),
         check(
           "loudnorm",
-          "Lautstärke normalisieren (EBU R128)",
-          "Gleicht die Lautstärke aller Tonspuren auf −23 LUFS an (zwei Durchläufe pro Spur: messen, dann anwenden). Die Spuren werden dabei neu kodiert.",
+          t("settings.lautstaerkeNormalisierenEbuR128"),
+          t("settings.gleichtDieLautstaerkeAller"),
         ),
       ),
     ],
     burn: () => [
       group(
-        "Brennen",
+        t("settings.brennen"),
         select(
           "burn_speed",
-          "Schreibgeschwindigkeit",
+          t("settings.schreibgeschwindigkeit"),
           [
-            ["auto", "Automatisch (DVD-5/BD: maximal, DVD-9: 4x)"],
-            ["max", "Maximal"],
+            ["auto", t("settings.automatischDvd5Bd")],
+            ["max", t("settings.maximal")],
             ["16", "16x"],
             ["12", "12x"],
             ["8", "8x"],
@@ -533,35 +518,35 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
             ["4", "4x"],
             ["2.4", "2,4x"],
           ],
-          "Wird auf die nächste vom Laufwerk unterstützte Geschwindigkeit abgerundet; die Angabe gilt für das jeweilige Medium (bei Blu-ray: 1x = 36 Mbit/s, 4,5 MB/s). Im Brenndialog lässt sie sich pro Disc ändern.",
+          t("settings.wirdAufDieNaechste"),
         ),
-        check("verify_after_burn", "Disc nach dem Brennen überprüfen", "Liest die Disc vollständig zurück und vergleicht sie mit dem Image."),
-        check("keep_iso", "ISO-Datei behalten", "Das Image (DVD: UDF 1.02, Blu-ray: UDF 2.50) bleibt neben dem Projektordner liegen."),
+        check("verify_after_burn", t("settings.discNachDemBrennen"), t("settings.liestDieDiscVollstaendig")),
+        check("keep_iso", t("settings.isoDateiBehalten"), t("settings.dasImageDvdUdf")),
       ),
       group(
-        "Nach dem Brennen",
+        t("settings.nachDemBrennen"),
         check(
           "delete_after_burn",
-          "DVD-Ordner und Arbeitsdateien nach erfolgreichem Brennen löschen",
-          "Löscht den erzeugten DVD-Ordner, das Image und den Arbeitsordner – nur wenn der Ordner ausschließlich VIDEO_TS/AUDIO_TS enthält.",
+          t("settings.dvdOrdnerUndArbeitsdateien"),
+          t("settings.loeschtDenErzeugtenDvd"),
         ),
         check(
           "quiet_finish",
-          "Explorer nicht öffnen / Laufwerk nicht auswerfen",
-          "Ohne diese Option wird die Disc nach dem Brennen ausgeworfen bzw. der DVD-Ordner im Explorer geöffnet, wenn nicht gebrannt wird.",
+          t("settings.explorerNichtOeffnenLaufwerk"),
+          t("settings.ohneDieseOptionWird"),
         ),
         check(
           "auto_erase_rewritable",
-          "Wiederbeschreibbare Discs ohne Nachfrage löschen",
-          "DVD±RW mit alten Daten werden automatisch gelöscht/überschrieben; der automatische Brennstart (Countdown) gilt dann auch für sie.",
+          t("settings.wiederbeschreibbareDiscsOhneNachfrage"),
+          t("settings.dvdrwMitAltenDaten"),
         ),
       ),
       group(
-        "Projekt",
+        t("settings.projekt"),
         el(
           "label",
           { class: "opt-row" },
-          el("span", { class: "opt-label" }, "Standard-Projekt-/Volume-Name"),
+          el("span", { class: "opt-label" }, t("settings.standardProjektVolumeName")),
           el(
             "span",
             { class: "opt-input" },
@@ -569,7 +554,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
               type: "text",
               class: "mono",
               value: draft.default_volume_label,
-              placeholder: "aus Menütitel / erstem Video",
+              placeholder: t("settings.ausMenuetitelErstemVideo"),
               maxlength: String(MAX_LABEL + 8),
               spellcheck: false,
               oninput: (e: Event) => {
@@ -592,7 +577,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           el(
             "small",
             { class: "opt-hint" },
-            `Ordnername der DVD und Volume-Label der Disc. A–Z, 0–9 und _, höchstens ${MAX_LABEL} Zeichen; leer = automatisch (Fallback ${DEFAULT_LABEL}).`,
+            t("settings.ordnernameDerDvdUnd", { MAX_LABEL, DEFAULT_LABEL }),
           ),
         ),
       ),
@@ -601,7 +586,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
 
   function renderTree() {
     tree.replaceChildren(
-      ...TREE.map((node) =>
+      ...treeNodes().map((node) =>
         el(
           "div",
           { class: "tree-node" },
@@ -622,7 +607,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
 
   function render() {
     renderTree();
-    const title = TREE.flatMap((n) => [n, ...(n.children ?? [])]).find((n) => n.id === page)?.label ?? "";
+    const title = treeNodes().flatMap((n) => [n, ...(n.children ?? [])]).find((n) => n.id === page)?.label ?? "";
     body.replaceChildren(el("h3", {}, title), ...pages[page]());
   }
 
@@ -640,7 +625,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
     el(
       "div",
       { class: "settings-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "settings-title" },
-      el("header", { class: "settings-header" }, el("h2", { id: "settings-title" }, "Allgemeine Einstellungen")),
+      el("header", { class: "settings-header" }, el("h2", { id: "settings-title" }, t("settings.allgemeineEinstellungen"))),
       el("div", { class: "settings-split" }, tree, body),
       el(
         "footer",
@@ -655,12 +640,12 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
               render();
             },
           },
-          "Standardwerte",
+          t("settings.standardwerte"),
         ),
         el("span", { class: "settings-path", title: info.path }, info.path),
         error,
         okButton,
-        el("button", { class: "btn", onclick: () => close() }, "Abbrechen"),
+        el("button", { class: "btn", onclick: () => close() }, t("settings.abbrechen")),
       ),
     ),
   );
@@ -672,7 +657,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
       close();
       onSaved(saved);
     } catch (e) {
-      error.textContent = `Speichern fehlgeschlagen: ${e}`;
+      error.textContent = t("settings.speichernFehlgeschlagen", { e });
       okButton.disabled = false;
     }
   });

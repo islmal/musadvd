@@ -16,7 +16,9 @@ use crate::layout::{
     LayoutTitle, MenuRole, MenuSound, LAYOUT_VERSION,
 };
 use crate::menu_anim;
-use crate::menu::{button_of_graphic, localize, page_by_style, resolve_resource, UiLang};
+use crate::dvd::ChapterSettings;
+use crate::i18n::{tr, UiLang};
+use crate::menu::{button_of_graphic, localize, page_by_style, resolve_resource};
 use crate::template::{Button, DelphiColor, Graphic, Page, Template, TextStyle};
 
 const CANVAS_W: f64 = 1920.0;
@@ -112,6 +114,8 @@ struct Nav<'a> {
     titles: &'a [LayoutTitle],
     /// Chapter start of each title's chapters (source time of the chapter's sample frame).
     chapter_starts: &'a [Vec<f64>],
+    chapters: &'a ChapterSettings,
+    ui: UiLang,
     title_page: &'a Page,
     title_pages: u32,
     /// Pages of the bonus menu (0 = none).
@@ -162,7 +166,7 @@ impl Nav<'_> {
                 }
                 Some(Mapped {
                     action: Some(Action::PlayChapter { title: t, chapter: i as u32 + 1 }),
-                    label: Some(format!("Kapitel {}", i + 1)),
+                    label: Some(self.chapters.label(i + 1, self.ui)),
                     video: Some(t),
                     start: self.chapter_starts.get(t as usize - 1).and_then(|c| c.get(i)).copied(),
                 })
@@ -290,7 +294,7 @@ impl Nav<'_> {
             .collect();
         let heading = match ctx.kind {
             Kind::Bonus => "Bonus",
-            Kind::Episodes => "Episoden",
+            Kind::Episodes => tr(self.ui, "episodes"),
             _ => &self.titles[ctx.title.max(1) as usize - 1].label,
         };
         let image_file = |value: &str, warnings: &mut Vec<String>| {
@@ -307,7 +311,7 @@ impl Nav<'_> {
             match m.and_then(|m| m.label.as_deref()) {
                 Some(l) => l.to_string(),
                 None if g.location.eq_ignore_ascii_case("ML_PAGE_TITLE") => heading.to_string(),
-                None => localize(&g.value, UiLang::De).to_string(),
+                None => localize(&g.value, self.ui).to_string(),
             }
         };
 
@@ -416,7 +420,7 @@ impl Nav<'_> {
 
 /// Builds the Blu-ray menu layout of a ConvertX template. `thumbnails[i]` is an optional still
 /// for title `i + 1` (video slots show the moving clip without one); `chapter_starts[i][c]` is the
-/// source time of chapter `c + 1`'s sample frame of title `i + 1`. Returns the layout and
+/// source time of chapter `c + 1`'s sample frame of title `i + 1`. Texts follow `ui`. Returns the layout and
 /// German warnings.
 pub fn layout_from_template(
     template: &Template,
@@ -425,6 +429,8 @@ pub fn layout_from_template(
     thumbnails: &[Option<String>],
     chapter_starts: &[Vec<f64>],
     aspect: Aspect,
+    chapters: &ChapterSettings,
+    ui: UiLang,
 ) -> Result<(CustomLayout, Vec<String>), LayoutError> {
     let fail = |m: &str| LayoutError(vec![m.to_string()]);
     if titles.is_empty() {
@@ -473,6 +479,8 @@ pub fn layout_from_template(
     let nav = Nav {
         titles,
         chapter_starts,
+        chapters,
+        ui,
         title_page,
         title_pages: match count_loc(title_page, TITLE_ITEMS) {
             0 => 1,
@@ -620,7 +628,7 @@ mod tests {
     }
 
     fn build(titles: &[LayoutTitle]) -> (CustomLayout, Vec<String>) {
-        layout_from_template(&template(), Path::new("t.ini"), titles, &vec![None; titles.len()], &vec![vec![11.0, 22.0, 33.0]; titles.len()], Aspect::Wide).unwrap()
+        layout_from_template(&template(), Path::new("t.ini"), titles, &vec![None; titles.len()], &vec![vec![11.0, 22.0, 33.0]; titles.len()], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap()
     }
 
     fn five() -> Vec<LayoutTitle> {
@@ -708,6 +716,20 @@ mod tests {
     }
 
     #[test]
+    fn chapter_captions_follow_the_ui_language() {
+        let titles = five();
+        let texts = |ui| -> Vec<String> {
+            let (l, _) = layout_from_template(&template(), Path::new("t.ini"), &titles, &vec![None; titles.len()], &vec![vec![11.0, 22.0, 33.0]; titles.len()], Aspect::Wide, &ChapterSettings::default(), ui).unwrap();
+            l.menus.iter().find(|m| m.id == "chap-2-p1").unwrap().elements.iter().filter_map(|e| match &e.content {
+                Content::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            }).collect()
+        };
+        assert!(texts(UiLang::EN).contains(&"Chapter 1".to_string()));
+        assert!(texts(UiLang::DE).contains(&"Kapitel 1".to_string()));
+    }
+
+    #[test]
     fn single_video_template_has_a_bonus_menu_and_a_main_video() {
         let ini = [
             "[CXT]\nKind=mtOpenStyle\n".to_string(),
@@ -718,7 +740,7 @@ mod tests {
             + &video("Item0", 1, "ML_PAGE_BACKGROUND", 0, (0, 0, 424, 340));
         let tpl = Template::parse(&ini).unwrap();
         let titles = [lt("A", 1, &[1], &[]), lt("B", 1, &[1], &[]), lt("C", 1, &[1], &[])];
-        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide).unwrap();
+        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
         let ids: Vec<&str> = l.menus.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(&ids[..2], ["title-p1", "bonus-p1"], "one main page although there are three titles");
         assert_eq!(actions(&l, "title-p1"), [Action::PlayTitle { title: 1 }, menu_to("bonus-p1")]);
@@ -738,7 +760,7 @@ mod tests {
         .concat();
         let tpl = Template::parse(&ini).unwrap();
         let titles = [lt("A", 1, &[1], &[]), lt("B", 1, &[1], &[]), lt("C", 1, &[1], &[])];
-        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide).unwrap();
+        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
         let ids: Vec<&str> = l.menus.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(&ids[..3], ["title-p1", "episodes-p1", "episodes-p2"], "no bonus menu next to an episode menu: {ids:?}");
         // The bonus button is hidden, the episode button opens the list.
@@ -794,7 +816,7 @@ mod tests {
             [CXT\\pages\\Item0\\buttons\\Item0]\nname=b\nvalue=mask.png\nLeft=10\nTop=10\nWidth=154\nHeight=120\nlocation=ML_PLAY_ALL\n\
             [CXT\\pages\\Item0\\blocks\\Item0\\Gfx\\Item0]\nvalue=icon.png\ngfx_type=GT_BITMAP\nLocation=ML_PLAY_ALL\nLeft=10\nTop=10\nWidth=154\nHeight=120\nPaddingMethod=letterbox\n";
         let t = Template::parse(ini).unwrap();
-        let (l, w) = layout_from_template(&t, &dir.join("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide).unwrap();
+        let (l, w) = layout_from_template(&t, &dir.join("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let button = l.menus[0].elements.iter().find(|e| e.action.is_some()).unwrap_or_else(|| panic!("no button: {w:?}"));
         assert!(matches!(&button.content, Content::Image { src, fit: Fit::Contain } if src.ends_with("mask.png")), "{:?}", button.content);
@@ -881,7 +903,7 @@ Width=100
 Height=40
 ";
         let tpl = Template::parse(ini).unwrap();
-        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide).unwrap();
+        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
         assert!(l.animations);
         let m = &l.menus[0];
         assert_eq!(m.intro_secs, Some(3.0), "the page's intro length wins over the last key");

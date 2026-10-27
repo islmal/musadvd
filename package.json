@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "node scripts/check-i18n.mjs && tsc --noEmit && vite build",
+    "check:i18n": "node scripts/check-i18n.mjs",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

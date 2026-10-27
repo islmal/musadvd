@@ -1,3 +1,4 @@
+import { fmtNumber, t } from "../i18n";
 // Small DOM helpers shared by the Burn Studio views.
 
 type Child = Node | string | null | undefined | false;
@@ -37,7 +38,7 @@ export function fmtTime(secs: number | null | undefined): string {
 
 /** Sectors → "2.295.104 Sektoren (4,70 GB)". */
 export function fmtSectors(n: number): string {
-  return `${n.toLocaleString("de-DE")} Sektoren (${fmtBytes(n * 2048)})`;
+  return t("studio.ui.sektoren", { n: fmtNumber(n), fmtBytes: fmtBytes(n * 2048) });
 }
 
 export interface ModalButton {
@@ -51,7 +52,7 @@ export interface ModalButton {
 export function modal(
   title: string,
   body: HTMLElement,
-  buttons: ModalButton[] = [{ label: "Schließen", primary: true }],
+  buttons: ModalButton[] = [{ label: t("studio.ui.schliessen"), primary: true }],
   wide = false,
 ): () => void {
   const overlay = el("div", { class: "overlay" });

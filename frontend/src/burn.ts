@@ -20,6 +20,7 @@ import {
   type WriteSpeed,
 } from "./api";
 import { DEFAULT_LABEL, MAX_LABEL, sanitizeLabel } from "./label";
+import { fmtNumber, t } from "./i18n";
 
 type Child = Node | string | null | undefined | false;
 
@@ -44,14 +45,14 @@ const COUNTDOWN_SECS = 20;
 const MEDIA_POLL_MS = 4000;
 
 const speedKey = (s: WriteSpeed) => (s === "max" ? "max" : String(s.specific));
-const gb = (sectors: number) => ((sectors * 2048) / 1e9).toFixed(2).replace(".", ",");
+const gb = (sectors: number) => fmtNumber((sectors * 2048) / 1e9, 2);
 
-const PHASES: { id: BurnPhase; label: string }[] = [
-  { id: "preparing", label: "Image" },
-  { id: "formatting", label: "Formatieren" },
-  { id: "writing", label: "Schreiben" },
-  { id: "finalizing", label: "Abschließen" },
-  { id: "verifying", label: "Überprüfen" },
+const phases = (): { id: BurnPhase; label: string }[] => [
+  { id: "preparing", label: t("burn.image") },
+  { id: "formatting", label: t("burn.formatieren") },
+  { id: "writing", label: t("burn.schreiben") },
+  { id: "finalizing", label: t("burn.abschliessen") },
+  { id: "verifying", label: t("burn.ueberpruefen") },
 ];
 
 /** Share of the total bar per phase: [start, end] in %. */
@@ -193,9 +194,9 @@ export async function openBurner(
     try {
       drives = await listDrives();
       if (!drives.some((d) => d.id === driveId)) driveId = drives[0]?.id ?? "";
-      error.textContent = drives.length === 0 ? "Kein DVD-/Blu-ray-Brenner gefunden." : "";
+      error.textContent = drives.length === 0 ? t("burn.keinDvdBluRay") : "";
     } catch (e) {
-      error.textContent = `Laufwerke: ${e}`;
+      error.textContent = t("burn.laufwerke", { e });
     }
     await refreshMedia();
   }
@@ -274,21 +275,21 @@ export async function openBurner(
     }
     cancelArmed = false;
     await cancelBurn().catch(() => false);
-    if (current) current = { ...current, message: "Wird abgebrochen …" };
+    if (current) current = { ...current, message: t("burn.wirdAbgebrochen") };
     render();
   }
 
   // ---- rendering ----------------------------------------------------------------------------------
   function mediaLine() {
-    if (!driveId) return el("div", { class: "media-state bad" }, "Kein Laufwerk");
-    if (!media) return el("div", { class: "media-state" }, probing ? "Disc wird geprüft …" : "—");
+    if (!driveId) return el("div", { class: "media-state bad" }, t("burn.keinLaufwerk"));
+    if (!media) return el("div", { class: "media-state" }, probing ? t("burn.discWirdGeprueft") : "—");
     const m = media.media;
     const kind = { dvd9: "DVD-9", dvd5: "DVD-5", bd25: "BD-25", bd50: "BD-50", unknown: "" }[m.media_type];
     const text = m.present
-      ? `${m.physical}${kind ? ` (${kind})` : ""} · ${m.blank ? "leer" : "beschrieben"} · ${gb(
+      ? `${m.physical}${kind ? ` (${kind})` : ""} · ${m.blank ? t("common.blank") : t("common.written")} · ${gb(
           m.blank ? m.free_sectors : m.total_sectors,
         )} GB`
-      : "Keine Disc eingelegt";
+      : t("burn.keineDiscEingelegt");
     const cls = media.problem ? "bad" : media.warning ? "warn" : "good";
     return el(
       "div",
@@ -307,7 +308,7 @@ export async function openBurner(
       el(
         "label",
         { class: "opt-row" },
-        el("span", { class: "opt-label" }, "Laufwerk"),
+        el("span", { class: "opt-label" }, t("burn.laufwerk")),
         el(
           "div",
           { class: "burn-drive" },
@@ -323,16 +324,16 @@ export async function openBurner(
               },
             },
             ...drives.map((d) => el("option", { value: d.id, selected: d.id === driveId }, d.name)),
-            drives.length === 0 ? el("option", {}, "Kein Brenner gefunden") : null,
+            drives.length === 0 ? el("option", {}, t("burn.keinBrennerGefunden")) : null,
           ),
-          el("button", { class: "btn", type: "button", disabled, onclick: () => void refreshDrives() }, "Aktualisieren"),
+          el("button", { class: "btn", type: "button", disabled, onclick: () => void refreshDrives() }, t("burn.aktualisieren")),
         ),
       ),
-      el("div", { class: "opt-row" }, el("span", { class: "opt-label" }, "Medium"), mediaLine()),
+      el("div", { class: "opt-row" }, el("span", { class: "opt-label" }, t("burn.medium")), mediaLine()),
       el(
         "label",
         { class: "opt-row" },
-        el("span", { class: "opt-label" }, "Volume-Label"),
+        el("span", { class: "opt-label" }, t("burn.volumeLabel")),
         el(
           "div",
           {},
@@ -358,13 +359,13 @@ export async function openBurner(
               (e.target as HTMLInputElement).value = label;
             },
           }),
-          el("small", { class: "hint" }, "A–Z, 0–9 und _, höchstens 32 Zeichen"),
+          el("small", { class: "hint" }, t("burn.az09UndHoechstens")),
         ),
       ),
       el(
         "label",
         { class: "opt-row" },
-        el("span", { class: "opt-label" }, "Geschwindigkeit"),
+        el("span", { class: "opt-label" }, t("burn.geschwindigkeit")),
         el(
           "select",
           {
@@ -376,22 +377,22 @@ export async function openBurner(
               render();
             },
           },
-          ...(media?.speeds ?? [{ value: "max" as WriteSpeed, label: "Maximal" }]).map((s) => {
+          ...(media?.speeds ?? [{ value: "max" as WriteSpeed, label: t("burn.maximal") }]).map((s) => {
             const isDefault = media && speedKey(s.value) === speedKey(media.defaultSpeed);
             const selected = speedKey(speed ?? media?.defaultSpeed ?? "max") === speedKey(s.value);
-            return el("option", { value: speedKey(s.value), selected }, isDefault ? `${s.label} (empfohlen)` : s.label);
+            return el("option", { value: speedKey(s.value), selected }, isDefault ? t("burn.recommended", { label: s.label }) : s.label);
           }),
         ),
       ),
       el(
         "div",
         { class: "burn-checks" },
-        check("Nach dem Brennen überprüfen", verify, (v) => ((verify = v), render()), disabled),
-        check("ISO-Datei behalten", keepIso, (v) => (keepIso = v), disabled || deleteAfter),
-        check("Disc danach auswerfen", eject, (v) => (eject = v), disabled),
-        check(`${discKind()}-Ordner danach löschen`, deleteAfter, (v) => ((deleteAfter = v), render()), disabled),
+        check(t("burn.nachDemBrennenUeberpruefen"), verify, (v) => ((verify = v), render()), disabled),
+        check(t("burn.isoDateiBehalten"), keepIso, (v) => (keepIso = v), disabled || deleteAfter),
+        check(t("burn.discDanachAuswerfen"), eject, (v) => (eject = v), disabled),
+        check(t("burn.ordnerDanachLoeschen", { discKind: discKind() }), deleteAfter, (v) => ((deleteAfter = v), render()), disabled),
         media?.needsErase && !autoErase
-          ? check("Inhalt der Disc löschen", eraseConfirmed, (v) => ((eraseConfirmed = v), render()), disabled)
+          ? check(t("burn.inhaltDerDiscLoeschen"), eraseConfirmed, (v) => ((eraseConfirmed = v), render()), disabled)
           : null,
       ),
       estimateLine(),
@@ -408,7 +409,7 @@ export async function openBurner(
     return el(
       "div",
       { class: "media-note" },
-      `Geschätzte Dauer: ${formatRemaining(secs)} (ISO + Brennen bei ${opt.label}${verify ? " + Überprüfung" : ""})`,
+      t("burn.geschaetzteDauerIsoBrennen", { formatRemaining: formatRemaining(secs), label: opt.label, verify: verify ? t("burn.ueberpruefung") : "" }),
     );
   }
 
@@ -424,8 +425,9 @@ export async function openBurner(
   function progressView() {
     if (!current && !finished) return null;
     const phase = current?.phase ?? "done";
-    const idx = PHASES.findIndex((p) => p.id === phase);
-    const shown = verify ? PHASES : PHASES.filter((p) => p.id !== "verifying");
+    const all = phases();
+    const idx = all.findIndex((p) => p.id === phase);
+    const shown = verify ? all : all.filter((p) => p.id !== "verifying");
     return el(
       "div",
       { class: "burn-progress" },
@@ -433,7 +435,7 @@ export async function openBurner(
         "ol",
         { class: "phases burn-phases", style: `grid-template-columns: repeat(${shown.length}, 1fr)` },
         ...shown.map((p) => {
-          const i = PHASES.indexOf(p);
+          const i = all.indexOf(p);
           const cls = finished?.ok || phase === "done" || i < idx ? "done" : i === idx && !finished ? "active" : "";
           return el("li", { class: cls }, p.label);
         }),
@@ -441,17 +443,17 @@ export async function openBurner(
       el(
         "div",
         { class: "progress-block" },
-        el("div", { class: "progress-label" }, el("span", {}, finished ? finished.message : current?.message ?? "Wird gestartet …"), el("span", {}, `${Math.floor(total)} %`)),
+        el("div", { class: "progress-label" }, el("span", {}, finished ? finished.message : current?.message ?? t("burn.wirdGestartet")), el("span", {}, `${Math.floor(total)} %`)),
         el("div", { class: "progress" }, el("div", { class: "progress-value", style: `width: ${total}%` })),
       ),
       current && !finished
         ? el(
             "div",
             { class: "eta-line" },
-            `Geschätzte Restzeit: ${formatRemaining(current.eta.remainingSecs ?? 0)} (Phase ${current.eta.phaseNumber}/${current.eta.phaseCount}: ${current.eta.phaseLabel}${current.eta.detail ? ` – ${current.eta.detail}` : ""})`,
+            t("burn.geschaetzteRestzeitPhase", { formatRemaining: formatRemaining(current.eta.remainingSecs ?? 0), phaseNumber: current.eta.phaseNumber, phaseCount: current.eta.phaseCount, phaseLabel: current.eta.phaseLabel, current: current.eta.detail ? ` – ${current.eta.detail}` : "" }),
           )
         : null,
-      finished?.iso ? el("div", { class: "media-note" }, `ISO-Datei: ${finished.iso}`) : null,
+      finished?.iso ? el("div", { class: "media-note" }, t("burn.isoDatei", { iso: finished.iso })) : null,
     );
   }
 
@@ -461,32 +463,32 @@ export async function openBurner(
     if (!bluray) return "DVD";
     // A BDMV that fits a DVD goes on DVD media as AVCHD.
     const onDvd = !!media && media.media.present && !["bd25", "bd50"].includes(media.media.media_type);
-    return needs?.fitsDvd && onDvd ? "AVCHD-Disc" : "Blu-ray";
+    return needs?.fitsDvd && onDvd ? t("burn.avchdDisc") : t("burn.bluRay");
   }
 
   function render() {
     const kind = discKind();
     const title = finished
       ? finished.ok
-        ? `${kind} gebrannt`
+        ? t("burn.burned", { kind })
         : finished.cancelled
-          ? "Brennen abgebrochen"
-          : "Brennen fehlgeschlagen"
+          ? t("burn.brennenAbgebrochen")
+          : t("burn.brennenFehlgeschlagen")
       : burning
         ? current
           ? `[${current.eta.phaseNumber}/${current.eta.phaseCount}] ${current.eta.phaseLabel}`
-          : `${kind} wird gebrannt`
-        : `Auf ${kind} brennen`;
+          : t("burn.burning", { kind })
+        : t("burn.aufBrennen", { kind });
     const info = needs
-      ? `Inhalt: ${needs.sizeGb.toFixed(2).replace(".", ",")} GB · ${needs.bluray ? (needs.dualLayer ? "BD-50 (Dual Layer) nötig" : `passt auf eine BD-25${needs.fitsDvd ? ` oder als AVCHD auf eine ${needs.sectors > 2295104 ? "DVD-9" : "DVD-5"}` : ""}`) : needs.dualLayer ? "DVD-9 (Double Layer) nötig" : "passt auf eine DVD-5"}`
-      : "Inhalt wird geprüft …";
+      ? t("burn.inhaltGb", { needs: fmtNumber(needs.sizeGb, 2), needs2: needs.bluray ? (needs.dualLayer ? t("burn.bd50DualLayer") : t("burn.passtAufEineBd", { needs: needs.fitsDvd ? t("burn.oderAlsAvchdAuf", { needs: needs.sectors > 2295104 ? "DVD-9" : "DVD-5" }) : "" })) : needs.dualLayer ? t("burn.dvd9DoubleLayer") : t("burn.passtAufEineDvd") })
+      : t("burn.inhaltWirdGeprueft");
     const canBurn = !burning && !finished && !!media && !media.problem && !!driveId && eraseOk();
     const countdownBar =
       countdown !== null
         ? el(
             "div",
             { class: "burn-countdown", role: "status" },
-            el("span", {}, `Brennen startet automatisch in ${countdown} s …`),
+            el("span", {}, t("burn.brennenStartetAutomatischIn", { countdown })),
             el(
               "button",
               {
@@ -498,7 +500,7 @@ export async function openBurner(
                   render();
                 },
               },
-              "Timer abbrechen",
+              t("burn.timerAbbrechen"),
             ),
             el("div", { class: "countdown-bar", style: `width: ${(countdown / COUNTDOWN_SECS) * 100}%` }),
           )
@@ -519,11 +521,11 @@ export async function openBurner(
           ? el(
               "button",
               { class: "btn danger", type: "button", onclick: () => void requestCancel() },
-              cancelArmed ? "Wirklich abbrechen? (Rohling wird unbrauchbar)" : "Abbrechen",
+              cancelArmed ? t("burn.wirklichAbbrechenRohlingWird") : t("burn.abbrechen"),
             )
-          : el("button", { class: "btn", type: "button", onclick: close }, "Schließen"),
+          : el("button", { class: "btn", type: "button", onclick: close }, t("burn.schliessen")),
         !burning && !finished
-          ? el("button", { class: "btn primary", type: "button", disabled: !canBurn, onclick: () => void burn() }, "Brennen")
+          ? el("button", { class: "btn primary", type: "button", disabled: !canBurn, onclick: () => void burn() }, t("burn.brennen"))
           : null,
         finished && !finished.ok && !finished.cancelled
           ? el(
@@ -537,7 +539,7 @@ export async function openBurner(
                   void refreshMedia();
                 },
               },
-              "Erneut versuchen",
+              t("burn.erneutVersuchen"),
             )
           : null,
       ),

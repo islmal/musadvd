@@ -1,36 +1,36 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ConvertX Rust</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
-  <body>
+  <body data-entry="main">
     <div class="app">
       <header class="toolbar">
         <div class="brand"><span class="disc" aria-hidden="true"></span>ConvertX Rust</div>
         <div class="toolbar-actions">
-          <button id="btn-add" class="btn">＋ Videos hinzufügen</button>
-          <button id="btn-remove" class="btn" disabled>Entfernen</button>
-          <button id="btn-up" class="btn icon" title="Nach oben" disabled>▲</button>
-          <button id="btn-down" class="btn icon" title="Nach unten" disabled>▼</button>
-          <button id="btn-studio" class="btn" title="Brennstudio: Images brennen, lesen, überprüfen, erstellen">💿 Brennstudio …</button>
-          <button id="btn-settings" class="btn" title="Allgemeine Einstellungen">⚙ Einstellungen</button>
+          <button id="btn-add" class="btn" data-i18n="app.addVideos">＋ Add videos</button>
+          <button id="btn-remove" class="btn" disabled data-i18n="app.remove">Remove</button>
+          <button id="btn-up" class="btn icon" data-i18n-title="app.moveUp" title="Move up" disabled>▲</button>
+          <button id="btn-down" class="btn icon" data-i18n-title="app.moveDown" title="Move down" disabled>▼</button>
+          <button id="btn-studio" class="btn" data-i18n="app.studio" data-i18n-title="app.studioTip" title="Burn Studio: burn, read, verify and create images">💿 Burn Studio …</button>
+          <button id="btn-settings" class="btn" data-i18n="app.settings" data-i18n-title="app.settingsTip" title="General settings">⚙ Settings</button>
         </div>
       </header>
 
       <main class="split">
         <aside class="left">
           <div id="dropzone" class="dropzone">
-            <strong>Videos hierher ziehen</strong>
-            <span>MKV, MP4, AVI, MOV, TS … – jedes Video wird ein eigenes Titleset</span>
+            <strong data-i18n="app.dropTitle">Drop videos here</strong>
+            <span data-i18n="app.dropHint">MKV, MP4, AVI, MOV, TS … – each video becomes its own titleset</span>
           </div>
           <ul id="title-list" class="title-list" aria-label="Titlesets"></ul>
 
           <footer class="left-footer">
             <div class="row">
-              <label for="disc">Medium</label>
+              <label for="disc" data-i18n="app.medium">Medium</label>
               <select id="disc">
                 <option value="dvd5">DVD-5 (4,3 GB)</option>
                 <option value="dvd9">DVD-9 (8,2 GB)</option>
@@ -38,33 +38,33 @@
                 <option value="bd50">BD-50 (45,8 GB)</option>
                 <option value="avchd5">AVCHD (DVD-5, 4,3 GB)</option>
                 <option value="avchd9">AVCHD (DVD-9, 8,2 GB)</option>
-                <option value="custom" id="disc-custom">Benutzerdefiniert</option>
+                <option value="custom" id="disc-custom" data-i18n="app.discCustom">Custom</option>
               </select>
             </div>
             <div class="fill">
               <div class="fill-bar"><div id="fill-value" class="fill-value"></div></div>
-              <div id="fill-text" class="fill-text">Noch keine Videos</div>
+              <div id="fill-text" class="fill-text" data-i18n="app.noVideos">No videos yet</div>
             </div>
             <div class="toggles">
-              <label class="switch"><input id="two-pass" type="checkbox" /><span></span>2-Pass Encoding</label>
-              <label class="switch"><input id="motion-menu" type="checkbox" /><span></span>Motion Menu</label>
+              <label class="switch"><input id="two-pass" type="checkbox" /><span></span><span data-i18n="app.twoPass">2-pass encoding</span></label>
+              <label class="switch"><input id="motion-menu" type="checkbox" /><span></span><span data-i18n="app.motionMenu">Motion menu</span></label>
             </div>
             <div class="row output-row">
-              <input id="output" type="text" placeholder="Ausgabeordner" spellcheck="false" />
-              <button id="btn-output" class="btn icon" title="Ordner wählen">…</button>
+              <input id="output" type="text" data-i18n-placeholder="app.outputPlaceholder" placeholder="Output folder" spellcheck="false" />
+              <button id="btn-output" class="btn icon" data-i18n-title="app.chooseFolder" title="Choose folder">…</button>
             </div>
-            <button id="btn-split-undo" class="btn" hidden>Aufteilen rückgängig</button>
-            <button id="btn-convert" class="btn primary big" disabled>Konvertieren</button>
+            <button id="btn-split-undo" class="btn" hidden data-i18n="app.splitUndo">Undo split</button>
+            <button id="btn-convert" class="btn primary big" disabled data-i18n="app.convert">Convert</button>
           </footer>
         </aside>
 
         <section class="right">
           <nav class="tabs" role="tablist">
-            <button class="tab active" data-tab="audio" role="tab">Audio</button>
-            <button class="tab" data-tab="subtitles" role="tab">Untertitel</button>
-            <button class="tab" data-tab="chapters" role="tab">Kapitel</button>
-            <button class="tab" data-tab="edit" role="tab">Schnitt &amp; Bild</button>
-            <button class="tab" data-tab="template" role="tab">Menüvorlage</button>
+            <button class="tab active" data-tab="audio" role="tab" data-i18n="app.tab.audio">Audio</button>
+            <button class="tab" data-tab="subtitles" role="tab" data-i18n="app.tab.subtitles">Subtitles</button>
+            <button class="tab" data-tab="chapters" role="tab" data-i18n="app.tab.chapters">Chapters</button>
+            <button class="tab" data-tab="edit" role="tab" data-i18n="app.tab.edit">Trim &amp; picture</button>
+            <button class="tab" data-tab="template" role="tab" data-i18n="app.tab.template">Menu template</button>
           </nav>
           <div id="tab-body" class="tab-body"></div>
         </section>
@@ -75,32 +75,32 @@
 
     <div id="overlay" class="overlay" hidden>
       <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
-        <h2 id="overlay-title">Konvertierung läuft</h2>
+        <h2 id="overlay-title" data-i18n="app.overlay.title">Conversion in progress</h2>
         <ol id="phases" class="phases">
-          <li data-phase="menus">Menüs</li>
-          <li data-phase="encoding">Videos</li>
-          <li data-phase="authoring">Authoring</li>
-          <li data-phase="image" title="im Brenndialog">ISO</li>
-          <li data-phase="burning" title="im Brenndialog">Brennen</li>
+          <li data-phase="menus" data-i18n="app.phase.menus">Menus</li>
+          <li data-phase="encoding" data-i18n="app.phase.encoding">Videos</li>
+          <li data-phase="authoring" data-i18n="app.phase.authoring">Authoring</li>
+          <li data-phase="image" data-i18n-title="app.phase.inBurnDialog" title="in the burn dialog">ISO</li>
+          <li data-phase="burning" data-i18n-title="app.phase.inBurnDialog" title="in the burn dialog" data-i18n="app.phase.burning">Burn</li>
         </ol>
         <div class="progress-block">
-          <div class="progress-label"><span>Gesamt</span><span id="total-pct">0 %</span></div>
+          <div class="progress-label"><span data-i18n="app.overlay.total">Total</span><span id="total-pct">0 %</span></div>
           <div class="progress"><div id="total-bar" class="progress-value"></div></div>
         </div>
         <div id="eta-line" class="eta-line" aria-live="polite"></div>
         <div class="progress-block">
-          <div class="progress-label"><span id="step-label">Starte …</span><span id="step-pct"></span></div>
+          <div class="progress-label"><span id="step-label" data-i18n="app.overlay.starting">Starting …</span><span id="step-pct"></span></div>
           <div class="progress thin"><div id="step-bar" class="progress-value"></div></div>
         </div>
         <ul id="log" class="log"></ul>
         <div class="overlay-actions">
-          <button id="btn-cancel" class="btn danger">Abbrechen</button>
-          <button id="btn-burn" class="btn" hidden>Auf Disc brennen …</button>
-          <button id="btn-close-overlay" class="btn primary" hidden>Schließen</button>
+          <button id="btn-cancel" class="btn danger" data-i18n="app.overlay.cancel">Cancel</button>
+          <button id="btn-burn" class="btn" hidden data-i18n="app.overlay.burn">Burn to disc …</button>
+          <button id="btn-close-overlay" class="btn primary" hidden data-i18n="app.overlay.close">Close</button>
         </div>
       </div>
     </div>
 
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/boot.ts"></script>
   </body>
 </html>

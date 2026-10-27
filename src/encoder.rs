@@ -1728,7 +1728,7 @@ mod tests {
             ],
             subtitles: vec![SubtitleStream { index: 3, codec: "subrip".into(), kind: SubtitleKind::Text, language: None, title: None, forced: false, width: None, height: None }],
             chapters: vec![],
-            trim: None,
+            trim: None, audio_names: Default::default(),
         };
         let job = EncodeJob {
             info: &info,
@@ -1954,7 +1954,7 @@ mod tests {
             ],
             subtitles: vec![],
             chapters: vec![],
-            trim: None,
+            trim: None, audio_names: Default::default(),
         }
     }
 

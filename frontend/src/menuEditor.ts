@@ -29,6 +29,7 @@ import {
   type LayoutElement,
   type TextElement,
 } from "./layout";
+import { t as tr } from "./i18n";
 
 type Child = Node | string | null | undefined | false;
 
@@ -69,13 +70,13 @@ export interface EditorOptions extends EditorInit {
   onClose: () => void;
 }
 
-const IMAGE_FILTER = [{ name: "Bilder", extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }];
-const AUDIO_FILTER = [{ name: "Audio", extensions: ["mp3", "wav", "flac", "m4a", "aac", "ac3", "ogg", "opus"] }];
-const LAYOUT_FILTER = [{ name: "Menü-Layout", extensions: ["json"] }];
+const IMAGE_FILTER = [{ name: tr("menuEditor.bilder"), extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }];
+const AUDIO_FILTER = [{ name: tr("menuEditor.audio"), extensions: ["mp3", "wav", "flac", "m4a", "aac", "ac3", "ogg", "opus"] }];
+const LAYOUT_FILTER = [{ name: tr("menuEditor.menueLayout"), extensions: ["json"] }];
 const FIT_LABELS: [Fit, string][] = [
-  ["contain", "Einpassen"],
-  ["cover", "Füllen (zuschneiden)"],
-  ["stretch", "Strecken"],
+  ["contain", tr("menuEditor.einpassen")],
+  ["cover", tr("menuEditor.fuellenZuschneiden")],
+  ["stretch", tr("menuEditor.strecken")],
 ];
 const SNAP = 2;
 
@@ -119,7 +120,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   const groupMembers = (e: LayoutElement): LayoutElement[] => (e.group ? menu().elements.filter((x) => x.group === e.group) : [e]);
   const W = () => L.canvas.width;
   const H = () => L.canvas.height;
-  const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? "(fehlt)"}`;
+  const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? tr("menuEditor.missing")}`;
   const snap = (v: number) => Math.round(v / SNAP) * SNAP;
   const clampBox = (e: LayoutElement) => {
     e.w = Math.max(8, Math.min(Math.round(e.w), W()));
@@ -154,7 +155,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
   const frameOf = (title: number, start?: number | null) => {
     const t = titles[title - 1];
-    if (!t) return Promise.reject(new Error("Titel fehlt"));
+    if (!t) return Promise.reject(new Error(tr("menuEditor.titelFehlt")));
     const at = start ?? Math.min(t.durationSecs * 0.1, 300);
     return preview("frame", `${t.path}@${at.toFixed(1)}`, () => titleFrame(t.path, at));
   };
@@ -196,17 +197,17 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (!a) return "";
     switch (a.type) {
       case "playTitle":
-        return `▶ Titel ${titleName(a.title)}`;
+        return tr("menuEditor.titel", { titleName: titleName(a.title) });
       case "playChapter":
-        return `▶ Titel ${titleName(a.title)}, ${chapterLabel(titles[a.title - 1], a.chapter)}`;
+        return tr("menuEditor.titel2", { titleName: titleName(a.title), chapterLabel: chapterLabel(titles[a.title - 1], a.chapter) });
       case "playAll":
-        return "▶ Alle abspielen";
+        return tr("menuEditor.alleAbspielen");
       case "menu":
-        return `→ ${L.menus.find((m) => m.id === a.menu)?.name ?? "(Menü fehlt)"}`;
+        return `→ ${L.menus.find((m) => m.id === a.menu)?.name ?? tr("menuEditor.menueFehlt")}`;
       case "setAudio":
-        return `♪ Tonspur: ${trackLabel("audio", menu()?.title, a.source)}`;
+        return tr("menuEditor.tonspur", { trackLabel: trackLabel("audio", menu()?.title, a.source) });
       case "setSubtitle":
-        return a.source === null ? "Untertitel aus" : `Untertitel: ${trackLabel("subtitle", menu()?.title, a.source)}`;
+        return a.source === null ? tr("menuEditor.untertitelAus") : tr("menuEditor.untertitel", { trackLabel: trackLabel("subtitle", menu()?.title, a.source) });
     }
   }
 
@@ -214,28 +215,28 @@ export function mountMenuEditor(opts: EditorOptions) {
   function trackLabel(kind: "audio" | "subtitle", title: number | null | undefined, source: number): string {
     const t = title ? titles[title - 1] : undefined;
     const list = kind === "audio" ? t?.audioTracks : t?.subtitleTracks;
-    return list?.find((x) => x.source === source)?.label ?? `Stream #${source} (nicht ausgewählt)`;
+    return list?.find((x) => x.source === source)?.label ?? tr("menuEditor.streamNichtAusgewaehlt", { source });
   }
 
   const ROLE_LABELS: Record<CustomMenu["role"], string> = {
-    title: "Titelmenü (Hauptmenü)",
-    root: "Root-Menü eines Titels",
-    settings: "Einstellungen eines Titels (Ton/Untertitel)",
+    title: tr("menuEditor.titelmenueHauptmenue"),
+    root: tr("menuEditor.rootMenueEinesTitels"),
+    settings: tr("menuEditor.einstellungenEinesTitelsTon"),
   };
 
   // ---- DOM skeleton -----------------------------------------------------------------------------
-  const menusPane = el("aside", { class: "ed-menus", "aria-label": "Menüs" });
+  const menusPane = el("aside", { class: "ed-menus", "aria-label": tr("menuEditor.menues") });
   const stage = el("div", { class: "ed-stage" });
   const viewport = el("div", { class: "ed-viewport" }, stage);
   const toolbar = el("div", { class: "ed-toolbar" });
-  const layersBox = el("section", { class: "ed-layers", "aria-label": "Elemente" });
-  const props = el("aside", { class: "ed-props", "aria-label": "Eigenschaften" });
+  const layersBox = el("section", { class: "ed-layers", "aria-label": tr("menuEditor.elemente") });
+  const props = el("aside", { class: "ed-props", "aria-label": tr("menuEditor.eigenschaften") });
   const status = el("footer", { class: "ed-status", role: "status" });
   const headerButtons = el("div", { class: "ed-header-actions" });
   const editor = el(
     "div",
-    { class: "ed", role: "dialog", "aria-modal": "true", "aria-label": "Menü-Editor" },
-    el("header", { class: "ed-header" }, el("h2", {}, "Menü-Editor"), headerButtons),
+    { class: "ed", role: "dialog", "aria-modal": "true", "aria-label": tr("menuEditor.menueEditor") },
+    el("header", { class: "ed-header" }, el("h2", {}, tr("menuEditor.menueEditor")), headerButtons),
     el("div", { class: "ed-body" }, menusPane, el("section", { class: "ed-center" }, toolbar, viewport), props),
     status,
   );
@@ -276,17 +277,17 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   function renderHeader() {
     headerButtons.replaceChildren(
-      el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, "Entwurf aus Titeln"),
-      el("button", { class: "btn", type: "button", onclick: () => void loadFile() }, "Laden …"),
-      el("button", { class: "btn", type: "button", onclick: () => void saveFile() }, "Speichern …"),
-      el("button", { class: "btn", type: "button", disabled: history.length === 0, onclick: undo, title: "Strg+Z" }, "Rückgängig"),
+      el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
+      el("button", { class: "btn", type: "button", onclick: () => void loadFile() }, tr("menuEditor.laden")),
+      el("button", { class: "btn", type: "button", onclick: () => void saveFile() }, tr("menuEditor.speichern")),
+      el("button", { class: "btn", type: "button", disabled: history.length === 0, onclick: undo, title: tr("menuEditor.strgZ") }, tr("menuEditor.rueckgaengig")),
       el("span", { class: "ed-spacer" }),
       el(
         "button",
         { class: "btn", type: "button", onclick: () => close(false) },
-        confirmClose ? "Änderungen verwerfen?" : "Schließen",
+        confirmClose ? tr("menuEditor.aenderungenVerwerfen") : tr("menuEditor.schliessen"),
       ),
-      el("button", { class: "btn primary", type: "button", onclick: () => void apply() }, "Übernehmen"),
+      el("button", { class: "btn primary", type: "button", onclick: () => void apply() }, tr("menuEditor.uebernehmen")),
     );
   }
 
@@ -309,42 +310,42 @@ export function mountMenuEditor(opts: EditorOptions) {
             renderAll();
           },
         },
-        el("span", { class: "ed-menu-name" }, m.name || "(ohne Namen)", i === firstTitle ? el("span", { class: "ed-badge start" }, "Start") : null),
+        el("span", { class: "ed-menu-name" }, m.name || tr("menuEditor.ohneNamen"), i === firstTitle ? el("span", { class: "ed-badge start" }, tr("menuEditor.start")) : null),
         el(
           "span",
           { class: "ed-menu-sub" },
-          m.role === "title" ? "Titelmenü" : `${m.role === "root" ? "Root-Menü" : "Einstellungen"} · Titel ${m.title ?? "?"}`,
-          ` · ${buttons} Button${buttons === 1 ? "" : "s"}`,
-          incoming ? ` · ${incoming}× verlinkt` : "",
-          isMoving(m) ? " · bewegt" : "",
+          m.role === "title" ? tr("menuEditor.titelmenue") : tr("menuEditor.titel3", { m: m.role === "root" ? tr("menuEditor.rootMenue") : tr("menuEditor.einstellungen"), m2: m.title ?? "?" }),
+          tr("menuEditor.button", { buttons, buttons2: buttons === 1 ? "" : "s" }),
+          incoming ? tr("menuEditor.linked", { incoming }) : "",
+          isMoving(m) ? tr("menuEditor.moving") : "",
         ),
       );
     });
     const m = menu();
     const parts: Child[] = [
-      el("h3", {}, "Menüs"),
+      el("h3", {}, tr("menuEditor.menues")),
       el("div", { class: "ed-menu-list" }, ...items),
       el(
         "div",
         { class: "ed-menu-actions" },
-        el("button", { class: "btn", type: "button", onclick: () => addMenu("title") }, "+ Titelmenü"),
-        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("root") }, "+ Root-Menü"),
-        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("settings") }, "+ Einstellungen"),
+        el("button", { class: "btn", type: "button", onclick: () => addMenu("title") }, tr("menuEditor.titelmenue2")),
+        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("root") }, tr("menuEditor.rootMenue2")),
+        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("settings") }, tr("menuEditor.einstellungen2")),
       ),
       m
         ? el(
             "div",
             { class: "ed-menu-actions" },
-            el("button", { class: "btn", type: "button", title: "Nach oben", disabled: menuIdx === 0, onclick: () => moveMenu(-1) }, "↑"),
-            el("button", { class: "btn", type: "button", title: "Nach unten", disabled: menuIdx >= L.menus.length - 1, onclick: () => moveMenu(1) }, "↓"),
-            el("button", { class: "btn", type: "button", onclick: duplicateMenu }, "Duplizieren"),
-            el("button", { class: "btn danger", type: "button", disabled: L.menus.length <= 1, onclick: deleteMenu }, "Löschen"),
+            el("button", { class: "btn", type: "button", title: tr("menuEditor.nachOben"), disabled: menuIdx === 0, onclick: () => moveMenu(-1) }, "↑"),
+            el("button", { class: "btn", type: "button", title: tr("menuEditor.nachUnten"), disabled: menuIdx >= L.menus.length - 1, onclick: () => moveMenu(1) }, "↓"),
+            el("button", { class: "btn", type: "button", onclick: duplicateMenu }, tr("menuEditor.duplizieren")),
+            el("button", { class: "btn danger", type: "button", disabled: L.menus.length <= 1, onclick: deleteMenu }, tr("menuEditor.loeschen")),
           )
         : null,
       el(
         "p",
         { class: "ed-hint" },
-        "Titelmenüs liegen im Hauptmenü der DVD (Taste „Title“); das erste erscheint beim Einlegen. Root-Menüs gehören zu einem Titel (Taste „Menu“ während der Wiedergabe).",
+        tr("menuEditor.titelmenuesLiegenImHauptmenue"),
       ),
       layersBox,
     ];
@@ -354,9 +355,9 @@ export function mountMenuEditor(opts: EditorOptions) {
   function renderToolbar() {
     const buttons = menu()?.elements.filter(isButton).length ?? 0;
     toolbar.replaceChildren(
-      el("button", { class: "btn", type: "button", onclick: addText }, "+ Text"),
-      el("button", { class: "btn", type: "button", onclick: () => void addImage() }, "+ Bild"),
-      el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: addVideo }, "+ Video"),
+      el("button", { class: "btn", type: "button", onclick: addText }, tr("menuEditor.text")),
+      el("button", { class: "btn", type: "button", onclick: () => void addImage() }, tr("menuEditor.bild")),
+      el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: addVideo }, tr("menuEditor.video")),
       el("span", { class: "ed-spacer" }),
       el(
         "label",
@@ -369,9 +370,9 @@ export function mountMenuEditor(opts: EditorOptions) {
             renderStage();
           },
         }),
-        "Sicherer Bereich",
+        tr("menuEditor.sichererBereich"),
       ),
-      el("span", { class: `ed-counter${buttons > maxButtons(tv) ? " bad" : ""}` }, `${buttons}/${maxButtons(tv)} Buttons`),
+      el("span", { class: `ed-counter${buttons > maxButtons(tv) ? " bad" : ""}` }, tr("menuEditor.buttons", { buttons, maxButtons: maxButtons(tv) })),
     );
   }
 
@@ -429,7 +430,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       });
       const src = e.type === "image" ? imageOf(e.src) : frameOf(e.title, e.startSecs);
       src.then((url) => (img.src = url)).catch(() => inner.classList.add("ed-missing"));
-      if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${titles[e.title - 1]?.label ?? `Titel ${e.title} (fehlt)`}`));
+      if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${titles[e.title - 1]?.label ?? tr("menuEditor.titelFehlt2", { title: e.title })}`));
     }
     const node = el(
       "div",
@@ -651,10 +652,10 @@ export function mountMenuEditor(opts: EditorOptions) {
   function layerName(e: LayoutElement): string {
     if (e.type === "text") {
       const first = e.text.split("\n")[0].trim();
-      return first.length > 28 ? `${first.slice(0, 27)}…` : first || "(leerer Text)";
+      return first.length > 28 ? `${first.slice(0, 27)}…` : first || tr("menuEditor.leererText");
     }
     if (e.type === "image") return e.src.split(/[\\/]/).pop() ?? e.src;
-    return titles[e.title - 1]?.label ?? `Titel ${e.title} (fehlt)`;
+    return titles[e.title - 1]?.label ?? tr("menuEditor.titelFehlt2", { title: e.title });
   }
 
   /** Pulses the stage nodes of `ids` so the user sees where they are. */
@@ -722,7 +723,7 @@ export function mountMenuEditor(opts: EditorOptions) {
             {
               type: "button",
               class: "ed-layer-fold",
-              title: folded ? "Aufklappen" : "Zuklappen",
+              title: folded ? tr("menuEditor.aufklappen") : tr("menuEditor.zuklappen"),
               onclick: () => {
                 if (folded) collapsedGroups.delete(g);
                 else collapsedGroups.add(g);
@@ -740,15 +741,15 @@ export function mountMenuEditor(opts: EditorOptions) {
               onpointerenter: () => hoverStage(ids, true),
               onpointerleave: () => hoverStage(ids, false),
             },
-            `Gruppe ${groupOrder.indexOf(g) + 1} (${members.length})`,
+            tr("menuEditor.gruppe", { groupOrder: groupOrder.indexOf(g) + 1, length: members.length }),
           ),
         ),
       );
       if (!folded) for (const x of members) rows.push(layerRow(x, true));
     }
     layersBox.replaceChildren(
-      el("h3", {}, "Elemente"),
-      rows.length ? el("div", { class: "ed-layer-list" }, ...rows) : el("p", { class: "ed-hint" }, "Noch keine Elemente."),
+      el("h3", {}, tr("menuEditor.elemente")),
+      rows.length ? el("div", { class: "ed-layer-list" }, ...rows) : el("p", { class: "ed-hint" }, tr("menuEditor.nochKeineElemente")),
     );
   }
 
@@ -817,26 +818,26 @@ export function mountMenuEditor(opts: EditorOptions) {
     const groups = new Set(sel.map((e) => e.group ?? null));
     const oneGroup = groups.size === 1 && !groups.has(null);
     return [
-      el("h3", {}, `${sel.length} Elemente ausgewählt`),
+      el("h3", {}, tr("menuEditor.elementeAusgewaehlt", { length: sel.length })),
       el(
         "div",
         { class: "ed-row-buttons" },
-        el("button", { class: "btn", type: "button", disabled: oneGroup, title: "Strg+G", onclick: groupSelection }, "Gruppieren"),
-        el("button", { class: "btn", type: "button", disabled: !sel.some((e) => e.group), title: "Strg+Umschalt+G", onclick: ungroupSelection }, "Gruppe auflösen"),
-        el("button", { class: "btn", type: "button", onclick: () => ((selIds = []), refreshSelection()) }, "Auswahl aufheben"),
+        el("button", { class: "btn", type: "button", disabled: oneGroup, title: tr("menuEditor.strgG"), onclick: groupSelection }, tr("menuEditor.gruppieren")),
+        el("button", { class: "btn", type: "button", disabled: !sel.some((e) => e.group), title: tr("menuEditor.strgUmschaltG"), onclick: ungroupSelection }, tr("menuEditor.gruppeAufloesen")),
+        el("button", { class: "btn", type: "button", onclick: () => ((selIds = []), refreshSelection()) }, tr("menuEditor.auswahlAufheben")),
       ),
       el(
         "div",
         { class: "ed-row-buttons" },
-        el("button", { class: "btn", type: "button", onclick: () => reorder(sel, 1) }, "Nach vorne"),
-        el("button", { class: "btn", type: "button", onclick: () => reorder(sel, -1) }, "Nach hinten"),
-        el("button", { class: "btn", type: "button", onclick: () => addCopies(sel) }, "Duplizieren"),
-        el("button", { class: "btn danger", type: "button", onclick: () => removeElements(sel) }, "Löschen"),
+        el("button", { class: "btn", type: "button", onclick: () => reorder(sel, 1) }, tr("menuEditor.nachVorne")),
+        el("button", { class: "btn", type: "button", onclick: () => reorder(sel, -1) }, tr("menuEditor.nachHinten")),
+        el("button", { class: "btn", type: "button", onclick: () => addCopies(sel) }, tr("menuEditor.duplizieren")),
+        el("button", { class: "btn danger", type: "button", onclick: () => removeElements(sel) }, tr("menuEditor.loeschen")),
       ),
       el(
         "p",
         { class: "ed-hint" },
-        "Ziehen verschiebt alle, Eck-Griffe ändern alle Größen. Umschalt+Klick: Auswahl erweitern · Alt+Klick: nur ein Element (auch in einer Gruppe) · Ziehen auf leerer Fläche: Auswahlrahmen.",
+        tr("menuEditor.ziehenVerschiebtAlleEck"),
       ),
     ];
   }
@@ -846,12 +847,12 @@ export function mountMenuEditor(opts: EditorOptions) {
     const bgKind = bg.video ? "video" : bg.image ? "image" : "color";
     const sound = m.audio;
     return [
-      el("h3", {}, "Menü"),
+      el("h3", {}, tr("menuEditor.menue")),
       group(
-        "Allgemein",
-        row("Name", bind(el("input", { type: "text", value: m.name }) as HTMLInputElement, (v) => (m.name = v), { live: true })),
+        tr("menuEditor.allgemein"),
+        row(tr("menuEditor.name"), bind(el("input", { type: "text", value: m.name }) as HTMLInputElement, (v) => (m.name = v), { live: true })),
         row(
-          "Art",
+          tr("menuEditor.art"),
           select(
             Object.entries(ROLE_LABELS) as [string, string][],
             m.role,
@@ -862,23 +863,23 @@ export function mountMenuEditor(opts: EditorOptions) {
           ),
         ),
         m.role !== "title"
-          ? row("Titel", select(titleOptions(), String(m.title ?? 1), (v) => (m.title = Number(v)), { disabled: titles.length === 0 }))
+          ? row(tr("menuEditor.titel4"), select(titleOptions(), String(m.title ?? 1), (v) => (m.title = Number(v)), { disabled: titles.length === 0 }))
           : null,
         row(
-          "Dauer (s)",
+          tr("menuEditor.dauerS"),
           num(m.durationSecs ?? 20, (v) => (m.durationSecs = Math.max(1, Math.min(600, v))), { min: "1", max: "600", step: "1" }),
         ),
-        el("p", { class: "ed-hint" }, isMoving(m) ? "Bewegtes Menü: wird als Schleife dieser Länge kodiert." : "Standbild (keine Videos, kein Ton)."),
+        el("p", { class: "ed-hint" }, isMoving(m) ? tr("menuEditor.bewegtesMenueWirdAls") : tr("menuEditor.standbildKeineVideosKein")),
       ),
       group(
-        "Hintergrund",
+        tr("menuEditor.hintergrund"),
         row(
-          "Art",
+          tr("menuEditor.art"),
           select(
             [
-              ["color", "Farbe"],
-              ["image", "Bild"],
-              ["video", "Video eines Titels"],
+              ["color", tr("menuEditor.farbe")],
+              ["image", tr("menuEditor.bild2")],
+              ["video", tr("menuEditor.videoEinesTitels")],
             ],
             bgKind,
             (v) => {
@@ -901,18 +902,18 @@ export function mountMenuEditor(opts: EditorOptions) {
             },
           ),
         ),
-        row("Farbe", bind(el("input", { type: "color", value: bg.color }) as HTMLInputElement, (v) => (bg.color = v.toUpperCase()), { live: true })),
+        row(tr("menuEditor.farbe"), bind(el("input", { type: "color", value: bg.color }) as HTMLInputElement, (v) => (bg.color = v.toUpperCase()), { live: true })),
         row(
-          "Abdunkeln",
+          tr("menuEditor.abdunkeln"),
           select(OVERLAY_LABELS, bg.gradientOverlay ?? "none", (v) => (bg.gradientOverlay = v as GradientOverlay)),
         ),
-        bg.image ? row("Bild", el("span", { class: "ed-path", title: bg.image }, bg.image.split(/[\\/]/).pop() ?? "")) : null,
+        bg.image ? row(tr("menuEditor.bild2"), el("span", { class: "ed-path", title: bg.image }, bg.image.split(/[\\/]/).pop() ?? "")) : null,
         bg.video
-          ? row("Titel", select(titleOptions(), String(bg.video.title), (v) => (bg.video = { ...bg.video!, title: Number(v) })))
+          ? row(tr("menuEditor.titel4"), select(titleOptions(), String(bg.video.title), (v) => (bg.video = { ...bg.video!, title: Number(v) })))
           : null,
         bg.video
           ? row(
-              "Start (s)",
+              tr("menuEditor.startS"),
               // Without an explicit start the engine uses 10 % of the runtime (max. 5 min).
               num(
                 bg.video.startSecs ?? Math.round(Math.min((titles[bg.video.title - 1]?.durationSecs ?? 0) * 0.1, 300)),
@@ -923,7 +924,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           : null,
         bgKind !== "color"
           ? row(
-              "Weichzeichner",
+              tr("menuEditor.weichzeichner"),
               bind(el("input", { type: "range", min: "0", max: "50", step: "1", value: String(bg.blur) }) as HTMLInputElement, (v) => (bg.blur = Number(v)), {
                 live: true,
               }),
@@ -931,14 +932,14 @@ export function mountMenuEditor(opts: EditorOptions) {
           : null,
       ),
       group(
-        "Ton",
+        tr("menuEditor.ton"),
         row(
-          "Quelle",
+          tr("menuEditor.quelle"),
           select(
             [
-              ["none", "Stumm"],
-              ...titles.map((_, i): [string, string] => [`title:${i + 1}`, `Ton von Titel ${titleName(i + 1)}`]),
-              ["file", "Audiodatei …"],
+              ["none", tr("menuEditor.stumm")],
+              ...titles.map((_, i): [string, string] => [`title:${i + 1}`, tr("menuEditor.tonVonTitel", { titleName: titleName(i + 1) })]),
+              ["file", tr("menuEditor.audiodatei")],
             ],
             sound.type === "title" ? `title:${sound.title}` : sound.type,
             (v) => {
@@ -955,19 +956,19 @@ export function mountMenuEditor(opts: EditorOptions) {
             },
           ),
         ),
-        sound.type === "file" ? row("Datei", el("span", { class: "ed-path", title: sound.path }, sound.path.split(/[\\/]/).pop() ?? "")) : null,
+        sound.type === "file" ? row(tr("menuEditor.datei"), el("span", { class: "ed-path", title: sound.path }, sound.path.split(/[\\/]/).pop() ?? "")) : null,
       ),
       group(
-        "Button-Markierung (alle Menüs)",
-        row("Ausgewählt", bind(el("input", { type: "color", value: L.highlight.color }) as HTMLInputElement, (v) => (L.highlight.color = v.toUpperCase()), { live: true })),
-        row("Aktiviert", bind(el("input", { type: "color", value: L.highlight.selectColor }) as HTMLInputElement, (v) => (L.highlight.selectColor = v.toUpperCase()), { live: true })),
+        tr("menuEditor.buttonMarkierungAlleMenues"),
+        row(tr("menuEditor.ausgewaehlt"), bind(el("input", { type: "color", value: L.highlight.color }) as HTMLInputElement, (v) => (L.highlight.color = v.toUpperCase()), { live: true })),
+        row(tr("menuEditor.aktiviert"), bind(el("input", { type: "color", value: L.highlight.selectColor }) as HTMLInputElement, (v) => (L.highlight.selectColor = v.toUpperCase()), { live: true })),
         row(
-          "Deckkraft",
+          tr("menuEditor.deckkraft"),
           bind(el("input", { type: "range", min: "0.2", max: "1", step: "0.05", value: String(L.highlight.opacity) }) as HTMLInputElement, (v) => (L.highlight.opacity = Number(v)), {
             live: true,
           }),
         ),
-        el("p", { class: "ed-hint" }, "Text-Buttons leuchten in Schriftform auf, Bild- und Video-Buttons mit einem Rahmen."),
+        el("p", { class: "ed-hint" }, tr("menuEditor.textButtonsLeuchtenIn")),
       ),
     ];
   }
@@ -984,16 +985,16 @@ export function mountMenuEditor(opts: EditorOptions) {
     };
     const out: HTMLElement[] = [
       row(
-        "Aktion",
+        tr("menuEditor.aktion"),
         select(
           [
-            ["none", "Keine (kein Button)"],
-            ["playTitle", "Titel abspielen"],
-            ["playChapter", "Kapitel abspielen"],
-            ["menu", "Menü öffnen"],
-            ["playAll", "Alle Titel abspielen"],
+            ["none", tr("menuEditor.keineKeinButton")],
+            ["playTitle", tr("menuEditor.titelAbspielen")],
+            ["playChapter", tr("menuEditor.kapitelAbspielen")],
+            ["menu", tr("menuEditor.menueOeffnen")],
+            ["playAll", tr("menuEditor.alleTitelAbspielen")],
             // Streams belong to a titleset: only in a title's root/settings menus.
-            ...(streamTitle ? ([["setAudio", "Tonspur wählen"], ["setSubtitle", "Untertitel wählen"]] as [string, string][]) : []),
+            ...(streamTitle ? ([["setAudio", tr("menuEditor.tonspurWaehlen")], ["setSubtitle", tr("menuEditor.untertitelWaehlen")]] as [string, string][]) : []),
           ],
           type,
           (v) => {
@@ -1018,13 +1019,13 @@ export function mountMenuEditor(opts: EditorOptions) {
       ),
     ];
     if (!streamTitle) {
-      out.push(el("p", { class: "ed-hint" }, "Ton- und Untertitelwahl gibt es nur in Root- und Einstellungsmenüs eines Titels."));
+      out.push(el("p", { class: "ed-hint" }, tr("menuEditor.tonUndUntertitelwahlGibt")));
     }
     if (a?.type === "setAudio" && streamTitle) {
       const tracks = streamTitle.audioTracks ?? [];
       out.push(
         row(
-          "Tonspur",
+          tr("menuEditor.tonspur2"),
           select(
             tracks.map((x): [string, string] => [String(x.source), x.label]),
             String(a.source),
@@ -1038,9 +1039,9 @@ export function mountMenuEditor(opts: EditorOptions) {
       const subs = streamTitle.subtitleTracks ?? [];
       out.push(
         row(
-          "Untertitel",
+          tr("menuEditor.untertitel2"),
           select(
-            [["off", "Aus"], ...subs.map((x): [string, string] => [String(x.source), x.label])],
+            [["off", tr("menuEditor.aus")], ...subs.map((x): [string, string] => [String(x.source), x.label])],
             a.source === null ? "off" : String(a.source),
             (v) => setAction({ type: "setSubtitle", source: v === "off" ? null : Number(v) }),
           ),
@@ -1050,7 +1051,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (a?.type === "playTitle" || a?.type === "playChapter") {
       out.push(
         row(
-          "Titel",
+          tr("menuEditor.titel4"),
           select(titleOptions(), String(a.title), (v) => {
             if (a.type === "playChapter") setAction({ type: "playChapter", title: Number(v), chapter: 1 });
             else setAction({ type: "playTitle", title: Number(v) });
@@ -1062,11 +1063,11 @@ export function mountMenuEditor(opts: EditorOptions) {
       const n = titles[a.title - 1]?.chapters ?? 1;
       out.push(
         row(
-          "Kapitel",
+          tr("menuEditor.kapitel"),
           select(
             Array.from({ length: Math.max(1, n) }, (_, i): [string, string] => {
               const name = chapterLabel(titles[a.title - 1], i + 1);
-              return [String(i + 1), name === `Kapitel ${i + 1}` ? name : `${i + 1}: ${name}`];
+              return [String(i + 1), name === tr("menuEditor.kapitel2", { i: i + 1 }) ? name : `${i + 1}: ${name}`];
             }),
             String(a.chapter),
             (v) => setAction({ type: "playChapter", title: a.title, chapter: Number(v) }),
@@ -1077,11 +1078,11 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (a?.type === "menu") {
       out.push(
         row(
-          "Ziel",
+          tr("menuEditor.ziel"),
           select(
             L.menus.map((m): [string, string] => [
               m.id,
-              `${m.name}${m.role === "title" ? "" : ` (${m.role === "root" ? "Root" : "Einstellungen"}, Titel ${m.title})`}`,
+              `${m.name}${m.role === "title" ? "" : tr("menuEditor.titel5", { m: m.role === "root" ? "Root" : tr("menuEditor.einstellungen"), title: m.title })}`,
             ]),
             a.menu,
             (v) => setAction({ type: "menu", menu: v }),
@@ -1109,34 +1110,34 @@ export function mountMenuEditor(opts: EditorOptions) {
             renderAll();
           },
         }),
-        "Eigene Farben",
+        tr("menuEditor.eigeneFarben"),
       ),
     ];
     if (own) {
       out.push(
-        row("Ausgewählt", bind(el("input", { type: "color", value: own.color }) as HTMLInputElement, (v) => (own.color = v.toUpperCase()), { live: true })),
-        row("Aktiviert", bind(el("input", { type: "color", value: own.selectColor }) as HTMLInputElement, (v) => (own.selectColor = v.toUpperCase()), { live: true })),
-        el("p", { class: "ed-hint" }, "Eine DVD-Menüseite zeigt höchstens 3 verschiedene Farbpaare; Buttons mit derselben Markierungsfarbe brauchen dieselbe Aktivierungsfarbe."),
+        row(tr("menuEditor.ausgewaehlt"), bind(el("input", { type: "color", value: own.color }) as HTMLInputElement, (v) => (own.color = v.toUpperCase()), { live: true })),
+        row(tr("menuEditor.aktiviert"), bind(el("input", { type: "color", value: own.selectColor }) as HTMLInputElement, (v) => (own.selectColor = v.toUpperCase()), { live: true })),
+        el("p", { class: "ed-hint" }, tr("menuEditor.eineDvdMenueseiteZeigt")),
       );
     }
     return out;
   }
 
   function elementProps(m: CustomMenu, e: LayoutElement): HTMLElement[] {
-    const kind = e.type === "text" ? "Text" : e.type === "image" ? "Bild" : "Video";
+    const kind = e.type === "text" ? tr("menuEditor.text2") : e.type === "image" ? tr("menuEditor.bild2") : tr("menuEditor.video2");
     const typeGroup: Child[] = [];
     if (e.type === "text") {
       const t = e;
       typeGroup.push(
         group(
-          "Text",
+          tr("menuEditor.text2"),
           bind(el("textarea", { rows: 3, class: "ed-textarea" }, t.text) as HTMLTextAreaElement, (v) => (t.text = v), { live: true }),
-          row("Schrift", select(FONTS.map((f): [string, string] => [f, f]), t.font, (v) => (t.font = v))),
-          row("Größe (px)", num(t.size, (v) => (t.size = Math.max(4, Math.min(300, v))), { min: "4", max: "300", step: "1" })),
-          row("Farbe", bind(el("input", { type: "color", value: t.color }) as HTMLInputElement, (v) => (t.color = v.toUpperCase()), { live: true })),
+          row(tr("menuEditor.schrift"), select(FONTS.map((f): [string, string] => [f, f]), t.font, (v) => (t.font = v))),
+          row(tr("menuEditor.groessePx"), num(t.size, (v) => (t.size = Math.max(4, Math.min(300, v))), { min: "4", max: "300", step: "1" })),
+          row(tr("menuEditor.farbe"), bind(el("input", { type: "color", value: t.color }) as HTMLInputElement, (v) => (t.color = v.toUpperCase()), { live: true })),
           el(
             "div",
-            { class: "ed-seg", role: "group", "aria-label": "Ausrichtung" },
+            { class: "ed-seg", role: "group", "aria-label": tr("menuEditor.ausrichtung") },
             ...(["left", "center", "right"] as const).map((al) =>
               el(
                 "button",
@@ -1150,7 +1151,7 @@ export function mountMenuEditor(opts: EditorOptions) {
                     renderProps();
                   },
                 },
-                al === "left" ? "Links" : al === "center" ? "Mitte" : "Rechts",
+                al === "left" ? tr("menuEditor.links") : al === "center" ? tr("menuEditor.mitte") : tr("menuEditor.rechts"),
               ),
             ),
           ),
@@ -1158,10 +1159,10 @@ export function mountMenuEditor(opts: EditorOptions) {
             "div",
             { class: "ed-checks" },
             ...([
-              ["bold", "Fett"],
-              ["italic", "Kursiv"],
-              ["shadow", "Schatten"],
-              ["wrap", "Zeilenumbruch"],
+              ["bold", tr("menuEditor.fett")],
+              ["italic", tr("menuEditor.kursiv")],
+              ["shadow", tr("menuEditor.schatten")],
+              ["wrap", tr("menuEditor.zeilenumbruch")],
             ] as const).map(([k, label]) =>
               el(
                 "label",
@@ -1185,8 +1186,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       const img = e;
       typeGroup.push(
         group(
-          "Bild",
-          row("Datei", el("span", { class: "ed-path", title: img.src }, img.src.split(/[\\/]/).pop() ?? "")),
+          tr("menuEditor.bild2"),
+          row(tr("menuEditor.datei"), el("span", { class: "ed-path", title: img.src }, img.src.split(/[\\/]/).pop() ?? "")),
           el(
             "button",
             {
@@ -1201,20 +1202,20 @@ export function mountMenuEditor(opts: EditorOptions) {
                 }
               },
             },
-            "Anderes Bild …",
+            tr("menuEditor.anderesBild"),
           ),
-          row("Anpassung", select(FIT_LABELS, img.fit, (v) => (img.fit = v as Fit))),
+          row(tr("menuEditor.anpassung"), select(FIT_LABELS, img.fit, (v) => (img.fit = v as Fit))),
         ),
       );
     } else {
       const v = e;
       typeGroup.push(
         group(
-          "Video",
-          row("Titel", select(titleOptions(), String(v.title), (x) => (v.title = Number(x)))),
-          row("Start (s)", num(v.startSecs ?? Math.round(Math.min((titles[v.title - 1]?.durationSecs ?? 0) * 0.1, 300)), (x) => (v.startSecs = Math.max(0, x)), { min: "0", step: "1" })),
-          row("Anpassung", select(FIT_LABELS, v.fit, (x) => (v.fit = x as Fit))),
-          el("p", { class: "ed-hint" }, "Das Video läuft im Menü als Schleife; ein Bild zeigt die Startposition."),
+          tr("menuEditor.video2"),
+          row(tr("menuEditor.titel4"), select(titleOptions(), String(v.title), (x) => (v.title = Number(x)))),
+          row(tr("menuEditor.startS"), num(v.startSecs ?? Math.round(Math.min((titles[v.title - 1]?.durationSecs ?? 0) * 0.1, 300)), (x) => (v.startSecs = Math.max(0, x)), { min: "0", step: "1" })),
+          row(tr("menuEditor.anpassung"), select(FIT_LABELS, v.fit, (x) => (v.fit = x as Fit))),
+          el("p", { class: "ed-hint" }, tr("menuEditor.dasVideoLaeuftIm")),
         ),
       );
     }
@@ -1222,19 +1223,19 @@ export function mountMenuEditor(opts: EditorOptions) {
     return [
       el("h3", {}, kind),
       ...(typeGroup as HTMLElement[]),
-      group("Button", ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...buttonColorControls(e)),
+      group(tr("menuEditor.button2"), ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...buttonColorControls(e)),
       group(
-        "Position & Größe",
+        tr("menuEditor.positionGroesse"),
         el(
           "div",
           { class: "ed-grid2" },
           row("X", num(e.x, (v) => ((e.x = v), clampBox(e)), { step: "1" })),
           row("Y", num(e.y, (v) => ((e.y = v), clampBox(e)), { step: "1" })),
-          row("Breite", num(e.w, (v) => ((e.w = v), clampBox(e)), { step: "1", min: "8" })),
-          row("Höhe", num(e.h, (v) => ((e.h = v), clampBox(e)), { step: "1", min: "8" })),
+          row(tr("menuEditor.breite"), num(e.w, (v) => ((e.w = v), clampBox(e)), { step: "1", min: "8" })),
+          row(tr("menuEditor.hoehe"), num(e.h, (v) => ((e.h = v), clampBox(e)), { step: "1", min: "8" })),
         ),
         row(
-          "Drehung",
+          tr("menuEditor.drehung"),
           select(
             [
               ["0", "0°"],
@@ -1244,21 +1245,21 @@ export function mountMenuEditor(opts: EditorOptions) {
             ],
             String(e.rotation),
             (v) => (e.rotation = Number(v)),
-            { disabled: isButton(e), title: isButton(e) ? "Buttons können nicht gedreht werden (DVD-Hitboxen sind Rechtecke)" : undefined },
+            { disabled: isButton(e), title: isButton(e) ? tr("menuEditor.buttonsKoennenNichtGedreht") : undefined },
           ),
         ),
         row(
-          "Deckkraft",
+          tr("menuEditor.deckkraft"),
           bind(el("input", { type: "range", min: "0.1", max: "1", step: "0.05", value: String(e.opacity) }) as HTMLInputElement, (v) => (e.opacity = Number(v)), { live: true }),
         ),
       ),
       el(
         "div",
         { class: "ed-row-buttons" },
-        el("button", { class: "btn", type: "button", disabled: index === m.elements.length - 1, onclick: () => reorder([e], 1) }, "Nach vorne"),
-        el("button", { class: "btn", type: "button", disabled: index === 0, onclick: () => reorder([e], -1) }, "Nach hinten"),
-        el("button", { class: "btn", type: "button", onclick: () => addCopies([e]) }, "Duplizieren"),
-        el("button", { class: "btn danger", type: "button", onclick: () => removeElements([e]) }, "Löschen"),
+        el("button", { class: "btn", type: "button", disabled: index === m.elements.length - 1, onclick: () => reorder([e], 1) }, tr("menuEditor.nachVorne")),
+        el("button", { class: "btn", type: "button", disabled: index === 0, onclick: () => reorder([e], -1) }, tr("menuEditor.nachHinten")),
+        el("button", { class: "btn", type: "button", onclick: () => addCopies([e]) }, tr("menuEditor.duplizieren")),
+        el("button", { class: "btn danger", type: "button", onclick: () => removeElements([e]) }, tr("menuEditor.loeschen")),
       ),
     ];
   }
@@ -1272,20 +1273,20 @@ export function mountMenuEditor(opts: EditorOptions) {
         el(
           "li",
           { class: "warn" },
-          `Neuer Entwurf für die ${titles.length} aktuellen Videos – das gespeicherte Layout war für andere Videos („Rückgängig“ holt es zurück).`,
+          tr("menuEditor.neuerEntwurfFuerDie", { length: titles.length }),
         ),
       );
     }
     if (!isBdFrame(tv) && H() !== tvCanvas) {
-      notes.push(el("li", { class: "warn" }, `Layout für 720×${H()} entworfen – wird für ${tv} auf 720×${tvCanvas} skaliert.`));
+      notes.push(el("li", { class: "warn" }, tr("menuEditor.layoutFuer720Entworfen", { H: H(), tv, tvCanvas })));
     }
     if (errors.length === 0) {
-      notes.push(el("li", { class: "ok" }, `✓ Layout ist gültig (${L.menus.length} Menüs).`));
+      notes.push(el("li", { class: "ok" }, tr("menuEditor.layoutIstGueltigMenues", { length: L.menus.length })));
     } else {
       for (const e of errors.slice(0, 8)) notes.push(el("li", { class: "error" }, e));
-      if (errors.length > 8) notes.push(el("li", { class: "error" }, `… und ${errors.length - 8} weitere`));
+      if (errors.length > 8) notes.push(el("li", { class: "error" }, tr("menuEditor.andMore", { n: errors.length - 8 })));
     }
-    status.replaceChildren(el("ul", {}, ...notes), el("span", { class: "ed-keys" }, "Ziehen: verschieben · Ecken: Größe (Umschalt: Seitenverhältnis) · Umschalt+Klick: mehrere · Alt+Klick: einzeln · Pfeile: 1 px (Umschalt: 10) · Entf: löschen · Strg+D/C/X/V · Strg+G: gruppieren · Strg+Z: rückgängig"));
+    status.replaceChildren(el("ul", {}, ...notes), el("span", { class: "ed-keys" }, tr("menuEditor.keysHint")));
   }
 
   let checkTimer: number | undefined;
@@ -1316,7 +1317,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     renderAll();
   }
   function addText() {
-    addElement(newText(Math.round(W() / 2 - 120), Math.round(H() / 2 - 25), 240, 50, "Neuer Text", { size: 28, wrap: true }));
+    addElement(newText(Math.round(W() / 2 - 120), Math.round(H() / 2 - 25), 240, 50, tr("menuEditor.neuerText"), { size: 28, wrap: true }));
   }
   async function addImage() {
     const p = await chooseFile(IMAGE_FILTER);
@@ -1424,7 +1425,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   function addMenu(role: CustomMenu["role"]) {
     remember();
     const n = L.menus.filter((m) => m.role === role).length + 1;
-    const name = role === "title" ? `Titelmenü ${n}` : role === "root" ? `Root-Menü ${n}` : `Einstellungen ${n}`;
+    const name = role === "title" ? tr("menuEditor.titelmenue3", { n }) : role === "root" ? tr("menuEditor.rootMenue3", { n }) : tr("menuEditor.einstellungen3", { n });
     const m = emptyMenu(name, role, role === "title" ? null : 1);
     L.menus.push(m);
     menuIdx = L.menus.length - 1;
@@ -1443,7 +1444,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     remember();
     const copy: CustomMenu = structuredClone(menu());
     copy.id = newId("m");
-    copy.name = `${copy.name} (Kopie)`;
+    copy.name = tr("menuEditor.copySuffix", { name: copy.name });
     copy.elements = copy.elements.map((e) => ({ ...e, id: newId("d") }));
     L.menus.splice(menuIdx + 1, 0, copy);
     menuIdx += 1;
@@ -1465,7 +1466,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       const p = await open({ multiple: false, directory: false, filters });
       return typeof p === "string" ? p : null;
     } catch (e) {
-      flash(`Dateiauswahl fehlgeschlagen: ${e}`, "error");
+      flash(tr("menuEditor.dateiauswahlFehlgeschlagen", { e }), "error");
       return null;
     }
   }
@@ -1500,9 +1501,9 @@ export function mountMenuEditor(opts: EditorOptions) {
       menuIdx = 0;
       selIds = [];
       renderAll();
-      flash(`Geladen: ${p}`, "ok");
+      flash(tr("menuEditor.geladen", { p }), "ok");
     } catch (e) {
-      flash(`Laden fehlgeschlagen: ${e}`, "error");
+      flash(tr("menuEditor.ladenFehlgeschlagen", { e }), "error");
     }
   }
   async function saveFile() {
@@ -1511,7 +1512,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       p = await save({ filters: LAYOUT_FILTER, defaultPath: "menue-layout.json" });
     } catch (e) {
       // e.g. the dialog is not permitted (capability) – never fail silently.
-      flash(`Speichern-Dialog konnte nicht geöffnet werden: ${e}`, "error");
+      flash(tr("menuEditor.speichernDialogKonnteNicht", { e }), "error");
       return;
     }
     if (typeof p !== "string" || !p) return; // cancelled
@@ -1519,9 +1520,9 @@ export function mountMenuEditor(opts: EditorOptions) {
     try {
       await saveLayout(path, L);
       dirty = false;
-      flash(`Gespeichert: ${path}`, "ok");
+      flash(tr("menuEditor.gespeichert", { path }), "ok");
     } catch (e) {
-      flash(`Speichern fehlgeschlagen: ${e}`, "error");
+      flash(tr("menuEditor.speichernFehlgeschlagen", { e }), "error");
     }
   }
 
@@ -1532,7 +1533,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (result.length > 0) return;
     opts.onApply(structuredClone(L));
     dirty = false;
-    flash("Übernommen.", "ok");
+    flash(tr("menuEditor.uebernommen"), "ok");
     renderHeader();
   }
 

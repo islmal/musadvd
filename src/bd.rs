@@ -29,6 +29,8 @@ use crate::dvd::{
 };
 use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, EncodePhase, VideoProcessing, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
+use crate::i18n::{tr, UiLang};
+use crate::tf;
 use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
 use crate::tools::{ToolError, Toolchain};
@@ -139,6 +141,7 @@ struct BdTitle {
     rate: BdRate,
     audio_mode: AudioMode,
     track_label_mode: probe::TrackLabelMode,
+    ui_lang: UiLang,
     video: VideoProcessing,
     audio_target: AudioTarget,
     loudnorm: bool,
@@ -168,7 +171,7 @@ impl BdTitle {
 
     /// Menu/report label of each selected audio stream, with the channel layout of its disc slot.
     fn audio_labels(&self, layout: &Layout) -> Vec<String> {
-        let all = probe::audio_labels(&self.info, self.track_label_mode);
+        let all = probe::audio_labels(&self.info, self.track_label_mode, self.ui_lang);
         let outs = self.audio_outs(layout);
         self.audio
             .iter()
@@ -178,7 +181,7 @@ impl BdTitle {
     }
 
     fn subtitle_labels(&self) -> Vec<String> {
-        let all = probe::subtitle_labels(&self.info, self.track_label_mode);
+        let all = probe::subtitle_labels(&self.info, self.track_label_mode, self.ui_lang);
         self.subs.iter().map(|&i| all[i].clone()).collect()
     }
 }
@@ -403,7 +406,7 @@ async fn build_menus(
 
     cancel.check()?;
     log(Event::Phase(BuildPhase::MenuEncoding));
-    log(Event::Step(format!("{count} Menüs kodieren, davon {motion} bewegt, {intros} mit Intro ({jobs} parallel)")));
+    log(Event::Step(tf!(opts.ui_lang, "bd_menus_encoding", count = count, motion = motion, intros = intros, jobs = jobs)));
     let mut encode: Vec<Job<()>> = Vec::new();
     for (i, page) in pages.iter().enumerate() {
         if let Some(ig) = &page.igs {
@@ -448,7 +451,7 @@ async fn build_menus(
     let menu_jobs = if motion > 0 { jobs.min(MOTION_MENU_MAX_JOBS) } else { jobs };
     run_limited(menu_jobs.min(count).max(1), encode, cancel, |e| {
         if let JobEvent::Finished { finished, total, .. } = e {
-            log(Event::Progress { label: format!("Menüs kodieren ({finished}/{total})"), fraction: finished as f64 / total as f64 });
+            log(Event::Progress { label: tf!(opts.ui_lang, "bd_menu_progress", done = finished, total = total), fraction: finished as f64 / total as f64 });
         }
     })
     .await?;
@@ -505,10 +508,11 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             "tsMuxeR nicht gefunden – für Blu-ray wird bin/tsMuxeR.exe benötigt (neben der Anwendung oder im PATH)".into(),
         )));
     }
-    log(Event::Step(format!(
-        "Werkzeuge: ffmpeg {}, tsMuxeR {}",
-        tools.ffmpeg.display(),
-        tools.tsmuxer.as_ref().map_or_else(String::new, |p| p.display().to_string())
+    log(Event::Step(tf!(
+        opts.ui_lang,
+        "tools_bd",
+        ffmpeg = tools.ffmpeg.display(),
+        tsmuxer = tools.tsmuxer.as_ref().map_or_else(String::new, |p| p.display().to_string())
     )));
     for note in &tools.notes {
         warn(log, note.clone());
@@ -531,7 +535,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     log(Event::Phase(BuildPhase::Probe));
     let mut titles: Vec<BdTitle> = Vec::new();
     for (i, input) in opts.inputs.iter().enumerate() {
-        log(Event::Step(format!("Analysiere {}", input.display())));
+        log(Event::Step(tf!(opts.ui_lang, "analyzing", path = input.display())));
         let mut info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
         if info.video.is_none() {
             return Err(BuildError::Internal(format!("{}: enthält keine Videospur", input.display())));
@@ -546,14 +550,14 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         }
         apply_selection(&mut info, &sel, &label)?;
         if info.video.as_ref().is_some_and(|v| v.crop.is_some()) && subs.iter().any(|&s| info.subtitles[s].kind == SubtitleKind::Bitmap) {
-            warn(log, format!("{label}: Bild-Untertitel (PGS) behalten bei Zuschnitt ihre Position im Originalbild und können verschoben erscheinen"));
+            warn(log, tf!(opts.ui_lang, "bd_pgs_crop_warn", label = label));
         }
         // Only SRT-like text and PGS can go on a BD here.
         subs.retain(|&s| {
             let s = &info.subtitles[s];
             let ok = s.kind == SubtitleKind::Text || s.codec == "hdmv_pgs_subtitle";
             if !ok {
-                warn(log, format!("{label}: Untertitel #{} ({}) wird auf Blu-ray nicht unterstützt, übersprungen", s.index, s.codec));
+                warn(log, tf!(opts.ui_lang, "bd_sub_unsupported", label = label, index = s.index, codec = s.codec));
             }
             ok
         });
@@ -571,6 +575,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             rate: bd_frame_rate(&[fps], opts.tv_standard, opts.resolution),
             audio_mode: opts.audio_mode,
             track_label_mode: opts.track_label_mode,
+            ui_lang: opts.ui_lang,
             video: opts.video,
             audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
             loudnorm: opts.loudnorm,
@@ -599,12 +604,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     for t in &titles {
         for (k, &s) in t.subs.iter().enumerate() {
             if k < layout.subs.len() && t.sub_for(&layout, k).is_none() {
-                warn(log, format!(
-                    "{}: Untertitel #{} hat eine andere Art (Text/Bild) als Spur {} der Disc und wird übersprungen",
-                    t.label,
-                    t.info.subtitles[s].index,
-                    k + 1
-                ));
+                warn(log, tf!(opts.ui_lang, "bd_sub_kind_mismatch", label = t.label, index = t.info.subtitles[s].index, track = k + 1));
             }
         }
     }
@@ -613,21 +613,24 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // Menus (and their clips) use the first title's rate.
     let menu_rate = titles[0].rate;
     let medium_name = if opts.disc.is_avchd() { "AVCHD" } else { "Blu-ray" };
-    log(Event::Step(format!(
-        "{medium_name} {} {}×{}, {} Playlist(s) mit eigener Bildrate; {} Tonspur(en), {} Untertitelspur(en)",
-        resolution.label(),
-        resolution.frame_size(tv).0,
-        resolution.frame_size(tv).1,
-        titles.len(),
-        layout.audio_langs.len(),
-        layout.subs.len()
+    log(Event::Step(tf!(
+        opts.ui_lang,
+        "bd_summary",
+        medium = medium_name,
+        res = resolution.label(),
+        w = resolution.frame_size(tv).0,
+        h = resolution.frame_size(tv).1,
+        n = titles.len(),
+        audio = layout.audio_langs.len(),
+        subs = layout.subs.len()
     )));
     for t in &titles {
-        log(Event::Step(format!(
-            "{}: {:.3} Bilder/s{}",
-            t.label,
-            t.rate.fps_f64(),
-            if t.rate.fake_interlaced { " (als 1080i markiert)" } else { "" }
+        log(Event::Step(tf!(
+            opts.ui_lang,
+            "bd_title_fps",
+            title = t.label,
+            fps = format!("{:.3}", t.rate.fps_f64()),
+            suffix = if t.rate.fake_interlaced { tr(opts.ui_lang, "bd_fake_interlaced") } else { "" }
         )));
     }
 
@@ -638,24 +641,24 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let disc_layout = &layout;
     let menu_layout = match (&opts.custom_layout, opts.template.as_os_str().is_empty()) {
         (Some(layout), _) => {
-            log(Event::Step(format!("Eigenes Menü-Layout: {} Menü(s)", layout.menus.len())));
+            log(Event::Step(tf!(opts.ui_lang, "custom_layout", n = layout.menus.len())));
             Some(layout)
         }
         (None, false) => {
             let tpl = crate::template::Template::load(&opts.template)
                 .map_err(|e| BuildError::Template(format!("Menü-Vorlage {}: {e}", opts.template.display())))?;
             if tpl.pages.is_empty() {
-                log(Event::Step("Menü-Vorlage ohne Seiten: Blu-ray ohne Menü".into()));
+                log(Event::Step(tr(opts.ui_lang, "bd_template_no_pages").into()));
                 None
             } else {
                 let aspect = if opts.aspect_policy == crate::dvd::AspectPolicy::Standard { Aspect::Standard } else { Aspect::Wide };
-                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles, &groups, &layout), &vec![None; groups.len()], &chapter_samples(&titles, &groups), aspect)
+                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles, &groups, &layout), &vec![None; groups.len()], &chapter_samples(&titles, &groups), aspect, &opts.chapters, opts.ui_lang)
                     .map_err(|e| BuildError::Template(e.to_string()))?;
                 for w in notes {
                     warn(log, w);
                 }
                 template_layout = built;
-                log(Event::Step(format!("Menü-Vorlage: {} Menü(s)", template_layout.menus.len())));
+                log(Event::Step(tf!(opts.ui_lang, "bd_template_menus", n = template_layout.menus.len())));
                 Some(&template_layout)
             }
         }
@@ -663,7 +666,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     };
     let menus = match menu_layout {
         Some(layout) => {
-            log(Event::Eta(Eta::new(JobPhase::Menus, None, None, None)));
+            log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Menus, None, None, None)));
             let stage = build_menus(&tools, layout, &titles, &groups, &disc_layout, opts, menu_rate, &work, heavy_jobs, log).await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
@@ -671,8 +674,8 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             Some(stage)
         }
         None => {
-            log(Event::Eta(Eta { phase_label: "Kein Menü (Blu-ray)".into(), ..Eta::new(JobPhase::Menus, None, None, None) }));
-            log(Event::Step("Blu-ray: ohne Menü (Autoplay)".into()));
+            log(Event::Eta(Eta { phase_label: tr(opts.ui_lang, "phase_bd_no_menu").into(), ..Eta::new(JobPhase::Menus, None, None, None) }));
+            log(Event::Step(tr(opts.ui_lang, "bd_no_menu").into()));
             None
         }
     };
@@ -691,13 +694,17 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }
     let profile = match opts.encoding_profile {
         EncodingProfile::Auto => String::new(),
-        p => format!(", Profil {} ≤ {} kbps", p.label(), p.max_video_kbps_for(opts.disc)),
+        p => tf!(opts.ui_lang, "bitrate_profile", profile = p.label(), kbps = p.max_video_kbps_for(opts.disc)),
     };
-    log(Event::Step(format!(
-        "Bitrate: {} kbps Video (Laufzeit {:.0} min, Ø Audio {avg_audio} kbps, Menüs {menu_mb:.1} MB, Ziel {} MB{profile})",
-        plan.video_kbps,
-        total_secs / 60.0,
-        opts.disc.target_mb()
+    log(Event::Step(tf!(
+        opts.ui_lang,
+        "bitrate",
+        kbps = plan.video_kbps,
+        min = format!("{:.0}", total_secs / 60.0),
+        audio = avg_audio,
+        menus = format!("{menu_mb:.1}"),
+        target = opts.disc.target_mb(),
+        profile = profile
     )));
 
     // 5. Encode titles -----------------------------------------------------------------------
@@ -715,7 +722,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         match tools.probe_nvenc().await {
             Ok(()) => true,
             Err(reason) => {
-                warn(log, format!("Video-Encoder: x264 – NVENC nicht verfügbar: {reason}"));
+                warn(log, tf!(opts.ui_lang, "bd_nvenc_unavailable", reason = reason));
                 false
             }
         }
@@ -724,10 +731,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         titles.iter().map(|t| if nvenc_ok && !t.rate.fake_interlaced { BdEncoder::Nvenc } else { BdEncoder::X264 }).collect();
     if nvenc_ok {
         let nv = encoders.iter().filter(|e| **e == BdEncoder::Nvenc).count();
-        log(Event::Step(format!("Video-Encoder: NVENC (h264_nvenc) für {nv} von {count} Titeln, sonst x264 (1080i-Bildraten)")));
+        log(Event::Step(tf!(opts.ui_lang, "bd_encoder_nvenc", nv = nv, count = count)));
     }
     let encode_jobs = if encoders.iter().all(|e| *e == BdEncoder::Nvenc) { heavy_jobs.min(NVENC_MAX_JOBS) } else { heavy_jobs }.min(count);
-    log(Event::Step(format!("Kodiere {count} Titel (H.264, {passes}, {encode_jobs} parallel, {} kbps Video)", plan.video_kbps)));
+    log(Event::Step(tf!(opts.ui_lang, "bd_encode_titles", count = count, passes = passes, jobs = encode_jobs, kbps = plan.video_kbps)));
     log(Event::Phase(BuildPhase::Encoding { index: 0, count }));
     let limits = opts.disc.limits();
     let max_total = limits.max_total_kbps;
@@ -762,7 +769,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let authoring_estimate = eta::authoring_secs(expected_bytes);
     let mut last_eta = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let encode_start = std::time::Instant::now();
-    log(Event::Eta(Eta::new(JobPhase::Encoding, Some(format!("Video 1 von {count}")), None, burn_estimate)));
+    log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Encoding, Some(tf!(opts.ui_lang, "eta_video_n", n = 1, count = count)), None, burn_estimate)));
     let results = run_limited(encode_jobs, jobs, cancel, |e| {
         let finished_now = match e {
             JobEvent::Progress { index, fraction, telemetry } => {
@@ -783,18 +790,18 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             last_eta = std::time::Instant::now();
             let detail = format!("Video {} von {count}", (finished_titles + 1).min(count));
             let remaining = frame_eta.remaining_secs().map(|s| s + authoring_estimate);
-            log(Event::Eta(Eta::new(JobPhase::Encoding, Some(detail), remaining, burn_estimate)));
+            log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Encoding, Some(detail), remaining, burn_estimate)));
         }
         let overall: f64 = fractions.iter().zip(&weights).map(|(f, w)| f * w).sum();
         if let Some(index) = finished_now {
             log(Event::Phase(BuildPhase::Encoding { index: finished_titles, count }));
-            log(Event::Step(format!("[{finished_titles}/{count}] {} fertig", labels[index])));
+            log(Event::Step(tf!(opts.ui_lang, "title_finished", done = finished_titles, count = count, title = labels[index])));
         }
         if finished_now.is_some() || (overall - last_overall >= 0.002 && last_emit.elapsed().as_millis() >= 150) {
             last_emit = std::time::Instant::now();
             last_overall = overall;
             log(Event::Progress {
-                label: format!("Encoding: {finished_titles}/{count} Titel fertig ({encode_jobs} parallel)"),
+                label: tf!(opts.ui_lang, "progress_encoding", done = finished_titles, count = count, jobs = encode_jobs),
                 fraction: overall,
             });
         }
@@ -809,9 +816,9 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         real_durations.push(real);
     }
     if let Some(hw) = hwaccels.iter().flatten().next() {
-        log(Event::Step(format!("GPU-Decoding: {hw}")));
+        log(Event::Step(tf!(opts.ui_lang, "gpu_decode", hw = hw)));
     } else if opts.hw_decode {
-        log(Event::Step("GPU-Decoding nicht verfügbar – Dekodierung auf der CPU".into()));
+        log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
     }
 
     // 6. tsMuxeR ------------------------------------------------------------------------------
@@ -836,10 +843,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let mut meta = String::new();
     log(Event::Phase(BuildPhase::Authoring));
     log(Event::Eta(Eta {
-        phase_label: "BDMV erstellen (tsMuxeR)".into(),
+        phase_label: tr(opts.ui_lang, "phase_bd_authoring").into(),
         ..Eta::new(JobPhase::Authoring, None, Some(authoring_estimate), burn_estimate)
     }));
-    log(Event::Step("tsMuxeR erstellt BDMV".into()));
+    log(Event::Step(tr(opts.ui_lang, "bd_tsmuxer").into()));
     cancel.check()?;
     // One tsMuxeR run (playlist + clip) per title after the menus (which are already in BD/).
     let mut mux_log = String::new();
@@ -878,19 +885,19 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let backup = project_dir.join("CERTIFICATE").join("BACKUP");
     std::fs::create_dir_all(&backup).at(&backup)?;
     let bdmv = project_dir.join("BDMV");
-    log(Event::Step(format!("Blu-ray-Ordner: {}", bdmv.display())));
+    log(Event::Step(tf!(opts.ui_lang, "bd_folder", path = bdmv.display())));
 
     let work_dir = if opts.keep_work {
         Some(work)
     } else {
         if let Err(e) = remove_old_output(&work).await {
-            warn(log, format!("Arbeitsordner konnte nicht gelöscht werden: {e}"));
+            warn(log, tf!(opts.ui_lang, "workdir_delete_failed", err = e));
         }
         None
     };
     let size_mb = tree_mb(&project_dir);
     if size_mb > opts.disc.target_mb() as f64 {
-        warn(log, format!("BDMV ist {size_mb:.0} MB groß und überschreitet das Ziel von {} MB", opts.disc.target_mb()));
+        warn(log, tf!(opts.ui_lang, "size_over_bd", mb = format!("{size_mb:.0}"), target = opts.disc.target_mb()));
     }
     Ok(BuildReport {
         video_ts: bdmv,
