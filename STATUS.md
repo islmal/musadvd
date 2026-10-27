@@ -10,10 +10,10 @@ optionally burnt. Three deliverables: engine library (`src/`), CLI (`src/main.rs
 (Tauri 2 + vanilla TS, `src-tauri/` + `frontend/`), plus **Burn Studio** (ImgBurn replacement window).
 
 Principles: **clean room w.r.t. ConvertX** (only its *template files* are read, never its code) – this does
-NOT apply to `src/dvdvm.rs`, `src/dvd_mux.rs`, `src/ifo.rs` (**ports of dvdauthor's GPL-2.0 `dvdcompile.c`/`dvdvob.c`/`dvdifo.c`/`dvdpgc.c`**, source-guided, byte-identical to dvdauthor 0.7.2+) and `src/spumux.rs`: that is a **port of dvdauthor's GPL spumux**, derived from a Ghidra decompile
+NOT apply to `src/dvdvm.rs`, `src/dvd_mux.rs`, `src/ifo.rs` (**ports of dvdauthor's GPL-2.0 `dvdcompile.c`/`dvdvob.c`/`dvdifo.c`/`dvdpgc.c`**, source-guided, byte-identical to dvdauthor 0.7.2+) `src/bd_mux.rs`/`src/bd_clip.rs` (**Apache-2.0 tsMuxer 2.7.0 derived**: packet scheduling, CLPI/MPLS layout, checked field by field against its output) and `src/spumux.rs`: that is a **port of dvdauthor's GPL spumux**, derived from a Ghidra decompile
 of `spumux.exe` (via `rea`) and checked byte for byte against its recorded output; treat it as GPL-derived
 when deciding the project licence; **few, proven
-black boxes** (only two external programs remain: ffmpeg CLI, tsMuxeR for Blu-ray – `spumux.exe` and `dvdauthor.exe` are gone;
+black boxes** (only ffmpeg/ffprobe remain external – `spumux.exe`, `dvdauthor.exe` and `tsMuxeR.exe` are gone;
 everything else is own Rust: template
 parser, compositor, subpicture masks, text subtitle renderer, subpicture muxer, navigation, bitrate model, UDF 1.02/ISO 9660 + UDF 2.50 writers,
 layer break, IMAPI2 burner; no mkisofs/libcdio); **deterministic authoring** (all disc addresses planned
@@ -36,10 +36,10 @@ through one native subtitle stage per stream; text subs are rendered to bitmaps 
 with the CLI through `burner::burn_video_ts`.
 
 **Blu-ray / AVCHD** (`DiscType::Bd25/Bd50/Avchd5/Avchd9`; `build_dvd` hands over to `bd::build_bd`):
-per title libx264 or `h264_nvenc` High@4.1 → MKV → one tsMuxeR run per title (own playlist + clip, own
+per title libx264 or `h264_nvenc` High@4.1 → MKV → one native mux run per title (`bd_mux::mux_title`: ffmpeg `-c copy` → MPEG-TS pipe → re-packetised BDAV m2ts + CLPI/MPLS by `bd_clip`; own playlist + clip, own
 frame rate) → our own `index.bdmv`/`MovieObject.bdmv` (`hdmv.rs`, `bd_menu.rs`) → own UDF 2.50 writer
 (`udf250.rs`, metadata partition, no ISO bridge). Menus: same `CustomLayout` on a 1920×1080 canvas;
-buttons become an **IGS** stream (`igs.rs`). ConvertX templates reach it through `bd_template.rs`: page
+buttons become an **IGS** stream (`igs.rs`, real ICS segments, muxed on PID 0x1400 with a still-mode playlist). Text subtitles are rendered natively to PGS (`pgs.rs`, `textsub::Canvas::hd`). ConvertX templates reach it through `bd_template.rs`: page
 coordinates are scaled to 1920×1080 (4:3 pillarboxed), `ML_*` buttons are translated to `layout::Action`s
 (not DVD registers) and `bd_menu::plan` turns those into HDMV commands; a template without pages = no menu. AVCHD = same pipeline on DVD-5/9 media with AVCHD limits.
 
@@ -100,8 +100,7 @@ only (same source, different trim).
 - Custom-layout navigation registers: DVD `g1` play-all, `g2` titleset dispatch, `g3` VMGM router; BD
   `GPR1` chapter mark, `GPR2` play-all. BD titles are entered with `JumpTitle` (VLC timebar), menus with
   `JumpObject`.
-- IGS muxing trick (`bd_patch.rs`): tsMuxeR drops unknown segments, so the IGS goes in disguised as PGS
-  and is patched afterwards (PID 0x1200→0x1400, segment type, PMT, CLPI, MPLS) – tied to tsMuxeR 2.7.0.
+- **BDAV muxer** (`bd_mux.rs`): AUs are written in DTS order; PCR on PID 0x1001 starts 500 ms before the first PTS (first PTS = 600 s), ATS interpolated between PCR packets, padded to 6144 bytes. Video PTS/DTS are regenerated on the exact frame grid (ffmpeg only has ms stamps), audio PTS from sample counts, LPCM re-cut into 5 ms frames. Deviations from tsMuxeR: PCR every ≤3000 ticks (its 7000 gave 105 ms at 23.976), SPS/HRD SEI not rewritten (x264/NVENC already emit them), x264 banner SEI dropped, no T-STD simulation. Oracle: `tests/tsmuxer_native.rs` + `tests/fixtures/tsmuxer/` (playlist byte-identical, CLPI identical except SPN/packet count, PES stamps/PSI identical; re-record with `TSMUXER_RECORD`).
 - Encoder choice per BD title: NVENC unless the rate needs `fake-interlaced` (1080i → x264); max 4
   parallel NVENC jobs. DVD MPEG-2 stays software (VBV compliance).
 
@@ -121,9 +120,9 @@ only (same source, different trim).
 
 ## 3. Roadmap & Known Issues
 
-**Last recorded test run (2026-10-27):** `cargo test --workspace`: all green (lib 348), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
+**Last recorded test run (2026-10-27):** `cargo test --workspace`: all green (lib 362), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
 **Next (prioritised)**
-- [in progress] Plan docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md: Phase 1 (native DVD authoring) done; Phase 2 (native BDAV muxer, remove tsMuxeR.exe: PGS first, oracle fixtures, `bd_mux`, `bd_clip`) and Phase 3 (cleanup, locale/CLAUDE.md, final run) open. Plan stays in place until then.
+- [in progress] Plan docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md: Phases 1 + 2 done; Phase 3 open: delete `.ref-src/`, `engine.dvdauthor_created`→`authoring_created` rename, release.yml check, final run. Manual (user): VLC on one BD + one AVCHD folder (seek, chapters, menu loop/intro, text + PGS subtitles, LPCM/DTS); standalone player.
 - Known quirk: dvdauthor reads one `audpts` entry past the array for a subpicture that starts after the VOBU (uninitialised there); native assumes 0 (matches the oracle). VOB split at 524,272 sectors only unit-tested, no ≥1 GiB run.
 1. Live player hardening **acceptance** in the release window (4K HEVC HDR smooth + colours, crop, DVD source without combing, CSP `media-src` under `http://tauri.localhost`); only then consider `-hwaccel` → docs/plans/2026-10-26-live-player-hardening.md
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
@@ -157,7 +156,7 @@ only (same source, different trim).
   4:3; GUI size estimate ignores template menus; explicit video starts are not offset by a trim.
 - Blu-ray: short pause between titles (one playlist each); menu clips use title 1's frame rate; PGS
   subtitles on a cropped title keep the uncropped position; titles with fewer tracks get silent/empty
-  filler tracks; text subtitles rendered by tsMuxeR (Arial, fixed); Top Menu → first title menu.
+  filler tracks; text subtitles rendered natively (DejaVu, no longer Arial); Top Menu → first title menu.
 - Native muxer gaps: button attribute byte always 0; a row ≥ 1440 bits skips that subtitle (spumux aborted).
 - Text subtitles on DVD: DejaVu Sans only (no CJK glyphs, `.notdef` boxes), no RTL/shaping, no markup.
 - Bitmap subtitles: 3 opaque colours (k-means) + hard transparency; DVB/XSUB/teletext/VobSub-on-BD
@@ -168,6 +167,7 @@ only (same source, different trim).
   conversion blocked until fixed). Merge: no GUI pre-check of track counts, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
+- **2026-10-27 – Native BDAV muxer (plan phase 2):** `bd_mux` (ffmpeg TS pipe → m2ts), `bd_clip` (CLPI/MPLS), `pgs` (text → PGS), `Toolchain::ffmpeg_sink`; `tsMuxeR.exe`, `bd_patch`, `Toolchain.tsmuxer`, tsMuxeR locale texts removed. Verified: `tests/tsmuxer_native.rs` (4 cases vs recorded tsMuxeR 2.7.0 output, packet/ATS/PCR/CC/EP-map validators, ffprobe), IG menu playlist byte-identical to the patched oracle, `bluray`, `menu_intro` (packet-level IG timing), full `cargo test --workspace`, gui + Unix check, `npm run build`. Not checked: VLC/standalone playback, ≥4 GB title, T-STD buffers, golden PNG of a 1080p cue (structural test only).
 - **2026-10-27 – Native DVD authoring (plan phase 1):** `author::author_dvd` replaces `dvdauthor.exe` (`dvdvm` VM compiler incl. `vm_optimize`, `dvd_mux` VOB scan/NAV packs, `ifo` IFO/BUP/PGC); `Toolchain.dvdauthor`, `strip_intro_buttons`, `bin/dvdauthor.exe` removed, `tools/dvdauthor-win` → `tools/oracle`. Verified: `tests/dvdauthor_native.rs` 7 cases byte-identical to recorded dvdauthor output (title, merged, NTSC, menus+dispatchers, playback options, motion intro, AC-3+DTS+2 SPU), lib tests (355), DVD integration tests (build_dvd, menu_intro, motion_menu, custom_menu, playback_options, dvd_audio, disc_image, burn_flow, real_templates, native_menu_templates, ntsc, resolution, render_menu, process_hygiene), gui + Unix check, `npm run build`. Not checked: ≥1 GiB VOB split, standalone player.
 - **2026-10-27 – spumux.exe removed, native text subtitles:** `src/textsub.rs` (SRT parser + `ab_glyph` renderer, bundled DejaVu Sans, no Windows font dependency) feeds the bitmap path; `Stage::External`, the `Toolchain::spumux` fallback/field and the arial copy are gone, `bin/spumux.exe` deleted (also from the installer bundle); spumux build output now only goes to `target/spumux-oracle/` for re-recording fixtures. Verified: `cargo test --workspace` green incl. byte-identity vs recorded spumux output (9 cases), template audit (20 templates, 333 menus, no `Unsupported`), renderer vs spumux measurements, pixel goldens, `bitmap_subs` SRT→VobSub round trip, gui + Unix check, `npm run build`. Not checked on a standalone player; look differs from Arial/FreeType.
 - **2026-10-27 – Typed spumux `MenuTooComplex` error path:** `SpumuxError::TooComplex` -> `ToolError::MenuTooComplex` -> `BuildError::MenuTooComplex` (manual `From<ToolError>`), localised via `BuildError::message(ui_lang)` (GUI + CLI) from `engine.err_menu_too_complex`. Verified: new unit test in `dvd.rs`, `cargo test --workspace`, `check-i18n`, `npm run build`, gui + Unix check; not with a real 12-button menu build.
@@ -176,5 +176,3 @@ only (same source, different trim).
 - **2026-10-27 – Runtime-loaded locale files:** no embedded JSON anymore; `UiLang` code struct, cached leaked catalogs, `get_available_languages`/`get_locale_data`, CLI `--ui-lang` any code. Verified: `cargo test --workspace`, gui + Unix check, `npm run build` (hint text absent from bundle); not clicked through in the real GUI.
 - **2026-10-27 – i18n German/English/Russian + audio track rename:** see Key design decisions. Own audio names: `StreamSelection.audio_names` -> `MediaInfo.audio_names` -> `probe::audio_labels` (GUI input in the Audio tab, session only, not persisted). Verified: workspace tests, gui + Unix check, `npm run build`, browser smoke test with mocked backend; not by hand in the Tauri GUI or a real conversion; Cyrillic glyphs in template menu fonts unchecked.
 - **2026-10-26 – Live player hardening:** 8-bit proxy, HDR tonemapping (also in encodes), shared `source_chain`. Verified: unit + stream tests; not in the release window.
-- **2026-10-26 – Template menu intros on BD/AVCHD:** see Key design decisions. Fixed in VLC checks: float `==` after
-  `clip()` (`same_box`), chapter menus skipping the intro, `clip_at` 25 s clamp. Verified: intros seen in VLC.
