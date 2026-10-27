@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{tr, UiLang};
+
 #[derive(Debug)]
 pub enum ProbeError {
     Io(std::io::Error),
@@ -43,6 +45,8 @@ pub struct MediaInfo {
     /// Section of the file that is used (see [`apply_trim`]); `duration_secs` and the chapters
     /// already describe the section.
     pub trim: Option<Trim>,
+    /// User-chosen audio track names by ffprobe stream index; they replace the generated label.
+    pub audio_names: std::collections::HashMap<u32, String>,
 }
 
 /// Used section of a file in seconds of the source.
@@ -261,6 +265,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
         subtitles: Vec::new(),
         chapters: Vec::new(),
         trim: None,
+        audio_names: Default::default(),
     };
 
     for s in raw.streams {
@@ -475,11 +480,14 @@ pub fn iso639_1(tag: &str) -> Option<&'static str> {
     lookup(tag).map(|l| l.2)
 }
 
-/// Human readable (German) language name, falling back to the tag itself.
-pub fn language_name(tag: Option<&str>) -> String {
+/// Human readable language name in the UI language, falling back to the tag itself.
+pub fn language_name(tag: Option<&str>, ui: UiLang) -> String {
     match tag {
-        Some(t) => lookup(t).map_or_else(|| t.to_string(), |l| l.3.to_string()),
-        None => "Unbekannt".to_string(),
+        Some(t) => lookup(t).map_or_else(
+            || t.to_string(),
+            |l| crate::i18n::tr_key(ui, &format!("lang.{}", l.2)).unwrap_or(l.4).to_string(),
+        ),
+        None => tr(ui, "unknown").to_string(),
     }
 }
 
@@ -508,8 +516,8 @@ impl TrackLabelMode {
 
 /// One label per track, numbered over all tracks of the file (not the selection), so the GUI and the
 /// disc menus always show the same name for a stream.
-fn track_labels<'a>(tracks: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>, generic: &str, mode: TrackLabelMode) -> Vec<String> {
-    let named: Vec<(String, Option<&str>)> = tracks.map(|(lang, title)| (language_name(lang), title)).collect();
+fn track_labels<'a>(tracks: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>, generic: &str, mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
+    let named: Vec<(String, Option<&str>)> = tracks.map(|(lang, title)| (language_name(lang, ui), title)).collect();
     named
         .iter()
         .enumerate()
@@ -527,13 +535,18 @@ fn track_labels<'a>(tracks: impl Iterator<Item = (Option<&'a str>, Option<&'a st
 }
 
 /// Labels of `info.audio`, without the channel suffix (see [`with_layout`]).
-pub fn audio_labels(info: &MediaInfo, mode: TrackLabelMode) -> Vec<String> {
-    track_labels(info.audio.iter().map(|a| (a.language.as_deref(), a.title.as_deref())), "Tonspur", mode)
+pub fn audio_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
+    let generated = track_labels(info.audio.iter().map(|a| (a.language.as_deref(), a.title.as_deref())), tr(ui, "audio_track"), mode, ui);
+    generated
+        .into_iter()
+        .zip(&info.audio)
+        .map(|(l, a)| info.audio_names.get(&a.index).map_or(l, |n| n.clone()))
+        .collect()
 }
 
 /// Labels of `info.subtitles`, forced tracks marked.
-pub fn subtitle_labels(info: &MediaInfo, mode: TrackLabelMode) -> Vec<String> {
-    track_labels(info.subtitles.iter().map(|s| (s.language.as_deref(), s.title.as_deref())), "Untertitel", mode)
+pub fn subtitle_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
+    track_labels(info.subtitles.iter().map(|s| (s.language.as_deref(), s.title.as_deref())), tr(ui, "subtitle"), mode, ui)
         .into_iter()
         .zip(&info.subtitles)
         .map(|(l, s)| if s.forced { format!("{l} (forced)") } else { l })
@@ -720,7 +733,7 @@ mod tests {
 
     fn audio(streams: &[(&str, &str, &str)], mode: TrackLabelMode) -> Vec<String> {
         let s: Vec<_> = streams.iter().map(|&(l, t, n)| ("audio", l, t, n, false)).collect();
-        audio_labels(&tracks(&s), mode)
+        audio_labels(&tracks(&s), mode, UiLang::DE)
     }
 
     #[test]
@@ -765,9 +778,27 @@ mod tests {
     #[test]
     fn subtitle_labels_mark_forced_tracks() {
         let info = tracks(&[("subtitle", "ger", "", "", true), ("subtitle", "ger", "SDH", "", false), ("audio", "ger", "", "", false)]);
-        assert_eq!(subtitle_labels(&info, TrackLabelMode::SmartMetadata), ["Deutsch (1) (forced)", "Deutsch - SDH"]);
-        assert_eq!(subtitle_labels(&info, TrackLabelMode::Generic), ["Untertitel 1 (forced)", "Untertitel 2"]);
-        assert_eq!(audio_labels(&info, TrackLabelMode::SmartMetadata), ["Deutsch"], "audio and subtitles are numbered apart");
+        assert_eq!(subtitle_labels(&info, TrackLabelMode::SmartMetadata, UiLang::DE), ["Deutsch (1) (forced)", "Deutsch - SDH"]);
+        assert_eq!(subtitle_labels(&info, TrackLabelMode::Generic, UiLang::DE), ["Untertitel 1 (forced)", "Untertitel 2"]);
+        assert_eq!(audio_labels(&info, TrackLabelMode::SmartMetadata, UiLang::DE), ["Deutsch"], "audio and subtitles are numbered apart");
+    }
+
+    #[test]
+    fn labels_follow_the_ui_language() {
+        let en = UiLang::EN;
+        let info = tracks(&[("audio", "eng", "", "Commentary", false), ("subtitle", "ger", "", "", true), ("subtitle", "xx1", "", "", false)]);
+        assert_eq!(audio_labels(&info, TrackLabelMode::SmartMetadata, en), ["English - Commentary"]);
+        assert_eq!(audio_labels(&info, TrackLabelMode::Generic, en), ["Audio 1"]);
+        assert_eq!(subtitle_labels(&info, TrackLabelMode::Generic, en), ["Subtitle 1 (forced)", "Subtitle 2"]);
+        assert_eq!(language_name(None, en), "Unknown");
+        assert_eq!(language_name(Some("ger"), en), "German");
+    }
+
+    #[test]
+    fn own_audio_names_replace_the_generated_label() {
+        let mut info = tracks(&[("audio", "spa", "Latino", "", false), ("audio", "ger", "", "", false)]);
+        info.audio_names.insert(info.audio[0].index, "Kommentar".into());
+        assert_eq!(audio_labels(&info, TrackLabelMode::SmartMetadata, UiLang::DE), ["Kommentar", "Deutsch"]);
     }
 
     #[test]
@@ -785,8 +816,8 @@ mod tests {
         assert_eq!(iso639_1("deu"), Some("de"));
         assert_eq!(iso639_1("ENG"), Some("en"));
         assert_eq!(iso639_1("xyz"), None);
-        assert_eq!(language_name(Some("fre")), "Französisch");
-        assert_eq!(language_name(None), "Unbekannt");
+        assert_eq!(language_name(Some("fre"), UiLang::DE), "Französisch");
+        assert_eq!(language_name(None, UiLang::DE), "Unbekannt");
         assert!(language_matches("de", Some("ger")));
         assert!(!language_matches("en", Some("ger")));
         assert!(!language_matches("de", None));

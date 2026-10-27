@@ -1,6 +1,7 @@
 // Layer break modal: the cells of a DVD-Video image or folder that make a legal layer break.
 import * as api from "./api";
 import { el, fmtSectors, modal } from "./ui";
+import { t } from "../i18n";
 
 /**
  * Lists the candidates of `source` (an `.iso` or a folder with `VIDEO_TS`). With `onPick` a row can
@@ -13,13 +14,13 @@ export async function openLayerBreak(source: string, onPick?: (c: api.Candidate)
   const table = el("div", { class: "lb-table" });
   const note = el("p", { class: "hint" });
   const load = async () => {
-    table.replaceChildren(el("p", { class: "hint" }, "Wird gelesen …"));
+    table.replaceChildren(el("p", { class: "hint" }, t("studio.layerbreak.wirdGelesen")));
     picked = null;
     try {
       const list = await api.ifoCandidates(source, showAll);
       note.textContent = list.length
-        ? `${list.length} mögliche Layerwechsel. Nahtlose Zellen stehen hinten (Wechsel dort kann kurz ruckeln); „Füllsektoren“ werden vor das Titleset eingefügt, um die Grenze auf 16 Sektoren auszurichten.`
-        : "Keine möglichen Layerwechsel gefunden (passt auf eine Schicht, oder keine Zelle erfüllt die Regeln).";
+        ? t("studio.layerbreak.moeglicheLayerwechselNahtloseZellen", { length: list.length })
+        : t("studio.layerbreak.keineMoeglichenLayerwechselGefunden");
       const rows = list.map((c) => {
         const tr = el(
           "tr",
@@ -40,7 +41,7 @@ export async function openLayerBreak(source: string, onPick?: (c: api.Candidate)
         el(
           "table",
           { class: "studio-table" },
-          el("thead", {}, el("tr", {}, ...["VTS", "TTN", "PGC", "Zelle", "Start", "Schicht 0", "Schicht 1", "Teilung", "Füllsektoren", "Flags"].map((t) => el("th", {}, t)))),
+          el("thead", {}, el("tr", {}, ...["VTS", "TTN", "PGC", t("studio.layerbreak.zelle"), t("studio.layerbreak.start"), t("studio.layerbreak.schicht0"), t("studio.layerbreak.schicht1"), t("studio.layerbreak.teilung"), t("studio.layerbreak.fuellsektoren"), t("studio.layerbreak.flags")].map((t) => el("th", {}, t)))),
           el("tbody", {}, ...rows),
         ),
       );
@@ -50,7 +51,7 @@ export async function openLayerBreak(source: string, onPick?: (c: api.Candidate)
     }
   };
   body.append(
-    el("p", {}, el("strong", {}, "Quelle: "), source),
+    el("p", {}, el("strong", {}, t("studio.layerbreak.quelle")), source),
     el(
       "label",
       { class: "opt-check" },
@@ -61,16 +62,16 @@ export async function openLayerBreak(source: string, onPick?: (c: api.Candidate)
           void load();
         },
       }),
-      el("span", {}, "Verschachtelte Zellen anzeigen", el("small", {}, "Interleaved-Blöcke (Multi-Angle) sind sonst ausgeblendet.")),
+      el("span", {}, t("studio.layerbreak.verschachtelteZellenAnzeigen"), el("small", {}, t("studio.layerbreak.interleavedBloeckeMultiAngle"))),
     ),
     note,
     table,
   );
   const buttons: Parameters<typeof modal>[2] = onPick
     ? [
-        { label: "Abbrechen" },
+        { label: t("studio.layerbreak.abbrechen") },
         {
-          label: "Übernehmen",
+          label: t("studio.layerbreak.uebernehmen"),
           primary: true,
           onClick: () => {
             if (!picked) return false;
@@ -78,9 +79,9 @@ export async function openLayerBreak(source: string, onPick?: (c: api.Candidate)
           },
         },
       ]
-    : [{ label: "Schließen", primary: true }];
-  modal("Layerwechsel (IFO-Inspektor)", body, buttons, true);
+    : [{ label: t("studio.layerbreak.schliessen"), primary: true }];
+  modal(t("studio.layerbreak.layerwechselIfoInspektor"), body, buttons, true);
   await load();
 }
 
-export const describeBreak = (c: api.Candidate) => `Schicht 0: ${fmtSectors(c.l0_sectors)}, Schicht 1: ${fmtSectors(c.l1_sectors)}`;
+export const describeBreak = (c: api.Candidate) => t("studio.layerbreak.schicht0Schicht1", { fmtSectors: fmtSectors(c.l0_sectors), fmtSectors2: fmtSectors(c.l1_sectors) });

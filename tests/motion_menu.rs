@@ -41,7 +41,7 @@ fn render_chapter_page(t: &Template, motion: bool, chapters: &[ChapterEntry]) ->
     let kind = MenuKind::Chapters(chapters);
     let links = MenuLinks { first: 1, root: None, chapters: Some(1), settings: None, main_menu: None, bonus: None, episodes: None, title1_chapters: None, title1_settings: None };
     let (buttons, _) = author::plan_buttons(page, &kind, 1, links, PAL_WIDTH, PAL_HEIGHT).unwrap();
-    let opts = RenderOptions { motion, ui_lang: UiLang::De, ..RenderOptions::still(Path::new(DIR)) };
+    let opts = RenderOptions { motion, ui_lang: UiLang::DE, ..RenderOptions::still(Path::new(DIR)) };
     menu::render_page(t, page, &buttons, &opts).unwrap()
 }
 
@@ -225,7 +225,7 @@ fn build_dvd_with_motion_menus() {
         no_subtitles: true,
         chapters: dvd::ChapterSettings { interval_secs: 2.0, ..Default::default() }, // 0, 2, 4 s -> chapter menu with 3 slots
         menu_title: None,
-        ui_lang: UiLang::De,
+        ui_lang: UiLang::DE,
         keep_work: true, // the test inspects menu PNGs, MPEGs and logs
         two_pass: false,
         motion_menu: true,

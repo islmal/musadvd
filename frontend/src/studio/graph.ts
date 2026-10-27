@@ -2,13 +2,14 @@
 // Fed live by `studio-graph` batches or by a loaded `.ibg` file.
 import type { GraphFile, Sample } from "./api";
 import { el, fmtTime } from "./ui";
+import { t } from "../i18n";
 
 const COLORS = { speed: "#2f6fde", main: "#2fa84f", device: "#e0a321", cpu: "#9099aa" };
 
 export class GraphView {
   readonly root: HTMLElement;
   private canvas = el("canvas", { class: "graph-canvas" });
-  private info = el("div", { class: "graph-info hint" }, "Noch keine Messdaten.");
+  private info = el("div", { class: "graph-info hint" }, t("studio.graph.nochKeineMessdaten"));
   private tip = el("div", { class: "graph-tip", hidden: true });
   private samples: Sample[] = [];
   private sampleMs = 100;
@@ -21,10 +22,10 @@ export class GraphView {
       { class: "graph-legend" },
       ...(
         [
-          ["speed", "Geschwindigkeit (x)"],
-          ["main", "Hauptpuffer %"],
-          ["device", "Laufwerkspuffer %"],
-          ["cpu", "CPU %"],
+          ["speed", t("studio.graph.geschwindigkeitX")],
+          ["main", t("studio.graph.hauptpuffer")],
+          ["device", t("studio.graph.laufwerkspuffer")],
+          ["cpu", t("studio.graph.cpu")],
         ] as const
       ).map(([k, t]) => el("span", {}, el("i", { style: `background:${COLORS[k]}` }), t)),
     );
@@ -40,14 +41,14 @@ export class GraphView {
 
   clear() {
     this.samples = [];
-    this.info.textContent = "Noch keine Messdaten.";
+    this.info.textContent = t("studio.graph.nochKeineMessdaten");
     this.redraw();
   }
 
   /** Appends live samples. */
   push(batch: Sample[]) {
     this.samples.push(...batch);
-    this.info.textContent = `${this.samples.length} Messpunkte (alle ${this.sampleMs} ms)`;
+    this.info.textContent = t("studio.graph.messpunkteAlleMs", { length: this.samples.length, sampleMs: this.sampleMs });
     this.redraw();
   }
 
@@ -57,7 +58,7 @@ export class GraphView {
     this.sampleMs = file.sampleMs;
     const cfg = Object.fromEntries(file.config);
     const bits = [title, cfg.MEDIA_TYPE, cfg.MEDIA_ID, cfg.DEVICE_MAKEMODEL].filter(Boolean);
-    this.info.textContent = `${bits.join(" · ")} — ${this.samples.length} Messpunkte`;
+    this.info.textContent = t("studio.graph.messpunkte", { bits: bits.join(" · "), length: this.samples.length });
     this.redraw();
   }
 
@@ -91,7 +92,7 @@ export class GraphView {
     this.tip.hidden = false;
     this.tip.style.left = `${Math.min(e.offsetX + 12, p.w - 170)}px`;
     this.tip.style.top = `${Math.max(e.offsetY - 10, 0)}px`;
-    this.tip.textContent = `${fmtTime((i * this.sampleMs) / 1000)} · ${s.speed.toFixed(2)}x · Sektor ${s.lba} · Haupt ${s.main.toFixed(0)} % · Gerät ${s.device.toFixed(0)} %${s.cpu >= 0 ? ` · CPU ${s.cpu.toFixed(0)} %` : ""}`;
+    this.tip.textContent = t("studio.graph.xSektorHauptGeraet", { fmtTime: fmtTime((i * this.sampleMs) / 1000), s: s.speed.toFixed(2), lba: s.lba, s2: s.main.toFixed(0), s3: s.device.toFixed(0), s4: s.cpu >= 0 ? t("studio.graph.cpu2", { s: s.cpu.toFixed(0) }) : "" });
     this.redraw();
   }
 

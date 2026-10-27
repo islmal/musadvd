@@ -13,6 +13,7 @@ pub mod dvd;
 pub mod encoder;
 pub mod eta;
 pub mod hdmv;
+pub mod i18n;
 pub mod igs;
 pub mod layout;
 pub mod menu;

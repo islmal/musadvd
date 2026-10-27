@@ -210,9 +210,11 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
     let tools = toolchain(&state).await?;
     let p = PathBuf::from(&path);
     let info = probe::probe(&tools.ffprobe, &p).await.map_err(|e| e.to_string())?;
-    let label_mode = TrackLabelMode::from_setting(&state.settings().track_label_mode);
-    let audio_labels = probe::audio_labels(&info, label_mode);
-    let subtitle_labels = probe::subtitle_labels(&info, label_mode);
+    let settings = state.settings();
+    let label_mode = TrackLabelMode::from_setting(&settings.track_label_mode);
+    let ui = UiLang::from_setting(&settings.ui_language);
+    let audio_labels = probe::audio_labels(&info, label_mode, ui);
+    let subtitle_labels = probe::subtitle_labels(&info, label_mode, ui);
     let chapter_settings = state.settings().chapters();
     let chapters = dvd::chapter_starts(&info, chapter_settings.interval_secs, chapter_settings.min_video_secs)
         .into_iter()
@@ -243,7 +245,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                     codec: a.codec.clone(),
                     channels: a.channels,
                     channel_layout: a.channel_layout.clone(),
-                    language_name: language_name(a.language.as_deref()),
+                    language_name: language_name(a.language.as_deref(), ui),
                     display_label: audio_labels[n].clone(),
                     language: a.language.clone(),
                     title: a.title.clone(),
@@ -262,7 +264,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                 index: s.index,
                 codec: s.codec.clone(),
                 kind: if s.kind == SubtitleKind::Text { "text".into() } else { "bitmap".into() },
-                language_name: language_name(s.language.as_deref()),
+                language_name: language_name(s.language.as_deref(), ui),
                 display_label: subtitle_labels[n].clone(),
                 language: s.language.clone(),
                 title: s.title.clone(),
@@ -442,7 +444,25 @@ fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<Ap
     let settings = settings.sanitized();
     settings.save(&state.settings_path).map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings.clone();
+    convertx_rust::i18n::reload();
     Ok(settings)
+}
+
+#[derive(Serialize)]
+struct LanguageOption {
+    code: String,
+    name: String,
+}
+
+#[tauri::command]
+fn get_available_languages() -> Vec<LanguageOption> {
+    convertx_rust::i18n::available_languages().into_iter().map(|(code, name)| LanguageOption { code, name }).collect()
+}
+
+/// A locale file fresh from disk (the GUI keeps its own copy).
+#[tauri::command]
+fn get_locale_data(lang: String) -> Result<std::collections::HashMap<String, String>, String> {
+    convertx_rust::i18n::load(&lang)
 }
 
 #[derive(Serialize)]
@@ -603,6 +623,9 @@ struct InputConfig {
     crop: Option<probe::Crop>,
     #[serde(default)]
     merge_with_previous: bool,
+    /// Own audio track names by ffprobe stream index.
+    #[serde(default)]
+    audio_names: std::collections::HashMap<u32, String>,
 }
 
 #[derive(Deserialize)]
@@ -654,7 +677,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
         output: PathBuf::from(&config.output),
         menu_title: config.menu_title.filter(|t| !t.trim().is_empty()),
         custom_layout: config.custom_layout,
-        ui_lang: UiLang::De,
+        ui_lang: UiLang::default(),
         two_pass: config.two_pass,
         motion_menu: config.motion_menu,
         motion_duration: config.motion_duration,
@@ -670,6 +693,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 end_secs: i.end_secs,
                 crop: i.crop,
                 merge_with_previous: i.merge_with_previous,
+                audio_names: i.audio_names.clone(),
             })
             .collect(),
         ..BuildOptions::default()
@@ -711,15 +735,16 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                     }
                     Ok(r) => ConversionDone {
                         ok: true,
-                        message: format!(
-                            "{} fertig: {:.0} MB von {} MB",
-                            match opts.disc {
+                        message: convertx_rust::tf!(
+                            opts.ui_lang,
+                            "done_summary",
+                            kind = match opts.disc {
                                 d if d.is_avchd() => "AVCHD",
                                 d if d.is_bluray() => "Blu-ray",
                                 _ => "DVD",
                             },
-                            r.size_mb,
-                            r.target_mb
+                            mb = format!("{:.0}", r.size_mb),
+                            target = r.target_mb
                         ),
                         video_ts: Some(r.video_ts.to_string_lossy().into_owned()),
                         project_name: r.project_dir.file_name().map(|n| n.to_string_lossy().into_owned()),
@@ -749,6 +774,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .manage(burn::BurnState::default())
         .manage(burn_studio::StudioState::default())
@@ -789,6 +815,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_available_languages,
+            get_locale_data,
             probe_file,
             list_templates,
             template_preview,

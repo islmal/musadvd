@@ -138,7 +138,7 @@ fn all_templates_become_valid_blu_ray_menus() {
             // Rendering 1080p layers is slow in debug builds: the pillarbox variant only runs once.
             let aspects: &[Aspect] = if count == 0 { &[Aspect::Standard] } else { &[Aspect::Wide] };
             for &aspect in aspects {
-                let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect)
+                let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect, &convertx_rust::dvd::ChapterSettings::default(), convertx_rust::menu::UiLang::DE)
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
                 validate_bd(&layout, &titles, frame).unwrap_or_else(|e| panic!("{name}: {e}"));
                 let nav = bd_menu::plan(&layout, &titles, &bd_menu::traits(&layout, &titles, frame), PlaybackOptions::default(), &titles.iter().map(|t| vec![t.chapters]).collect::<Vec<_>>());

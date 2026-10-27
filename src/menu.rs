@@ -724,36 +724,12 @@ pub struct RenderedPage {
     pub warnings: Vec<String>,
 }
 
-/// Language for the template's fixed UI texts ("Chapters", "Back", ...).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UiLang {
-    /// Keep the template texts (English).
-    En,
-    #[default]
-    De,
-}
+pub use crate::i18n::UiLang;
 
-/// Translates the fixed texts of the ConvertX templates.
+/// Translates the fixed texts of the ConvertX templates (keys `engine.tpl.<English text>`); unknown
+/// texts stay as they are.
 pub fn localize(text: &str, lang: UiLang) -> &str {
-    if lang == UiLang::En {
-        return text;
-    }
-    match text.trim() {
-        "Chapters" => "Kapitel",
-        "Settings" => "Einstellungen",
-        "Back" => "Zurück",
-        "Resume" => "Wiedergabe",
-        "Play" | "Play all" => "Alle abspielen",
-        "Subtitles" => "Untertitel",
-        "No subtitle" => "Keine Untertitel",
-        "Audio" => "Tonspur",
-        "Episodes" => "Episoden",
-        "Bonuses" => "Bonus",
-        "Previous" => "Zurück",
-        "Next" => "Weiter",
-        "Title menu" => "Hauptmenü",
-        _ => text,
-    }
+    crate::i18n::tr_key(lang, &format!("engine.tpl.{}", text.trim())).unwrap_or(text)
 }
 
 pub struct RenderOptions<'a> {

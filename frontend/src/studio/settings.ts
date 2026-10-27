@@ -4,9 +4,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { saveSettings } from "../api";
 import * as api from "./api";
 import { el, modal } from "./ui";
+import { t } from "../i18n";
 
-const DIRECT = "nur mit Backend „SPTI Direkt“";
-const NOT_YET = "noch nicht unterstützt";
+const DIRECT = t("studio.settings.nurMitBackendSpti");
+const NOT_YET = t("studio.settings.nochNichtUnterstuetzt");
 
 interface Opt {
   /** Greyed out for good: shown with this reason. */
@@ -18,17 +19,17 @@ interface Opt {
 
 type Tab = "general" | "read" | "build" | "write" | "verify" | "graph" | "io";
 const TABS: [Tab, string][] = [
-  ["general", "Allgemein"],
-  ["read", "Lesen"],
-  ["build", "Image bauen"],
-  ["write", "Schreiben"],
-  ["verify", "Überprüfen"],
-  ["graph", "Graph"],
+  ["general", t("studio.settings.allgemein")],
+  ["read", t("studio.settings.lesen")],
+  ["build", t("studio.settings.imageBauen")],
+  ["write", t("studio.settings.schreiben")],
+  ["verify", t("studio.settings.ueberpruefen")],
+  ["graph", t("studio.settings.graph")],
   ["io", "E/A"],
 ];
 
-const SPLIT: [string, string][] = [["none", "Nicht teilen"], ["2gb", "2 GB-Teile"], ["4gb", "4 GB-Teile (FAT32)"]];
-const LAYOUT: [string, string][] = [["auto", "Automatisch"], ["none", "Keine"], ["dvd", ".dvd"], ["mds", ".mds"], ["cue", ".cue"]];
+const SPLIT: [string, string][] = [["none", t("studio.settings.nichtTeilen")], ["2gb", t("studio.settings.2GbTeile")], ["4gb", t("studio.settings.4GbTeileFat32")]];
+const LAYOUT: [string, string][] = [["auto", t("studio.settings.automatisch")], ["none", t("studio.settings.keine")], ["dvd", ".dvd"], ["mds", ".mds"], ["cue", ".cue"]];
 
 function walk(obj: unknown, path: string): { parent: Record<string, unknown>; key: string } {
   const keys = path.split(".");
@@ -83,7 +84,7 @@ export function openStudioSettings(current: api.FullSettings, onSaved: (s: api.F
             const v = Math.round(Number(input.value));
             if (!Number.isFinite(v) || v < min || v > max) {
               input.value = String(get<number>(path));
-              error.textContent = `${label}: erlaubt sind ${min} bis ${max}${unit ? " " + unit : ""}.`;
+              error.textContent = t("settings.allowedRange", { label, min, max, unit: unit ?? "" }).replace(" .", ".");
               return;
             }
             error.textContent = "";
@@ -143,12 +144,12 @@ export function openStudioSettings(current: api.FullSettings, onSaved: (s: api.F
   const group = (title: string, ...rows: HTMLElement[]) => el("fieldset", { class: "opt-group" }, el("legend", {}, title), ...rows);
 
   const perOp = (path: "io.lock_tray" | "io.eject_after", title: string) =>
-    group(title, ...([["read", "Lesen"], ["write", "Schreiben"], ["verify", "Überprüfen"], ["erase", "Löschen"]] as const).map(([k, t]) => check(`${path}.${k}`, t)));
+    group(title, ...([["read", t("studio.settings.lesen")], ["write", t("studio.settings.schreiben")], ["verify", t("studio.settings.ueberpruefen")], ["erase", t("studio.settings.loeschen")]] as const).map(([k, t]) => check(`${path}.${k}`, t)));
 
   const preview = el("small", { class: "opt-hint" });
   const updatePreview = async () => {
     try {
-      preview.textContent = `Beispiel: ${await api.templatePreview(d.graph.template)}`;
+      preview.textContent = t("studio.settings.beispiel", { api: await api.templatePreview(d.graph.template) });
     } catch {
       preview.textContent = "";
     }
@@ -157,159 +158,159 @@ export function openStudioSettings(current: api.FullSettings, onSaved: (s: api.F
   const pages: Record<Tab, () => HTMLElement[]> = {
     general: () => [
       group(
-        "Betrieb",
-        check("general.prevent_standby", "Standby während des Vorgangs verhindern"),
-        pick("general.on_complete", "Wenn fertig", [
-          ["nothing", "Nichts tun"],
-          ["shutdown", "Herunterfahren (60 s Frist, „shutdown /a“ bricht ab)"],
-          ["standby", "Standby"],
-          ["hibernate", "Ruhezustand"],
-          ["close", "Fenster schließen"],
+        t("studio.settings.betrieb"),
+        check("general.prevent_standby", t("studio.settings.standbyWaehrendDesVorgangs")),
+        pick("general.on_complete", t("studio.settings.wennFertig"), [
+          ["nothing", t("studio.settings.nichtsTun")],
+          ["shutdown", t("studio.settings.herunterfahren60SFrist")],
+          ["standby", t("studio.settings.standby")],
+          ["hibernate", t("studio.settings.ruhezustand")],
+          ["close", t("studio.settings.fensterSchliessen")],
         ]),
-        check("general.md5_calculate", "MD5 berechnen (Lesen, Bauen, Überprüfen)"),
-        check("general.md5_compare", "MD5 vergleichen", { off: NOT_YET }),
+        check("general.md5_calculate", t("studio.settings.md5BerechnenLesenBauen")),
+        check("general.md5_compare", t("studio.settings.md5Vergleichen"), { off: NOT_YET }),
       ),
       group(
-        "Warnungen",
-        check("general.warnings.overburn", "Overburn", { off: "gespeichert, derzeit ohne Wirkung" }),
-        check("general.warnings.dvd_r_dl_layer_break", "DVD-R DL: Layerwechsel", { off: "gespeichert, derzeit ohne Wirkung" }),
-        check("general.warnings.no_ifo_update", "Layerwechsel ohne IFO-Anpassung", { off: "gespeichert, derzeit ohne Wirkung" }),
-        check("general.warnings.seamless_layer_break", "Layerwechsel in nahtloser Zelle", { off: "gespeichert, derzeit ohne Wirkung" }),
+        t("studio.settings.warnungen"),
+        check("general.warnings.overburn", t("studio.settings.overburn"), { off: t("studio.settings.gespeichertDerzeitOhneWirkung") }),
+        check("general.warnings.dvd_r_dl_layer_break", t("studio.settings.dvdRDlLayerwechsel"), { off: t("studio.settings.gespeichertDerzeitOhneWirkung") }),
+        check("general.warnings.no_ifo_update", t("studio.settings.layerwechselOhneIfoAnpassung"), { off: t("studio.settings.gespeichertDerzeitOhneWirkung") }),
+        check("general.warnings.seamless_layer_break", t("studio.settings.layerwechselInNahtloserZelle"), { off: t("studio.settings.gespeichertDerzeitOhneWirkung") }),
       ),
       group(
-        "Layerwechsel-Kandidaten",
-        check("general.lb_check_seamless", "Nicht nahtlose Zellen bevorzugen"),
-        check("general.lb_show_interleaved", "Verschachtelte Zellen anzeigen"),
+        t("studio.settings.layerwechselKandidaten"),
+        check("general.lb_check_seamless", t("studio.settings.nichtNahtloseZellenBevorzugen")),
+        check("general.lb_show_interleaved", t("studio.settings.verschachtelteZellenAnzeigen")),
       ),
     ],
     read: () => [
       group(
-        "Image",
-        pick("read.split", "Image teilen", SPLIT),
-        pick("read.layout_file", "Layout-Datei", LAYOUT, { hint: "Auto: .dvd bei Dual Layer, sonst keine." }),
+        t("studio.settings.image"),
+        pick("read.split", t("studio.settings.imageTeilen"), SPLIT),
+        pick("read.layout_file", t("studio.settings.layoutDatei"), LAYOUT, { hint: t("studio.settings.autoDvdBeiDual") }),
       ),
       group(
-        "Fehlerbehandlung",
-        num("read.sw_retries", "Software-Wiederholungen", 0, 100, "", {}),
-        num("read.hw_retries", "Hardware-Wiederholungen (-1 = Laufwerk)", -1, 100, "", { off: "Laufwerkseinstellung, " + NOT_YET }),
-        check("read.ignore_read_errors", "Lesefehler ignorieren", { hint: "Unlesbare Sektoren werden mit Nullen gefüllt und gelistet." }),
+        t("studio.settings.fehlerbehandlung"),
+        num("read.sw_retries", t("studio.settings.softwareWiederholungen"), 0, 100, "", {}),
+        num("read.hw_retries", t("studio.settings.hardwareWiederholungen1Laufwerk"), -1, 100, "", { off: t("studio.settings.laufwerkseinstellung") + NOT_YET }),
+        check("read.ignore_read_errors", t("studio.settings.lesefehlerIgnorieren"), { hint: t("studio.settings.unlesbareSektorenWerdenMit") }),
       ),
       group(
-        "Sonstiges",
-        pick("read.priority", "Priorität", [["normal", "Normal"], ["below", "Niedriger"], ["idle", "Leerlauf"]], { off: NOT_YET }),
-        check("read.batch_eject_next", "Stapel: auswerfen und nächste Disc", { off: NOT_YET }),
+        t("studio.settings.sonstiges"),
+        pick("read.priority", t("studio.settings.prioritaet"), [["normal", t("studio.settings.normal")], ["below", t("studio.settings.niedriger")], ["idle", t("studio.settings.leerlauf")]], { off: NOT_YET }),
+        check("read.batch_eject_next", t("studio.settings.stapelAuswerfenUndNaechste"), { off: NOT_YET }),
       ),
     ],
     build: () => [
       group(
-        "Image",
-        pick("build.fs", "Dateisystem", [["iso_joliet_udf102", "ISO 9660 + Joliet + UDF 1.02"], ["udf102", "UDF 1.02"], ["udf250", "UDF 2.50"]], {
-          hint: "DVD-Video: immer UDF-1.02-Brücke; Blu-ray: immer UDF 2.50.",
+        t("studio.settings.image"),
+        pick("build.fs", t("studio.settings.dateisystem"), [["iso_joliet_udf102", t("studio.settings.iso9660JolietUdf")], ["udf102", t("studio.settings.udf102")], ["udf250", t("studio.settings.udf250")]], {
+          hint: t("studio.settings.dvdVideoImmerUdf"),
         }),
-        num("build.start_lba", "Erster Datensektor (0 = automatisch)", 0, 2_000_000, "Sektoren"),
-        num("build.min_sectors", "Mindestgröße", 0, 2_000_000, "Sektoren"),
-        check("build.dedupe", "Doppelte Dateien teilen sich einen Bereich"),
-        pick("build.split", "Image teilen", SPLIT),
-        pick("build.layout_file", "Layout-Datei", LAYOUT),
-        pick("build.prompts", "Erkannte DVD/BD-Ordner", [["ask", "Nachfragen"], ["always", "Immer als Disc"], ["never", "Immer als Daten"]]),
+        num("build.start_lba", t("studio.settings.ersterDatensektor0Automatisch"), 0, 2_000_000, t("studio.settings.sektoren")),
+        num("build.min_sectors", t("studio.settings.mindestgroesse"), 0, 2_000_000, t("studio.settings.sektoren")),
+        check("build.dedupe", t("studio.settings.doppelteDateienTeilenSich")),
+        pick("build.split", t("studio.settings.imageTeilen"), SPLIT),
+        pick("build.layout_file", t("studio.settings.layoutDatei"), LAYOUT),
+        pick("build.prompts", t("studio.settings.erkannteDvdBdOrdner"), [["ask", t("studio.settings.nachfragen")], ["always", t("studio.settings.immerAlsDisc")], ["never", t("studio.settings.immerAlsDaten")]]),
       ),
       group(
-        "Dateifilter",
-        check("build.filter.skip_hidden", "Versteckte Dateien überspringen"),
-        check("build.filter.skip_system", "Systemdateien überspringen"),
-        check("build.filter.skip_reparse", "Reparse-Punkte (Verknüpfungen) überspringen"),
-        check("build.filter.skip_in_use", "Dateien in Benutzung überspringen"),
-        check("build.log_skipped", "Übersprungene Dateien protokollieren"),
+        t("studio.settings.dateifilter"),
+        check("build.filter.skip_hidden", t("studio.settings.versteckteDateienUeberspringen")),
+        check("build.filter.skip_system", t("studio.settings.systemdateienUeberspringen")),
+        check("build.filter.skip_reparse", t("studio.settings.reparsePunkteVerknuepfungenUeberspringen")),
+        check("build.filter.skip_in_use", t("studio.settings.dateienInBenutzungUeberspringen")),
+        check("build.log_skipped", t("studio.settings.uebersprungeneDateienProtokollieren")),
       ),
       group(
-        "DVD-Video",
-        check("build.dvd.create_audio_ts", "Leeren AUDIO_TS-Ordner anlegen"),
-        check("build.dvd.fix_vts_sectors", "Titelset-Sektoren (TT_SRPT) an das Layout anpassen"),
-        check("build.dvd.ifo_bup_ecc_padding", "IFO/BUP in getrennten ECC-Blöcken", { off: NOT_YET }),
-        check("build.dvd.uppercase", "Namen in Großbuchstaben", { off: NOT_YET }),
-        check("build.dvd.read_dvd_text", "Label aus DVD-Text lesen", { off: NOT_YET }),
+        t("studio.settings.dvdVideo"),
+        check("build.dvd.create_audio_ts", t("studio.settings.leerenAudioTsOrdner")),
+        check("build.dvd.fix_vts_sectors", t("studio.settings.titelsetSektorenTtSrpt")),
+        check("build.dvd.ifo_bup_ecc_padding", t("studio.settings.ifoBupInGetrennten"), { off: NOT_YET }),
+        check("build.dvd.uppercase", t("studio.settings.namenInGrossbuchstaben"), { off: NOT_YET }),
+        check("build.dvd.read_dvd_text", t("studio.settings.labelAusDvdText"), { off: NOT_YET }),
       ),
       group(
-        "Blu-ray",
-        check("build.bd.create_certificate", "CERTIFICATE-Ordner anlegen"),
-        check("build.bd.reset_cpi", "Kopierschutz-Flag der M2TS-Pakete zurücksetzen", { hint: "Setzt nur die TP_extra_header-Bits; das Flag in der .clpi bleibt unberührt." }),
-        check("build.bd.read_bdmt", "Label aus bdmt_eng.xml lesen"),
+        t("studio.settings.bluRay"),
+        check("build.bd.create_certificate", t("studio.settings.certificateOrdnerAnlegen")),
+        check("build.bd.reset_cpi", t("studio.settings.kopierschutzFlagDerM2ts"), { hint: t("studio.settings.setztNurDieTp") }),
+        check("build.bd.read_bdmt", t("studio.settings.labelAusBdmtEng")),
       ),
     ],
     write: () => [
       group(
-        "Disc",
-        check("write.verify", "Nach dem Schreiben überprüfen"),
-        num("write.copies", "Kopien", 1, 99, "", { hint: "Nach jeder Kopie wird ausgeworfen und auf eine leere Disc gewartet." }),
-        check("write.delete_image_after", "Image nach erfolgreichem Brennen löschen", { hint: "Betrifft nur „Image schreiben“." }),
-        check("write.test_mode", "Testmodus (nur DVD-R/-RW, schreibt nichts)", { direct: true }),
-        pick("write.overburn", "Zu große Images", [["prompt", "Abbrechen (Fehlermeldung)"], ["overburn", "Overburn versuchen"], ["truncate", "Ablehnen"]], { direct: true }),
+        t("studio.settings.disc"),
+        check("write.verify", t("studio.settings.nachDemSchreibenUeberpruefen")),
+        num("write.copies", t("studio.settings.kopien"), 1, 99, "", { hint: t("studio.settings.nachJederKopieWird") }),
+        check("write.delete_image_after", t("studio.settings.imageNachErfolgreichemBrennen"), { hint: t("studio.settings.betrifftNurImageSchreiben") }),
+        check("write.test_mode", t("studio.settings.testmodusNurDvdR"), { direct: true }),
+        pick("write.overburn", t("studio.settings.zuGrosseImages"), [["prompt", t("studio.settings.abbrechenFehlermeldung")], ["overburn", t("studio.settings.overburnVersuchen")], ["truncate", t("studio.settings.ablehnen")]], { direct: true }),
       ),
       group(
-        "Layerwechsel",
-        pick("write.layer_break", "Layerwechsel", [["auto", "Automatisch (aus dem Image)"], ["user", "Eigener Wert"]]),
-        num("write.user_l0_sectors", "Sektoren auf Schicht 0", 0, 4_000_000, "Sektoren", {}),
+        t("studio.settings.layerwechsel"),
+        pick("write.layer_break", t("studio.settings.layerwechsel"), [["auto", t("studio.settings.automatischAusDemImage")], ["user", t("studio.settings.eigenerWert")]]),
+        num("write.user_l0_sectors", t("studio.settings.sektorenAufSchicht0"), 0, 4_000_000, t("studio.settings.sektoren"), {}),
       ),
       group(
-        "Schreibparameter",
-        pick("write.mode", "Medium", [["auto", "Automatisch"], ["dvd", "DVD"], ["bd", "Blu-ray"]], { off: NOT_YET }),
-        pick("write.write_type", "Schreibtyp (DVD-R/-RW)", [["dao", "Disc-at-once"], ["incremental", "Inkrementell"]], { direct: true }),
-        num("write.link_size", "Link-Größe (0 = Laufwerk)", 0, 255, "", { direct: true }),
-        check("write.opc", "OPC (Laser-Kalibrierung)", { direct: true }),
-        check("write.dvdpr_reserve_track", "DVD+R: Spur reservieren", { direct: true }),
-        check("write.dvdpr_min_radius", "DVD+R: minimaler Radius", { off: NOT_YET }),
-        check("write.dvdpr_dl_only_l0", "DVD+R DL: nur Schicht 0", { off: NOT_YET }),
-        check("write.prefer_no_spare", "BD-RE: ohne Spare-Bereiche formatieren", { direct: true }),
-        check("write.lock_volume", "Volume sperren (nur SPTI-Transport)", { direct: true }),
-        num("write.sw_retries", "Wiederholungen bei behebbaren Fehlern", 0, 100, "", { direct: true }),
-        check("write.burn_proof", "BURN-Proof", { off: NOT_YET }),
-        check("write.fastwrite", "FastWrite", { off: NOT_YET }),
-        check("write.bdr_verify_not_required", "BD-R: Verifizierung nicht erforderlich", { off: NOT_YET }),
-        check("write.cycle_tray_before_verify", "Schublade vor dem Überprüfen aus-/einfahren", { off: NOT_YET }),
-        check("write.auto_book_type", "Book-Typ automatisch ändern", { off: "nicht unterstützt (herstellerspezifisch)" }),
+        t("studio.settings.schreibparameter"),
+        pick("write.mode", t("studio.settings.medium"), [["auto", t("studio.settings.automatisch")], ["dvd", "DVD"], ["bd", t("studio.settings.bluRay")]], { off: NOT_YET }),
+        pick("write.write_type", t("studio.settings.schreibtypDvdRRw"), [["dao", t("studio.settings.discAtOnce")], ["incremental", t("studio.settings.inkrementell")]], { direct: true }),
+        num("write.link_size", t("studio.settings.linkGroesse0Laufwerk"), 0, 255, "", { direct: true }),
+        check("write.opc", t("studio.settings.opcLaserKalibrierung"), { direct: true }),
+        check("write.dvdpr_reserve_track", t("studio.settings.dvdRSpurReservieren"), { direct: true }),
+        check("write.dvdpr_min_radius", t("studio.settings.dvdRMinimalerRadius"), { off: NOT_YET }),
+        check("write.dvdpr_dl_only_l0", t("studio.settings.dvdRDlNur"), { off: NOT_YET }),
+        check("write.prefer_no_spare", t("studio.settings.bdReOhneSpare"), { direct: true }),
+        check("write.lock_volume", t("studio.settings.volumeSperrenNurSpti"), { direct: true }),
+        num("write.sw_retries", t("studio.settings.wiederholungenBeiBehebbarenFehlern"), 0, 100, "", { direct: true }),
+        check("write.burn_proof", t("studio.settings.burnProof"), { off: NOT_YET }),
+        check("write.fastwrite", t("studio.settings.fastwrite"), { off: NOT_YET }),
+        check("write.bdr_verify_not_required", t("studio.settings.bdRVerifizierungNicht"), { off: NOT_YET }),
+        check("write.cycle_tray_before_verify", t("studio.settings.schubladeVorDemUeberpruefen"), { off: NOT_YET }),
+        check("write.auto_book_type", t("studio.settings.bookTypAutomatischAendern"), { off: t("studio.settings.nichtUnterstuetztHerstellerspezifisch") }),
       ),
     ],
     verify: () => [
       group(
-        "Überprüfen",
-        check("verify.ignore_miscompares", "Abweichungen melden, aber als bestanden werten"),
-        num("verify.sw_retries", "Software-Wiederholungen", 0, 100),
-        num("verify.hw_retries", "Hardware-Wiederholungen (-1 = Laufwerk)", -1, 100, "", { off: "Laufwerkseinstellung, " + NOT_YET }),
-        check("verify.ignore_non_user_data", "Nicht-Nutzdaten ignorieren", { off: "betrifft nur 2352-Byte-Quellen, " + NOT_YET }),
+        t("studio.settings.ueberpruefen"),
+        check("verify.ignore_miscompares", t("studio.settings.abweichungenMeldenAberAls")),
+        num("verify.sw_retries", t("studio.settings.softwareWiederholungen"), 0, 100),
+        num("verify.hw_retries", t("studio.settings.hardwareWiederholungen1Laufwerk"), -1, 100, "", { off: t("studio.settings.laufwerkseinstellung") + NOT_YET }),
+        check("verify.ignore_non_user_data", t("studio.settings.nichtNutzdatenIgnorieren"), { off: t("studio.settings.betrifftNur2352Byte") + NOT_YET }),
       ),
     ],
     graph: () => [
       group(
-        "Messung",
-        check("graph.capture", "Graph-Daten aufzeichnen und als .ibg speichern", { hint: "Die ImgBurn-Prüfsummenzeile am Dateiende wird nicht geschrieben." }),
-        check("graph.capture_cpu", "CPU-Last aufzeichnen"),
-        num("graph.sample_ms", "Abtastrate", 50, 2000, "ms"),
+        t("studio.settings.messung"),
+        check("graph.capture", t("studio.settings.graphDatenAufzeichnenUnd"), { hint: t("studio.settings.dieImgburnPruefsummenzeileAm") }),
+        check("graph.capture_cpu", t("studio.settings.cpuLastAufzeichnen")),
+        num("graph.sample_ms", t("studio.settings.abtastrate"), 50, 2000, "ms"),
       ),
       group(
-        "Dateien",
-        text("graph.template", "Dateiname", { hint: "%M Modell, %F Firmware, %D Datum lang, %d dd-mm-yyyy, %B yyyy-mm-dd, %T HH-MM, %I Media-ID, %S Geschwindigkeit, %V Label" }),
+        t("studio.settings.dateien"),
+        text("graph.template", t("studio.settings.dateiname"), { hint: t("studio.settings.mModellFFirmware") }),
         el("div", {}, preview),
-        text("graph.folder", "Ordner (leer = %APPDATA%\\convertx-rust\\graph)", {}, true),
+        text("graph.folder", t("studio.settings.ordnerLeerAppdataConvertx"), {}, true),
       ),
     ],
     io: () => [
       group(
-        "Schreib-Backend",
-        pick("io.backend", "Backend", [["auto", "Automatisch (IMAPI schreibt, MMC fragt ab)"], ["imapi", "Nur IMAPI (keine MMC-Abfragen)"], ["direct", "SPTI Direkt (eigene Schreibschleife, ungetestet)"]], {
-          hint: "„SPTI Direkt“ wurde nie an echter Hardware erprobt.",
+        t("studio.settings.schreibBackend"),
+        pick("io.backend", t("studio.settings.backend"), [["auto", t("studio.settings.automatischImapiSchreibtMmc")], ["imapi", t("studio.settings.nurImapiKeineMmc")], ["direct", t("studio.settings.sptiDirektEigeneSchreibschleife")]], {
+          hint: t("studio.settings.sptiDirektWurdeNie"),
         }),
-        pick("io.transport", "MMC-Transport", [["imapi_ex", "IMAPI (ohne Administratorrechte)"], ["spti", "SPTI (benötigt Administratorrechte)"]]),
-        num("io.ring_mib", "Ringpuffer", 20, 512, "MiB"),
-        num("io.recovery_main_low", "Buffer Recovery: Pause unter", 0, 100, "%"),
-        num("io.recovery_main_high", "Buffer Recovery: weiter ab", 0, 100, "%"),
-        num("io.recovery_device_low", "Laufwerkspuffer: Pause unter (0 = aus)", 0, 100, "%", { direct: true }),
-        pick("io.transfer_kib", "Transfergröße", [["0", "Automatisch"], ["32", "32 KiB"], ["64", "64 KiB"]], { direct: true }),
-        check("io.buffered_io_read", "Gepufferte E/A beim Lesen", { off: NOT_YET }),
-        check("io.buffered_io_write", "Gepufferte E/A beim Schreiben", { off: NOT_YET }),
-        pick("io.device_sort", "Laufwerke sortieren nach", [["letter", "Laufwerksbuchstabe"], ["name", "Name"]]),
+        pick("io.transport", t("studio.settings.mmcTransport"), [["imapi_ex", t("studio.settings.imapiOhneAdministratorrechte")], ["spti", t("studio.settings.sptiBenoetigtAdministratorrechte")]]),
+        num("io.ring_mib", t("studio.settings.ringpuffer"), 20, 512, t("studio.settings.mib")),
+        num("io.recovery_main_low", t("studio.settings.bufferRecoveryPauseUnter"), 0, 100, "%"),
+        num("io.recovery_main_high", t("studio.settings.bufferRecoveryWeiterAb"), 0, 100, "%"),
+        num("io.recovery_device_low", t("studio.settings.laufwerkspufferPauseUnter0"), 0, 100, "%", { direct: true }),
+        pick("io.transfer_kib", t("studio.settings.transfergroesse"), [["0", t("studio.settings.automatisch")], ["32", t("studio.settings.32Kib")], ["64", t("studio.settings.64Kib")]], { direct: true }),
+        check("io.buffered_io_read", t("studio.settings.gepufferteEABeim"), { off: NOT_YET }),
+        check("io.buffered_io_write", t("studio.settings.gepufferteEABeim2"), { off: NOT_YET }),
+        pick("io.device_sort", t("studio.settings.laufwerkeSortierenNach"), [["letter", t("studio.settings.laufwerksbuchstabe")], ["name", t("studio.settings.name")]]),
       ),
-      perOp("io.lock_tray", "Schublade sperren während"),
-      perOp("io.eject_after", "Auswerfen nach"),
+      perOp("io.lock_tray", t("studio.settings.schubladeSperrenWaehrend")),
+      perOp("io.eject_after", t("studio.settings.auswerfenNach")),
     ],
   };
 
@@ -323,12 +324,12 @@ export function openStudioSettings(current: api.FullSettings, onSaved: (s: api.F
   render();
   const wrap = el("div", { class: "settings-split studio-settings" }, nav, el("div", { class: "settings-page" }, body, error));
   modal(
-    "Brennstudio – Einstellungen",
+    t("studio.settings.brennstudioEinstellungen"),
     wrap,
     [
-      { label: "Abbrechen" },
+      { label: t("studio.settings.abbrechen") },
       {
-        label: "Speichern",
+        label: t("studio.settings.speichern"),
         primary: true,
         onClick: async () => {
           d.io.transfer_kib = Number(d.io.transfer_kib);

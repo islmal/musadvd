@@ -1,0 +1,43 @@
+name: Release
+
+# Push a tag like v0.1.0 (must match "version" in src-tauri/tauri.conf.json, the updater compares it) (or run manually) to build the NSIS installer and attach it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg/ffprobe are git-ignored (~220 MB each); fetch the same build as local dev.
+      - name: Fetch ffmpeg 9.0.1 full build
+        shell: pwsh
+        run: |
+          curl.exe -L --fail -o ffmpeg.7z https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-full_build.7z
+          7z x ffmpeg.7z -offmpeg-extract
+          Copy-Item ffmpeg-extract\*\bin\ffmpeg.exe bin\
+          Copy-Item ffmpeg-extract\*\bin\ffprobe.exe bin\
+
+      - run: npm ci
+      # Signs the installer for the in-app updater (secrets below) and uploads latest.json next to it.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ConvertX Rust ${{ github.ref_name }}
+          releaseBody: Download the installer below; installed copies update themselves.

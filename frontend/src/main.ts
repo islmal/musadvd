@@ -7,6 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
 import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { check } from "@tauri-apps/plugin-updater";
 import {
   checkLayout,
   calculateProject,
@@ -20,6 +21,7 @@ import {
   startConversion,
   getSettings,
   settingsInfo,
+  availableLanguages,
   startupFiles,
   startupBurn,
   templatePreview,
@@ -36,6 +38,7 @@ import {
   type TemplateInfo,
   type VideoMetadata,
 } from "./api";
+import { applyStatic, fmtNumber, loadLanguage, t as tr } from "./i18n";
 
 // ---------------------------------------------------------------------------
 // State
@@ -61,6 +64,8 @@ interface Title {
   crop: Crop | null;
   /** Plays together with the previous title behind one menu entry (ignored for the first title). */
   mergeWithPrevious: boolean;
+  /** Own audio track names by ffprobe stream index (empty = generated label). */
+  audioNames: Record<number, string>;
 }
 
 type Tab = "audio" | "subtitles" | "chapters" | "edit" | "template";
@@ -212,7 +217,7 @@ function parseTime(text: string): number | null {
 }
 
 const fmtNum = (n: number, digits = 0) =>
-  n.toLocaleString("de-DE", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  fmtNumber(n, digits);
 
 const selectedTitle = () => state.titles.find((t) => t.id === state.selected) ?? null;
 
@@ -253,6 +258,13 @@ function audioChoice(t: Title, a: AudioTrack): AudioChoice {
   return a.plans[planKey()][forced ? "ac3" : mode];
 }
 
+/** Menu/GUI label of an audio track: the user's own name (plus channel layout) or the engine's label. */
+function audioLabel(t: Title, a: AudioTrack): string {
+  const own = t.audioNames[a.index];
+  if (!own) return audioChoice(t, a).label;
+  return state.settings?.track_label_mode === "generic" ? own : `${own} (${audioChoice(t, a).layout})`;
+}
+
 const CODEC_NAMES = { ac3: "AC-3", dts: "DTS", lpcm: "LPCM" } as const;
 
 /** The frame menus are designed for: `PAL` / `NTSC`, or `BD1080` / `BD720` on a Blu-ray. */
@@ -266,7 +278,7 @@ const singleVideoViolated = () => isBluray() && !!state.settings?.bd_single_vide
 
 function updateCustomDiscLabel() {
   const mb = state.settings?.target_size_mb ?? 4300;
-  $("disc-custom").textContent = `Benutzerdefiniert (${fmtNum(mb)} MB)`;
+  $("disc-custom").textContent = tr("main.benutzerdefiniertMb", { fmtNum: fmtNum(mb) });
 }
 
 function audioKbps(t: Title): number {
@@ -287,13 +299,13 @@ async function addFiles(paths: string[]) {
   state.splitUndo = null;
   const videos = paths.filter((p) => VIDEO_EXTENSIONS.includes(p.split(".").pop()?.toLowerCase() ?? ""));
   if (videos.length === 0) {
-    status("Keine unterstützten Videodateien.", "error");
+    status(tr("main.keineUnterstuetztenVideodateien"), "error");
     return;
   }
   state.probing += videos.length;
   renderFooter();
   for (const path of videos) {
-    status(`Analysiere ${path} …`);
+    status(tr("main.analysiere", { path }));
     try {
       const meta = await probeFile(path);
       const title: Title = {
@@ -307,10 +319,11 @@ async function addFiles(paths: string[]) {
         trimEnd: null,
         crop: null,
         mergeWithPrevious: false,
+        audioNames: {},
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
-      status(`${meta.fileName} hinzugefügt.`);
+      status(tr("main.hinzugefuegt", { fileName: meta.fileName }));
     } catch (e) {
       status(`${path}: ${e}`, "error");
     } finally {
@@ -324,8 +337,8 @@ async function addFiles(paths: string[]) {
 async function addViaDialog() {
   const picked = await open({
     multiple: true,
-    title: "Videos hinzufügen",
-    filters: [{ name: "Videos", extensions: VIDEO_EXTENSIONS }],
+    title: tr("main.videosHinzufuegen"),
+    filters: [{ name: tr("main.videos"), extensions: VIDEO_EXTENSIONS }],
   });
   if (picked) await addFiles(Array.isArray(picked) ? picked : [picked]);
 }
@@ -388,19 +401,20 @@ async function splitByChapters(t: Title) {
   const segs = chapterSegments(t.chapters, t.trimStart ?? 0, t.trimEnd ?? dur);
   const i = state.titles.findIndex((x) => x.id === t.id);
   if (segs.length < 2 || i < 0) return;
-  const text = `„${t.label}“ in ${segs.length} Titel aufteilen? Mit „Aufteilen rückgängig“ lässt sich das wieder zusammenführen.`;
-  if (!(await ask(text, { title: "Titel aufteilen", kind: "info" }))) return;
+  const text = tr("main.inTitelAufteilenMit", { label: t.label, length: segs.length });
+  if (!(await ask(text, { title: tr("main.titelAufteilen"), kind: "info" }))) return;
   const news: Title[] = segs.map((s, k) => ({
     id: nextId++,
     meta: t.meta,
     audio: new Set(t.audio),
     subs: new Set(t.subs),
-    label: t.meta.chapters.find((c) => Math.abs(c.startSecs - s.chapter) < 0.5)?.title || `${t.label} – Kapitel ${k + 1}`,
+    label: t.meta.chapters.find((c) => Math.abs(c.startSecs - s.chapter) < 0.5)?.title || tr("main.kapitel", { label: t.label, k: k + 1 }),
     chapters: [0],
     trimStart: s.start > 0.05 ? s.start : null,
     trimEnd: s.end < dur - 0.05 ? s.end : null,
     crop: t.crop ? { ...t.crop } : null,
     mergeWithPrevious: false,
+    audioNames: { ...t.audioNames },
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
@@ -408,7 +422,7 @@ async function splitByChapters(t: Title) {
   state.selected = news[0].id;
   renderAll();
   scheduleCalc();
-  status(`In ${news.length} Titel aufgeteilt.`);
+  status(tr("main.inTitelAufgeteilt", { length: news.length }));
 }
 
 function undoSplit() {
@@ -452,7 +466,7 @@ async function runCalc() {
     state.calc = result;
   } catch (e) {
     state.calc = null;
-    status(`Berechnung fehlgeschlagen: ${e}`, "error");
+    status(tr("main.berechnungFehlgeschlagen", { e }), "error");
   }
   renderTitleList();
   renderFooter();
@@ -473,9 +487,9 @@ function renderTitleList() {
     const audioSummary =
       t.meta.audio
         .filter((a) => t.audio.has(a.index))
-        .map((a) => `${audioChoice(t, a).label}`)
-        .join(", ") || "kein Ton";
-    const subsSummary = t.subs.size > 0 ? ` · ${t.subs.size} Untertitel` : "";
+        .map((a) => audioLabel(t, a))
+        .join(", ") || tr("main.keinTon");
+    const subsSummary = t.subs.size > 0 ? tr("main.untertitel", { size: t.subs.size }) : "";
     const quality = calc ? calc.qualityPercent : 0;
     const qualityClass = calc ? calc.quality : "medium";
 
@@ -496,9 +510,9 @@ function renderTitleList() {
           { class: "title-meta" },
           v ? `${v.width}×${v.height} · ${v.dvdAspect}${v.interlaced ? " · interlaced" : ""} · ` : "",
           fmtTime(effDuration(t)),
-          ` · ${effChapters(t).length} Kapitel`,
-          isTrimmed(t) ? " · geschnitten" : "",
-          t.crop ? " · zugeschnitten" : "",
+          tr("main.kapitel2", { effChapters: effChapters(t).length }),
+          isTrimmed(t) ? tr("main.trimmed") : "",
+          t.crop ? tr("main.cropped") : "",
         ),
         h("div", { class: "title-audio" }, audioSummary + subsSummary),
         i > 0
@@ -506,14 +520,14 @@ function renderTitleList() {
               "button",
               {
                 class: "btn small title-merge",
-                title: "Beide Videos laufen hinter einem Menüeintrag nacheinander (gleiche Anzahl Ton- und Untertitelspuren nötig)",
+                title: tr("main.beideVideosLaufenHinter"),
                 disabled: state.converting,
                 onclick: (e: Event) => {
                   e.stopPropagation();
                   toggleMerge(t);
                 },
               },
-              t.mergeWithPrevious ? "Trennen" : "Mit vorherigem zusammenführen",
+              t.mergeWithPrevious ? tr("main.trennen") : tr("main.mitVorherigemZusammenfuehren"),
             )
           : "",
         h(
@@ -521,10 +535,10 @@ function renderTitleList() {
           {
             class: "quality",
             title: isAvchd()
-              ? "Videoqualität: grün über 10.000 kbps, gelb 5.000–10.000 kbps, rot unter 5.000 kbps"
+              ? tr("main.videoqualitaetGruenUeber10")
               : isBluray()
-              ? "Videoqualität: grün über 15.000 kbps, gelb 8.000–15.000 kbps, rot unter 8.000 kbps"
-              : "Videoqualität: grün über 2.500 kbps, gelb 1.200–2.500 kbps, rot unter 1.200 kbps",
+              ? tr("main.videoqualitaetGruenUeber15")
+              : tr("main.videoqualitaetGruenUeber2"),
           },
           h("div", { class: "quality-bar" }, h("div", { class: `quality-value ${qualityClass}`, style: `width:${quality}%` })),
           h("span", { class: "quality-text" }, calc ? `${fmtNum(calc.videoKbps)} kbps` : "…"),
@@ -547,24 +561,24 @@ function renderFooter() {
   if (!calc || state.titles.length === 0) {
     fill.style.width = "0%";
     fill.className = "fill-value";
-    text.textContent = state.probing > 0 ? "Analysiere …" : "Noch keine Videos";
+    text.textContent = state.probing > 0 ? tr("main.analysiere2") : tr("main.nochKeineVideos");
   } else {
     fill.style.width = `${Math.min(100, calc.fillPercent)}%`;
     fill.className = `fill-value ${calc.fits ? (calc.fillPercent > 97 ? "full" : "ok") : "over"}`;
     const base = `${fmtNum(calc.estimatedMb)} / ${fmtNum(calc.targetMb)} MB (${fmtNum(calc.fillPercent)} %)`;
     const hint =
       state.disc === "bd25"
-        ? "BD-50 wählen oder Tonspuren abwählen."
+        ? tr("main.bd50WaehlenOder")
         : state.disc === "bd50" || state.disc === "avchd9"
-          ? "Videos kürzen oder Tonspuren abwählen."
+          ? tr("main.videosKuerzenOderTonspuren")
           : state.disc === "avchd5"
-            ? "AVCHD (DVD-9) wählen oder Tonspuren abwählen."
-            : "DVD-9 wählen oder Tonspuren abwählen.";
+            ? tr("main.avchdDvd9Waehlen")
+            : tr("main.dvd9WaehlenOder");
     text.textContent = singleVideoViolated()
-      ? "Nur ein Video pro Blu-ray erlaubt (Einstellung „Nur ein Video pro Blu-ray“)."
+      ? tr("main.nurEinVideoPro")
       : calc.fits
-        ? `${base} · Video ${fmtNum(calc.videoKbps)} kbps${calc.clamp === "max" ? " (Maximum)" : ""}`
-        : `${base} – passt nicht! ${hint}`;
+        ? tr("main.videoKbps", { base, fmtNum: fmtNum(calc.videoKbps), calc: calc.clamp === "max" ? tr("main.maximum") : "" })
+        : tr("main.doesNotFit", { base, hint });
   }
   const menusReady =
     state.menuMode === "template"
@@ -582,9 +596,9 @@ function renderFooter() {
   if (motionToggle) {
     motionToggle.disabled = state.menuMode === "custom" || isBluray();
     motionToggle.title = isBluray()
-      ? "Blu-ray-Menüs bewegen sich, wenn die Vorlage Video-Slots hat"
+      ? tr("main.bluRayMenuesBewegen")
       : state.menuMode === "custom"
-        ? "Beim eigenen Menü bestimmen Videos/Ton im Layout, ob ein Menü sich bewegt"
+        ? tr("main.beimEigenenMenueBestimmen")
         : "";
   }
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
@@ -616,7 +630,7 @@ function renderTabs() {
     return;
   }
   if (!t) {
-    body.append(h("div", { class: "empty" }, "Links ein Video hinzufügen oder auswählen."));
+    body.append(h("div", { class: "empty" }, tr("main.linksEinVideoHinzufuegen")));
     return;
   }
 
@@ -624,7 +638,7 @@ function renderTabs() {
     h(
       "div",
       { class: "title-label-row" },
-      h("label", { for: "title-label" }, "Bezeichnung im Menü"),
+      h("label", { for: "title-label" }, tr("main.bezeichnungImMenue")),
       h("input", {
         id: "title-label",
         type: "text",
@@ -670,7 +684,7 @@ const editHooks = {
 };
 
 function renderAudioTab(t: Title) {
-  if (t.meta.audio.length === 0) return h("div", { class: "empty" }, "Dieses Video hat keine Tonspur.");
+  if (t.meta.audio.length === 0) return h("div", { class: "empty" }, tr("main.diesesVideoHatKeine"));
   const full = t.audio.size >= MAX_AUDIO;
   return h(
     "div",
@@ -678,7 +692,7 @@ function renderAudioTab(t: Title) {
     h(
       "p",
       { class: "hint" },
-      `Passende AC-3-/DTS-Spuren werden unverändert übernommen, alle anderen nach AC-3 umgewandelt (Einstellung „Audio-Modus“; DVD: höchstens ${MAX_AUDIO} Spuren).`,
+      tr("main.passendeAc3Dts", { MAX_AUDIO }),
     ),
     ...t.meta.audio.map((a) => {
       const checked = t.audio.has(a.index);
@@ -699,8 +713,22 @@ function renderAudioTab(t: Title) {
         h(
           "div",
           { class: "track-main" },
-          h("span", { class: "track-lang" }, a.displayLabel),
-          a.default ? h("span", { class: "badge" }, "Standard") : null,
+          h("input", {
+            class: "track-name",
+            type: "text",
+            maxLength: 60,
+            value: t.audioNames[a.index] ?? "",
+            placeholder: a.displayLabel,
+            title: tr("main.renameTrack"),
+            spellcheck: false,
+            onchange: (e: Event) => {
+              const v = (e.target as HTMLInputElement).value.trim();
+              if (v) t.audioNames[a.index] = v;
+              else delete t.audioNames[a.index];
+              renderAll();
+            },
+          }),
+          a.default ? h("span", { class: "badge" }, tr("main.standard")) : null,
         ),
         h("span", { class: "track-detail" }, audioDetail(t, a)),
       );
@@ -716,7 +744,7 @@ async function relabelTitles() {
       t.meta.audio = m.audio;
       t.meta.subtitles = m.subtitles;
     } catch (e) {
-      status(`Spurnamen konnten nicht aktualisiert werden: ${e}`, "error");
+      status(tr("main.spurnamenKonntenNichtAktualisiert", { e }), "error");
     }
   }
   renderAll();
@@ -725,15 +753,15 @@ async function relabelTitles() {
 function audioDetail(t: Title, a: AudioTrack): string {
   const c = audioChoice(t, a);
   const target = `${CODEC_NAMES[c.codec]} ${c.layout} ${fmtNum(c.kbps)} kbps`;
-  return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${c.copy ? `${target} (unverändert kopiert)` : target}`;
+  return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${c.copy ? tr("main.unveraendertKopiert", { target }) : target}`;
 }
 
 function renderSubtitleTab(t: Title) {
-  if (t.meta.subtitles.length === 0) return h("div", { class: "empty" }, "Dieses Video hat keine Untertitel.");
+  if (t.meta.subtitles.length === 0) return h("div", { class: "empty" }, tr("main.diesesVideoHatKeine2"));
   return h(
     "div",
     { class: "track-list" },
-    h("p", { class: "hint" }, "Text-Untertitel (SRT/ASS) werden als DVD-Untertitel gerendert. Bild-Untertitel (Blu-ray-PGS, DVD-VobSub) werden umgerechnet und auf 3 Farben reduziert. DVB- und XSUB-Untertitel werden nicht unterstützt."),
+    h("p", { class: "hint" }, tr("main.textUntertitelSrtAss")),
     ...t.meta.subtitles.map((s) =>
       h(
         "label",
@@ -760,7 +788,7 @@ function renderSubtitleTab(t: Title) {
           h("span", { class: "track-lang" }, s.displayLabel),
           s.forced ? h("span", { class: "badge" }, "Forced") : null,
         ),
-        h("span", { class: "track-detail" }, `#${s.index} · ${s.codec}${s.supported ? "" : " · nicht unterstützt"}`),
+        h("span", { class: "track-detail" }, `#${s.index} · ${s.codec}${s.supported ? "" : tr("main.nichtUnterstuetzt")}`),
       ),
     ),
   );
@@ -795,20 +823,20 @@ function renderChapterTab(t: Title) {
                 const v = parseTime(input.value);
                 if (v === null || v <= 0 || v >= t.meta.durationSecs - 1) {
                   input.value = fmtTime(start);
-                  status("Ungültige Kapitelzeit.", "error");
+                  status(tr("main.ungueltigeKapitelzeit"), "error");
                   return;
                 }
                 update(sorted.map((s, j) => (j === i ? v : s)));
               },
             }),
       ),
-      h("td", {}, sourceTitle(start) ?? `Kapitel ${i + 1}`),
+      h("td", {}, sourceTitle(start) ?? tr("main.kapitel3", { i: i + 1 })),
       h(
         "td",
         { class: "actions" },
         i === 0
           ? null
-          : h("button", { class: "btn icon", title: "Kapitel entfernen", onclick: () => update(sorted.filter((_, j) => j !== i)) }, "✕"),
+          : h("button", { class: "btn icon", title: tr("main.kapitelEntfernen"), onclick: () => update(sorted.filter((_, j) => j !== i)) }, "✕"),
       ),
     ),
   );
@@ -829,12 +857,12 @@ function renderChapterTab(t: Title) {
             if (next > last + 1) update([...sorted, next]);
           },
         },
-        "＋ Kapitel",
+        tr("main.kapitel4"),
       ),
       h("span", { class: "spacer" }),
-      "Alle ",
+      tr("main.alle"),
       intervalInput,
-      " Min. ",
+      tr("main.min"),
       h(
         "button",
         {
@@ -846,23 +874,23 @@ function renderChapterTab(t: Title) {
             update(out.slice(0, 99));
           },
         },
-        "Raster erzeugen",
+        tr("main.rasterErzeugen"),
       ),
       t.meta.hasSourceChapters
-        ? h("button", { class: "btn", onclick: () => update(t.meta.chapters.map((c) => c.startSecs)) }, "Kapitel der Quelle")
+        ? h("button", { class: "btn", onclick: () => update(t.meta.chapters.map((c) => c.startSecs)) }, tr("main.kapitelDerQuelle"))
         : null,
     ),
     h(
       "table",
       { class: "table" },
-      h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Start"), h("th", {}, "Titel"), h("th", {}))),
+      h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, tr("main.start")), h("th", {}, tr("main.titel")), h("th", {}))),
       h("tbody", {}, ...rows),
     ),
     h(
       "p",
       { class: "hint" },
-      `${sorted.length} von höchstens 99 Kapiteln · Laufzeit ${fmtTime(t.meta.durationSecs)}`,
-      isTrimmed(t) ? ` · Zeiten der Quelldatei; im Ausschnitt (${fmtTime(t.trimStart ?? 0)}–${fmtTime(t.trimEnd ?? t.meta.durationSecs)}) bleiben ${effChapters(t).length}` : "",
+      tr("main.vonHoechstens99Kapiteln", { length: sorted.length, fmtTime: fmtTime(t.meta.durationSecs) }),
+      isTrimmed(t) ? tr("main.zeitenDerQuelldateiIm", { fmtTime: fmtTime(t.trimStart ?? 0), fmtTime2: fmtTime(t.trimEnd ?? t.meta.durationSecs), effChapters: effChapters(t).length }) : "",
     ),
   );
 }
@@ -893,7 +921,7 @@ function editorTitles(): EditorTitle[] {
       // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
         .filter((a) => t.audio.has(a.index))
-        .map((a) => ({ source: a.index, label: audioChoice(t, a).label })),
+        .map((a) => ({ source: a.index, label: audioLabel(t, a) })),
       subtitleTracks: t.meta.subtitles
         .filter((s) => t.subs.has(s.index) && s.supported)
         .map((s) => ({ source: s.index, label: s.displayLabel })),
@@ -934,7 +962,7 @@ function editorInit(): EditorInit {
     layout: state.customLayout,
     titles: editorTitles(),
     tv: frameName(),
-    heading: state.menuTitle.trim() || state.titles[0]?.label || (isBluray() ? "Blu-ray" : "DVD"),
+    heading: state.menuTitle.trim() || state.titles[0]?.label || (isBluray() ? tr("main.bluRay") : "DVD"),
     layoutTitlesKey: state.customLayoutKey,
   };
 }
@@ -949,7 +977,7 @@ void listen<CustomLayout>("editor-apply", ({ payload }) => {
   void refreshLayoutCheck();
   scheduleCalc();
   renderAll();
-  status("Eigenes Menü übernommen.");
+  status(tr("main.eigenesMenueUebernommen"));
 });
 
 // The Burn Studio is its own window ("burn-studio", burnStudio.html): created or focused.
@@ -961,13 +989,13 @@ async function openStudio() {
   }
   const win = new WebviewWindow("burn-studio", {
     url: "burnStudio.html",
-    title: "Brennstudio – ConvertX Rust",
+    title: tr("main.brennstudioConvertxRust"),
     width: 1180,
     height: 800,
     minWidth: 900,
     minHeight: 620,
   });
-  void win.once("tauri://error", (ev) => status(`Brennstudio konnte nicht geöffnet werden: ${String(ev.payload)}`));
+  void win.once("tauri://error", (ev) => status(tr("main.brennstudioKonnteNichtGeoeffnet", { ev: String(ev.payload) })));
 }
 
 async function openEditor() {
@@ -978,13 +1006,13 @@ async function openEditor() {
   }
   const win = new WebviewWindow("menu-editor", {
     url: "editor.html",
-    title: "Menü-Editor – ConvertX Rust",
+    title: tr("main.menueEditorConvertxRust"),
     width: 1280,
     height: 820,
     minWidth: 960,
     minHeight: 620,
   });
-  void win.once("tauri://error", (ev) => status(`Menü-Editor konnte nicht geöffnet werden: ${String(ev.payload)}`));
+  void win.once("tauri://error", (ev) => status(tr("main.menueEditorKonnteNicht", { ev: String(ev.payload) })));
 }
 
 function renderCustomMenuTab(): HTMLElement {
@@ -992,7 +1020,7 @@ function renderCustomMenuTab(): HTMLElement {
   const wrap = h("div", { class: "custom-menu-tab" });
   if (!l) {
     wrap.append(
-      h("p", { class: "hint" }, "Noch kein eigenes Menü. Der Editor erzeugt einen Entwurf aus den Videos des Projekts, den du frei gestalten kannst."),
+      h("p", { class: "hint" }, tr("main.nochKeinEigenesMenue")),
     );
   } else {
     const titleMenus = l.menus.filter((m) => m.role === "title").length;
@@ -1006,17 +1034,17 @@ function renderCustomMenuTab(): HTMLElement {
         h(
           "div",
           { class: "template-info" },
-          h("h3", {}, "Eigenes Menü"),
-          h("p", {}, `${titleMenus} Titelmenü(s), ${rootMenus} Root-Menü(s), ${buttons} Buttons, ${moving} bewegte(s) Menü(s)`),
-          h("p", {}, h("strong", {}, "Startmenü: "), l.menus.find((m) => m.role === "title")?.name ?? "–"),
+          h("h3", {}, tr("main.eigenesMenue")),
+          h("p", {}, tr("main.titelmenueSRootMenue", { titleMenus, rootMenus, buttons, moving })),
+          h("p", {}, h("strong", {}, tr("main.startmenue")), l.menus.find((m) => m.role === "title")?.name ?? "–"),
           layoutIsStale()
             ? h(
                 "p",
                 { class: "layout-errors" },
-                "Dieses Layout wurde für andere Videos erstellt. Beim Öffnen des Editors entsteht ein neuer Entwurf aus den aktuellen Videos („Rückgängig“ holt das alte zurück).",
+                tr("main.diesesLayoutWurdeFuer"),
               )
             : state.layoutErrors.length === 0
-              ? h("p", { class: "ok-text" }, "✓ Passt zu den aktuellen Videos.")
+              ? h("p", { class: "ok-text" }, tr("main.passtZuDenAktuellen"))
               : h("ul", { class: "layout-errors" }, ...state.layoutErrors.slice(0, 6).map((e) => h("li", {}, e))),
         ),
       ),
@@ -1026,7 +1054,7 @@ function renderCustomMenuTab(): HTMLElement {
     h(
       "div",
       { class: "row" },
-      h("button", { class: "btn primary", type: "button", disabled: state.titles.length === 0, onclick: openEditor }, l ? "Menü-Editor öffnen …" : "Menü gestalten …"),
+      h("button", { class: "btn primary", type: "button", disabled: state.titles.length === 0, onclick: openEditor }, l ? tr("main.menueEditorOeffnen") : tr("main.menueGestalten")),
       l
         ? h(
             "button",
@@ -1041,25 +1069,25 @@ function renderCustomMenuTab(): HTMLElement {
                 renderAll();
               },
             },
-            "Eigenes Menü verwerfen",
+            tr("main.eigenesMenueVerwerfen"),
           )
         : null,
     ),
   );
-  if (state.titles.length === 0) wrap.append(h("p", { class: "hint" }, "Zuerst Videos hinzufügen."));
+  if (state.titles.length === 0) wrap.append(h("p", { class: "hint" }, tr("main.zuerstVideosHinzufuegen")));
   return wrap;
 }
 
 function renderTemplateTab() {
   const outer = h("div", { class: "template-tab" });
   const modes: ["template" | "custom", string][] = [
-    ["template", "ConvertX-Vorlage"],
-    ["custom", "Eigenes Menü (Editor)"],
+    ["template", tr("main.convertxVorlage")],
+    ["custom", tr("main.eigenesMenueEditor")],
   ];
   outer.append(
     h(
       "div",
-      { class: "seg menu-mode", role: "radiogroup", "aria-label": "Menüart" },
+      { class: "seg menu-mode", role: "radiogroup", "aria-label": tr("main.menueart") },
       ...modes.map(([mode, label]) =>
         h(
           "button",
@@ -1089,7 +1117,7 @@ function renderTemplateTab() {
 function renderTemplateChoice() {
   const wrap = h("div", { class: "template-tab" });
   if (state.templates.length === 0) {
-    wrap.append(h("div", { class: "empty" }, "Keine ConvertX-Menüvorlagen gefunden (C:\\ProgramData\\VSO\\ConvertXToDVD\\7\\Templates)."));
+    wrap.append(h("div", { class: "empty" }, tr("main.keineConvertxMenuevorlagenGefunden")));
     return wrap;
   }
   const select = h("select", {
@@ -1111,14 +1139,14 @@ function renderTemplateChoice() {
 
   const info = state.templates.find((t) => t.path === state.template);
   const styles: Record<string, string> = {
-    MNUS_TITLE: "Titel",
+    MNUS_TITLE: tr("main.titel"),
     MNUS_ROOT: "Root",
-    MNUS_CHAPTER: "Kapitel",
-    MNUS_SETTINGS: "Einstellungen",
-    MNUS_BONUS: "Bonus",
-    MNUS_SERIES_EPISODES: "Episoden",
+    MNUS_CHAPTER: tr("main.kapitel5"),
+    MNUS_SETTINGS: tr("main.einstellungen"),
+    MNUS_BONUS: tr("main.bonus"),
+    MNUS_SERIES_EPISODES: tr("main.episoden"),
   };
-  const preview = h("img", { class: "template-preview", alt: "Vorschau" }) as HTMLImageElement;
+  const preview = h("img", { class: "template-preview", alt: tr("main.vorschau") }) as HTMLImageElement;
   if (info?.thumbnail) {
     templatePreview(info.thumbnail)
       .then((url) => (preview.src = url))
@@ -1126,16 +1154,16 @@ function renderTemplateChoice() {
   }
 
   wrap.append(
-    h("p", { class: "hint" }, "Die Menüvorlage gilt für das ganze Projekt (Hauptmenü und Untermenüs aller Titlesets)."),
-    h("div", { class: "row" }, h("label", { for: "template-select" }, "Vorlage"), select),
+    h("p", { class: "hint" }, tr("main.dieMenuevorlageGiltFuer")),
+    h("div", { class: "row" }, h("label", { for: "template-select" }, tr("main.vorlage")), select),
     h(
       "div",
       { class: "row" },
-      h("label", { for: "menu-title" }, "Überschrift Hauptmenü"),
+      h("label", { for: "menu-title" }, tr("main.ueberschriftHauptmenue")),
       h("input", {
         id: "menu-title",
         type: "text",
-        placeholder: "Name des ersten Videos",
+        placeholder: tr("main.nameDesErstenVideos"),
         value: state.menuTitle,
         oninput: (e: Event) => {
           state.menuTitle = (e.target as HTMLInputElement).value;
@@ -1145,7 +1173,7 @@ function renderTemplateChoice() {
         },
       }),
     ),
-    h("p", { class: "hint" }, String.raw`Auch Name des DVD-Ordners: <Ausgabeordner>\<Überschrift>\VIDEO_TS. Standard ist der Name des ersten Videos.`),
+    h("p", { class: "hint" }, tr("main.auchNameDesDvd")),
   );
   if (info) {
     const pages = info.pageStyles.map((s) => styles[s] ?? s).join(", ");
@@ -1160,10 +1188,10 @@ function renderTemplateChoice() {
           { class: "template-info" },
           h("h3", {}, info.name),
           info.description ? h("p", {}, info.description) : null,
-          h("p", {}, h("strong", {}, "Seiten: "), pages),
-          info.titlesPerPage ? h("p", {}, h("strong", {}, "Titel pro Seite: "), String(info.titlesPerPage)) : null,
-          h("p", {}, h("strong", {}, "Video-Slots: "), info.hasVideoSlots ? "ja – Motion Menu animiert Vorschauen" : "nein"),
-          hasSub ? null : h("p", { class: "hint" }, "Fehlende Untermenüs (Root/Kapitel/Einstellungen) werden aus einer Vorlage derselben Familie ergänzt."),
+          h("p", {}, h("strong", {}, tr("main.seiten")), pages),
+          info.titlesPerPage ? h("p", {}, h("strong", {}, tr("main.titelProSeite")), String(info.titlesPerPage)) : null,
+          h("p", {}, h("strong", {}, tr("main.videoSlots")), info.hasVideoSlots ? tr("main.jaMotionMenuAnimiert") : "nein"),
+          hasSub ? null : h("p", { class: "hint" }, tr("main.fehlendeUntermenuesRootKapitel")),
         ),
       ),
     );
@@ -1273,18 +1301,18 @@ function onEvent(e: BuildEvent) {
 
 /** "Geschätzte Restzeit: ~14 min 20 s (Phase 2/5: Videos encodieren – Video 2 von 4)". */
 function showEta(eta: Eta) {
-  const phase = `Phase ${eta.phaseNumber}/${eta.phaseCount}: ${eta.phaseLabel}${eta.detail ? ` – ${eta.detail}` : ""}`;
+  const phase = tr("main.phase", { phaseNumber: eta.phaseNumber, phaseCount: eta.phaseCount, phaseLabel: eta.phaseLabel, eta: eta.detail ? ` – ${eta.detail}` : "" });
   const remaining =
     eta.remainingSecs === null
-      ? `Restzeit wird berechnet … (${phase})`
-      : `Geschätzte Restzeit: ${formatRemaining(eta.remainingSecs)} (${phase})`;
-  const burn = eta.burnSecs !== null ? ` · danach ${formatRemaining(eta.burnSecs)} für ISO & Brennen (Schätzung)` : "";
+      ? tr("main.restzeitWirdBerechnet", { phase })
+      : tr("main.geschaetzteRestzeit", { formatRemaining: formatRemaining(eta.remainingSecs), phase });
+  const burn = eta.burnSecs !== null ? tr("main.danachFuerIsoBrennen", { formatRemaining: formatRemaining(eta.burnSecs) }) : "";
   $("eta-line").textContent = remaining + burn;
 }
 
 function onDone(d: ConversionDone) {
   state.converting = false;
-  $("overlay-title").textContent = d.ok ? "DVD fertig" : "Konvertierung fehlgeschlagen";
+  $("overlay-title").textContent = d.ok ? tr("main.dvdFertig") : tr("main.konvertierungFehlgeschlagen");
   if (d.ok) {
     setPhase("authoring");
     // The conversion is done; ISO and burning follow in the burn dialog.
@@ -1299,7 +1327,7 @@ function onDone(d: ConversionDone) {
   }
   $("btn-close-overlay").hidden = false;
   $("btn-cancel").hidden = true;
-  status(d.ok ? d.message : `Fehler: ${d.message.split("\n")[0]}`, d.ok ? "info" : "error");
+  status(d.ok ? d.message : tr("main.fehler", { d: d.message.split("\n")[0] }), d.ok ? "info" : "error");
   renderAll();
   // Finished DVD: offer burning right away (the dialog's countdown starts only with a blank disc).
   lastDvd = d.ok && d.videoTs ? { videoTs: d.videoTs, projectName: d.projectName } : null;
@@ -1316,35 +1344,35 @@ function onCancelled(message: string) {
   state.converting = false;
   $("overlay").hidden = true;
   resetCancelButton();
-  status(`${message}. Der temporäre Arbeitsordner wurde gelöscht.`);
+  status(tr("main.derTemporaereArbeitsordnerWurde", { message }));
   renderAll();
 }
 
 function resetCancelButton() {
   const b = $("btn-cancel") as HTMLButtonElement;
   b.disabled = false;
-  b.textContent = "Abbrechen";
+  b.textContent = tr("main.abbrechen");
 }
 
 async function requestCancel() {
   const b = $("btn-cancel") as HTMLButtonElement;
   if (b.disabled) return;
   b.disabled = true;
-  b.textContent = "Wird abgebrochen …";
-  $("step-label").textContent = "Wird abgebrochen …";
+  b.textContent = tr("main.wirdAbgebrochen");
+  $("step-label").textContent = tr("main.wirdAbgebrochen");
   try {
     // `false`: the conversion has just finished – its result arrives as `convert-done`.
     if (!(await cancelConversion())) resetCancelButton();
   } catch (e) {
     resetCancelButton();
-    logLine(`Abbrechen fehlgeschlagen: ${e}`, "error");
+    logLine(tr("main.abbrechenFehlgeschlagen", { e }), "error");
   }
 }
 
 async function convert() {
   if (state.converting) return;
   const overlayEl = $("overlay");
-  $("overlay-title").textContent = "Konvertierung läuft";
+  $("overlay-title").textContent = tr("main.konvertierungLaeuft");
   $("log").replaceChildren();
   $("btn-close-overlay").hidden = true;
   $("btn-burn").hidden = true;
@@ -1352,7 +1380,7 @@ async function convert() {
   resetCancelButton();
   $("step-bar").style.width = "0%";
   $("step-pct").textContent = "";
-  $("step-label").textContent = "Starte …";
+  $("step-label").textContent = tr("main.starte");
   $("eta-line").textContent = "";
   overlay.total = 0;
   setTotal(0);
@@ -1372,6 +1400,7 @@ async function convert() {
         endSecs: t.trimEnd,
         crop: t.crop,
         mergeWithPrevious: t.mergeWithPrevious,
+        audioNames: t.audioNames,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
@@ -1407,21 +1436,27 @@ async function init() {
   try {
     state.settings = await getSettings();
     const info = await settingsInfo();
-    if (info.loadProblem) status(`Einstellungen: ${info.loadProblem}`, "error");
+    if (info.loadProblem) status(tr("main.einstellungen2", { loadProblem: info.loadProblem }), "error");
   } catch (e) {
-    status(`Einstellungen konnten nicht geladen werden: ${e}`, "error");
+    status(tr("main.einstellungenKonntenNichtGeladen", { e }), "error");
   }
   updateCustomDiscLabel();
   $("btn-studio").addEventListener("click", () => void openStudio());
   $("btn-settings").addEventListener("click", async () => {
     if (state.converting || !state.settings) return;
-    const info = await settingsInfo();
-    openSettings(state.settings, info, (saved) => {
-      const relabel = saved.track_label_mode !== state.settings?.track_label_mode;
+    const [info, languages] = await Promise.all([settingsInfo(), availableLanguages()]);
+    openSettings(state.settings, info, languages, async (saved) => {
+      const langChanged = saved.ui_language !== state.settings?.ui_language;
+      const relabel = langChanged || saved.track_label_mode !== state.settings?.track_label_mode;
       state.settings = saved;
+      if (langChanged) {
+        await loadLanguage(saved.ui_language);
+        applyStatic();
+        renderAll();
+      }
       if (relabel) void relabelTitles();
       updateCustomDiscLabel();
-      status("Einstellungen gespeichert.");
+      status(tr("main.einstellungenGespeichert"));
       void refreshLayoutCheck();
       scheduleCalc();
     });
@@ -1461,7 +1496,7 @@ async function init() {
     renderFooter();
   });
   $("btn-output").addEventListener("click", async () => {
-    const dir = await open({ directory: true, title: "Ausgabeordner wählen", defaultPath: state.output || undefined });
+    const dir = await open({ directory: true, title: tr("main.ausgabeordnerWaehlen"), defaultPath: state.output || undefined });
     if (typeof dir === "string") {
       state.output = dir;
       output.value = dir;
@@ -1506,10 +1541,10 @@ async function init() {
         "";
     }
   } catch (e) {
-    status(`Menüvorlagen: ${e}`, "error");
+    status(tr("main.menuevorlagen", { e }), "error");
   }
   renderAll();
-  status("Bereit. Videos per Drag & Drop oder über „Videos hinzufügen“ laden.");
+  status(tr("main.bereitVideosPerDrag"));
 
   const initial = await startupFiles().catch(() => [] as string[]);
   if (initial.length > 0) await addFiles(initial);
@@ -1522,4 +1557,16 @@ async function init() {
   }
 }
 
-void init();
+/** Offers a newer GitHub release; offline, dev builds and unsigned releases fail silently. */
+async function checkForUpdate() {
+  try {
+    const update = await check();
+    if (update && (await ask(tr("update.prompt", { version: update.version }), { title: tr("update.title"), kind: "info" }))) {
+      await update.downloadAndInstall(); // the passive NSIS installer restarts the app
+    }
+  } catch {
+    // no update check possible, not worth bothering the user
+  }
+}
+
+void init().then(checkForUpdate);

@@ -9,15 +9,16 @@ import { openStudioSettings } from "./studio/settings";
 import { openAutoSpeed, openDriveInfo, openIfoTool, openLabelTool, openSidecarTool } from "./studio/tools";
 import { el, fmtTime, modal } from "./studio/ui";
 import { MODES, mediaText, needsDrive, renderHome, renderMode, speedOptions, type Host, type Mode } from "./studio/views";
+import { fmtNumber, t as tr } from "./i18n";
 
 const PHASES: Record<string, string> = {
-  preparing: "Vorbereiten",
-  formatting: "Formatieren",
-  writing: "Schreiben",
-  finalizing: "Abschließen",
-  verifying: "Überprüfen",
-  reading: "Lesen",
-  building: "Image erstellen",
+  preparing: tr("studio.main.vorbereiten"),
+  formatting: tr("studio.main.formatieren"),
+  writing: tr("studio.main.schreiben"),
+  finalizing: tr("studio.main.abschliessen"),
+  verifying: tr("studio.main.ueberpruefen"),
+  reading: tr("studio.main.lesen"),
+  building: tr("studio.main.imageErstellen"),
 };
 
 let settings: api.FullSettings;
@@ -40,9 +41,9 @@ const bar = el("div", { class: "progress-value" });
 const ringBar = el("div", { class: "progress-value buf" });
 const deviceBar = el("div", { class: "progress-value buf dev" });
 const stats = el("div", { class: "studio-stats" });
-const phaseLabel = el("span", {}, "Bereit");
+const phaseLabel = el("span", {}, tr("studio.main.bereit"));
 const pctLabel = el("span", {}, "");
-const cancelBtn = el("button", { class: "btn danger", disabled: true, onclick: () => void api.cancel() }, "Abbrechen");
+const cancelBtn = el("button", { class: "btn danger", disabled: true, onclick: () => void api.cancel() }, tr("studio.main.abbrechen"));
 const statusPanel = el("div", { class: "status-tab" });
 const bottom = el("section", { class: "studio-bottom" });
 const note = el("div", { class: "status-bar" });
@@ -67,7 +68,7 @@ const host: Host = {
   refreshDrive: () => void refreshDrive(),
   note: say,
   run(what, start) {
-    if (running) return say("Es läuft bereits ein Vorgang.");
+    if (running) return say(tr("studio.main.esLaeuftBereitsEin"));
     running = true;
     logList.replaceChildren();
     graph.clear();
@@ -93,7 +94,7 @@ function setProgress(p: api.Progress | null) {
     bar.style.width = "0";
     ringBar.style.width = "0";
     deviceBar.style.width = "0";
-    phaseLabel.textContent = running ? "Starte …" : "Bereit";
+    phaseLabel.textContent = running ? tr("studio.main.starte") : tr("studio.main.bereit");
     pctLabel.textContent = "";
     stats.replaceChildren();
     return;
@@ -105,11 +106,11 @@ function setProgress(p: api.Progress | null) {
   pctLabel.textContent = `${(p.fraction * 100).toFixed(1)} %`;
   const cell = (k: string, v: string) => el("span", {}, el("small", {}, k), v);
   stats.replaceChildren(
-    cell("Geschwindigkeit", `${p.speedX.toFixed(1)}x`),
-    cell("Sektor", `${p.lba.toLocaleString("de-DE")} / ${p.total.toLocaleString("de-DE")}`),
-    cell("Hauptpuffer", `${p.ring} %`),
-    cell("Laufwerkspuffer", p.device === null ? "—" : `${p.device} %`),
-    cell("Verbleibend", fmtTime(p.etaSecs)),
+    cell(tr("studio.main.geschwindigkeit"), `${p.speedX.toFixed(1)}x`),
+    cell(tr("studio.main.sektor"), `${fmtNumber(p.lba)} / ${fmtNumber(p.total)}`),
+    cell(tr("studio.main.hauptpuffer"), `${p.ring} %`),
+    cell(tr("studio.main.laufwerkspuffer"), p.device === null ? "—" : `${p.device} %`),
+    cell(tr("studio.main.verbleibend"), fmtTime(p.etaSecs)),
   );
 }
 
@@ -118,7 +119,7 @@ function renderBottom() {
     "div",
     { class: "tabs" },
     ...(["status", "graph"] as const).map((t) =>
-      el("button", { class: `tab${tab === t ? " active" : ""}`, onclick: () => ((tab = t), renderBottom()) }, t === "status" ? "Vorgang" : "Graph"),
+      el("button", { class: `tab${tab === t ? " active" : ""}`, onclick: () => ((tab = t), renderBottom()) }, t === "status" ? tr("studio.main.vorgang") : tr("studio.main.graph")),
     ),
   );
   statusPanel.hidden = tab !== "status";
@@ -131,7 +132,7 @@ function buildStatusPanel() {
     el("div", { class: "progress-block" }, el("div", { class: "progress-label" }, el("span", {}, label)), el("div", { class: "progress thin" }, inner));
   statusPanel.append(
     el("div", { class: "progress-block" }, el("div", { class: "progress-label" }, phaseLabel, pctLabel), el("div", { class: "progress" }, bar)),
-    el("div", { class: "meters" }, meter("Hauptpuffer", ringBar), meter("Laufwerkspuffer", deviceBar)),
+    el("div", { class: "meters" }, meter(tr("studio.main.hauptpuffer"), ringBar), meter(tr("studio.main.laufwerkspuffer"), deviceBar)),
     stats,
     logList,
     el("div", { class: "overlay-actions" }, cancelBtn),
@@ -177,15 +178,15 @@ function renderDriveBar() {
           void refreshDrive();
         },
       },
-      ...(drives.length ? drives.map((d) => el("option", { value: d.id, selected: d.id === driveId }, d.name)) : [el("option", {}, "Kein Laufwerk gefunden")]),
+      ...(drives.length ? drives.map((d) => el("option", { value: d.id, selected: d.id === driveId }, d.name)) : [el("option", {}, tr("studio.main.keinLaufwerkGefunden"))]),
     ),
-    el("button", { class: "btn icon", title: "Aktualisieren", onclick: () => void refreshDrive() }, "↻"),
+    el("button", { class: "btn icon", title: tr("studio.main.aktualisieren"), onclick: () => void refreshDrive() }, "↻"),
     el("span", { class: "media-text" }, driveId ? mediaText(view) : "—"),
     el("span", { class: "spacer" }),
-    el("label", {}, "Geschwindigkeit ", el("select", { onchange: (e: Event) => (speed = (e.target as HTMLSelectElement).value) }, ...speeds.map(([v, t]) => el("option", { value: v, selected: v === speed }, t)))),
-    el("button", { class: "btn", disabled: !driveId, onclick: () => void tray("eject") }, "⏏ Auswerfen"),
-    el("button", { class: "btn", disabled: !driveId, onclick: () => void tray("load") }, "Einfahren"),
-    el("button", { class: "btn", disabled: !driveId, onclick: () => void openDriveInfo(driveId || null) }, "Info"),
+    el("label", {}, tr("studio.main.geschwindigkeit2"), el("select", { onchange: (e: Event) => (speed = (e.target as HTMLSelectElement).value) }, ...speeds.map(([v, t]) => el("option", { value: v, selected: v === speed }, t)))),
+    el("button", { class: "btn", disabled: !driveId, onclick: () => void tray("eject") }, tr("studio.main.auswerfen")),
+    el("button", { class: "btn", disabled: !driveId, onclick: () => void tray("load") }, tr("studio.main.einfahren")),
+    el("button", { class: "btn", disabled: !driveId, onclick: () => void openDriveInfo(driveId || null) }, tr("studio.main.info")),
   );
 }
 
@@ -201,8 +202,8 @@ async function tray(action: "eject" | "load") {
 // ---- main area -------------------------------------------------------------------------------
 
 function renderMain() {
-  const title = mode === "home" ? "Brennstudio" : MODES.find((m) => m.id === mode)!.title;
-  document.title = mode === "home" ? title : `${title} – Brennstudio`;
+  const title = mode === "home" ? tr("studio.main.brennstudio") : MODES.find((m) => m.id === mode)!.title;
+  document.title = mode === "home" ? title : tr("studio.main.brennstudio2", { title });
   main.replaceChildren(
     mode === "home"
       ? renderHome(setMode)
@@ -229,39 +230,39 @@ type Entry = { label: string; run?: () => void; checked?: boolean; sep?: boolean
 function menus(): [string, Entry[]][] {
   return [
     [
-      "Datei",
+      tr("studio.main.datei"),
       [
-        { label: "Graph laden …", run: () => void loadGraph() },
-        { label: "Einstellungen …", run: openSettings },
+        { label: tr("studio.main.graphLaden"), run: () => void loadGraph() },
+        { label: tr("studio.main.einstellungen"), run: openSettings },
         { sep: true, label: "" },
-        { label: "Beenden", run: () => void getCurrentWindow().close() },
+        { label: tr("studio.main.beenden"), run: () => void getCurrentWindow().close() },
       ],
     ],
     [
-      "Ansicht",
+      tr("studio.main.ansicht"),
       [
-        { label: "Vorgang", run: () => ((tab = "status"), renderBottom()), checked: tab === "status" },
-        { label: "Graph", run: () => ((tab = "graph"), renderBottom()), checked: tab === "graph" },
+        { label: tr("studio.main.vorgang"), run: () => ((tab = "status"), renderBottom()), checked: tab === "status" },
+        { label: tr("studio.main.graph"), run: () => ((tab = "graph"), renderBottom()), checked: tab === "graph" },
         { sep: true, label: "" },
-        { label: "Protokoll leeren", run: () => logList.replaceChildren() },
+        { label: tr("studio.main.protokollLeeren"), run: () => logList.replaceChildren() },
       ],
     ],
-    ["Modus", [{ label: "Start", run: () => setMode("home"), checked: mode === "home" }, ...MODES.map((m) => ({ label: m.title, run: () => setMode(m.id), checked: mode === m.id }))]],
+    [tr("studio.main.modus"), [{ label: tr("studio.main.start"), run: () => setMode("home"), checked: mode === "home" }, ...MODES.map((m) => ({ label: m.title, run: () => setMode(m.id), checked: mode === m.id }))]],
     [
-      "Werkzeuge",
+      tr("studio.main.werkzeuge"),
       [
-        { label: "Volume-Label ändern …", run: openLabelTool },
-        { label: "Layerwechsel (IFO-Inspektor) …", run: () => void openIfoTool() },
-        { label: "Layout-Dateien schreiben …", run: openSidecarTool },
-        { label: "Laufwerks- und Disc-Info …", run: () => void openDriveInfo(driveId || null) },
-        { label: "Auto-Geschwindigkeit …", run: () => openAutoSpeed(settings.burn_studio, () => void saveStudioSettings()) },
+        { label: tr("studio.main.volumeLabelAendern"), run: openLabelTool },
+        { label: tr("studio.main.layerwechselIfoInspektor"), run: () => void openIfoTool() },
+        { label: tr("studio.main.layoutDateienSchreiben"), run: openSidecarTool },
+        { label: tr("studio.main.laufwerksUndDiscInfo"), run: () => void openDriveInfo(driveId || null) },
+        { label: tr("studio.main.autoGeschwindigkeit"), run: () => openAutoSpeed(settings.burn_studio, () => void saveStudioSettings()) },
         { sep: true, label: "" },
-        { label: "Schublade auswerfen", run: () => void tray("eject") },
-        { label: "Schublade einfahren", run: () => void tray("load") },
-        { label: "Schublade sperren", checked: locked, run: () => void toggleLock() },
+        { label: tr("studio.main.schubladeAuswerfen"), run: () => void tray("eject") },
+        { label: tr("studio.main.schubladeEinfahren"), run: () => void tray("load") },
+        { label: tr("studio.main.schubladeSperren"), checked: locked, run: () => void toggleLock() },
       ],
     ],
-    ["Hilfe", [{ label: "Über das Brennstudio", run: about }]],
+    [tr("studio.main.hilfe"), [{ label: tr("studio.main.ueberDasBrennstudio"), run: about }]],
   ];
 }
 
@@ -288,7 +289,7 @@ document.addEventListener("click", closeMenus);
 function openSettings() {
   openStudioSettings(settings, (s) => {
     settings = s;
-    say("Einstellungen gespeichert.");
+    say(tr("studio.main.einstellungenGespeichert"));
     void refreshDrive();
   });
 }
@@ -296,7 +297,7 @@ function openSettings() {
 async function saveStudioSettings() {
   try {
     settings = (await saveSettings(settings)) as api.FullSettings;
-    say("Gespeichert.");
+    say(tr("studio.main.gespeichert"));
   } catch (e) {
     say(String(e));
   }
@@ -307,14 +308,14 @@ async function toggleLock() {
     await api.lock(driveId, !locked);
     locked = !locked;
     renderMenu();
-    say(locked ? "Schublade gesperrt." : "Schublade entsperrt.");
+    say(locked ? tr("studio.main.schubladeGesperrt") : tr("studio.main.schubladeEntsperrt"));
   } catch (e) {
     say(String(e));
   }
 }
 
 async function loadGraph() {
-  const p = await open({ multiple: false, defaultPath: await api.graphFolder(), filters: [{ name: "Graph-Dateien", extensions: ["ibg"] }] });
+  const p = await open({ multiple: false, defaultPath: await api.graphFolder(), filters: [{ name: tr("studio.main.graphDateien"), extensions: ["ibg"] }] });
   if (typeof p !== "string") return;
   try {
     graph.show(await api.graphLoad(p), p.split(/[\\/]/).pop() ?? p);
@@ -327,16 +328,16 @@ async function loadGraph() {
 
 function about() {
   modal(
-    "Brennstudio",
+    tr("studio.main.brennstudio"),
     el(
       "div",
       {},
-      el("p", {}, "Brennen, Lesen, Überprüfen und Image-Bau für DVD und Blu-ray auf Basis der ConvertX-Rust-Engine."),
+      el("p", {}, tr("studio.main.brennenLesenUeberpruefenUnd")),
       el("ul", { class: "hint" },
-        el("li", {}, "Book-Typ ändern (Bitsetting) ist herstellerspezifisch und nicht umgesetzt."),
-        el("li", {}, "„SPTI Direkt“ (eigene Schreibschleife) wurde nur gegen ein simuliertes Laufwerk getestet."),
-        el("li", {}, "Kein CSS/AACS-Entschlüsseln beim Lesen."),
-        el("li", {}, "Graph-Dateien (.ibg) haben keine ImgBurn-Prüfsummenzeile.")),
+        el("li", {}, tr("studio.main.bookTypAendernBitsetting")),
+        el("li", {}, tr("studio.main.sptiDirektEigeneSchreibschleife")),
+        el("li", {}, tr("studio.main.keinCssAacsEntschluesseln")),
+        el("li", {}, tr("studio.main.graphDateienIbgHaben"))),
     ),
   );
 }
@@ -355,14 +356,14 @@ async function init() {
     cancelBtn.disabled = true;
     const kind = o.cancelled ? "warn" : o.ok ? "ok" : "error";
     logLine(o.message, kind);
-    o.files.forEach((f) => logLine(`Datei: ${f}`));
-    if (o.layoutFile) logLine(`Layout-Datei: ${o.layoutFile}`);
-    if (o.md5) logLine(`MD5: ${o.md5}`);
-    if (o.graph) logLine(`Graph: ${o.graph}`);
+    o.files.forEach((f) => logLine(tr("studio.main.datei2", { f })));
+    if (o.layoutFile) logLine(tr("studio.main.layoutDatei", { layoutFile: o.layoutFile }));
+    if (o.md5) logLine(tr("studio.main.md5", { md5: o.md5 }));
+    if (o.graph) logLine(tr("studio.main.graph2", { graph: o.graph }));
     o.details.forEach((d) => logLine(d, "warn"));
-    if (o.badSectors) logLine(`${o.badSectors.toLocaleString("de-DE")} Sektoren betroffen`, "warn");
+    if (o.badSectors) logLine(tr("studio.main.sektorenBetroffen", { o: fmtNumber(o.badSectors) }), "warn");
     if (o.ok) setProgress(null);
-    phaseLabel.textContent = o.cancelled ? "Abgebrochen" : o.ok ? "Fertig" : "Fehler";
+    phaseLabel.textContent = o.cancelled ? tr("studio.main.abgebrochen") : o.ok ? tr("studio.main.fertig") : tr("studio.main.fehler");
     renderAll();
     void refreshDrive();
     if (o.ok && settings.burn_studio.general.on_complete === "close") void getCurrentWindow().close();
@@ -371,7 +372,7 @@ async function init() {
     if (running) {
       ev.preventDefault();
       void api.cancel();
-      say("Vorgang wird abgebrochen – danach kann das Fenster geschlossen werden.");
+      say(tr("studio.main.vorgangWirdAbgebrochenDanach"));
     }
   });
   renderAll();
@@ -379,5 +380,5 @@ async function init() {
 }
 
 void init().catch((e) => {
-  root.textContent = `Brennstudio konnte nicht gestartet werden: ${String(e)}`;
+  root.textContent = tr("studio.main.brennstudioKonnteNichtGestartet", { e: String(e) });
 });

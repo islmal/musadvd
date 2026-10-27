@@ -2,6 +2,7 @@
 // (black bars cut away, with automatic detection and a preview of the output frame). The trimmer has a
 // live player (ffmpeg fMP4 stream from `preview.rs`) to set start, end and chapters at the playhead.
 import { detectCrop, previewStop, previewStream, sourceFrame, type Crop, type VideoMetadata } from "./api";
+import { fmtNumber, t as tr } from "./i18n";
 
 /** The part of a project title this tab edits. */
 export interface EditTarget {
@@ -130,18 +131,18 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   let start = t.trimStart ?? 0;
   let end = t.trimEnd ?? dur;
 
-  const startInput = h("input", { type: "text", class: "mono time", "aria-label": "Start" }) as HTMLInputElement;
-  const endInput = h("input", { type: "text", class: "mono time", "aria-label": "Ende" }) as HTMLInputElement;
+  const startInput = h("input", { type: "text", class: "mono time", "aria-label": tr("edit.start") }) as HTMLInputElement;
+  const endInput = h("input", { type: "text", class: "mono time", "aria-label": tr("edit.ende") }) as HTMLInputElement;
   const length = h("span", { class: "hint" });
   const range = h("div", { class: "trim-range" });
-  const hStart = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": "Startpunkt", title: "Startpunkt ziehen" });
-  const hEnd = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": "Endpunkt", title: "Endpunkt ziehen" });
+  const hStart = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": tr("edit.startpunkt"), title: tr("edit.startpunktZiehen") });
+  const hEnd = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": tr("edit.endpunkt"), title: tr("edit.endpunktZiehen") });
   const playhead = h("div", { class: "trim-playhead" });
   const track = h("div", { class: "trim-track" }, range, playhead, hStart, hEnd);
-  const video = h("video", { playsinline: "", preload: "auto", "aria-label": "Vorschau" }) as HTMLVideoElement;
+  const video = h("video", { playsinline: "", preload: "auto", "aria-label": tr("edit.vorschau") }) as HTMLVideoElement;
   const timeText = h("span", { class: "mono" });
-  const playBtn = h("button", { class: "btn", type: "button" }, "Wiedergabe") as HTMLButtonElement;
-  const splitBtn = h("button", { class: "btn", type: "button", onclick: () => hooks.split() }, "In separate Titel aufteilen") as HTMLButtonElement;
+  const playBtn = h("button", { class: "btn", type: "button" }, tr("edit.wiedergabe")) as HTMLButtonElement;
+  const splitBtn = h("button", { class: "btn", type: "button", onclick: () => hooks.split() }, tr("edit.inSeparateTitelAufteilen")) as HTMLButtonElement;
   const splitHint = h("span", { class: "hint" });
 
   // Output timestamps of a stream start at 0 (`-ss` before `-i`): logical time = base + currentTime.
@@ -153,7 +154,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   const paintPlayhead = () => {
     playhead.style.left = `${(clamp(pos(), 0, dur) / dur) * 100}%`;
     timeText.textContent = `${fmtPrecise(pos())} / ${fmtPrecise(dur)}`;
-    playBtn.textContent = video.paused ? "Wiedergabe" : "Pause";
+    playBtn.textContent = video.paused ? tr("edit.wiedergabe") : tr("edit.pause");
   };
   const seek = async (secs: number, play: boolean) => {
     const mine = ++seq;
@@ -174,7 +175,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
       paintPlayhead();
     } catch (e) {
       streamUrl = null;
-      hooks.status(`Vorschau: ${e}`, "error");
+      hooks.status(tr("edit.vorschau2", { e }), "error");
     }
   };
   player = { video, pos };
@@ -202,7 +203,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   const refreshSplit = () => {
     const n = chapterSegments(t.chapters, start, end).length;
     splitBtn.disabled = n < 2;
-    splitHint.textContent = n < 2 ? "Mindestens zwei Kapitel im Ausschnitt nötig." : `Ergibt ${n} Titel.`;
+    splitHint.textContent = n < 2 ? tr("edit.mindestensZweiKapitelIm") : tr("edit.ergibtTitel", { n });
   };
 
   const store = () => {
@@ -220,7 +221,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     hEnd.setAttribute("aria-valuenow", end.toFixed(1));
     if (document.activeElement !== startInput) startInput.value = fmtPrecise(start);
     if (document.activeElement !== endInput) endInput.value = fmtPrecise(end);
-    length.textContent = `Länge ${fmtPrecise(end - start)} von ${fmtPrecise(dur)}`;
+    length.textContent = tr("edit.laengeVon", { fmtPrecise: fmtPrecise(end - start), fmtPrecise2: fmtPrecise(dur) });
     refreshSplit();
   };
 
@@ -271,7 +272,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
       const bad =
         v === null || v < 0 || v > dur + 0.05 || (which === "start" ? v > end - MIN_SECS : v < start + MIN_SECS);
       if (bad) {
-        hooks.status(`Ungültige Zeit. Der Ausschnitt muss mindestens ${MIN_SECS} s lang sein und innerhalb von ${fmtPrecise(dur)} liegen.`, "error");
+        hooks.status(tr("edit.ungueltigeZeitDerAusschnitt", { MIN_SECS, fmtPrecise: fmtPrecise(dur) }), "error");
         input.value = fmtPrecise(which === "start" ? start : end);
         return;
       }
@@ -285,7 +286,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     const c = Math.round(pos() * 10) / 10;
     const bad = c <= 0 || c >= dur - 1 || t.chapters.some((x) => Math.abs(x - c) < 0.5) || c < start || c > end;
     if (bad) {
-      hooks.status("Hier kann kein Kapitel gesetzt werden (Anfang/Ende, vorhandenes Kapitel in der Nähe oder außerhalb des Ausschnitts).", "error");
+      hooks.status(tr("edit.hierKannKeinKapitel"), "error");
       return;
     }
     t.chapters.push(c);
@@ -293,7 +294,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     paintMarks();
     refreshSplit();
     hooks.changed();
-    hooks.status(`Kapitel bei ${fmtPrecise(c)} gesetzt.`);
+    hooks.status(tr("edit.kapitelBeiGesetzt", { fmtPrecise: fmtPrecise(c) }));
   };
   const btn = (label: string, onclick: () => void) => h("button", { class: "btn", type: "button", onclick }, label);
 
@@ -304,8 +305,8 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   return h(
     "section",
     { class: "edit-section" },
-    h("h3", {}, "Schnitt"),
-    h("p", { class: "hint" }, "Nur den gewählten Ausschnitt ins Video übernehmen (Vorspann und Abspann abschneiden). Kapitel werden auf den Ausschnitt gekürzt. Vorschau in 480p, nach dem Springen dauert es kurz."),
+    h("h3", {}, tr("edit.schnitt")),
+    h("p", { class: "hint" }, tr("edit.nurDenGewaehltenAusschnitt")),
     h(
       "div",
       { class: "edit-player" },
@@ -315,18 +316,18 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
         { class: "player-controls" },
         playBtn,
         timeText,
-        btn("Start hier setzen", () => set("start", pos(), true, false)),
-        btn("Ende hier setzen", () => set("end", pos(), true, false)),
-        btn("Kapitel hier setzen", addChapter),
+        btn(tr("edit.startHierSetzen"), () => set("start", pos(), true, false)),
+        btn(tr("edit.endeHierSetzen"), () => set("end", pos(), true, false)),
+        btn(tr("edit.kapitelHierSetzen"), addChapter),
       ),
     ),
     track,
     h(
       "div",
       { class: "trim-times" },
-      h("label", {}, "Start ", startInput),
+      h("label", {}, tr("edit.start2"), startInput),
       length,
-      h("label", {}, "Ende ", endInput),
+      h("label", {}, tr("edit.ende2"), endInput),
       h(
         "button",
         {
@@ -340,7 +341,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
             hooks.changed();
           },
         },
-        "Gesamtes Video",
+        tr("edit.gesamtesVideo"),
       ),
     ),
     h("div", { class: "row" }, splitBtn, splitHint),
@@ -355,20 +356,20 @@ type Edge = keyof Crop;
 
 function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
   const v = t.meta.video;
-  if (!v) return h("section", { class: "edit-section" }, h("h3", {}, "Bild"), h("div", { class: "empty" }, "Dieses Video hat keine Videospur."));
+  if (!v) return h("section", { class: "edit-section" }, h("h3", {}, tr("edit.bild")), h("div", { class: "empty" }, tr("edit.diesesVideoHatKeine")));
   const W = v.width;
   const H = v.height;
   const crop: Crop = { ...(t.crop ?? { top: 0, bottom: 0, left: 0, right: 0 }) };
 
-  const img = h("img", { class: "crop-image", alt: "Bild mit Zuschnitt", draggable: false }) as HTMLImageElement;
+  const img = h("img", { class: "crop-image", alt: tr("edit.bildMitZuschnitt"), draggable: false }) as HTMLImageElement;
   const masks = (["top", "bottom", "left", "right"] as const).map((e) => h("div", { class: `crop-mask ${e}` }));
   const box = h("div", { class: "crop-box" });
   const handles = (["top", "bottom", "left", "right"] as const).map((e) =>
-    h("div", { class: `crop-edge ${e}`, "data-edge": e, role: "slider", tabIndex: 0, "aria-label": { top: "oberer", bottom: "unterer", left: "linker", right: "rechter" }[e] + " Rand", title: "Rand ziehen" }),
+    h("div", { class: `crop-edge ${e}`, "data-edge": e, role: "slider", tabIndex: 0, "aria-label": { top: "oberer", bottom: "unterer", left: "linker", right: "rechter" }[e] + tr("edit.rand"), title: tr("edit.randZiehen") }),
   );
   const stage = h("div", { class: "crop-stage" }, img, ...masks, box, ...handles);
   const fields = {} as Record<Edge, HTMLInputElement>;
-  const labels: Record<Edge, string> = { top: "Oben", bottom: "Unten", left: "Links", right: "Rechts" };
+  const labels: Record<Edge, string> = { top: tr("edit.oben"), bottom: tr("edit.unten"), left: tr("edit.links"), right: tr("edit.rechts") };
   for (const e of ["top", "bottom", "left", "right"] as const) {
     fields[e] = h("input", {
       type: "number",
@@ -380,7 +381,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
     }) as HTMLInputElement;
   }
   const info = h("p", { class: "hint crop-info" });
-  const out = h("canvas", { class: "crop-output", width: 320, height: 180, "aria-label": "Vorschau des Ausgabebilds" }) as HTMLCanvasElement;
+  const out = h("canvas", { class: "crop-output", width: 320, height: 180, "aria-label": tr("edit.vorschauDesAusgabebilds") }) as HTMLCanvasElement;
 
   const cropped = () => {
     const w = W - crop.left - crop.right;
@@ -413,8 +414,8 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
       ctx.fillStyle = "#334";
       ctx.fillRect(Math.round((cw - pw) / 2), Math.round((ch - ph) / 2), pw, ph);
     }
-    const bars = dar > frame * 1.01 ? "oben und unten" : dar < frame / 1.01 ? "links und rechts" : null;
-    info.textContent = `Bild ${cropped().w}×${cropped().h} (${(dar).toFixed(2).replace(".", ",")}:1) → Ausgabebild ${frame > 1.5 ? "16:9" : "4:3"}${bars ? `, schwarze Balken ${bars}` : ""}`;
+    const bars = dar > frame * 1.01 ? tr("edit.barsTopBottom") : dar < frame / 1.01 ? tr("edit.barsLeftRight") : null;
+    info.textContent = tr("edit.bild1Ausgabebild", { cropped: cropped().w, cropped2: cropped().h, dar: fmtNumber(dar, 2), frame: frame > 1.5 ? "16:9" : "4:3", bars: bars ? tr("edit.schwarzeBalken", { bars }) : "" });
   };
 
   const paint = () => {
@@ -482,7 +483,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
         img.onload = () => drawOutput();
         img.src = u;
       })
-      .catch((e) => hooks.status(`Vorschaubild: ${e}`, "error"));
+      .catch((e) => hooks.status(tr("edit.vorschaubild", { e }), "error"));
   };
 
   const detect = h(
@@ -493,7 +494,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
       onclick: async (ev: Event) => {
         const b = ev.currentTarget as HTMLButtonElement;
         b.disabled = true;
-        b.textContent = "Suche …";
+        b.textContent = tr("edit.suche");
         try {
           const c = await detectCrop(t.meta.path, t.trimStart, t.trimEnd);
           Object.assign(crop, c);
@@ -502,16 +503,16 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
           paint();
           hooks.changed();
           const none = !crop.top && !crop.bottom && !crop.left && !crop.right;
-          hooks.status(none ? "Keine schwarzen Ränder gefunden." : `Zuschnitt erkannt: oben ${crop.top}, unten ${crop.bottom}, links ${crop.left}, rechts ${crop.right} Pixel.`);
+          hooks.status(none ? tr("edit.keineSchwarzenRaenderGefunden") : tr("edit.zuschnittErkanntObenUnten", { top: crop.top, bottom: crop.bottom, left: crop.left, right: crop.right }));
         } catch (e) {
-          hooks.status(`Automatische Erkennung fehlgeschlagen: ${e}`, "error");
+          hooks.status(tr("edit.automatischeErkennungFehlgeschlagen", { e }), "error");
         } finally {
           b.disabled = false;
-          b.textContent = "Automatisch erkennen";
+          b.textContent = tr("edit.automatischErkennen");
         }
       },
     },
-    "Automatisch erkennen",
+    tr("edit.automatischErkennen"),
   );
   const reset = h(
     "button",
@@ -525,7 +526,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
         hooks.changed();
       },
     },
-    "Zurücksetzen",
+    tr("edit.zuruecksetzen"),
   );
 
   paint();
@@ -533,8 +534,8 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
   return h(
     "section",
     { class: "edit-section" },
-    h("h3", {}, "Bild (Zuschnitt)"),
-    h("p", { class: "hint" }, "Schwarze Ränder abschneiden: Die Ränder im Bild ziehen, Pixelwerte eingeben oder automatisch erkennen lassen. Das Ergebnis wird mit schwarzen Balken in das Bildformat der Disc eingepasst."),
+    h("h3", {}, tr("edit.bildZuschnitt")),
+    h("p", { class: "hint" }, tr("edit.schwarzeRaenderAbschneidenDie")),
     h(
       "div",
       { class: "crop-layout" },
@@ -543,7 +544,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
         "div",
         { class: "crop-side" },
         h("div", { class: "crop-fields" }, ...(["top", "bottom", "left", "right"] as const).map((e) => h("label", {}, labels[e], fields[e]))),
-        h("div", { class: "row" }, detect, reset, h("button", { class: "btn", type: "button", onclick: () => loadImage(player?.pos() ?? midpoint()) }, "Bild von Abspielposition")),
+        h("div", { class: "row" }, detect, reset, h("button", { class: "btn", type: "button", onclick: () => loadImage(player?.pos() ?? midpoint()) }, tr("edit.bildVonAbspielposition"))),
         h("div", { class: "crop-output-box" }, out, info),
       ),
     ),

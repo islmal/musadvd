@@ -13,6 +13,7 @@ use crate::author::{PlaybackOptions, Resolution, TvStandard};
 use crate::encoder::{AudioMode, Deinterlace, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
+use crate::i18n::{available_languages, tr, UiLang};
 use crate::menu::TextOverflow;
 use crate::probe::TrackLabelMode;
 use crate::tools::ProcessPriority;
@@ -45,6 +46,8 @@ pub const UNSUPPORTED_CHOICES: &[&str] = &[];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    /// GUI and generated-label language: the code of a locale file, see [`available_languages`].
+    pub ui_language: String,
     // Menu options
     pub auto_start_playback: bool,
     pub loop_playback: bool,
@@ -127,6 +130,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
+            ui_language: "de".into(),
             auto_start_playback: false,
             loop_playback: false,
             play_sequentially: false,
@@ -620,6 +624,8 @@ fn language(value: &str) -> String {
 impl AppSettings {
     /// Clamps numbers into sensible ranges and normalises the string choices.
     pub fn sanitized(mut self) -> Self {
+        let code = self.ui_language.trim().to_ascii_lowercase();
+        self.ui_language = if available_languages().iter().any(|(c, _)| *c == code) { code } else { "de".into() };
         self.text_overflow_action = choice(&self.text_overflow_action, TEXT_OVERFLOW_ACTIONS);
         self.tv_standard = choice(&self.tv_standard, TV_STANDARDS);
         self.menu_audio = choice(&self.menu_audio, MENU_AUDIO_MODES);
@@ -730,7 +736,12 @@ impl AppSettings {
         ChapterSettings {
             interval_secs: if self.auto_chapter_enabled { self.auto_chapter_interval_seconds as f64 } else { 0.0 },
             min_video_secs: self.auto_chapter_min_video_length_seconds as f64,
-            label_template: Some(self.chapter_naming_template.clone()),
+            // The stock template follows the language; a user-edited one is kept as typed.
+            label_template: Some(if self.chapter_naming_template == AppSettings::default().chapter_naming_template {
+                format!("{} #<c>", tr(UiLang::from_setting(&self.ui_language), "chapter"))
+            } else {
+                self.chapter_naming_template.clone()
+            }),
         }
     }
 
@@ -757,6 +768,7 @@ impl AppSettings {
 
     /// Transfers the settings the engine implements onto build options.
     pub fn apply_to(&self, opts: &mut BuildOptions) {
+        opts.ui_lang = UiLang::from_setting(&self.ui_language);
         opts.playback = self.playback();
         opts.skip_root_menu = self.skip_root_menu;
         opts.no_title_menu_for_single_title = self.no_title_menu_for_single_title;
@@ -903,6 +915,13 @@ mod tests {
         assert_eq!(s.chapter_naming_template, "Kapitel #<c>");
         assert_eq!(s.default_audio_language, "");
         assert_eq!(s.default_subtitle_language, "en");
+        assert_eq!(AppSettings { ui_language: "xx".into(), ..AppSettings::default() }.sanitized().ui_language, "de");
+        assert_eq!(AppSettings { ui_language: "en".into(), ..AppSettings::default() }.sanitized().ui_language, "en");
+        assert_eq!(AppSettings { ui_language: "ru".into(), ..AppSettings::default() }.sanitized().ui_language, "ru");
+        let mut o = BuildOptions::default();
+        AppSettings { ui_language: "en".into(), ..AppSettings::default() }.apply_to(&mut o);
+        assert_eq!(o.ui_lang, UiLang::EN);
+        assert_eq!(o.chapters.label(2, o.ui_lang), "Chapter #2", "stock chapter template follows the language");
         assert_eq!(AppSettings { track_label_mode: "bogus".into(), ..AppSettings::default() }.sanitized().track_label_mode, "smart");
         assert_eq!(AppSettings { track_label_mode: "generic".into(), ..AppSettings::default() }.sanitized().track_label_mode, "generic");
     }

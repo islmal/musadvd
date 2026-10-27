@@ -1,3 +1,4 @@
+import { t as tr } from "./i18n";
 // Custom menu layouts (same JSON as `src/layout.rs`) and a generator for a first draft.
 
 export type Fit = "stretch" | "contain" | "cover";
@@ -115,10 +116,10 @@ export interface EditorTitle {
 }
 
 export const OVERLAY_LABELS: [GradientOverlay, string][] = [
-  ["none", "Keine"],
-  ["bottomDark", "Nach unten abdunkeln"],
-  ["vignette", "Vignette (Ecken dunkel)"],
-  ["dim", "Insgesamt abdunkeln"],
+  ["none", tr("layout.keine")],
+  ["bottomDark", tr("layout.nachUntenAbdunkeln")],
+  ["vignette", tr("layout.vignetteEckenDunkel")],
+  ["dim", tr("layout.insgesamtAbdunkeln")],
 ];
 
 /** Identifies the set of videos a layout was made for (paths in disc order). */
@@ -151,7 +152,7 @@ export function madeForOtherTitles(layout: CustomLayout, key: string | null, tit
 
 /** Label of chapter `n` (1-based): the source's chapter name or "Kapitel n". */
 export function chapterLabel(t: EditorTitle | undefined, n: number): string {
-  return t?.chapterNames?.[n - 1]?.trim() || `Kapitel ${n}`;
+  return t?.chapterNames?.[n - 1]?.trim() || tr("layout.kapitel", { n });
 }
 
 /** Whether a title needs an audio/subtitle selection menu. */
@@ -276,7 +277,7 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
 
   const pageMenus: CustomMenu[] = [];
   for (let p = 0; p < titlePages; p++) {
-    pageMenus.push(emptyMenu(titlePages > 1 ? `Hauptmenü ${p + 1}` : "Hauptmenü", "title"));
+    pageMenus.push(emptyMenu(titlePages > 1 ? tr("layout.hauptmenue", { p: p + 1 }) : tr("layout.hauptmenue2"), "title"));
   }
   pageMenus.forEach((menu, p) => {
     menu.elements.push(text(60, Y(36), W - 120, Y(56), heading || "DVD", { size: 40, bold: true }));
@@ -287,18 +288,18 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
       const y = Y(120 + Math.floor(i / 3) * 180);
       menu.elements.push(video(x, y, 180, Y(112), n, null, { type: "playTitle", title: n }));
       const root = rootIds[p * perPage + i];
-      const caption = root ? `${t.label} · ${t.chapters > 1 ? "Kapitel" : "Menü"}` : t.label;
+      const caption = root ? `${t.label} · ${t.chapters > 1 ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
       menu.elements.push(text(x, y + Y(118), 180, Y(30), caption, { size: 18, action: root ? { type: "menu", menu: root } : null }));
     });
     const bottom = Y(490);
     if (titles.length > 1 && p === 0) {
-      menu.elements.push(text(60, bottom, 220, Y(36), "Alle abspielen", { size: 22, align: "left", action: { type: "playAll" } }));
+      menu.elements.push(text(60, bottom, 220, Y(36), tr("layout.alleAbspielen"), { size: 22, align: "left", action: { type: "playAll" } }));
     }
     if (p > 0) {
-      menu.elements.push(text(300, bottom, 140, Y(36), "‹ Zurück", { size: 22, action: { type: "menu", menu: pageMenus[p - 1].id } }));
+      menu.elements.push(text(300, bottom, 140, Y(36), tr("layout.zurueck"), { size: 22, action: { type: "menu", menu: pageMenus[p - 1].id } }));
     }
     if (p < titlePages - 1) {
-      menu.elements.push(text(W - 220, bottom, 160, Y(36), "Weiter ›", { size: 22, align: "right", action: { type: "menu", menu: pageMenus[p + 1].id } }));
+      menu.elements.push(text(W - 220, bottom, 160, Y(36), tr("layout.weiter"), { size: 22, align: "right", action: { type: "menu", menu: pageMenus[p + 1].id } }));
     }
   });
   menus.push(...pageMenus);
@@ -316,7 +317,7 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
     const pages = t.chapters > 1 ? Math.ceil(t.chapters / perChapterPage) : 1;
     const rootMenus: CustomMenu[] = [];
     for (let p = 0; p < pages; p++) {
-      const name = t.chapters > 1 ? (pages > 1 ? `${t.label} – Kapitel ${p + 1}` : `${t.label} – Kapitel`) : `${t.label} – Menü`;
+      const name = t.chapters > 1 ? (pages > 1 ? tr("layout.kapitel3", { label: t.label, p: p + 1 }) : tr("layout.kapitel4", { label: t.label })) : tr("layout.menue2", { label: t.label });
       const m = emptyMenu(name, "root", n);
       if (p === 0) m.id = rootId;
       m.background = { ...shaded, gradientOverlay: "bottomDark" };
@@ -336,9 +337,9 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
       }
       // Bottom row: play, settings, main menu, page arrows.
       const bottom = Y(490);
-      const row: TextElement[] = [text(60, bottom, 170, Y(36), "Film abspielen", { size: 20, align: "left", action: { type: "playTitle", title: n } })];
-      if (settingsId) row.push(text(240, bottom, 160, Y(36), "Einstellungen", { size: 20, action: { type: "menu", menu: settingsId } }));
-      row.push(text(410, bottom, 130, Y(36), "Hauptmenü", { size: 20, action: { type: "menu", menu: main } }));
+      const row: TextElement[] = [text(60, bottom, 170, Y(36), tr("layout.filmAbspielen"), { size: 20, align: "left", action: { type: "playTitle", title: n } })];
+      if (settingsId) row.push(text(240, bottom, 160, Y(36), tr("layout.einstellungen"), { size: 20, action: { type: "menu", menu: settingsId } }));
+      row.push(text(410, bottom, 130, Y(36), tr("layout.hauptmenue2"), { size: 20, action: { type: "menu", menu: main } }));
       if (p > 0) row.push(text(550, bottom, 50, Y(36), "‹", { size: 24, action: { type: "menu", menu: rootMenus[p - 1].id } }));
       if (p < pages - 1) row.push(text(610, bottom, 50, Y(36), "›", { size: 24, action: { type: "menu", menu: rootMenus[p + 1].id } }));
       m.elements.push(...row);
@@ -347,24 +348,24 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
 
     // Settings menu: audio tracks left, subtitles (with "Aus") right.
     if (settingsId) {
-      const s = emptyMenu(`${t.label} – Einstellungen`, "settings", n);
+      const s = emptyMenu(tr("layout.einstellungen2", { label: t.label }), "settings", n);
       s.id = settingsId;
       s.background = { ...shaded, gradientOverlay: "dim" };
-      s.elements.push(text(60, Y(36), W - 120, Y(50), `${t.label} – Einstellungen`, { size: 32, bold: true }));
+      s.elements.push(text(60, Y(36), W - 120, Y(50), tr("layout.einstellungen2", { label: t.label }), { size: 32, bold: true }));
       const rows = 8;
       const step = Y(38);
       const top = Y(150);
       const audio = t.audioTracks ?? [];
       if (audio.length > 0) {
-        s.elements.push(text(60, Y(110), 300, Y(32), "Tonspur", { size: 22, bold: true, align: "left", color: "#FFD200" }));
+        s.elements.push(text(60, Y(110), 300, Y(32), tr("layout.tonspur"), { size: 22, bold: true, align: "left", color: "#FFD200" }));
         audio.slice(0, rows).forEach((a, k) => {
           s.elements.push(text(60, top + k * step, 300, Y(34), a.label, { size: 20, align: "left", action: { type: "setAudio", source: a.source } }));
         });
       }
       const subs = t.subtitleTracks ?? [];
       if (subs.length > 0) {
-        s.elements.push(text(380, Y(110), 280, Y(32), "Untertitel", { size: 22, bold: true, align: "left", color: "#FFD200" }));
-        const entries: [string, number | null][] = [["Aus", null], ...subs.map((x): [string, number | null] => [x.label, x.source])];
+        s.elements.push(text(380, Y(110), 280, Y(32), tr("layout.untertitel"), { size: 22, bold: true, align: "left", color: "#FFD200" }));
+        const entries: [string, number | null][] = [[tr("layout.aus"), null], ...subs.map((x): [string, number | null] => [x.label, x.source])];
         // One column of 8, a second (narrower) one for more.
         const twoColumns = entries.length > rows;
         entries.slice(0, rows * 2).forEach(([label, source], k) => {
@@ -375,9 +376,9 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
         });
       }
       const bottom = Y(490);
-      s.elements.push(text(60, bottom, 170, Y(36), "‹ Zurück", { size: 20, align: "left", action: { type: "menu", menu: rootId } }));
-      s.elements.push(text(240, bottom, 160, Y(36), "Film abspielen", { size: 20, action: { type: "playTitle", title: n } }));
-      s.elements.push(text(410, bottom, 130, Y(36), "Hauptmenü", { size: 20, action: { type: "menu", menu: main } }));
+      s.elements.push(text(60, bottom, 170, Y(36), tr("layout.zurueck"), { size: 20, align: "left", action: { type: "menu", menu: rootId } }));
+      s.elements.push(text(240, bottom, 160, Y(36), tr("layout.filmAbspielen"), { size: 20, action: { type: "playTitle", title: n } }));
+      s.elements.push(text(410, bottom, 130, Y(36), tr("layout.hauptmenue2"), { size: 20, action: { type: "menu", menu: main } }));
       menus.push(s);
     }
   });

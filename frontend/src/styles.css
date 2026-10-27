@@ -381,7 +381,7 @@ input.small {
   height: 1px;
 }
 
-.switch span {
+.switch input + span {
   width: 34px;
   height: 19px;
   border-radius: 10px;
@@ -391,7 +391,7 @@ input.small {
   flex: none;
 }
 
-.switch span::after {
+.switch input + span::after {
   content: "";
   position: absolute;
   top: 2px;
@@ -517,6 +517,23 @@ input.small {
   gap: 8px;
   align-items: baseline;
   min-width: 0;
+}
+
+.track-name {
+  min-width: 0;
+  width: 220px;
+  padding: 3px 8px;
+  font-weight: 600;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.track-name:hover,
+.track-name:focus {
+  border-color: var(--border);
+  background: var(--panel);
 }
 
 .track-lang {

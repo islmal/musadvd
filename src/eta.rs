@@ -4,6 +4,7 @@
 //! Encoding is estimated from ffmpeg's frame/fps telemetry, authoring and image creation from
 //! the data size and measured throughputs, burning from the image size and the write speed.
 
+use crate::i18n::{tr, UiLang};
 use serde::Serialize;
 
 /// Bytes per second at 1x DVD speed.
@@ -72,13 +73,20 @@ impl JobPhase {
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            JobPhase::Menus => "Menüs erstellen",
-            JobPhase::Encoding => "Videos encodieren",
-            JobPhase::Authoring => "VOBs multiplexen (Authoring)",
-            JobPhase::Image => "ISO erstellen (UDF 1.02)",
-            JobPhase::Burning => "Disc brennen",
-        }
+        self.label_in(UiLang::DE)
+    }
+
+    pub fn label_in(self, ui: UiLang) -> &'static str {
+        tr(
+            ui,
+            match self {
+                JobPhase::Menus => "phase_menus",
+                JobPhase::Encoding => "phase_encoding",
+                JobPhase::Authoring => "phase_authoring",
+                JobPhase::Image => "phase_image",
+                JobPhase::Burning => "phase_burning",
+            },
+        )
     }
 }
 
@@ -101,6 +109,11 @@ pub struct Eta {
 }
 
 impl Eta {
+    /// [`Eta::new`] with the phase label (and any detail the caller built) in `ui`.
+    pub fn localized(ui: UiLang, phase: JobPhase, detail: Option<String>, remaining_secs: Option<f64>, burn_secs: Option<f64>) -> Self {
+        Eta { phase_label: phase.label_in(ui).to_string(), ..Eta::new(phase, detail, remaining_secs, burn_secs) }
+    }
+
     pub fn new(phase: JobPhase, detail: Option<String>, remaining_secs: Option<f64>, burn_secs: Option<f64>) -> Self {
         Eta {
             phase,
