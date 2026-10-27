@@ -8,6 +8,7 @@ import type { EditorInit } from "./menuEditor";
 import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
+import { moveItem, shapeMismatch } from "./order";
 import {
   checkLayout,
   calculateProject,
@@ -387,6 +388,35 @@ function moveSelected(delta: number) {
   scheduleCalc();
 }
 
+/** Moves a title to index `to` (drag and drop). A moved title never silently merges into its new predecessor. */
+function moveTitle(from: number, to: number) {
+  if (from === to || !state.titles[from]) return;
+  state.splitUndo = null;
+  moveItem(state.titles, from, to);
+  state.titles[to].mergeWithPrevious = false;
+  normalizeMerge();
+  renderAll();
+  scheduleCalc();
+}
+
+/** Merged members whose audio/subtitle track counts differ from the group's first title, as id -> that title (mirrors `dvd::check_group_shapes`). */
+function mergeMismatches(): Map<number, { audio: number; subs: number; first: Title }> {
+  const groups = titleGroups();
+  const counts = groups.map((g) =>
+    g.map((t) => ({
+      audio: t.meta.audio.filter((a) => t.audio.has(a.index)).length,
+      subs: t.meta.subtitles.filter((s) => t.subs.has(s.index) && s.supported).length,
+    })),
+  );
+  const bad = new Map<number, { audio: number; subs: number; first: Title }>();
+  shapeMismatch(counts).forEach((flags, g) =>
+    flags.forEach((f, m) => {
+      if (f) bad.set(groups[g][m].id, { ...counts[g][m], first: groups[g][0] });
+    }),
+  );
+  return bad;
+}
+
 /** Index of the split titles in `state.titles` while the undo is still valid, else -1. */
 function splitUndoIndex(): number {
   const u = state.splitUndo;
@@ -436,6 +466,80 @@ function undoSplit() {
   scheduleCalc();
 }
 
+/**
+ * Pointer-event drag reordering (HTML5 DnD is swallowed by the webview's native file drop, see
+ * `dragDropEnabled`). Listeners sit on the list because `runCalc` re-renders the cards mid-drag.
+ */
+function initTitleDrag() {
+  const list = $("title-list");
+  let down: { id: number; x: number; y: number } | null = null;
+  let dragging = false;
+  let drop: { id: number; after: boolean } | null = null;
+  let suppressClick = false;
+
+  const card = (id: number) => list.querySelector<HTMLElement>(`.title-item[data-id="${id}"]`);
+  const clear = () => {
+    list.querySelectorAll(".dragging, .drag-over-top, .drag-over-bottom").forEach((e) => e.classList.remove("dragging", "drag-over-top", "drag-over-bottom"));
+    document.body.classList.remove("reordering");
+  };
+  const abort = () => {
+    clear();
+    down = null;
+    dragging = false;
+    drop = null;
+  };
+
+  list.addEventListener("pointerdown", (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>(".title-item");
+    if (e.button !== 0 || state.converting || !el || (e.target as HTMLElement).closest("button")) return;
+    down = { id: Number(el.dataset.id), x: e.clientX, y: e.clientY };
+    suppressClick = false;
+  });
+  list.addEventListener("pointermove", (e) => {
+    if (!down) return;
+    if (!dragging) {
+      if (Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) return;
+      dragging = true;
+      list.setPointerCapture(e.pointerId);
+      document.body.classList.add("reordering");
+    }
+    clear();
+    document.body.classList.add("reordering");
+    card(down.id)?.classList.add("dragging");
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>(".title-item");
+    drop = null;
+    if (!over || !list.contains(over)) return;
+    const r = over.getBoundingClientRect();
+    const after = e.clientY > r.top + r.height / 2;
+    drop = { id: Number(over.dataset.id), after };
+    over.classList.add(after ? "drag-over-bottom" : "drag-over-top");
+  });
+  list.addEventListener("pointerup", () => {
+    const d = down;
+    const target = drop;
+    const was = dragging;
+    abort();
+    if (!was || !d) return;
+    suppressClick = true; // the click that follows the pointerup must not select
+    if (!target) return;
+    const from = state.titles.findIndex((t) => t.id === d.id);
+    const j = state.titles.findIndex((t) => t.id === target.id);
+    if (from < 0 || j < 0) return;
+    const at = j + (target.after ? 1 : 0);
+    moveTitle(from, at > from ? at - 1 : at);
+  });
+  list.addEventListener("pointercancel", abort);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && down) abort();
+  });
+  list.addEventListener("click", (e) => {
+    if (suppressClick) {
+      e.stopPropagation();
+      suppressClick = false;
+    }
+  }, true);
+}
+
 // ---------------------------------------------------------------------------
 // Bitrate calculation (debounced)
 // ---------------------------------------------------------------------------
@@ -481,8 +585,10 @@ function renderTitleList() {
   list.replaceChildren();
   $("dropzone").classList.toggle("compact", state.titles.length > 0);
 
+  const mismatches = mergeMismatches();
   state.titles.forEach((t, i) => {
     const v = t.meta.video;
+    const bad = mismatches.get(t.id);
     const calc = state.calc?.titles[i];
     const audioSummary =
       t.meta.audio
@@ -497,7 +603,8 @@ function renderTitleList() {
       h(
         "li",
         {
-          class: `title-item${t.id === state.selected ? " selected" : ""}${i > 0 && t.mergeWithPrevious ? " merged" : ""}`,
+          class: `title-item${t.id === state.selected ? " selected" : ""}${i > 0 && t.mergeWithPrevious ? " merged" : ""}${bad ? " merge-bad" : ""}`,
+          "data-id": t.id,
           tabIndex: 0,
           onclick: () => select(t.id),
           onkeydown: (e: KeyboardEvent) => {
@@ -515,6 +622,7 @@ function renderTitleList() {
           t.crop ? tr("main.cropped") : "",
         ),
         h("div", { class: "title-audio" }, audioSummary + subsSummary),
+        bad ? h("div", { class: "title-warn" }, tr("main.mergeTrackMismatch", { audio: bad.audio, subs: bad.subs, first: bad.first.label })) : "",
         i > 0
           ? h(
               "button",
@@ -590,6 +698,7 @@ function renderFooter() {
     !state.converting &&
     menusReady &&
     !singleVideoViolated() &&
+    mergeMismatches().size === 0 &&
     !!state.output.trim() &&
     !!calc?.fits;
   const motionToggle = document.getElementById("motion-menu") as HTMLInputElement | null;
@@ -1429,6 +1538,7 @@ async function init() {
   $("btn-split-undo").addEventListener("click", undoSplit);
   $("btn-up").addEventListener("click", () => moveSelected(-1));
   $("btn-down").addEventListener("click", () => moveSelected(1));
+  initTitleDrag();
   document.addEventListener("keydown", (e) => {
     if (e.key === "Delete" && !(e.target instanceof HTMLInputElement) && !state.converting) removeSelected();
   });

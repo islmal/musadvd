@@ -206,6 +206,32 @@ select {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+.title-item.dragging {
+  opacity: 0.4;
+}
+
+.title-item.drag-over-top {
+  box-shadow: 0 -3px 0 0 var(--accent);
+}
+
+.title-item.drag-over-bottom {
+  box-shadow: 0 3px 0 0 var(--accent);
+}
+
+body.reordering {
+  user-select: none;
+  cursor: grabbing;
+}
+
+.title-item.merge-bad {
+  border-color: var(--bad);
+}
+
+.title-warn {
+  color: var(--bad);
+  font-size: 12.5px;
+}
+
 .title-head {
   display: flex;
   gap: 8px;

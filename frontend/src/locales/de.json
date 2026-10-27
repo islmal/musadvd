@@ -829,6 +829,7 @@
  "main.untertitel": " · {size} Untertitel",
  "main.kapitel2": " · {effChapters} Kapitel",
  "main.beideVideosLaufenHinter": "Beide Videos laufen hinter einem Menüeintrag nacheinander (gleiche Anzahl Ton- und Untertitelspuren nötig)",
+ "main.mergeTrackMismatch": "Dieses Video hat {audio} Tonspuren und {subs} Untertitel, das erste der Gruppe ({first}) hat andere Anzahlen. Zusammengeführte Videos brauchen gleich viele.",
  "main.trennen": "Trennen",
  "main.mitVorherigemZusammenfuehren": "Mit vorherigem zusammenführen",
  "main.videoqualitaetGruenUeber10": "Videoqualität: grün über 10.000 kbps, gelb 5.000–10.000 kbps, rot unter 5.000 kbps",

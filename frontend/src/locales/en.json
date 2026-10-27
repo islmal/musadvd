@@ -829,6 +829,7 @@
  "main.untertitel": " · {size} subtitles",
  "main.kapitel2": " · {effChapters} chapters",
  "main.beideVideosLaufenHinter": "Both videos play one after the other behind a single menu entry (same number of audio and subtitle tracks required)",
+ "main.mergeTrackMismatch": "This video has {audio} audio and {subs} subtitle tracks, but the group's first video ({first}) differs. Merged videos need equal counts.",
  "main.trennen": "Separate",
  "main.mitVorherigemZusammenfuehren": "Merge with previous",
  "main.videoqualitaetGruenUeber10": "Video quality: green above 10,000 kbps, yellow 5,000–10,000 kbps, red below 5,000 kbps",
