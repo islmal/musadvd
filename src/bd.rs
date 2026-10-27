@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::author::{AuthorError, ClipSource, MenuFrame, Resolution, TvStandard, MAX_TITLES};
 use crate::bd_menu::{self, BdNav};
 use crate::hdmv;
-use crate::bd_author::{BdProject, BdSubTrack, BdTitleFiles, SubKind, EMPTY_SRT};
+use crate::bd_author::{BdProject, BdSubTrack, BdTitleFiles, SubKind};
 use crate::calculator::{Clamp, DiscType, EncodingProfile};
 use crate::dvd::{
     apply_selection, available_cpus, cancellable, chapter_starts, custom_chapters, default_jobs, display_path, job, remove_old_output,
@@ -121,12 +121,8 @@ fn sub_track(s: &SubtitleStream) -> BdSubTrack {
     BdSubTrack { kind: if s.kind == SubtitleKind::Text { SubKind::Text } else { SubKind::Pgs }, lang: s.language.clone() }
 }
 
-fn sub_ext(kind: SubKind) -> &'static str {
-    match kind {
-        SubKind::Text => "srt",
-        SubKind::Pgs => "sup",
-    }
-}
+/// Both subtitle kinds end up as PGS `.sup` files (text cues are rendered natively).
+const SUB_EXT: &str = "sup";
 
 /// One input after stream selection.
 struct BdTitle {
@@ -223,22 +219,29 @@ async fn encode_bd_title(
     let duration = t.info.duration_secs;
 
     let mut extract: Vec<(usize, &SubtitleStream)> = Vec::new();
-    for (k, track) in layout.subs.iter().enumerate() {
+    for k in 0..layout.subs.len() {
         match t.sub_for(layout, k) {
             Some(s) => extract.push((k, s)),
             None => {
-                let path = work.join(encoder::subtitle_file(&t.stem, k, sub_ext(track.kind)));
+                let path = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
                 let (w, h) = resolution.frame_size(TvStandard::Pal);
-                let data = match track.kind {
-                    SubKind::Text => EMPTY_SRT.as_bytes().to_vec(),
-                    SubKind::Pgs => subpic::empty_pgs(w as u16, h as u16),
-                };
-                std::fs::write(&path, data).at(&path)?;
+                std::fs::write(&path, subpic::empty_pgs(w as u16, h as u16)).at(&path)?;
             }
         }
     }
     if let Some(args) = encoder::extract_subtitle_args(&t.info, &extract, work, &t.stem) {
         tools.ffmpeg(&args, duration, |_| {}).await?;
+    }
+    // Text cues become PGS on the title's HD canvas.
+    let (w, h) = resolution.frame_size(TvStandard::Pal);
+    for &(k, s) in &extract {
+        if sub_track(s).kind == SubKind::Text {
+            let srt = work.join(encoder::subtitle_file(&t.stem, k, "srt"));
+            let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
+            let text = std::fs::read(&srt).at(&srt)?;
+            let (cues, _skipped) = crate::textsub::parse_srt(&String::from_utf8_lossy(&text));
+            std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h), t.rate.fps)).at(&sup)?;
+        }
     }
 
     let rate = t.rate;
@@ -830,7 +833,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 mkv: format!("{}.mkv", t.stem),
                 duration_secs,
                 chapters: t.chapters.clone(),
-                subs: layout.subs.iter().enumerate().map(|(k, s)| encoder::subtitle_file(&t.stem, k, sub_ext(s.kind))).collect(),
+                subs: (0..layout.subs.len()).map(|k| encoder::subtitle_file(&t.stem, k, SUB_EXT)).collect(),
                 rate: t.rate,
                 audio_kinds: t.audio_outs(&layout).iter().map(|o| o.kind()).collect(),
             })

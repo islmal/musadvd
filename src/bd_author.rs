@@ -13,7 +13,7 @@ use crate::encoder::AudioKind;
 /// Kind of a subtitle track of the disc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubKind {
-    /// SRT, rendered to PGS by tsMuxeR.
+    /// SRT, rendered to PGS natively (`crate::pgs`).
     Text,
     /// PGS `.sup` stream.
     Pgs,
@@ -83,7 +83,6 @@ impl BdProject {
     pub fn title_meta_text(&self, i: usize, offset: usize) -> String {
         let t = &self.titles[i];
         let files = |pick: &dyn Fn(&BdTitleFiles) -> &str| format!("\"{}\"", pick(t));
-        let (w, h) = self.resolution.frame_size(crate::author::TvStandard::Pal);
         let chapters: Vec<String> = marks(t).into_iter().map(chapter_time).collect();
         let mut out = format!(
             "MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --custom-chapters={} --vbv-len=500{}
@@ -103,19 +102,11 @@ impl BdProject {
             out.push_str(&format!("{codec}, {mkvs}, track={}, lang={}
 ", 2 + k, lang_code(lang.as_deref())));
         }
-        let font_size = (65.0 * h as f64 / 1080.0).round() as u32;
-        let fps = format!("{:.3}", t.rate.fps_f64());
-        let fps = fps.trim_end_matches('0').trim_end_matches('.');
         for (k, track) in self.sub_tracks.iter().enumerate() {
             let files = files(&|t| &t.subs[k]);
             let lang = lang_code(track.lang.as_deref());
-            match track.kind {
-                SubKind::Text => out.push_str(&format!(
-                    "S_TEXT/UTF8, {files}, font-name=\"Arial\", font-size={font_size}, font-color=0xffffffff, \
-                     bottom-offset=24, font-border=5, text-align=center, video-width={w}, video-height={h}, fps={fps}, lang={lang}\n"
-                )),
-                SubKind::Pgs => out.push_str(&format!("S_HDMV/PGS, {files}, lang={lang}\n")),
-            }
+            out.push_str(&format!("S_HDMV/PGS, {files}, lang={lang}
+"));
         }
         out
     }
@@ -167,7 +158,7 @@ mod tests {
                     mkv: "title_01.mkv".into(),
                     duration_secs: 252.48,
                     chapters: vec![0.0, 100.0],
-                    subs: vec!["title_01_s1.srt".into(), "title_01_s2.sup".into()],
+                    subs: vec!["title_01_s1.sup".into(), "title_01_s2.sup".into()],
                     rate,
                     audio_kinds: vec![AudioKind::Ac3, AudioKind::Dts],
                 },
@@ -175,7 +166,7 @@ mod tests {
                     mkv: "title_02.mkv".into(),
                     duration_secs: 60.0,
                     chapters: vec![0.0],
-                    subs: vec!["title_02_s1.srt".into(), "title_02_s2.sup".into()],
+                    subs: vec!["title_02_s1.sup".into(), "title_02_s2.sup".into()],
                     rate: BdRate { fps: (25, 1), fake_interlaced: true },
                     audio_kinds: vec![AudioKind::Lpcm, AudioKind::Ac3],
                 },
@@ -207,10 +198,7 @@ mod tests {
         assert_eq!(lines[1], r#"V_MPEG4/ISO/AVC, "title_01.mkv", insertSEI, contSPS, track=1"#);
         assert_eq!(lines[2], r#"A_AC3, "title_01.mkv", track=2, lang=deu"#);
         assert_eq!(lines[3], r#"A_DTS, "title_01.mkv", track=3, lang=und"#);
-        assert_eq!(
-            lines[4],
-            r#"S_TEXT/UTF8, "title_01_s1.srt", font-name="Arial", font-size=65, font-color=0xffffffff, bottom-offset=24, font-border=5, text-align=center, video-width=1920, video-height=1080, fps=23.976, lang=deu"#
-        );
+        assert_eq!(lines[4], r#"S_HDMV/PGS, "title_01_s1.sup", lang=deu"#);
         assert_eq!(lines[5], r#"S_HDMV/PGS, "title_01_s2.sup", lang=eng"#);
         assert_eq!(lines.len(), 6);
         assert!(meta.is_ascii() && !meta.contains('\r'));
@@ -224,7 +212,7 @@ mod tests {
 "));
         assert!(m.contains(r#"V_MPEG4/ISO/AVC, "title_02.mkv", insertSEI"#) && !m.contains("title_01"));
         assert!(m.contains(r#"A_LPCM, "title_02.mkv", track=2"#) && m.contains(r#"A_AC3, "title_02.mkv", track=3"#));
-        assert!(m.contains("fps=25,"), "{m}");
+        assert!(m.contains(r#"S_HDMV/PGS, "title_02_s1.sup""#), "{m}");
     }
 
     #[test]
@@ -234,7 +222,7 @@ mod tests {
         p.titles[0].rate = BdRate { fps: (60000, 1001), fake_interlaced: false };
         let meta = p.title_meta_text(0, 0);
         assert!(meta.contains(r#"V_MPEG4/ISO/AVC, "title_01.mkv", insertSEI"#));
-        assert!(meta.contains("font-size=43") && meta.contains("video-width=1280, video-height=720, fps=59.94,"));
+        assert!(meta.contains("S_HDMV/PGS"));
     }
 
     #[test]

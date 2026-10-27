@@ -81,11 +81,12 @@ pub fn rgb_to_ycrcb(r: u8, g: u8, b: u8) -> [u8; 3] {
     [q(16.0 + 219.0 * y), q(128.0 + 224.0 * cr), q(128.0 + 224.0 * cb)]
 }
 
-fn segment(pts: u32, ty: u8, payload: &[u8]) -> Vec<u8> {
+/// One `.sup` segment; `dts` 0 = none.
+pub(crate) fn segment(pts: u32, dts: u32, ty: u8, payload: &[u8]) -> Vec<u8> {
     let mut s = Vec::with_capacity(13 + payload.len());
     s.extend(b"PG");
     s.extend(pts.to_be_bytes());
-    s.extend(0u32.to_be_bytes()); // DTS
+    s.extend(dts.to_be_bytes());
     s.push(ty);
     s.extend((payload.len() as u16).to_be_bytes());
     s.extend(payload);
@@ -107,7 +108,7 @@ fn ods_segments(pts: u32, o: &IgObject) -> Vec<Vec<u8>> {
     p.extend(o.width.to_be_bytes());
     p.extend(o.height.to_be_bytes());
     p.extend(head);
-    out.push(segment(pts, 0x15, &p));
+    out.push(segment(pts, 0, 0x15, &p));
     while !rest.is_empty() {
         let (chunk, r) = rest.split_at(rest.len().min(MAX - 4));
         rest = r;
@@ -116,7 +117,7 @@ fn ods_segments(pts: u32, o: &IgObject) -> Vec<Vec<u8>> {
         p.push(0);
         p.push(if rest.is_empty() { 0x40 } else { 0x00 });
         p.extend(chunk);
-        out.push(segment(pts, 0x15, &p));
+        out.push(segment(pts, 0, 0x15, &p));
     }
     out
 }
@@ -180,19 +181,19 @@ fn ics_payload(m: &IgMenu) -> Vec<u8> {
 pub fn build_sup(m: &IgMenu) -> Vec<u8> {
     // 0x16 (PCS) instead of the real ICS type 0x18: tsMuxeR only passes PGS segment types;
     // `bd_patch` relabels it in the muxed clip.
-    let mut out = segment(m.pts, 0x16, &ics_payload(m));
+    let mut out = segment(m.pts, 0, 0x16, &ics_payload(m));
     let mut pds = vec![0, 0];
     for (i, e) in m.palette.iter().enumerate().take(256) {
         pds.push(i as u8);
         pds.extend(e);
     }
-    out.extend(segment(m.pts, 0x14, &pds));
+    out.extend(segment(m.pts, 0, 0x14, &pds));
     for o in &m.objects {
         for s in ods_segments(m.pts, o) {
             out.extend(s);
         }
     }
-    out.extend(segment(m.pts, 0x80, &[]));
+    out.extend(segment(m.pts, 0, 0x80, &[]));
     out
 }
 

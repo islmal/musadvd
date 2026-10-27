@@ -113,13 +113,40 @@ pub fn parse_srt(text: &str) -> (Vec<Cue>, usize) {
     (cues, skipped)
 }
 
-fn scaled() -> ab_glyph::PxScaleFont<&'static FontRef<'static>> {
-    let f = font();
-    f.as_scaled(PxScale::from(EM_PX * f.height_unscaled() / f.units_per_em().unwrap_or(f.height_unscaled())))
+/// Frame and metrics of the rendering: the DVD values are measured (see the module docs), other
+/// canvases scale them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Canvas {
+    pub size: (u32, u32),
+    em: f32,
+    pitch: i32,
+    outline: i32,
+    side: u32,
+    bottom: u32,
+    baseline_above: i32,
+    trim: u32,
 }
 
-fn text_width(text: &str) -> f32 {
-    let sf = scaled();
+impl Canvas {
+    pub fn dvd(tv: TvStandard) -> Canvas {
+        Canvas { size: tv.size(), em: EM_PX, pitch: LINE_PITCH, outline: OUTLINE, side: SIDE_MARGIN, bottom: BOTTOM_MARGIN, baseline_above: BASELINE_ABOVE_BOX, trim: FRAME_TRIM }
+    }
+
+    /// HD canvas: em 65 px at 1080 lines (what tsMuxeR was configured with), the rest scaled from the DVD metrics.
+    pub fn hd(width: u32, height: u32) -> Canvas {
+        let s = 65.0 * height as f32 / 1080.0 / EM_PX;
+        let px = |v: f32| (v * s).round();
+        Canvas { size: (width, height), em: EM_PX * s, pitch: px(LINE_PITCH as f32) as i32, outline: px(OUTLINE as f32) as i32, side: px(SIDE_MARGIN as f32) as u32, bottom: px(BOTTOM_MARGIN as f32) as u32, baseline_above: px(BASELINE_ABOVE_BOX as f32) as i32, trim: 0 }
+    }
+}
+
+fn scaled(em: f32) -> ab_glyph::PxScaleFont<&'static FontRef<'static>> {
+    let f = font();
+    f.as_scaled(PxScale::from(em * f.height_unscaled() / f.units_per_em().unwrap_or(f.height_unscaled())))
+}
+
+fn text_width_em(text: &str, em: f32) -> f32 {
+    let sf = scaled(em);
     let mut w = 0.0;
     let mut prev = None;
     for c in text.chars() {
@@ -133,13 +160,22 @@ fn text_width(text: &str) -> f32 {
     w
 }
 
+#[cfg(test)]
+fn text_width(text: &str) -> f32 {
+    text_width_em(text, EM_PX)
+}
+
 /// Greedy word wrap to `max_w` pixels (a single longer word stays on its own line).
 pub fn wrap(text: &str, max_w: f32) -> Vec<String> {
+    wrap_em(text, max_w, EM_PX)
+}
+
+fn wrap_em(text: &str, max_w: f32, em: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut cur = String::new();
     for word in text.split_whitespace() {
         let joined = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-        if cur.is_empty() || text_width(&joined) <= max_w {
+        if cur.is_empty() || text_width_em(&joined, em) <= max_w {
             cur = joined;
         } else {
             lines.push(std::mem::replace(&mut cur, word.to_string()));
@@ -154,30 +190,35 @@ pub fn wrap(text: &str, max_w: f32) -> Vec<String> {
 /// Renders one cue on a `tv` frame; returns the picture and its top-left corner in the frame, or
 /// `None` when nothing is visible.
 pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u32, u32)> {
-    let (fw, fh) = tv.size();
-    let lines: Vec<String> = cue_lines.iter().flat_map(|l| wrap(l, (fw - 2 * SIDE_MARGIN) as f32)).collect();
+    render_cue_on(&Canvas::dvd(tv), cue_lines)
+}
+
+/// [`render_cue`] on any [`Canvas`].
+pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32, u32)> {
+    let (fw, fh) = c.size;
+    let lines: Vec<String> = cue_lines.iter().flat_map(|l| wrap_em(l, (fw - 2 * c.side) as f32, c.em)).collect();
     if lines.is_empty() {
         return None;
     }
-    let sf = scaled();
-    let last_baseline = (fh - FRAME_TRIM - BOTTOM_MARGIN) as i32 - BASELINE_ABOVE_BOX;
+    let sf = scaled(c.em);
+    let last_baseline = (fh - c.trim - c.bottom) as i32 - c.baseline_above;
     let n = lines.len() as i32;
-    let first_baseline = last_baseline - (n - 1) * LINE_PITCH;
+    let first_baseline = last_baseline - (n - 1) * c.pitch;
 
     // Coverage in frame coordinates, but only over the cue's bounding box.
-    let widest = lines.iter().map(|l| text_width(l)).fold(0.0f32, f32::max);
-    let x0 = (((fw as f32 - widest) / 2.0).floor() as i32 - OUTLINE - 2).max(0);
-    let x1 = (((fw as f32 + widest) / 2.0).ceil() as i32 + OUTLINE + 2).min(fw as i32);
-    let y0 = (first_baseline - sf.ascent().ceil() as i32 - OUTLINE - 1).max(0);
-    let y1 = (last_baseline + (-sf.descent()).ceil() as i32 + OUTLINE + 1).min(fh as i32);
+    let widest = lines.iter().map(|l| text_width_em(l, c.em)).fold(0.0f32, f32::max);
+    let x0 = (((fw as f32 - widest) / 2.0).floor() as i32 - c.outline - 2).max(0);
+    let x1 = (((fw as f32 + widest) / 2.0).ceil() as i32 + c.outline + 2).min(fw as i32);
+    let y0 = (first_baseline - sf.ascent().ceil() as i32 - c.outline - 1).max(0);
+    let y1 = (last_baseline + (-sf.descent()).ceil() as i32 + c.outline + 1).min(fh as i32);
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
     let mut ink = vec![false; w * h];
     for (i, line) in lines.iter().enumerate() {
-        let baseline = (first_baseline + i as i32 * LINE_PITCH) as f32;
-        let mut caret = ((fw as f32 - text_width(line)) / 2.0).floor();
+        let baseline = (first_baseline + i as i32 * c.pitch) as f32;
+        let mut caret = ((fw as f32 - text_width_em(line, c.em)) / 2.0).floor();
         let mut prev = None;
         for c in line.chars() {
             let id = sf.glyph_id(c);
@@ -200,7 +241,7 @@ pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u3
     }
 
     let mut img = RgbaImage::new(w as u32, h as u32);
-    let r = OUTLINE;
+    let r = c.outline;
     for y in 0..h as i32 {
         for x in 0..w as i32 {
             let px = if ink[y as usize * w + x as usize] {
@@ -208,7 +249,7 @@ pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u3
             } else if (-r..=r).any(|dy| {
                 (-r..=r).any(|dx| {
                     let (xx, yy) = (x + dx, y + dy);
-                    dx * dx + dy * dy <= 5 && xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h && ink[yy as usize * w + xx as usize]
+                    dx * dx + dy * dy <= r * r + 1 && xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h && ink[yy as usize * w + xx as usize]
                 })
             }) {
                 EDGE

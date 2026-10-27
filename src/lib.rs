@@ -21,6 +21,7 @@ pub mod igs;
 pub mod layout;
 pub mod menu;
 pub mod menu_anim;
+pub mod pgs;
 pub mod probe;
 pub mod spumux;
 pub mod textsub;
