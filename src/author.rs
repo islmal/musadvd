@@ -208,6 +208,8 @@ pub enum AuthorError {
     NoTitles,
     /// A PGC would exceed the VM command limit (internal error, never expected).
     TooManyCommands { pgc: String, commands: usize },
+    /// The native authoring step failed (message in the language of the original dvdauthor).
+    Native(String),
 }
 
 impl fmt::Display for AuthorError {
@@ -222,6 +224,7 @@ impl fmt::Display for AuthorError {
             AuthorError::TooManyCommands { pgc, commands } => {
                 write!(f, "{pgc}: {commands} VM commands (DVD max {MAX_PGC_COMMANDS})")
             }
+            AuthorError::Native(m) => f.write_str(m),
         }
     }
 }
@@ -1103,6 +1106,298 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
     }
     let _ = writeln!(x, "</dvdauthor>");
     Ok(x)
+}
+
+// ---------------------------------------------------------------------------
+// Native authoring (replaces dvdauthor.exe)
+// ---------------------------------------------------------------------------
+
+/// Messages the original dvdauthor printed (warnings, statistics).
+#[derive(Debug, Clone, Default)]
+pub struct AuthorLog(pub Vec<String>);
+
+impl From<crate::dvd_mux::MuxError> for AuthorError {
+    fn from(e: crate::dvd_mux::MuxError) -> Self {
+        AuthorError::Native(e.0)
+    }
+}
+
+impl From<crate::dvdvm::VmError> for AuthorError {
+    fn from(e: crate::dvdvm::VmError) -> Self {
+        AuthorError::Native(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for AuthorError {
+    fn from(e: std::io::Error) -> Self {
+        AuthorError::Native(e.to_string())
+    }
+}
+
+/// dvdauthor's `parsechapter`: `[[h:]m:]s[.frac]` in seconds.
+fn chapter_secs(s: &str) -> Result<f64, AuthorError> {
+    let bad = || AuthorError::InvalidChapter(s.to_string());
+    let mut total = 0.0;
+    let mut parts = s.split(':').peekable();
+    while let Some(p) = parts.next() {
+        let v: f64 = p.parse().map_err(|_| bad())?;
+        if parts.peek().is_some() {
+            total = total * 60.0 + v;
+        } else {
+            return Ok(total * 60.0 + v);
+        }
+    }
+    Err(bad())
+}
+
+fn cell(start: f64, end: Option<f64>, kind: crate::dvd_mux::CellKind, pause: u8) -> crate::dvd_mux::Cell {
+    crate::dvd_mux::Cell {
+        startpts: (start * 90000.0 + 0.5) as i64,
+        endpts: end.map_or(-1, |e| (e * 90000.0 + 0.5) as i64),
+        kind,
+        pauselen: pause,
+        scellid: 0,
+        ecellid: 0,
+    }
+}
+
+/// Cells of a `<vob chapters="...">` (`parsechapters`).
+fn chapter_cells(chapters: &[String]) -> Result<Vec<crate::dvd_mux::Cell>, AuthorError> {
+    use crate::dvd_mux::CellKind;
+    let mut cells = Vec::new();
+    let (mut last, mut lastchap) = (0.0, CellKind::Neither);
+    for c in chapters {
+        let total = chapter_secs(c)?;
+        if total > last {
+            cells.push(cell(last, Some(total), lastchap, 0));
+            last = total;
+            lastchap = CellKind::ChapterProgram;
+        } else if total == last {
+            lastchap = CellKind::ChapterProgram;
+        }
+    }
+    cells.push(cell(last, None, lastchap, 0));
+    Ok(cells)
+}
+
+fn source(fname: &str, cells: Vec<crate::dvd_mux::Cell>) -> crate::dvd_mux::Source {
+    crate::dvd_mux::Source { fname: fname.to_string(), cells, vob: 0 }
+}
+
+fn parse_commands(commands: &str, pgc: &str) -> Result<crate::dvdvm::Program, AuthorError> {
+    if command_count(commands) > MAX_PGC_COMMANDS {
+        return Err(AuthorError::TooManyCommands { pgc: pgc.to_string(), commands: command_count(commands) });
+    }
+    Ok(crate::dvdvm::parse(commands)?)
+}
+
+fn entry_bits(entry: &str) -> Result<u32, AuthorError> {
+    entry.split([',', ' ']).filter(|e| !e.is_empty()).try_fold(0u32, |acc, e| {
+        match crate::dvdvm::ENTRY_NAMES.iter().position(|n| !n.is_empty() && n.eq_ignore_ascii_case(e)) {
+            Some(i) => Ok(acc | 1 << i),
+            None => Err(AuthorError::Native(format!("ERR:  Unknown entry '{e}'"))),
+        }
+    })
+}
+
+fn menu_pgcs(menus: &[MenuSpec], domain: Domain, pre: &str, tv: TvStandard, aspect: &str) -> Result<crate::dvd_mux::PgcSet, AuthorError> {
+    use crate::dvd_mux::{CellKind, Pgc, PgcSet};
+    let kind = if domain == Domain::Vmgm { crate::dvdvm::Domain::Vmgm } else { crate::dvdvm::Domain::Vtsm };
+    let mut set = PgcSet::new(kind);
+    set.vg.vd.set_format(tv == TvStandard::Pal);
+    set.vg.vd.set_aspect(aspect == "16:9");
+    for (i, menu) in menus.iter().enumerate() {
+        if menu.buttons.len() > MAX_BUTTONS {
+            return Err(AuthorError::TooManyButtons(menu.buttons.len()));
+        }
+        let mut pgc = Pgc::new();
+        if let Some(e) = &menu.entry {
+            pgc.entries = entry_bits(e)?;
+        }
+        let name = if menu.is_command_only() { format!("menu {} (dispatcher)", i + 1) } else { menu.vob.clone() };
+        let all_pre = match (&menu.pre, menu.is_command_only()) {
+            (Some(own), true) => own.clone(),
+            (Some(own), false) if !pre.is_empty() => format!("{pre} {own}"),
+            (Some(own), false) => own.clone(),
+            (None, _) => pre.to_string(),
+        };
+        if !all_pre.is_empty() {
+            pgc.prei = Some(parse_commands(&all_pre, &name)?);
+        }
+        if !menu.is_command_only() {
+            let ctx = CommandContext { domain, menu: i as u32 + 1 };
+            for b in &menu.buttons {
+                pgc.buttons.push(crate::dvd_mux::Button { name: b.name.clone(), commands: crate::dvdvm::parse(&b.action.command(ctx))?, streams: vec![] });
+            }
+            let still = if menu.motion { 0 } else { 255 };
+            if let Some(t) = menu.intro_secs {
+                let secs = chapter_secs(&format!("{t:.3}"))?;
+                pgc.sources.push(source(&menu.vob, vec![cell(0.0, Some(secs), CellKind::Program, 0), cell(secs, None, CellKind::Neither, still)]));
+                if menu.motion {
+                    pgc.posti = Some(crate::dvdvm::parse("jump cell 2;")?);
+                }
+            } else {
+                pgc.sources.push(source(&menu.vob, vec![cell(0.0, None, CellKind::ChapterProgram, still)]));
+                if menu.motion {
+                    pgc.posti = Some(crate::dvdvm::parse("jump cell 1;")?);
+                }
+            }
+        }
+        set.pgcs.push(pgc);
+    }
+    Ok(set)
+}
+
+fn title_pgc(layout: &DvdLayout, t: &TitleSpec, back: &str) -> Result<crate::dvd_mux::PgcSet, AuthorError> {
+    use crate::dvd_mux::{AudioDesc, Pgc, PgcSet, SubpDesc, AF_AC3, AF_DTS, AF_PCM, AL_LANG, VW_NOPANSCAN};
+    let mut set = PgcSet::new(crate::dvdvm::Domain::Vts);
+    let vd = &mut set.vg.vd;
+    vd.set_format(layout.tv == TvStandard::Pal);
+    vd.set_aspect(t.aspect == "16:9");
+    if t.aspect == "16:9" {
+        vd.vwidescreen = VW_NOPANSCAN;
+    }
+    let lang = |l: &Option<String>| l.as_ref().filter(|l| l.len() == 2).map(|l| [l.as_bytes()[0].to_ascii_lowercase(), l.as_bytes()[1].to_ascii_lowercase()]);
+    for (n, l) in t.audio_langs.iter().enumerate().take(8) {
+        let mut a = AudioDesc {
+            aformat: match t.audio_formats.get(n).map_or("ac3", String::as_str) {
+                "dts" => AF_DTS,
+                "pcm" => AF_PCM,
+                _ => AF_AC3,
+            },
+            ..AudioDesc::default()
+        };
+        if let Some(l) = lang(l) {
+            a.alangpresent = AL_LANG;
+            a.lang = l;
+        }
+        set.vg.ad[n] = a;
+        set.vg.numaudiotracks = n + 1;
+    }
+    for (id, l) in t.subtitle_langs.iter().enumerate().take(32) {
+        let mut s = SubpDesc::default();
+        if let Some(l) = lang(l) {
+            s.slangpresent = AL_LANG;
+            s.lang = l;
+        }
+        if t.aspect == "16:9" {
+            s.idmap[1] = 128 + id as u8;
+            s.idmap[2] = 128 + id as u8;
+        }
+        set.vg.sp[id] = s;
+        set.vg.numsubpicturetracks = id + 1;
+    }
+    let mut pgc = Pgc::new();
+    let mut title_pre = layout.title_pre.clone().unwrap_or_default();
+    if t.force_subtitle && !t.subtitle_langs.is_empty() {
+        title_pre = format!("{title_pre} subtitle = 64;").trim().to_string();
+    }
+    if !title_pre.is_empty() {
+        pgc.prei = Some(parse_commands(&title_pre, t.first_vob())?);
+    }
+    for v in &t.vobs {
+        pgc.sources.push(source(&v.file, chapter_cells(&v.chapters)?));
+    }
+    pgc.posti = Some(parse_commands(back, t.first_vob())?);
+    set.pgcs.push(pgc);
+    Ok(set)
+}
+
+/// Authors the DVD-Video structure of `layout` into `dest` (`VIDEO_TS`, `AUDIO_TS`), reading the
+/// menu and title program streams from `work`. Replaces dvdauthor; the output is byte-identical.
+pub fn author_dvd(layout: &DvdLayout, work: &std::path::Path, dest: &std::path::Path) -> Result<AuthorLog, AuthorError> {
+    use crate::dvd_mux as mux;
+    use crate::ifo;
+    if layout.titlesets.is_empty() {
+        return Err(AuthorError::NoTitles);
+    }
+    if layout.titlesets.len() > MAX_TITLES {
+        return Err(AuthorError::TooManyTitles(layout.titlesets.len()));
+    }
+    for ts in &layout.titlesets {
+        ts.title.validate()?;
+    }
+    let video_ts = dest.join("VIDEO_TS");
+    std::fs::create_dir_all(&video_ts)?;
+    std::fs::create_dir_all(dest.join("AUDIO_TS"))?;
+    let mut log = Vec::new();
+    let pages = layout.vmgm_menus.len();
+    let titles = layout.titlesets.len();
+    let opts = layout.playback;
+
+    let mut summaries = Vec::new();
+    for (i, ts) in layout.titlesets.iter().enumerate() {
+        let back = if pages == 0 {
+            post_without_main_menu(!ts.menus.is_empty(), opts).to_string()
+        } else {
+            format!("call vmgm menu {};", dispatcher_menu(pages, i + 1))
+        };
+        let mut menus = menu_pgcs(&ts.menus, Domain::Vtsm, "", layout.tv, &layout.menu_aspect)?;
+        let mut tset = title_pgc(layout, &ts.title, &back)?;
+        menus.validate()?;
+        menus.create_vobs();
+        menus.force_entry(0x80);
+        menus.force_entry(0x08);
+        tset.validate()?;
+        tset.create_vobs();
+        let files = mux::VobFiles { dir: video_ts.clone(), base: format!("VTS_{:02}", i + 1), single: false };
+        if !menus.vg.vobs.is_empty() {
+            mux::find_vobus(work, Some(&files), &mut menus, &mut log)?;
+            mux::mark_chapters(&mut menus, &mut log)?;
+            mux::set_attributes(&mut menus)?;
+        }
+        mux::find_vobus(work, Some(&files), &mut tset, &mut log)?;
+        mux::mark_chapters(&mut tset, &mut log)?;
+        mux::set_attributes(&mut tset)?;
+        if menus.vg.vobs.is_empty() {
+            menus.vg.vd = tset.vg.vd;
+        }
+        let ifo_bytes = ifo::write_vts_ifo(&menus, &tset)?;
+        for ext in ["IFO", "BUP"] {
+            std::fs::write(video_ts.join(format!("VTS_{:02}_0.{ext}", i + 1)), &ifo_bytes)?;
+        }
+        let ws = ifo::Workset { menus: &menus, titles: Some(&tset) };
+        if !menus.vg.vobs.is_empty() {
+            mux::fix_vobus(&files, &menus, &|p| ws.context(&menus, Some(p)))?;
+        }
+        mux::fix_vobus(&files, &tset, &|p| ws.context(&tset, Some(p)))?;
+        summaries.push(ifo::scan_ifo(&ifo_bytes));
+    }
+
+    // Video manager: title menu pages, then one command-only dispatcher per title.
+    let tv = layout.tv;
+    let first_has_menu = layout.titlesets.first().is_some_and(|ts| !ts.menus.is_empty());
+    let (fpc, mut vmgm) = if pages == 0 {
+        let fpc = if first_has_menu && !opts.auto_start { "g1 = 0; jump titleset 1 menu;" } else { "g1 = 0; jump title 1;" };
+        (fpc, menu_pgcs(&[], Domain::Vmgm, "g1 = 0;", tv, &layout.menu_aspect)?)
+    } else {
+        let mut all = layout.vmgm_menus.clone();
+        for (i, ts) in layout.titlesets.iter().enumerate() {
+            let page = ts.main_menu_page.clamp(1, pages as u32);
+            all.push(MenuSpec::commands(dispatcher_commands(i + 1, titles, page, !ts.menus.is_empty(), opts), None));
+        }
+        let fpc = if opts.auto_start { "g1 = 0; jump title 1;" } else { "g1 = 0; jump menu 1;" };
+        (fpc, menu_pgcs(&all, Domain::Vmgm, "g1 = 0;", tv, &layout.menu_aspect)?)
+    };
+    vmgm.validate()?;
+    vmgm.create_vobs();
+    vmgm.force_entry(4);
+    let files = mux::VobFiles { dir: video_ts.clone(), base: "VIDEO_TS.VOB".into(), single: true };
+    if !vmgm.vg.vobs.is_empty() {
+        mux::find_vobus(work, Some(&files), &mut vmgm, &mut log)?;
+        mux::mark_chapters(&mut vmgm, &mut log)?;
+        mux::set_attributes(&mut vmgm)?;
+    }
+    let fpc_prog = crate::dvdvm::parse(fpc)?;
+    let ifo_bytes = ifo::write_vmg_ifo(&vmgm, Some(&fpc_prog), &summaries)?;
+    for ext in ["IFO", "BUP"] {
+        std::fs::write(video_ts.join(format!("VIDEO_TS.{ext}")), &ifo_bytes)?;
+    }
+    if !vmgm.vg.vobs.is_empty() {
+        let ws = ifo::Workset { menus: &vmgm, titles: None };
+        mux::fix_vobus(&files, &vmgm, &|p| ws.context(&vmgm, Some(p)))?;
+    }
+    Ok(AuthorLog(log))
 }
 
 /// Offsets inside a 2048-byte NAV-pack sector: the PCI packet follows the 0x26 PES header, its
