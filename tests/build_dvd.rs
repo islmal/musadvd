@@ -1,5 +1,5 @@
 //! End-to-end: generate two short clips with ffmpeg, build a DVD5 and check the VIDEO_TS.
-//! Skipped (with a message) when ffmpeg/dvdauthor/spumux or the ConvertX templates are missing.
+//! Skipped (with a message) when ffmpeg/dvdauthor or the ConvertX templates are missing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,7 +43,6 @@ fn builds_dvd_with_submenus() {
     let bin = std::env::current_dir().unwrap().join("bin");
     if bin.join("dvdauthor.exe").is_file() {
         assert_eq!(tools.dvdauthor, bin.join("dvdauthor.exe"));
-        assert_eq!(tools.spumux, bin.join("spumux.exe"));
     }
     if !Path::new(TEMPLATE).is_file() {
         eprintln!("skipping: {TEMPLATE} not found");

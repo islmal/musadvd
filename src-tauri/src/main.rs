@@ -172,7 +172,7 @@ fn audio_plans(a: &probe::AudioStream, base: &str, mode: TrackLabelMode) -> Audi
 struct SubtitleTrack {
     index: u32,
     codec: String,
-    /// `text` (rendered by spumux) or `bitmap` (PGS/VobSub converted, others unsupported).
+    /// `text` (rendered natively) or `bitmap` (PGS/VobSub converted, others unsupported).
     kind: String,
     language: Option<String>,
     language_name: String,

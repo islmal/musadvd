@@ -1,12 +1,18 @@
-//! The native subpicture multiplexer (`spumux.rs`) must reproduce `spumux -m dvd` byte for byte
-//! on bitmap subtitle streams. Skipped (with a message) when ffmpeg/spumux are missing.
+//! The native subpicture multiplexer (`spumux.rs`) must reproduce dvdauthor's `spumux -m dvd`
+//! byte for byte. The reference outputs were recorded once from `spumux.exe` and are checked in as
+//! MD5 + length per case (`tests/fixtures/spumux/<case>.md5`) next to the small input streams
+//! (`<input>.mpg`), so the tests need no external tool.
+//!
+//! Re-recording (needs a spumux build, e.g. `tools/dvdauthor-win/build.sh`, and ffmpeg):
+//! `SPUMUX_RECORD=<path to spumux.exe> cargo test --test spumux_native`; this runs the real tool,
+//! asserts native == reference and rewrites the fixtures.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use convertx_rust::menu::IndexedImage;
 use convertx_rust::spumux;
-use convertx_rust::tools::Toolchain;
+use md5::{Digest, Md5};
 
 /// A subtitle-like bitmap: `w`×`h`, text-ish stripes in two opaque colours on transparency.
 fn image(w: u32, h: u32, seed: u32, palette: [[u8; 4]; 4]) -> IndexedImage {
@@ -51,17 +57,80 @@ fn first_diff(a: &[u8], b: &[u8]) -> String {
     }
 }
 
-fn run_case(name: &str, tools: &Toolchain, entries: &[(&str, Option<&str>, bool)], secs: u32) {
+/// Recording mode: the real `spumux` and the ffmpeg used to create missing input streams.
+struct Ctx {
+    record: Option<(PathBuf, PathBuf)>,
+}
+
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spumux")
+}
+
+/// Copies input stream `name` into `dir/in.mpg`; when recording, `ffmpeg_args` create it first if
+/// it is missing (small bitrates keep the checked-in files small).
+fn input(ctx: &Ctx, name: &str, dir: &Path, ffmpeg_args: &[&str]) {
+    let path = fixtures().join(format!("{name}.mpg"));
+    if let (Some((_, ffmpeg)), false) = (&ctx.record, path.is_file()) {
+        std::fs::create_dir_all(fixtures()).unwrap();
+        let st = Command::new(ffmpeg).args(["-hide_banner", "-loglevel", "error", "-y"]).args(ffmpeg_args).arg(&path).status().unwrap();
+        assert!(st.success());
+    }
+    std::fs::copy(&path, dir.join("in.mpg")).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
+fn digest(bytes: &[u8]) -> String {
+    let h: String = Md5::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
+    format!("{h} {}", bytes.len())
+}
+
+/// Compares `native` with the recorded reference of `name` (or, when recording, with the output of
+/// the real spumux run by `reference`, and stores its digest).
+fn check(ctx: &Ctx, name: &str, native: &[u8], reference: impl FnOnce(&Path) -> Vec<u8>, dir: &Path) {
+    let file = fixtures().join(format!("{name}.md5"));
+    if let Some((exe, _)) = &ctx.record {
+        let reference = reference(exe);
+        assert!(native == reference, "{name}: {}", first_diff(&reference, native));
+        std::fs::write(&file, digest(&reference)).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        assert_eq!(digest(native), expected.trim(), "{name}: native output differs from the recorded spumux output");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `spumux -s <stream> -m dvd <xml> < in.mpg > ref.mpg` in `dir`.
+fn run_reference(exe: &Path, dir: &Path, xml: &str, stream: &str) -> Vec<u8> {
+    let out = Command::new(exe)
+        .args(["-s", stream, "-m", "dvd", xml])
+        .current_dir(dir)
+        .stdin(std::fs::File::open(dir.join("in.mpg")).unwrap())
+        .stdout(std::fs::File::create(dir.join("ref.mpg")).unwrap())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::read(dir.join("ref.mpg")).unwrap()
+}
+
+fn tools() -> Option<Ctx> {
+    let record = std::env::var_os("SPUMUX_RECORD").map(|exe| {
+        let ffmpeg = ["bin/ffmpeg.exe", "bin/ffmpeg"].iter().map(Path::new).find(|p| p.is_file()).map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
+        (PathBuf::from(exe), ffmpeg)
+    });
+    Some(Ctx { record })
+}
+
+fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("cx_spumux_native_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("s")).unwrap();
-    let st = Command::new(&tools.ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=720x576:r=25", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
-        .args(["-t", &secs.to_string(), "-target", "pal-dvd", "-b:v", "4000k", "-c:a", "ac3", "-b:a", "192k", "in.mpg"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
-    assert!(st.success());
+    dir
+}
+
+fn run_case(name: &str, tools: &Ctx, entries: &[(&str, Option<&str>, bool)], secs: u32) {
+    let dir = temp_dir(name);
+    let s = secs.to_string();
+    input(tools, &format!("in_audio_{secs}s"), &dir, &["-f", "lavfi", "-i", "testsrc=s=720x576:r=25", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", &s, "-target", "pal-dvd", "-b:v", "300k", "-c:a", "ac3", "-b:a", "96k"]);
 
     let pal = [[0, 0, 0, 0], [255, 255, 255, 255], [10, 10, 10, 255], [250, 200, 20, 255]];
     let pal_half = [[0, 0, 0, 0], [240, 240, 240, 255], [60, 60, 200, 128], [0, 0, 0, 255]];
@@ -81,33 +150,9 @@ fn run_case(name: &str, tools: &Toolchain, entries: &[(&str, Option<&str>, bool)
     xml.push_str("</stream></subpictures>\n");
     std::fs::write(dir.join("sub.xml"), &xml).unwrap();
 
-    let out = Command::new(&tools.spumux)
-        .args(["-s", "1", "-m", "dvd", "sub.xml"])
-        .current_dir(&dir)
-        .stdin(std::fs::File::open(dir.join("in.mpg")).unwrap())
-        .stdout(std::fs::File::create(dir.join("ref.mpg")).unwrap())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-
-    let defs = spumux::parse_xml(&xml, &dir).unwrap();
     let mut native = Vec::new();
-    let stats = spumux::mux(std::fs::File::open(dir.join("in.mpg")).unwrap(), &mut native, defs, 1).unwrap();
-    let reference = std::fs::read(dir.join("ref.mpg")).unwrap();
-    assert!(native == reference, "{name}: {} ({stats:?})\n{}", first_diff(&reference, &native), String::from_utf8_lossy(&out.stderr));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-fn tools() -> Option<Toolchain> {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    match rt.block_on(Toolchain::detect()) {
-        Ok(t) if Path::new(&t.spumux).is_file() => Some(t),
-        other => {
-            eprintln!("skipping: {:?}", other.err());
-            None
-        }
-    }
+    spumux::mux(std::fs::File::open(dir.join("in.mpg")).unwrap(), &mut native, spumux::parse_xml(&xml, &dir).unwrap(), 1).unwrap();
+    check(tools, name, &native, |exe| run_reference(exe, &dir, "sub.xml", "1"), &dir);
 }
 
 #[test]
@@ -117,16 +162,10 @@ fn single_subtitle_with_end() {
 }
 
 /// Runs a set of images (`start`, `end`, x, y) through both muxers and compares.
-fn run_set(name: &str, tools: &Toolchain, items: &[(IndexedImage, &str, Option<&str>, u32, u32)], secs: u32) {
-    let dir = std::env::temp_dir().join(format!("cx_spumux_native_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let st = Command::new(&tools.ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=720x576:r=25", "-t", &secs.to_string(), "-target", "pal-dvd", "-an", "in.mpg"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
-    assert!(st.success());
+fn run_set(name: &str, tools: &Ctx, items: &[(IndexedImage, &str, Option<&str>, u32, u32)], secs: u32) {
+    let dir = temp_dir(name);
+    let s = secs.to_string();
+    input(tools, &format!("in_{secs}s"), &dir, &["-f", "lavfi", "-i", "testsrc=s=720x576:r=25", "-t", &s, "-target", "pal-dvd", "-b:v", "300k", "-an"]);
     let mut xml = String::from("<subpictures format=\"PAL\"><stream>\n");
     for (i, (img, start, end, x, y)) in items.iter().enumerate() {
         img.write_png(&dir.join(format!("{i}.png"))).unwrap();
@@ -137,23 +176,12 @@ fn run_set(name: &str, tools: &Toolchain, items: &[(IndexedImage, &str, Option<&
     }
     xml.push_str("</stream></subpictures>\n");
     std::fs::write(dir.join("sub.xml"), &xml).unwrap();
-    let out = Command::new(&tools.spumux)
-        .args(["-s", "0", "-m", "dvd", "sub.xml"])
-        .current_dir(&dir)
-        .stdin(std::fs::File::open(dir.join("in.mpg")).unwrap())
-        .stdout(std::fs::File::create(dir.join("ref.mpg")).unwrap())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let mut native = Vec::new();
     spumux::mux(std::fs::File::open(dir.join("in.mpg")).unwrap(), &mut native, spumux::parse_xml(&xml, &dir).unwrap(), 0).unwrap();
-    let reference = std::fs::read(dir.join("ref.mpg")).unwrap();
-    assert!(native == reference, "{name}: {}\n{}", first_diff(&reference, &native), String::from_utf8_lossy(&out.stderr));
-    let _ = std::fs::remove_dir_all(&dir);
+    check(tools, name, &native, |exe| run_reference(exe, &dir, "sub.xml", "0"), &dir);
 }
 
-fn run_image(name: &str, tools: &Toolchain, img: &IndexedImage) {
+fn run_image(name: &str, tools: &Ctx, img: &IndexedImage) {
     run_set(name, tools, &[(img.clone(), "00:00:01.00", Some("00:00:02.00"), 100, 300)], 3);
 }
 
@@ -188,18 +216,10 @@ fn menu_mask(palette: [[u8; 4]; 4], buttons: &[Btn], values: impl Fn(usize, u32,
 }
 
 /// Runs a menu (highlight + select masks, buttons) through both muxers and compares.
-fn run_menu(name: &str, tools: &Toolchain, hl: &IndexedImage, sel: &IndexedImage, buttons: &[Btn], force: bool) {
-    let dir = std::env::temp_dir().join(format!("cx_spumux_native_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn run_menu(name: &str, tools: &Ctx, hl: &IndexedImage, sel: &IndexedImage, buttons: &[Btn], force: bool) {
+    let dir = temp_dir(name);
     // A still menu like the real pipeline's: one second of video with a NAV pack per VOBU.
-    let st = Command::new(&tools.ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=720x576:r=25", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
-        .args(["-t", "1", "-target", "pal-dvd", "-c:a", "ac3", "-b:a", "192k", "in.mpg"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
-    assert!(st.success());
+    input(tools, "in_menu", &dir, &["-f", "lavfi", "-i", "color=c=gray:s=720x576:r=25", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1", "-target", "pal-dvd", "-c:a", "ac3", "-b:a", "96k"]);
     hl.write_png(&dir.join("hl.png")).unwrap();
     sel.write_png(&dir.join("sel.png")).unwrap();
     let mut xml = format!(
@@ -217,22 +237,9 @@ fn run_menu(name: &str, tools: &Toolchain, hl: &IndexedImage, sel: &IndexedImage
     }
     xml.push_str("    </spu>\n  </stream>\n</subpictures>\n");
     std::fs::write(dir.join("m.xml"), &xml).unwrap();
-    let out = Command::new(&tools.spumux)
-        .args(["-s", "0", "-m", "dvd", "m.xml"])
-        .current_dir(&dir)
-        .stdin(std::fs::File::open(dir.join("in.mpg")).unwrap())
-        .stdout(std::fs::File::create(dir.join("ref.mpg")).unwrap())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let mut native = Vec::new();
-    let stats = spumux::mux(std::fs::File::open(dir.join("in.mpg")).unwrap(), &mut native, spumux::parse_xml(&xml, &dir).unwrap(), 0).unwrap();
-    let reference = std::fs::read(dir.join("ref.mpg")).unwrap();
-    assert!(native == reference, "{name}: {} ({stats:?})\n{}", first_diff(&reference, &native), String::from_utf8_lossy(&out.stderr));
-    let log = String::from_utf8_lossy(&out.stderr).into_owned();
-    eprintln!("{name}: {}", log.lines().find(|l| l.contains("Pickbuttongroups")).unwrap_or("-"));
-    let _ = std::fs::remove_dir_all(&dir);
+    spumux::mux(std::fs::File::open(dir.join("in.mpg")).unwrap(), &mut native, spumux::parse_xml(&xml, &dir).unwrap(), 0).unwrap();
+    check(tools, name, &native, |exe| run_reference(exe, &dir, "m.xml", "0"), &dir);
 }
 
 const SELECTION: [[u8; 4]; 4] = [[0, 0, 0, 0], [255, 255, 0, 200], [255, 255, 0, 150], [255, 255, 0, 80]];

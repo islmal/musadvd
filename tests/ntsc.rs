@@ -91,7 +91,12 @@ fn ntsc_disc() {
     let spu = std::fs::read_to_string(work.join("spumux_vmgm.xml")).unwrap();
     assert!(spu.contains(r#"<subpictures format="NTSC">"#));
     let sub = std::fs::read_to_string(work.join("title_01_s1.xml")).unwrap();
-    assert!(sub.contains(r#"<subpictures format="NTSC">"#) && sub.contains(r#"movie-fps="29.97""#));
+    assert!(sub.contains(r#"<subpictures format="NTSC">"#) && sub.contains("<spu "), "{sub}");
+    // Natively rendered text subtitles sit inside the 480-line frame.
+    for tag in sub.split("<spu ").skip(1) {
+        let y: u32 = tag.split(r#"yoffset=""#).nth(1).and_then(|v| v.split('"').next()).and_then(|v| v.parse().ok()).unwrap();
+        assert!(y > 300 && y < 480, "{tag}");
+    }
     // Root + chapter menu (video slots) and the settings page (still image with the video's sound).
     assert_eq!(report.motion_pages, 3, "motion menus in NTSC");
     std::fs::remove_dir_all(&dir).ok();

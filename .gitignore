@@ -11,7 +11,7 @@ frontend/dist/
 
 # Third-party tool binaries: ffmpeg/ffprobe are ~220 MB each (above GitHub's file limit) –
 # copy the real ffmpeg.exe/ffprobe.exe into bin/ locally (see STATUS.md §4.1).
-# dvdauthor.exe/spumux.exe are small self-built binaries and are tracked.
+# dvdauthor.exe is a small self-built binary and is tracked.
 bin/ffmpeg.exe
 bin/ffprobe.exe
 bin/*.iso

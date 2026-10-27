@@ -20,6 +20,7 @@ pub mod menu;
 pub mod menu_anim;
 pub mod probe;
 pub mod spumux;
+pub mod textsub;
 pub mod subpic;
 pub mod template;
 pub mod tools;

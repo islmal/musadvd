@@ -48,18 +48,24 @@ make CPPFLAGS="$CPPFLAGS" LDFLAGS="-all-static" \
     exit 1
 }
 
-mkdir -p "$PROJECT/bin"
+# dvdauthor ships in bin/. spumux is not used by the product any more (muxing is native); it is
+# only the test oracle of tests/spumux_native.rs (SPUMUX_RECORD), so it stays out of bin/.
+mkdir -p "$PROJECT/bin" "$PROJECT/target/spumux-oracle"
 for exe in dvdauthor spumux; do
     # libtool puts the real binary into .libs/ when it exists.
     src="$exe.exe"
     [ -f ".libs/$exe.exe" ] && src=".libs/$exe.exe"
-    strip -o "$PROJECT/bin/$exe.exe" "$src"
+    dest="$PROJECT/bin"
+    [ "$exe" = spumux ] && dest="$PROJECT/target/spumux-oracle"
+    strip -o "$dest/$exe.exe" "$src"
 done
 cp ../COPYING "$PROJECT/bin/dvdauthor-COPYING.txt"
 
 echo "Built from ldo/dvdauthor@$REV:"
 for exe in dvdauthor spumux; do
-    printf '  %s  imports: ' "$PROJECT/bin/$exe.exe"
-    objdump -p "$PROJECT/bin/$exe.exe" | awk '/DLL Name/ {printf "%s ", $3}'
+    dest="$PROJECT/bin"
+    [ "$exe" = spumux ] && dest="$PROJECT/target/spumux-oracle"
+    printf '  %s  imports: ' "$dest/$exe.exe"
+    objdump -p "$dest/$exe.exe" | awk '/DLL Name/ {printf "%s ", $3}'
     echo
 done

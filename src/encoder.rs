@@ -1,14 +1,14 @@
 //! ffmpeg wrapper: source -> DVD-compliant MPEG-2 program stream (`{stem}.mpg`).
 //!
 //! Per title (see [`run_encode`]):
-//! 1. text subtitles are extracted as `{stem}_sN.srt` (spumux needs them before the encode);
+//! 1. text subtitles are extracted as `{stem}_sN.srt` and rendered natively ([`crate::textsub`]);
 //! 2. with 2-pass encoding a video-only analysis run (`-pass 1`, output to `NUL`) writes
 //!    `{stem}_2pass-0.log`;
 //! 3. one ffmpeg run decodes the source once and writes MPEG-2 video (720x576/480, 4:3 or 16:9)
 //!    plus one AC-3 track per selected audio track (192 kbps stereo / 448 kbps 5.1) straight
 //!    into a DVD program stream (`-f dvd`, 2048-byte packs) – no elementary streams on disk;
-//! 4. with text subtitles that stream is piped through one spumux per subtitle stream
-//!    (see [`spumux_textsub_xml`]) into `{stem}.mpg`.
+//! 4. with subtitles that stream is piped through one native subpicture muxer per subtitle
+//!    stream ([`crate::spumux`]) into `{stem}.mpg`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::bd::BdRate;
-use crate::author::{xml_escape, ClipSource, MenuFrame, Resolution, TvStandard};
+use crate::author::{ClipSource, MenuFrame, Resolution, TvStandard};
 use crate::probe::{AudioStream, Crop, MediaInfo, SubtitleKind, SubtitleStream, VideoStream};
-use crate::subpic;
+use crate::{subpic, textsub};
 use crate::tools::{FfmpegProgress, ToolError, Toolchain};
 
 /// VBV buffer of DVD-Video MPEG-2 (224 KiB).
@@ -568,9 +568,6 @@ fn cleanup_passlogs_in(dir: &Path, stem: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Font for text subtitles (copied into the work directory's `.spumux/`).
-pub const SUBTITLE_FONT: &str = "arial.ttf";
-
 impl EncodeJob<'_> {
     /// `-passlogfile` prefix; ffmpeg appends `-0.log` (and `.mbtree` for x264).
     pub fn passlog_prefix(&self) -> PathBuf {
@@ -749,9 +746,9 @@ pub fn extract_subtitle_args(info: &MediaInfo, tracks: &[(usize, &SubtitleStream
 
 /// Encodes `job` into `job.vob()` in the work directory: text subtitles are extracted first,
 /// with `job.two_pass` an analysis run (statistics only) follows, then the final run writes the
-/// DVD program stream – through one spumux per text subtitle stream via pipes when there are
+/// DVD program stream – through one native subpicture muxer per subtitle stream via pipes when there are
 /// subtitles. The 2-pass statistics files are removed after success (stale ones from an aborted
-/// earlier attempt before starting). Returns the spumux logs.
+/// earlier attempt before starting). Returns the muxer logs.
 pub async fn run_encode(
     tools: &Toolchain,
     job: &EncodeJob<'_>,
@@ -766,7 +763,7 @@ pub async fn run_encode(
     for (n, sub) in job.subtitles.iter().enumerate() {
         let xml = job.subtitle_xml(n);
         let text = if sub.kind == SubtitleKind::Text {
-            spumux_textsub_xml(job.tv, &job.srt(n), SUBTITLE_FONT)
+            text_subtitle_xml(job, n, sub).await?
         } else {
             bitmap_subtitle_xml(tools, job, n, sub).await?
         };
@@ -1043,32 +1040,24 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
     Ok(xml)
 }
 
-/// spumux XML rendering an SRT file as DVD subpictures. The font is looked up in
-/// `$HOME/.spumux/` (see [`crate::tools::Toolchain::spumux`]).
-pub fn spumux_textsub_xml(tv: TvStandard, srt_file: &str, font_file: &str) -> String {
-    // SRT times are real time; render at the movie's frame rate. Height 2 lines short of the
-    // frame, as recommended for spumux.
-    let fps = match tv {
-        TvStandard::Pal => "25",
-        TvStandard::Ntsc => "29.97",
-    };
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<subpictures format="{format}">
-  <stream>
-    <textsub filename="{}" characterset="UTF-8" fontsize="28.0" font="{}"
-      horizontal-alignment="center" vertical-alignment="bottom"
-      left-margin="60" right-margin="60" top-margin="20" bottom-margin="40"
-      subtitle-fps="{fps}" movie-fps="{fps}" movie-width="{w}" movie-height="{h}"/>
-  </stream>
-</subpictures>
-"#,
-        xml_escape(srt_file),
-        xml_escape(font_file),
-        format = tv.spumux_format(),
-        w = tv.width(),
-        h = tv.height() - 2,
-    )
+/// Renders text subtitle `n` (its extracted `.srt`) natively into `<stem>_s<n>/` and returns the
+/// spumux XML, like [`bitmap_subtitle_xml`].
+async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) -> Result<String, ToolError> {
+    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Text-Untertitel #{}", sub.index), status: String::new(), log: e.to_string() };
+    let path = job.dir.join(job.srt(n));
+    let data = std::fs::read(&path).map_err(|error| ToolError::Io { tool: path.display().to_string(), error })?;
+    let (dir, tv, folder) = (job.dir.clone(), job.tv, format!("{}_s{}", job.stem, n + 1));
+    let (xml, _count) = tokio::task::spawn_blocking(move || {
+        let (cues, _skipped) = textsub::parse_srt(&String::from_utf8_lossy(&data));
+        let decoded = textsub::render_cues(&cues, tv);
+        let (w, h) = tv.size();
+        let whole = subpic::Target { frame: (w, h), area: (0, 0, w, h), source: (0, 0, w, h) };
+        subpic::render(&decoded, &whole, tv, &dir, &folder)
+    })
+    .await
+    .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+    .map_err(fail)?;
+    Ok(xml)
 }
 
 /// Arguments extracting one display-aspect-correct frame at `at_secs` as a PNG thumbnail.
@@ -1927,16 +1916,6 @@ mod tests {
         assert!(a.contains("color=c=black:s=720x576:r=25:d=0.04,format=rgba,geq=r=0:g=0:b=0:a='215*clip((Y/H-0.35)/0.65\\,0\\,1)',loop=loop=-1:size=1,trim=duration=20.000"), "{a}");
         // The shaded background is what the first layer goes onto.
         assert!(a.contains("[bg0][shade]overlay=0:0:format=rgb[bg];") && a.contains("[bg][l0]overlay"), "{a}");
-    }
-
-    #[test]
-    fn textsub_xml() {
-        let x = spumux_textsub_xml(TvStandard::Pal, "t_s1.srt", "arial.ttf");
-        assert!(x.contains(r#"filename="t_s1.srt""#));
-        assert!(x.contains(r#"font="arial.ttf""#));
-        assert!(x.contains(r#"movie-fps="25""#) && x.contains(r#"movie-height="574""#));
-        let n = spumux_textsub_xml(TvStandard::Ntsc, "t_s1.srt", "arial.ttf");
-        assert!(n.contains(r#"<subpictures format="NTSC">"#) && n.contains(r#"movie-height="478""#) && n.contains(r#"movie-fps="29.97""#));
     }
 
     fn strings(a: Vec<OsString>) -> String {

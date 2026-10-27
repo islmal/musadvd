@@ -2,7 +2,7 @@
 //! - PGS: a small `.sup` written here is muxed into Matroska by ffmpeg, converted by the build
 //!   and must come out as a DVD subpicture stream at the right time and place (checked against
 //!   ffmpeg's own rendering of the source).
-//! - VobSub: a DVD built from an SRT (spumux-rendered subpictures) is used as the input of a
+//! - VobSub: a DVD built from an SRT (natively rendered subpictures) is used as the input of a
 //!   second build; every subtitle must survive with its timing.
 //! Skipped (with a message) when tools or templates are missing.
 
@@ -194,7 +194,7 @@ fn vobsub_subtitles_survive_a_second_build() {
     std::fs::write(&srt, "1\n00:00:01,000 --> 00:00:02,000\nErste Zeile\n\n2\n00:00:02,500 --> 00:00:03,500\nZweite Zeile\n\n3\n00:00:04,000 --> 00:00:04,800\nDritte\n").unwrap();
     let clip = dir.join("clip.mkv");
     ffmpeg(&tools, &["-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:duration=6", "-f", "lavfi", "-i", "sine=f=440:duration=6", "-i", srt.to_str().unwrap(), "-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-c:s", "srt", clip.to_str().unwrap()]);
-    // First build: spumux renders the SRT into DVD subpictures (VobSub).
+    // First build: the native renderer turns the SRT into DVD subpictures (VobSub).
     let first = build(&rt, clip, dir.join("first"));
     let vob = first.video_ts.join("VTS_01_1.VOB");
     let (original, original_start) = subtitle_packets(&tools, &vob);

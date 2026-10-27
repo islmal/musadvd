@@ -39,8 +39,6 @@ pub const MAX_AUDIO_STREAMS: usize = 8;
 pub const MAX_SUBTITLE_STREAMS: usize = 32;
 /// Bitrate reserved per text subtitle stream for the size calculation.
 const SUBTITLE_KBPS: u32 = 10;
-/// Font copied into `work/.spumux/` for text subtitles.
-use crate::encoder::SUBTITLE_FONT;
 use crate::eta::{self, Eta, FrameEta, JobPhase};
 
 #[derive(Debug)]
@@ -1003,6 +1001,9 @@ pub(crate) fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &Bui
                 notes.push(tf!(opts.ui_lang, "note_bitmap_sub_unsupported", label = label, index = s.index, codec = s.codec));
                 continue;
             }
+            if s.kind == SubtitleKind::Text && !opts.disc.is_bluray() && s.language.as_deref().is_some_and(is_rtl_language) {
+                notes.push(tf!(opts.ui_lang, "note_rtl_subtitle", label = label, index = s.index, lang = s.language.as_deref().unwrap_or("")));
+            }
             subtitles.push(n);
         }
         subtitles.truncate(MAX_SUBTITLE_STREAMS);
@@ -1015,6 +1016,11 @@ pub(crate) fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &Bui
         subtitles.sort_by_key(|&s| !language_matches(lang, info.subtitles[s].language.as_deref()));
     }
     (audio, subtitles, notes)
+}
+
+/// Languages whose text subtitles need bidi/shaping, which [`crate::textsub`] does not do.
+fn is_rtl_language(lang: &str) -> bool {
+    matches!(lang.to_ascii_lowercase().as_str(), "ar" | "ara" | "he" | "heb" | "fa" | "fas" | "per" | "ur" | "urd" | "yi" | "yid")
 }
 
 /// Builds a complete DVD-Video structure from `opts.inputs`.
@@ -1063,8 +1069,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         opts.ui_lang,
         "tools_dvd",
         ffmpeg = tools.ffmpeg.display(),
-        dvdauthor = tools.dvdauthor.display(),
-        spumux = tools.spumux.display()
+        dvdauthor = tools.dvdauthor.display()
     )));
     for note in &tools.notes {
         warn(log, note.clone());
@@ -1640,12 +1645,6 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     }
 
     // 7. Encode titles (independent titlesets in parallel) ---------------------------------------
-    if titles.iter().any(|t| !t.subtitles.is_empty()) {
-        let font_dir = work.join(".spumux");
-        std::fs::create_dir_all(&font_dir)?;
-        let windir = std::env::var_os("WINDIR").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-        std::fs::copy(windir.join("Fonts").join(SUBTITLE_FONT), font_dir.join(SUBTITLE_FONT))?;
-    }
     let count = titles.len();
     let passes = match (opts.two_pass, opts.fast_encode) {
         (true, true) => tr(opts.ui_lang, "passes_2_fast"),

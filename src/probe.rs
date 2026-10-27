@@ -121,7 +121,7 @@ pub struct AudioStream {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SubtitleKind {
-    /// SRT, ASS, WebVTT, mov_text: rendered by spumux.
+    /// SRT, ASS, WebVTT, mov_text: rendered natively ([`crate::textsub`]).
     Text,
     /// DVD/PGS/DVB bitmaps.
     Bitmap,

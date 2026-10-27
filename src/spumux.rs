@@ -2,14 +2,15 @@
 //! subpicture units (RLE fields + SP_DCSQ command sequences) and multiplexes them as private
 //! stream 1 (`0xBD`) PES packets into an MPEG-2 program stream.
 //!
-//! Behaviour was derived from `bin/spumux.exe` (dvdauthor 0.7.2+) and is verified against it
-//! byte for byte in `tests/spumux_native.rs`:
+//! Behaviour was derived from `spumux.exe` (dvdauthor 0.7.2+) and is verified against its recorded
+//! output byte for byte in `tests/spumux_native.rs`:
 //! - every subpicture is preceded by a `dvdauthor-data` padding sector (stream id, PTS, end PTS and
 //!   the CLUT as Y/Cr/Cb) that `dvdauthor` reads instead of an SPU-internal palette;
 //! - the SPU sectors enter the stream at the first pack whose SCR reaches `PTS - 150 ms`;
 //! - every pack header is rewritten so the SCR never falls below the previous one plus one sector.
 //!
-//! Not covered (still `spumux`): text subtitles (FreeType) and menu button groups.
+//! Text subtitles are rendered to bitmaps by [`crate::textsub`] and enter here like any other bitmap
+//! stream; there is no external `spumux` in the product any more.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -33,8 +34,8 @@ pub enum SpumuxError {
     Xml(String),
     Image { path: PathBuf, reason: String },
     DuplicateStream(u8),
-    /// Input spumux itself would reject or that this module does not reproduce; callers fall back
-    /// to the external tool.
+    /// Input spumux itself would reject or that this module does not reproduce (fatal: there is no
+    /// external tool to fall back to).
     Unsupported(String),
     /// The button group search exceeded its iteration limit (number of buttons).
     TooComplex(usize),
