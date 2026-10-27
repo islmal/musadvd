@@ -1074,5 +1074,7 @@
  "lang.hr": "Croatian",
  "lang.sr": "Serbian",
  "lang.th": "Thai",
- "lang.vi": "Vietnamese"
+ "lang.vi": "Vietnamese",
+ "update.title": "Update available",
+ "update.prompt": "Version {version} is available. Download and install it now? The application restarts during the update."
 }

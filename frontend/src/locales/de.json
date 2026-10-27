@@ -1074,5 +1074,7 @@
  "lang.hr": "Kroatisch",
  "lang.sr": "Serbisch",
  "lang.th": "Thai",
- "lang.vi": "Vietnamesisch"
+ "lang.vi": "Vietnamesisch",
+ "update.title": "Update verfügbar",
+ "update.prompt": "Version {version} ist verfügbar. Jetzt herunterladen und installieren? Die Anwendung wird dabei neu gestartet."
 }

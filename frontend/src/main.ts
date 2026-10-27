@@ -7,6 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
 import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { check } from "@tauri-apps/plugin-updater";
 import {
   checkLayout,
   calculateProject,
@@ -1556,4 +1557,16 @@ async function init() {
   }
 }
 
-void init();
+/** Offers a newer GitHub release; offline, dev builds and unsigned releases fail silently. */
+async function checkForUpdate() {
+  try {
+    const update = await check();
+    if (update && (await ask(tr("update.prompt", { version: update.version }), { title: tr("update.title"), kind: "info" }))) {
+      await update.downloadAndInstall(); // the passive NSIS installer restarts the app
+    }
+  } catch {
+    // no update check possible, not worth bothering the user
+  }
+}
+
+void init().then(checkForUpdate);

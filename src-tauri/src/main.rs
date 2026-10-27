@@ -774,6 +774,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .manage(burn::BurnState::default())
         .manage(burn_studio::StudioState::default())
