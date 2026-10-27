@@ -1065,20 +1065,15 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
 
     // 0. Tools and directories --------------------------------------------------------------
     let tools = cancellable(cancel, Toolchain::detect()).await?;
-    log(Event::Step(tf!(
-        opts.ui_lang,
-        "tools_dvd",
-        ffmpeg = tools.ffmpeg.display(),
-        dvdauthor = tools.dvdauthor.display()
-    )));
+    log(Event::Step(tf!(opts.ui_lang, "tools_dvd", ffmpeg = tools.ffmpeg.display())));
     for note in &tools.notes {
         warn(log, note.clone());
     }
     std::fs::create_dir_all(&opts.output).at(&opts.output)?;
     let out = display_path(std::fs::canonicalize(&opts.output).at(&opts.output)?);
     // Temporary work directory; a leftover from an aborted run (recognised by its marker) is
-    // removed. dvdauthor writes into it with plain ASCII names, the finished VIDEO_TS is then
-    // moved into the project folder (Unicode-safe, the MinGW dvdauthor uses the ANSI file API).
+    // removed. The authoring writes into it with plain ASCII names, the finished VIDEO_TS is then
+    // moved into the project folder.
     let work = out.join(WORK_DIR);
     if work.join(WORK_DIR).is_file() {
         remove_old_output(&work).await?;
@@ -1779,6 +1774,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         tv,
         title_pre,
     };
+    // The authoring XML is only kept for the report (and the work directory): the native authoring
+    // takes the layout directly.
     let authoring_xml = author::dvdauthor_xml(&layout)?;
     std::fs::write(work.join("dvdauthor.xml"), &authoring_xml)?;
     log(Event::Phase(BuildPhase::Authoring));
@@ -1793,25 +1790,21 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .unwrap_or(expected_bytes);
     let burn_estimate = Some(eta::image_and_burn_secs(eta::Medium::Dvd, vob_bytes, eta::default_speed_x(eta::Medium::Dvd, dual_layer), true, dual_layer));
     log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Authoring, None, Some(eta::authoring_secs(vob_bytes)), burn_estimate)));
-    log(Event::Step(tr(opts.ui_lang, "dvdauthor_created").into()));
+    log(Event::Step(tr(opts.ui_lang, "authoring_created").into()));
     cancel.check()?;
-    let dvd_log = cancellable(cancel, tools.dvdauthor(&work, "dvdauthor.xml")).await?;
+    let authoring_log = {
+        let (work, dest) = (work.clone(), work.join(&layout.dest));
+        cancellable(cancel, async move {
+            tokio::task::spawn_blocking(move || author::author_dvd(&layout, &work, &dest))
+                .await
+                .map_err(|e| AuthorError::Native(e.to_string()))?
+        })
+        .await?
+    };
     cancel.check()?;
-    std::fs::write(work.join("dvdauthor.log"), &dvd_log)?;
-    if stage.pages.iter().any(|(spec, _)| spec.intro_secs.is_some()) {
-        // Menu domain VOBs: VIDEO_TS.VOB (VMGM) and VTS_nn_0.VOB (titleset menus).
-        let menu_vobs = std::fs::read_dir(work.join("DVD").join("VIDEO_TS"))?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case("VIDEO_TS.VOB") || (n.len() == 12 && n.to_ascii_uppercase().ends_with("_0.VOB"))));
-        for path in menu_vobs {
-            let mut bytes = std::fs::read(&path).at(&path)?;
-            if author::strip_intro_buttons(&mut bytes) > 0 {
-                std::fs::write(&path, bytes).at(&path)?;
-            }
-        }
-    }
-    for line in dvd_log.lines().filter(|l| l.contains("WARN")) {
+    std::fs::write(work.join("authoring.log"), authoring_log.0.join("
+"))?;
+    for line in authoring_log.0.iter().filter(|l| l.contains("WARN")) {
         warn(log, format!("dvdauthor: {}", line.trim()));
     }
 

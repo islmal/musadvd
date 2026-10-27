@@ -3,7 +3,7 @@
 # sources (https://github.com/ldo/dvdauthor) and copies them into <project>/bin.
 #
 # Run in an MSYS2 UCRT64 shell:
-#   MSYSTEM=UCRT64 bash -l tools/dvdauthor-win/build.sh [work-dir]
+#   MSYSTEM=UCRT64 bash -l tools/oracle/build.sh [work-dir]
 #
 # Required MSYS2 packages:
 #   git autoconf automake libtool make flex bison gettext-devel

@@ -41,8 +41,8 @@ fn builds_dvd_with_submenus() {
     };
     // With the bundled native builds present, they must win over anything on PATH.
     let bin = std::env::current_dir().unwrap().join("bin");
-    if bin.join("dvdauthor.exe").is_file() {
-        assert_eq!(tools.dvdauthor, bin.join("dvdauthor.exe"));
+    if bin.join("ffmpeg.exe").is_file() {
+        assert_eq!(tools.ffmpeg, bin.join("ffmpeg.exe"));
     }
     if !Path::new(TEMPLATE).is_file() {
         eprintln!("skipping: {TEMPLATE} not found");

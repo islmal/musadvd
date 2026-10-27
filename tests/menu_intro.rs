@@ -794,7 +794,7 @@ mod dvd {
             }
         }
         assert!(checked > 0, "no intro menu found in the VOBs");
-        let log = std::fs::read_to_string(report.work_dir.as_ref().unwrap().join("dvdauthor.log")).unwrap();
+        let log = std::fs::read_to_string(report.work_dir.as_ref().unwrap().join("authoring.log")).unwrap();
         assert!(!log.contains("Discontinuity"), "{log}");
         if std::env::var_os("CX_KEEP").is_none() {
             std::fs::remove_dir_all(&dir).ok();

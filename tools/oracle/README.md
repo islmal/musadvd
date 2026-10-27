@@ -11,7 +11,7 @@ scoop install msys2
 # in an MSYS2 UCRT64 shell:
 pacman -S --needed git autoconf automake libtool make flex bison gettext-devel \
   mingw-w64-ucrt-x86_64-{gcc,pkgconf,libxml2,libpng,freetype,fribidi,libiconv,zlib,libdvdread}
-bash tools/dvdauthor-win/build.sh
+bash tools/oracle/build.sh
 ```
 
 ## Windows port

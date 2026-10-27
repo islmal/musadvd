@@ -263,7 +263,7 @@ fn build_dvd_with_motion_menus() {
     // dvdauthor accepted everything and wrote the menu domain VOB.
     assert!(report.video_ts.join("VTS_01_0.VOB").is_file());
     assert!(report.video_ts.join("VTS_01_1.VOB").is_file());
-    let log = std::fs::read_to_string(work.join("dvdauthor.log")).unwrap();
+    let log = std::fs::read_to_string(work.join("authoring.log")).unwrap();
     assert!(!log.contains("Discontinuity"), "audio of the motion menus must be continuous");
     std::fs::remove_dir_all(&dir).ok();
 }

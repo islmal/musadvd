@@ -124,6 +124,7 @@ only (same source, different trim).
 
 **Last recorded test run (2026-10-27):** `cargo test --workspace`: all green (lib 348), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
 **Next (prioritised)**
+- [planned] Native DVD authoring + native BDAV muxer (remove dvdauthor.exe, tsMuxeR.exe) → docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md
 1. Live player hardening **acceptance** in the release window (4K HEVC HDR smooth + colours, crop, DVD source without combing, CSP `media-src` under `http://tauri.localhost`); only then consider `-hwaccel` → docs/plans/2026-10-26-live-player-hardening.md
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
    on DVD+R, DTS/LPCM BD audio; JumpTitle behaviour in VLC 3.0.23 (timebar, Menu key, title end →

@@ -3,7 +3,7 @@
 //! MD5 + length per case (`tests/fixtures/spumux/<case>.md5`) next to the small input streams
 //! (`<input>.mpg`), so the tests need no external tool.
 //!
-//! Re-recording (needs a spumux build, e.g. `tools/dvdauthor-win/build.sh`, and ffmpeg):
+//! Re-recording (needs a spumux build, e.g. `tools/oracle/build.sh`, and ffmpeg):
 //! `SPUMUX_RECORD=<path to spumux.exe> cargo test --test spumux_native`; this runs the real tool,
 //! asserts native == reference and rewrites the fixtures.
 

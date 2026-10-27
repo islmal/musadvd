@@ -29,7 +29,7 @@ cargo check --lib --tests --target x86_64-unknown-linux-gnu             # Unix b
 
 - Without `tauri/custom-protocol` the GUI exe loads `http://localhost:5173` ("page not reachable").
 - `bin/ffmpeg.exe` / `ffprobe.exe` (9.0.1 gyan.dev full, ~220 MB each) are git-ignored and must be
-  copied in after cloning; `dvdauthor` (self-built, `tools/dvdauthor-win/build.sh`; `spumux` is gone, muxing is native) and
+  copied in after cloning; `dvdauthor`/`spumux` are gone (DVD authoring and subpicture muxing are native; `tools/oracle/` rebuilds them only to re-record the test fixtures) and
   `tsMuxeR` 2.7.0 are tracked. NVENC needs NVIDIA driver ≥ 610.
 - ConvertX templates are read from `C:\ProgramData\VSO\ConvertXToDVD\7\Templates` (read-only).
 

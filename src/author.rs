@@ -1400,31 +1400,6 @@ pub fn author_dvd(layout: &DvdLayout, work: &std::path::Path, dest: &std::path::
     Ok(AuthorLog(log))
 }
 
-/// Offsets inside a 2048-byte NAV-pack sector: the PCI packet follows the 0x26 PES header, its
-/// highlight info (`hli`, 189 bytes, `hli_ss` first) starts at PCI byte 0x60; the DSI packet's
-/// `vobu_vob_idn` / `vobu_c_idn` sit at 0x41F / 0x422.
-const NAV_HLI: std::ops::Range<usize> = 0x8D..0x8D + 189;
-
-/// dvdauthor copies a menu's button info into the NAV pack of every VOBU, also those of an intro
-/// cell (cell 1 of a VOB that has a cell 2), where the buttons must not be active yet. Clears the
-/// highlight info there (the VOBUs then look like those of a menu without buttons). Returns the
-/// number of NAV packs changed.
-pub fn strip_intro_buttons(vob: &mut [u8]) -> usize {
-    let is_nav = |s: &[u8]| s[0x26..0x2A] == [0, 0, 1, 0xBF] && s[0x2C] == 0 && s[0x400..0x404] == [0, 0, 1, 0xBF];
-    let id = |s: &[u8]| (u16::from_be_bytes([s[0x41F], s[0x420]]), s[0x422]);
-    let with_intro: std::collections::HashSet<u16> =
-        vob.chunks_exact(2048).filter(|s| is_nav(s)).map(id).filter(|&(_, cell)| cell > 1).map(|(v, _)| v).collect();
-    let mut n = 0;
-    for s in vob.chunks_exact_mut(2048).filter(|s| is_nav(s)) {
-        let (v, cell) = id(s);
-        if cell == 1 && with_intro.contains(&v) {
-            s[NAV_HLI].fill(0);
-            n += 1;
-        }
-    }
-    n
-}
-
 /// `HH:MM:SS.mmm` of `secs`, rounded up to the millisecond.
 fn spu_time(secs: f64) -> String {
     let ms = (secs * 1000.0 - 1e-6).ceil().max(0.0) as u64;
@@ -1798,24 +1773,6 @@ mod tests {
         let x = dvdauthor_xml(&layout).unwrap();
         assert_eq!(x.matches(r#"<video format="ntsc""#).count(), 2, "menus and titles");
         assert!(!x.contains(r#"format="pal""#));
-    }
-
-    #[test]
-    fn intro_cell_loses_its_buttons() {
-        let nav = |vob: u16, cell: u8| {
-            let mut s = vec![0u8; 2048];
-            s[0x26..0x2A].copy_from_slice(&[0, 0, 1, 0xBF]);
-            s[0x400..0x404].copy_from_slice(&[0, 0, 1, 0xBF]);
-            s[0x41F..0x421].copy_from_slice(&vob.to_be_bytes());
-            s[0x422] = cell;
-            s[0x8D] = 1;
-            s
-        };
-        // VOB 1 has an intro (cells 1, 2), VOB 2 is a plain one-cell menu.
-        let mut vob = [nav(1, 1), nav(1, 1), nav(1, 2), nav(2, 1)].concat();
-        assert_eq!(strip_intro_buttons(&mut vob), 2);
-        let hli: Vec<u8> = vob.chunks(2048).map(|s| s[0x8D]).collect();
-        assert_eq!(hli, [0, 0, 1, 1]);
     }
 
     #[test]

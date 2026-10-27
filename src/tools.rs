@@ -1,13 +1,12 @@
-//! Locating and running the external tools natively: ffmpeg/ffprobe and dvdauthor (plus
-//! tsMuxeR for Blu-ray); subpictures are muxed in-process ([`crate::spumux`]).
+//! Locating and running the external tools natively: ffmpeg/ffprobe (plus tsMuxeR for
+//! Blu-ray); DVD authoring and subpicture muxing run in-process ([`crate::author`],
+//! [`crate::spumux`]).
 //!
 //! Lookup order for every tool:
 //! 1. `bin/` next to the running executable (all-in-one distribution),
 //! 2. `bin/` in the current directory (`cargo run` / `cargo test` from the project root),
 //! 3. the system `PATH`.
 //!
-//! A native Windows build of dvdauthor is produced by `tools/dvdauthor-win/build.sh`.
-//! dvdauthor runs with the work directory as current directory and plain file names as arguments.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -159,12 +158,11 @@ pub struct RawStream {
 pub struct Toolchain {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
-    pub dvdauthor: PathBuf,
     /// tsMuxeR, only needed for Blu-ray output (DVD builds work without it).
     pub tsmuxer: Option<PathBuf>,
     /// Broken candidates that were skipped during detection.
     pub notes: Vec<String>,
-    /// Priority of every ffmpeg/dvdauthor process started by this toolchain.
+    /// Priority of every ffmpeg process started by this toolchain.
     pub priority: ProcessPriority,
 }
 
@@ -263,10 +261,8 @@ impl Toolchain {
     pub async fn detect() -> Result<Self, ToolError> {
         let mut notes = Vec::new();
         let ff_hint = "scoop install ffmpeg, or copy the real ffmpeg.exe/ffprobe.exe into bin/";
-        let dvd_hint = "build it with tools/dvdauthor-win/build.sh";
         let ffmpeg = locate("ffmpeg", true, ff_hint, &mut notes).await?;
         let ffprobe = locate("ffprobe", true, ff_hint, &mut notes).await?;
-        let dvdauthor = locate("dvdauthor", false, dvd_hint, &mut notes).await?;
         let mut tsmuxer = None;
         for candidate in tool_candidates("tsMuxeR") {
             if is_tsmuxer(&candidate).await {
@@ -278,7 +274,6 @@ impl Toolchain {
         Ok(Toolchain {
             ffmpeg,
             ffprobe,
-            dvdauthor,
             tsmuxer,
             notes,
             priority: ProcessPriority::Normal,
@@ -341,14 +336,6 @@ impl Toolchain {
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
-
-    /// `dvdauthor -x <xml>` in `dir`.
-    pub async fn dvdauthor(&self, dir: &Path, xml: &str) -> Result<String, ToolError> {
-        let mut cmd = self.command(&self.dvdauthor);
-        cmd.args(["-x", xml]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped());
-        run_capture("dvdauthor", cmd).await
-    }
-
 
     /// Runs ffmpeg with `args`, reporting progress (0..1) for an output of `duration_secs`.
     pub async fn ffmpeg(
@@ -718,9 +705,9 @@ mod tests {
         let dirs = bundled_bin_dirs();
         let cwd_bin = std::env::current_dir().unwrap().join("bin");
         assert!(dirs.contains(&cwd_bin), "{dirs:?}");
-        // `cargo test` runs in the project root, where bin/ holds the native DVD tools.
-        if cwd_bin.join(exe_name("dvdauthor")).is_file() {
-            assert_eq!(find_tool("dvdauthor"), Some(cwd_bin.join(exe_name("dvdauthor"))));
+        // `cargo test` runs in the project root, where bin/ holds ffmpeg.
+        if cwd_bin.join(exe_name("ffmpeg")).is_file() {
+            assert_eq!(find_tool("ffmpeg"), Some(cwd_bin.join(exe_name("ffmpeg"))));
         }
         assert_eq!(find_tool("definitely-not-a-tool-xyz"), None);
     }

@@ -2208,3 +2208,75 @@ pub fn voblen(vg: &VobGroup) -> i32 {
 pub fn num_vobus(vg: &VobGroup) -> usize {
     vg.vobs.iter().map(|v| v.vobu.len()).sum()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pal() -> VideoDesc {
+        let mut vd = VideoDesc::default();
+        vd.set_format(true);
+        vd
+    }
+
+    #[test]
+    fn bcd_time_and_frame_rate_bits() {
+        // 1:01:01 and 0 frames, PAL (25 fps code 1 in the top bits of the frame byte).
+        assert_eq!(pal().bcd_time(3661 * 90_000), 0x0101_0140);
+        let mut ntsc = VideoDesc::default();
+        ntsc.set_format(false);
+        assert_eq!(ntsc.bcd_time(0) >> 6 & 3, 3);
+    }
+
+    /// Ten VOBUs of half a second, ten sectors each, video in all but the odd ones.
+    fn vob() -> Vob {
+        let mut v = Vob::new("x", 0);
+        for i in 0..10 {
+            v.vobu.push(Vobu {
+                sector: i * 10,
+                lastsector: i * 10 + 9,
+                vobcellid: 257,
+                hasvideo: i % 2 == 0,
+                sectpts: [i as Pts * 45_000, (i as Pts + 1) * 45_000],
+                ..Vobu::default()
+            });
+        }
+        v.vobid = 1;
+        v
+    }
+
+    #[test]
+    fn vobu_search_and_dsi_offsets() {
+        let v = vob();
+        assert_eq!(v.find_vobu(3 * 45_000 + 5, 0, 9), 3);
+        assert_eq!(v.find_vobu(-1, 0, 9), -1);
+        assert_eq!(v.find_vobu(10 * 45_000, 0, 9), 10);
+        // Next VOBU with video is two ahead: 20 sectors, video flag set.
+        assert_eq!(getsect(&v, 0, findnextvideo(&v, 0, 1), false, 0xbfff_ffff), 20 | 0x8000_0000);
+        // Past the end: the "not found" marker; skipping flag for a >1 VOBU jump over video.
+        assert_eq!(getsect(&v, 9, 10, false, 0x3fff_ffff), 0x3fff_ffff);
+        assert_eq!(getsect(&v, 0, 4, true, 0), 40 | 0x8000_0000 | 0x4000_0000);
+        assert_eq!(getsect(&v, 4, 0, true, 0), 40 | 0x8000_0000 | 0x4000_0000);
+    }
+
+    #[test]
+    fn vob_files_split_naming() {
+        let f = VobFiles { dir: PathBuf::from("d"), base: "VTS_01".into(), single: false };
+        assert_eq!(f.path(0), Path::new("d").join("VTS_01_0.VOB"));
+        assert_eq!(f.path(2), Path::new("d").join("VTS_01_2.VOB"));
+        let m = VobFiles { dir: PathBuf::from("d"), base: "VIDEO_TS.VOB".into(), single: true };
+        assert_eq!(m.path(-1), Path::new("d").join("VIDEO_TS.VOB"));
+        // A VOB file is closed just below 1 GiB of 2048-byte sectors.
+        assert!(MAX_VOB_SECTORS as u64 * 2048 < 1 << 30);
+    }
+
+    #[test]
+    fn scr_and_pts_round_trip() {
+        let mut b = [0u8; 14];
+        writescr(&mut b[4..], 123_456_789);
+        assert_eq!(readscr(&b[4..]), 123_456_789);
+        let mut p = [0x21u8, 0, 1, 0, 1];
+        writepts(&mut p, 987_654_321);
+        assert_eq!(readpts(&p), 987_654_321);
+    }
+}
