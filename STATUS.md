@@ -10,10 +10,10 @@ optionally burnt. Three deliverables: engine library (`src/`), CLI (`src/main.rs
 (Tauri 2 + vanilla TS, `src-tauri/` + `frontend/`), plus **Burn Studio** (ImgBurn replacement window).
 
 Principles: **clean room w.r.t. ConvertX** (only its *template files* are read, never its code) – this does
-NOT apply to `src/spumux.rs`: that is a **port of dvdauthor's GPL spumux**, derived from a Ghidra decompile
+NOT apply to `src/dvdvm.rs`, `src/dvd_mux.rs`, `src/ifo.rs` (**ports of dvdauthor's GPL-2.0 `dvdcompile.c`/`dvdvob.c`/`dvdifo.c`/`dvdpgc.c`**, source-guided, byte-identical to dvdauthor 0.7.2+) and `src/spumux.rs`: that is a **port of dvdauthor's GPL spumux**, derived from a Ghidra decompile
 of `spumux.exe` (via `rea`) and checked byte for byte against its recorded output; treat it as GPL-derived
 when deciding the project licence; **few, proven
-black boxes** (only three external programs remain: ffmpeg CLI, self-built dvdauthor, tsMuxeR for Blu-ray – `spumux.exe` is gone;
+black boxes** (only two external programs remain: ffmpeg CLI, tsMuxeR for Blu-ray – `spumux.exe` and `dvdauthor.exe` are gone;
 everything else is own Rust: template
 parser, compositor, subpicture masks, text subtitle renderer, subpicture muxer, navigation, bitrate model, UDF 1.02/ISO 9660 + UDF 2.50 writers,
 layer break, IMAPI2 burner; no mkisofs/libcdio); **deterministic authoring** (all disc addresses planned
@@ -30,7 +30,7 @@ branching, DVD-Audio, CSS, region coding, DVD-R DL layer break (drive default).
 titleset per menu entry = merge group) → **[1] menus** (ConvertX template via `template.rs`/`menu.rs`, or custom JSON
 layout from the WYSIWYG editor via `layout.rs`; masks → native `spumux.rs`) → bitrate from the *real* menu size →
 **[2] videos** (parallel, one ffmpeg run writes MPEG-2 + AC-3 straight into a DVD program stream, piped
-through one native subtitle stage per stream; text subs are rendered to bitmaps first) → **[3] authoring** (`author.rs` → dvdauthor XML → `VIDEO_TS`) →
+through one native subtitle stage per stream; text subs are rendered to bitmaps first) → **[3] authoring** (`author::author_dvd` → `dvdvm`/`dvd_mux`/`ifo` → `VIDEO_TS`; `dvdauthor_xml` only feeds the report and `render-menu`) →
 **[4] ISO** (`burner::create_disc_image`: own UDF 1.02 + ISO 9660 bridge, layer break) → **[5] burn**
 (IMAPI2 / growisofs). Phases 1–3 = `dvd::build_dvd`; 4–5 = burn dialog (`src-tauri/src/burn.rs`), shared
 with the CLI through `burner::burn_video_ts`.
@@ -62,8 +62,7 @@ only (same source, different trim).
   dispatcher object (GPR3–5,7). Off via `animations`/`menu_animations`/`--no-menu-animations`.
 - **Template menu intro (DVD)**: same sprites/compositor as BD, but template pages are not `CustomLayout`s:
   `menu::render_page` redraws each graphic on a scratch layer → `menu_anim::Sprite` (`RenderOptions.intro`). One VOB, two cells (intro, page; `jump cell 2` or `pause=inf`), SPU at T, T = whole GOPs, closed GOP (`-sc_threshold` required).
-  **dvdauthor writes the HLI into every NAV pack, ignoring the SPU start** → `author::strip_intro_buttons`
-  zeroes it in cell 1 after authoring. Intro replays on paging.
+  **dvdauthor wrote the HLI into every NAV pack, ignoring the SPU start** → the native `fix_vobus` leaves it empty in cell 1 of menus with several cells. Intro replays on paging.
 - **Subpicture muxing is fully native** (`spumux.rs`, wired in `Toolchain::spumux` for menus and
   `ffmpeg_spumux_pipeline` for titles; no `spumux.exe`, no fallback – `Unsupported` (odd/oversized masks,
   >16 colours) fails the build, `tests/native_menu_templates.rs` proves all 20 installed templates avoid it).
@@ -73,7 +72,7 @@ only (same source, different trim).
   transparent slot forced to 0, default nav = nearest button within 90°. Button grouping is a 3^N search
   (`pick_groups`) capped at `MAX_GROUP_TRIALS`; beyond it `TooComplex` aborts the build. Byte-identity
   tests: `tests/spumux_native.rs` against **recorded** spumux output (MD5 + small input streams in
-  `tests/fixtures/spumux/`; re-record with `SPUMUX_RECORD=<spumux.exe>`, see `tools/dvdauthor-win/README.md`).
+  `tests/fixtures/spumux/`; re-record with `SPUMUX_RECORD=<spumux.exe>`, see `tools/oracle/README.md`; dvdauthor fixtures: `DVDAUTHOR_RECORD=<dvdauthor.exe>`, `tests/dvdauthor_native.rs`).
 - **Text subtitles** (`textsub.rs`): ffmpeg extracts SRT, `textsub` parses and renders each cue (bundled DejaVu
   Sans in `assets/fonts/`, 31 px, 2 px outline, white/black, hard edges, bottom centre, wraps at 600 px) into
   RGBA pictures that take the bitmap path (`subpic::render` → `<spu>` XML → native mux). Geometry measured
@@ -124,7 +123,8 @@ only (same source, different trim).
 
 **Last recorded test run (2026-10-27):** `cargo test --workspace`: all green (lib 348), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
 **Next (prioritised)**
-- [planned] Native DVD authoring + native BDAV muxer (remove dvdauthor.exe, tsMuxeR.exe) → docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md
+- [in progress] Plan docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md: Phase 1 (native DVD authoring) done; Phase 2 (native BDAV muxer, remove tsMuxeR.exe: PGS first, oracle fixtures, `bd_mux`, `bd_clip`) and Phase 3 (cleanup, locale/CLAUDE.md, final run) open. Plan stays in place until then.
+- Known quirk: dvdauthor reads one `audpts` entry past the array for a subpicture that starts after the VOBU (uninitialised there); native assumes 0 (matches the oracle). VOB split at 524,272 sectors only unit-tested, no ≥1 GiB run.
 1. Live player hardening **acceptance** in the release window (4K HEVC HDR smooth + colours, crop, DVD source without combing, CSP `media-src` under `http://tauri.localhost`); only then consider `-hwaccel` → docs/plans/2026-10-26-live-player-hardening.md
 2. Player checks of the 2026-10-25 work: mixed-rate Blu-ray title chain, AVCHD folder in VLC and burnt
    on DVD+R, DTS/LPCM BD audio; JumpTitle behaviour in VLC 3.0.23 (timebar, Menu key, title end →
@@ -168,6 +168,7 @@ only (same source, different trim).
   conversion blocked until fixed). Merge: no GUI pre-check of track counts, mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
+- **2026-10-27 – Native DVD authoring (plan phase 1):** `author::author_dvd` replaces `dvdauthor.exe` (`dvdvm` VM compiler incl. `vm_optimize`, `dvd_mux` VOB scan/NAV packs, `ifo` IFO/BUP/PGC); `Toolchain.dvdauthor`, `strip_intro_buttons`, `bin/dvdauthor.exe` removed, `tools/dvdauthor-win` → `tools/oracle`. Verified: `tests/dvdauthor_native.rs` 7 cases byte-identical to recorded dvdauthor output (title, merged, NTSC, menus+dispatchers, playback options, motion intro, AC-3+DTS+2 SPU), lib tests (355), DVD integration tests (build_dvd, menu_intro, motion_menu, custom_menu, playback_options, dvd_audio, disc_image, burn_flow, real_templates, native_menu_templates, ntsc, resolution, render_menu, process_hygiene), gui + Unix check, `npm run build`. Not checked: ≥1 GiB VOB split, standalone player.
 - **2026-10-27 – spumux.exe removed, native text subtitles:** `src/textsub.rs` (SRT parser + `ab_glyph` renderer, bundled DejaVu Sans, no Windows font dependency) feeds the bitmap path; `Stage::External`, the `Toolchain::spumux` fallback/field and the arial copy are gone, `bin/spumux.exe` deleted (also from the installer bundle); spumux build output now only goes to `target/spumux-oracle/` for re-recording fixtures. Verified: `cargo test --workspace` green incl. byte-identity vs recorded spumux output (9 cases), template audit (20 templates, 333 menus, no `Unsupported`), renderer vs spumux measurements, pixel goldens, `bitmap_subs` SRT→VobSub round trip, gui + Unix check, `npm run build`. Not checked on a standalone player; look differs from Arial/FreeType.
 - **2026-10-27 – Typed spumux `MenuTooComplex` error path:** `SpumuxError::TooComplex` -> `ToolError::MenuTooComplex` -> `BuildError::MenuTooComplex` (manual `From<ToolError>`), localised via `BuildError::message(ui_lang)` (GUI + CLI) from `engine.err_menu_too_complex`. Verified: new unit test in `dvd.rs`, `cargo test --workspace`, `check-i18n`, `npm run build`, gui + Unix check; not with a real 12-button menu build.
 - **2026-10-27 – Native subpicture muxer (hybrid pipeline):** `src/spumux.rs` ports spumux (Ghidra decompile) for menu masks and bitmap subtitles; `spumux.exe` remains for text subtitles + fallback. Verified: 9 golden tests byte-identical to `bin/spumux.exe` (subtitles: overlap/open end/crop/multi-sector; menus: default+explicit nav, opaque palettes, 2-group case), unit tests incl. trial limit, `custom_menu` (dvdauthor accepts it, disc colours checked), `bitmap_subs`, `real_templates`, `menu_intro`, `motion_menu`, `ntsc`, Unix check. Not checked on a standalone player.
