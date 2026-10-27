@@ -1,0 +1,3 @@
+MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --vbv-len=500
+V_MPEG4/ISO/AVC, "in.mkv", insertSEI, contSPS, track=1
+A_LPCM, "in.mkv", track=2, lang=eng

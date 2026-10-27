@@ -1,13 +1,17 @@
-//! tsMuxeR project of a Blu-ray: the `.meta` files that turn the encoded `title_NN.mkv` files
-//! (H.264 + AC-3/DTS/LPCM) and the subtitle files into `BDMV` + `CERTIFICATE`.
+//! Blu-ray mux jobs: turns the encoded `title_NN.mkv` files (H.264 + AC-3/DTS/LPCM) and the
+//! subtitle files into [`MuxJob`]s for the native BDAV muxer ([`crate::bd_mux`]).
 //!
-//! Every title is muxed by its own tsMuxeR run into its own playlist + clip (so each title keeps
-//! its own frame rate); the runs share the disc through `--mplsOffset/--m2tsOffset`
-//! ([`BdProject::title_meta_text`]). Players address audio/subtitle tracks by position, so all
-//! titles have the same track layout – the build harmonises the tracks first.
+//! Every title is muxed on its own into its own playlist + clip (so each title keeps its own
+//! frame rate); the clip / playlist numbers continue after the menus ([`BdProject::mux_job`]).
+//! Players address audio/subtitle tracks by position, so all titles have the same track layout –
+//! the build harmonises the tracks first.
+
+use std::path::{Path, PathBuf};
 
 use crate::author::Resolution;
 use crate::bd::BdRate;
+use crate::bd_clip::Codec;
+use crate::bd_mux::{MuxJob, SubSpec, VideoSpec};
 use crate::encoder::AudioKind;
 
 /// Kind of a subtitle track of the disc.
@@ -55,7 +59,7 @@ pub struct BdProject {
 /// BD playlists hold at most 999 chapter marks.
 const MAX_BD_CHAPTERS: usize = 999;
 
-/// ISO 639-2/B tags (as ffprobe reports them) that differ from the /T tags tsMuxeR expects.
+/// ISO 639-2/B tags (as ffprobe reports them) that differ from the /T tags the clip files use.
 const B_TO_T: [(&str, &str); 20] = [
     ("alb", "sqi"), ("arm", "hye"), ("baq", "eus"), ("bur", "mya"), ("chi", "zho"), ("cze", "ces"), ("dut", "nld"),
     ("fre", "fra"), ("geo", "kat"), ("ger", "deu"), ("gre", "ell"), ("ice", "isl"), ("mac", "mkd"), ("mao", "mri"),
@@ -71,80 +75,68 @@ pub fn lang_code(tag: Option<&str>) -> String {
     B_TO_T.iter().find(|(b, _)| *b == t).map_or(t.clone(), |(_, t)| (*t).to_string())
 }
 
-/// `HH:MM:SS.mmm` as tsMuxeR's `--custom-chapters` wants it.
-pub fn chapter_time(secs: f64) -> String {
-    let ms = (secs.max(0.0) * 1000.0).round() as u64;
-    format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+/// Three-letter tag as the clip files carry it.
+fn lang_bytes(tag: Option<&str>) -> [u8; 3] {
+    let code = lang_code(tag);
+    [code.as_bytes()[0], code.as_bytes()[1], code.as_bytes()[2]]
+}
+
+/// Marks at whole milliseconds (the resolution `--custom-chapters` had).
+pub fn chapter_secs(secs: f64) -> f64 {
+    (secs.max(0.0) * 1000.0).round() / 1000.0
 }
 
 impl BdProject {
-    /// Meta file of title `i`, written as playlist / clip number `offset` (UTF-8, no BOM, one line
-    /// per track).
-    pub fn title_meta_text(&self, i: usize, offset: usize) -> String {
+    /// Mux job of title `i`, written as playlist / clip number `number` into `bdmv`.
+    pub fn mux_job(&self, i: usize, number: usize, work: &Path, bdmv: &Path) -> MuxJob {
         let t = &self.titles[i];
-        let files = |pick: &dyn Fn(&BdTitleFiles) -> &str| format!("\"{}\"", pick(t));
-        let chapters: Vec<String> = marks(t).into_iter().map(chapter_time).collect();
-        let mut out = format!(
-            "MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --custom-chapters={} --vbv-len=500{}
-",
-            chapters.join(";"),
-            offset_options(offset)
-        );
-        let mkvs = files(&|t| &t.mkv);
-        out.push_str(&format!("V_MPEG4/ISO/AVC, {mkvs}, insertSEI, contSPS, track=1
-"));
-        for (k, lang) in self.audio_langs.iter().enumerate() {
-            let codec = match t.audio_kinds.get(k).copied().unwrap_or(AudioKind::Ac3) {
-                AudioKind::Ac3 => "A_AC3",
-                AudioKind::Dts => "A_DTS",
-                AudioKind::Lpcm => "A_LPCM",
-            };
-            out.push_str(&format!("{codec}, {mkvs}, track={}, lang={}
-", 2 + k, lang_code(lang.as_deref())));
+        let (width, _) = self.resolution.frame_size(crate::author::TvStandard::Pal);
+        MuxJob {
+            mkv: work.join(&t.mkv),
+            video: VideoSpec { fps: t.rate.fps, width, interlaced: t.rate.fake_interlaced },
+            audio: self
+                .audio_langs
+                .iter()
+                .enumerate()
+                .map(|(k, lang)| {
+                    let codec = match t.audio_kinds.get(k).copied().unwrap_or(AudioKind::Ac3) {
+                        AudioKind::Ac3 => Codec::Ac3,
+                        AudioKind::Dts => Codec::Dts,
+                        AudioKind::Lpcm => Codec::Lpcm,
+                    };
+                    (codec, lang_bytes(lang.as_deref()))
+                })
+                .collect(),
+            subs: self.sub_tracks.iter().enumerate().map(|(k, s)| SubSpec { sup: work.join(&t.subs[k]), lang: lang_bytes(s.lang.as_deref()), ig: false }).collect(),
+            chapters: t.chapters.iter().take(MAX_BD_CHAPTERS).map(|&c| chapter_secs(c)).collect(),
+            number,
+            still: false,
+            bdmv: bdmv.to_path_buf(),
+            duration_secs: t.duration_secs,
         }
-        for (k, track) in self.sub_tracks.iter().enumerate() {
-            let files = files(&|t| &t.subs[k]);
-            let lang = lang_code(track.lang.as_deref());
-            out.push_str(&format!("S_HDMV/PGS, {files}, lang={lang}
-"));
-        }
-        out
     }
 }
 
-fn marks(t: &BdTitleFiles) -> Vec<f64> {
-    let mut marks = t.chapters.clone();
-    marks.truncate(MAX_BD_CHAPTERS);
-    marks
-}
-
-/// ` --mplsOffset=N --m2tsOffset=N` for the N-th playlist of a disc built in several runs.
-fn offset_options(offset: usize) -> String {
-    if offset == 0 { String::new() } else { format!(" --mplsOffset={offset} --m2tsOffset={offset}") }
-}
-
-/// Meta file of one menu clip: video, its AC-3 sound and the Interactive Graphics stream (an
-/// `.sup` that `bd_patch` turns from PGS into IG after muxing). Menu `offset` is its playlist /
-/// clip number. With `intro_secs` the playlist gets a second mark where the loop behind the intro
-/// starts (the menu object restarts at it).
-pub fn menu_meta_text(mkv: &str, sup: Option<&str>, offset: usize, intro_secs: Option<f64>) -> String {
+/// Mux job of one menu clip: video, its AC-3 sound and the Interactive Graphics stream (`sup`).
+/// Menu `number` is its playlist / clip number. With `intro_secs` the playlist gets a second
+/// mark where the loop behind the intro starts (the menu object restarts at it); `still` pages
+/// wait forever at their end.
+#[allow(clippy::too_many_arguments)]
+pub fn menu_job(mkv: PathBuf, sup: Option<PathBuf>, number: usize, intro_secs: Option<f64>, still: bool, rate: BdRate, width: u32, bdmv: &Path, duration_secs: f64) -> MuxJob {
     // Rounded up to the millisecond: a mark before the keyframe would restart the intro.
-    let marks = intro_secs.map_or_else(String::new, |t| format!(" --custom-chapters=00:00:00.000;{}", chapter_time((t * 1000.0 - 1e-6).ceil() / 1000.0)));
-    let mut out = format!("MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr{marks} --vbv-len=500{}
-", offset_options(offset));
-    out.push_str(&format!("V_MPEG4/ISO/AVC, \"{mkv}\", insertSEI, contSPS, track=1
-"));
-    out.push_str(&format!("A_AC3, \"{mkv}\", track=2, lang=und
-"));
-    if let Some(sup) = sup {
-        out.push_str(&format!("S_HDMV/PGS, \"{sup}\", lang=und
-"));
+    let chapters = intro_secs.map_or_else(Vec::new, |t| vec![0.0, (t * 1000.0 - 1e-6).ceil() / 1000.0]);
+    MuxJob {
+        mkv,
+        video: VideoSpec { fps: rate.fps, width, interlaced: rate.fake_interlaced },
+        audio: vec![(Codec::Ac3, *b"und")],
+        subs: sup.into_iter().map(|sup| SubSpec { sup, lang: *b"und", ig: true }).collect(),
+        chapters,
+        number,
+        still,
+        bdmv: bdmv.to_path_buf(),
+        duration_secs,
     }
-    out
 }
-
-/// An SRT with one invisible cue: stands in for a text subtitle track a title does not have.
-pub const EMPTY_SRT: &str = "1\n00:00:00,000 --> 00:00:00,040\n \n\n";
 
 #[cfg(test)]
 mod tests {
@@ -181,38 +173,23 @@ mod tests {
     }
 
     #[test]
-    fn chapter_times() {
-        assert_eq!(chapter_time(252.48), "00:04:12.480");
-        assert_eq!(chapter_time(3723.0049), "01:02:03.005");
-        assert_eq!(chapter_time(-1.0), "00:00:00.000");
-    }
-
-    #[test]
-    fn meta_text_shape() {
-        let meta = project().title_meta_text(0, 0);
-        let lines: Vec<&str> = meta.lines().collect();
-        assert_eq!(
-            lines[0],
-            "MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --custom-chapters=00:00:00.000;00:01:40.000 --vbv-len=500"
-        );
-        assert_eq!(lines[1], r#"V_MPEG4/ISO/AVC, "title_01.mkv", insertSEI, contSPS, track=1"#);
-        assert_eq!(lines[2], r#"A_AC3, "title_01.mkv", track=2, lang=deu"#);
-        assert_eq!(lines[3], r#"A_DTS, "title_01.mkv", track=3, lang=und"#);
-        assert_eq!(lines[4], r#"S_HDMV/PGS, "title_01_s1.sup", lang=deu"#);
-        assert_eq!(lines[5], r#"S_HDMV/PGS, "title_01_s2.sup", lang=eng"#);
-        assert_eq!(lines.len(), 6);
-        assert!(meta.is_ascii() && !meta.contains('\r'));
+    fn title_job_shape() {
+        let job = project().mux_job(0, 0, Path::new("w"), Path::new("w/BD/BDMV"));
+        assert_eq!(job.mkv, Path::new("w").join("title_01.mkv"));
+        assert_eq!(job.audio, vec![(Codec::Ac3, *b"deu"), (Codec::Dts, *b"und")]);
+        assert_eq!(job.subs.iter().map(|s| (s.lang, s.ig)).collect::<Vec<_>>(), vec![(*b"deu", false), (*b"eng", false)]);
+        assert_eq!(job.chapters, vec![0.0, 100.0]);
+        assert_eq!((job.video.fps, job.video.width, job.video.interlaced), ((24000, 1001), 1920, false));
     }
 
     #[test]
     fn every_title_has_its_own_rate_and_codecs() {
-        let p = project();
-        let m = p.title_meta_text(1, 1);
-        assert!(m.starts_with("MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --custom-chapters=00:00:00.000 --vbv-len=500 --mplsOffset=1 --m2tsOffset=1
-"));
-        assert!(m.contains(r#"V_MPEG4/ISO/AVC, "title_02.mkv", insertSEI"#) && !m.contains("title_01"));
-        assert!(m.contains(r#"A_LPCM, "title_02.mkv", track=2"#) && m.contains(r#"A_AC3, "title_02.mkv", track=3"#));
-        assert!(m.contains(r#"S_HDMV/PGS, "title_02_s1.sup""#), "{m}");
+        let job = project().mux_job(1, 3, Path::new("w"), Path::new("b"));
+        assert_eq!(job.number, 3);
+        assert_eq!(job.audio[0].0, Codec::Lpcm);
+        assert_eq!(job.audio[1].0, Codec::Ac3);
+        assert_eq!((job.video.fps, job.video.interlaced), ((25, 1), true));
+        assert!(job.subs[0].sup.ends_with("title_02_s1.sup"));
     }
 
     #[test]
@@ -220,21 +197,20 @@ mod tests {
         let mut p = project();
         p.resolution = Resolution::Hd720;
         p.titles[0].rate = BdRate { fps: (60000, 1001), fake_interlaced: false };
-        let meta = p.title_meta_text(0, 0);
-        assert!(meta.contains(r#"V_MPEG4/ISO/AVC, "title_01.mkv", insertSEI"#));
-        assert!(meta.contains("S_HDMV/PGS"));
+        let job = p.mux_job(0, 0, Path::new("w"), Path::new("b"));
+        assert_eq!((job.video.fps, job.video.width), ((60000, 1001), 1280));
     }
 
     #[test]
-    fn menu_meta() {
-        let menu = menu_meta_text("menu_01.mkv", Some("menu_01.sup"), 1, None);
-        assert!(menu.lines().next().unwrap().ends_with("--mplsOffset=1 --m2tsOffset=1"));
-        assert!(menu.contains(r#"S_HDMV/PGS, "menu_01.sup", lang=und"#));
-        assert!(!menu_meta_text("m.mkv", None, 0, None).contains("PGS"));
-        let intro = menu_meta_text("m.mkv", None, 0, Some(3.003));
-        assert!(intro.lines().next().unwrap().contains("--vbr --custom-chapters=00:00:00.000;00:00:03.003 --vbv-len=500"));
+    fn menu_marks() {
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let menu = |intro| menu_job("m.mkv".into(), Some("m.sup".into()), 1, intro, true, rate, 1920, Path::new("b"), 10.0);
+        let m = menu(None);
+        assert!(m.chapters.is_empty() && m.still && m.number == 1 && m.subs[0].ig);
+        assert_eq!(menu(Some(3.003)).chapters, vec![0.0, 3.003]);
         // Never before the keyframe at the loop start.
-        assert!(menu_meta_text("m.mkv", None, 0, Some(3.0447083)).contains(";00:00:03.045"));
+        assert_eq!(menu(Some(3.0447083)).chapters, vec![0.0, 3.045]);
+        assert!(menu_job("m.mkv".into(), None, 0, None, false, rate, 1920, Path::new("b"), 1.0).subs.is_empty());
     }
 
     #[test]
@@ -244,12 +220,13 @@ mod tests {
         assert_eq!(lang_code(Some("eng")), "eng");
         assert_eq!(lang_code(Some("de")), "und");
         assert_eq!(lang_code(None), "und");
+        assert_eq!(lang_bytes(Some("ger")), *b"deu");
     }
 
     #[test]
-    fn chapter_limit() {
-        let mut p = project();
-        p.titles[0].chapters = (0..2000).map(|c| c as f64).collect();
-        assert_eq!(p.title_meta_text(0, 0).lines().next().unwrap().matches(';').count(), 998);
+    fn chapter_marks_are_milliseconds() {
+        assert_eq!(chapter_secs(252.48), 252.48);
+        assert_eq!(chapter_secs(3723.0049), 3723.005);
+        assert_eq!(chapter_secs(-1.0), 0.0);
     }
 }

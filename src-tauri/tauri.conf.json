@@ -32,8 +32,7 @@
     "resources": {
       "../bin/*.exe": "bin/",
       "../frontend/src/locales/*.json": "locales/",
-      "../bin/dvdauthor-COPYING.txt": "bin/dvdauthor-COPYING.txt",
-      "../bin/tsMuxeR-LICENSE.txt": "bin/tsMuxeR-LICENSE.txt"
+      "../bin/dvdauthor-COPYING.txt": "bin/dvdauthor-COPYING.txt"
     }
   },
   "plugins": {

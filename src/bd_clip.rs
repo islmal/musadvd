@@ -419,6 +419,25 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// A menu clip (video, AC-3 "eng", IG) with the item waiting forever: tsMuxeR 2.7.0's playlist
+    /// of the clip with a PGS stream, with the PG entry turned into an IG entry and the still
+    /// mode set (what the removed `bd_patch` did).
+    #[test]
+    fn menu_playlist_with_ig_and_still() {
+        let streams = [
+            Stream { pid: VIDEO_PID, codec: Codec::H264, lang: *b"und", attr: 0x51, es_info: vec![] },
+            Stream { pid: AUDIO_PID, codec: Codec::Ac3, lang: *b"eng", attr: 0x31, es_info: vec![] },
+            Stream { pid: IG_PID, codec: Codec::Ig, lang: *b"eng", attr: 0, es_info: vec![] },
+        ];
+        let p = Playlist { clip: 0, start: 27_000_000, end: 27_090_090, marks: &[], still: true, streams: &streams };
+        let want = unhex("4d504c53303230300000003a000000a60000000000000000000000000000000000000000000000000000000e000100000000000000000000400000000068000000010000006030303030304d325453000100019bfcc0019d5caa000000000000000000010000003e000001010001000000000000000009011011000000000000051b5100000009011100000000000000058131656e67090114000000000000000591656e670000000010000100010000019bfcc0ffff00000000");
+        assert_eq!(hex(&mpls(&p)), hex(&want));
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     #[test]
     fn end_codes() {
         assert_eq!([end_code(0), end_code(1), end_code(131072), end_code(1310719), end_code(1310720)], [0, 1, 2, 6, 7]);

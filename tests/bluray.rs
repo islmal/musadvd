@@ -1,8 +1,8 @@
 //! Blu-ray output end to end: two clips (16:9 25 fps with 5.1 + stereo audio, an SRT and chapters;
 //! 4:3 24 fps with one stereo track) become two chained playlists, each with its own frame rate, on
-//! a BD-25 (H.264 + AC-3 via tsMuxeR),
+//! a BD-25 (H.264 + AC-3 through the native BDAV muxer),
 //! 720p NTSC, the `--single-video` check, and the UDF 2.50 image of the result.
-//! Skipped (with a message) when ffmpeg or tsMuxeR are missing.
+//! Skipped (with a message) when ffmpeg is missing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,11 +22,7 @@ fn tools_pair() -> (tokio::runtime::Runtime, Toolchain) {
 fn tools() -> Option<(tokio::runtime::Runtime, Toolchain)> {
     let rt = tokio::runtime::Runtime::new().unwrap();
     match rt.block_on(Toolchain::detect()) {
-        Ok(t) if t.tsmuxer.is_some() => Some((rt, t)),
-        Ok(_) => {
-            eprintln!("skipping: tsMuxeR not found");
-            None
-        }
+        Ok(t) => Some((rt, t)),
         Err(e) => {
             eprintln!("skipping: {e}");
             None
@@ -320,7 +316,7 @@ fn audio_is_copied_when_compliant() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// LPCM: written as `pcm_s24le` into the Matroska intermediate, tsMuxeR makes BD LPCM of it.
+/// LPCM: written as `pcm_s24le` into the Matroska intermediate, ffmpeg makes BD LPCM of it.
 #[test]
 fn lpcm_ends_up_as_bluray_pcm() {
     use convertx_rust::encoder::AudioMode;

@@ -1,6 +1,6 @@
 //! Blu-ray Interactive Graphics (IGS) segment writer: ICS (one page, one BOG per button), PDS,
-//! ODS and END, in the `.sup` layout (13-byte `PG` header per segment) that tsMuxeR copies as a
-//! PGS track. Field layouts follow libbluray's `ig_decode.c`.
+//! ODS and END, in the `.sup` layout (13-byte `PG` header per segment) that [`crate::bd_mux`]
+//! copies into the clip. Field layouts follow libbluray's `ig_decode.c`.
 
 /// One HDMV navigation command (12 bytes, see `hdmv.rs`).
 pub type Command = [u8; 12];
@@ -177,11 +177,9 @@ fn ics_payload(m: &IgMenu) -> Vec<u8> {
     p
 }
 
-/// The whole `.sup` for tsMuxeR as an `S_HDMV/PGS` track: ICS (disguised as PCS), PDS, one ODS group per object, END.
+/// The whole `.sup`: ICS, PDS, one ODS group per object, END.
 pub fn build_sup(m: &IgMenu) -> Vec<u8> {
-    // 0x16 (PCS) instead of the real ICS type 0x18: tsMuxeR only passes PGS segment types;
-    // `bd_patch` relabels it in the muxed clip.
-    let mut out = segment(m.pts, 0, 0x16, &ics_payload(m));
+    let mut out = segment(m.pts, 0, 0x18, &ics_payload(m));
     let mut pds = vec![0, 0];
     for (i, e) in m.palette.iter().enumerate().take(256) {
         pds.push(i as u8);
@@ -259,7 +257,7 @@ mod tests {
     #[test]
     fn segment_order_and_lengths() {
         let segs = parse(&build_sup(&menu()));
-        assert_eq!(segs.iter().map(|s| s.0).collect::<Vec<_>>(), vec![0x16, 0x14, 0x15, 0x80]);
+        assert_eq!(segs.iter().map(|s| s.0).collect::<Vec<_>>(), vec![0x18, 0x14, 0x15, 0x80]);
         let ics = &segs[0].1;
         assert_eq!(&ics[..5], &[0x07, 0x80, 0x04, 0x38, 0x10]);
         let ic_len = u32::from_be_bytes([0, ics[9], ics[10], ics[11]]) as usize;

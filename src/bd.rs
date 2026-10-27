@@ -1,13 +1,13 @@
-//! Blu-ray build (BD-25 / BD-50): probe -> bitrate -> H.264 + AC-3 encodes -> tsMuxeR.
+//! Blu-ray build (BD-25 / BD-50): probe -> bitrate -> H.264 + AC-3 encodes -> native BDAV muxer.
 //!
 //! Output layout:
 //! ```text
 //! <output>/<project>/BDMV/         playlist, clip info, m2ts streams
 //! <output>/<project>/CERTIFICATE/
-//! <output>/.convertx-work/         title_NN.mkv, subtitle files, bd.meta, tsmuxer.log
+//! <output>/.convertx-work/         title_NN.mkv, subtitle files, mux.log
 //! ```
 //!
-//! Every title gets its own tsMuxeR run (one playlist + clip each), so each keeps its own frame
+//! Every title gets its own mux run (one playlist + clip each), so each keeps its own frame
 //! rate. Without menus the titles play one after the other (`bd_menu::plan_without_menus`); with
 //! the menu editor's layout the title playlists follow the menu clips. AVCHD ("BD5/BD9") is the
 //! same BDMV structure on DVD media with AVCHD limits. The DVD path in [`crate::dvd`] is
@@ -33,7 +33,7 @@ use crate::i18n::{tr, UiLang};
 use crate::tf;
 use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
-use crate::tools::{ToolError, Toolchain};
+use crate::tools::Toolchain;
 
 /// Parallel NVENC encodes. GeForce drivers limit concurrent sessions; the CPU-side scaling is the
 /// real limit anyway. shortcut: not measured yet, set after the real-GPU run.
@@ -318,7 +318,7 @@ struct MenuStage {
     warnings: Vec<String>,
 }
 
-/// Writes `index.bdmv` and `MovieObject.bdmv` (over tsMuxeR's) into `BDMV` and `BDMV/BACKUP`.
+/// Writes `index.bdmv` and `MovieObject.bdmv` into `BDMV` and `BDMV/BACKUP`.
 fn write_navigation(bdmv: &Path, nav: &BdNav) -> std::io::Result<()> {
     let index = hdmv::index_bdmv(bd_menu::FIRST_PLAY_OBJECT, bd_menu::TOP_MENU_OBJECT, &nav.title_objects);
     let objects = hdmv::movie_object_bdmv(&nav.objects);
@@ -461,16 +461,16 @@ async fn build_menus(
 
     // Mux every menu into the shared BD folder (clip / playlist number = menu number).
     let bdmv = work.join("BD").join("BDMV");
+    crate::bd_mux::create_skeleton(&bdmv).at(&bdmv)?;
+    let width = fw;
+    let mut mux_log = String::new();
     for (i, page) in pages.iter().enumerate() {
         cancel.check()?;
-        let sup = page.igs.as_ref().map(|_| format!("menu_{:02}.sup", i + 1));
-        let meta = format!("bd_menu_{:02}.meta", i + 1);
-        std::fs::write(work.join(&meta), crate::bd_author::menu_meta_text(&format!("menu_{:02}.mkv", i + 1), sup.as_deref(), i, page.intro.as_ref().map(|n| n.secs))).at(work)?;
-        let out = cancellable(cancel, tools.tsmuxer(work, &meta, "BD")).await?;
-        std::fs::write(work.join(format!("{meta}.log")), out).at(work)?;
-        let name = format!("{i:05}");
-        crate::bd_patch::patch_menu(&bdmv, &name, &name, !page.moving, page.igs.is_some()).at(&bdmv)?;
+        let sup = page.igs.as_ref().map(|_| work.join(format!("menu_{:02}.sup", i + 1)));
+        let job = crate::bd_author::menu_job(work.join(format!("menu_{:02}.mkv", i + 1)), sup, i, page.intro.as_ref().map(|n| n.secs), !page.moving, rate, width, &bdmv, page.secs);
+        mux_log.push_str(&cancellable(cancel, crate::bd_mux::mux_title(tools, &job)).await?);
     }
+    std::fs::write(work.join("mux_menus.log"), mux_log).at(work)?;
     let size_mb = (0..count).map(|i| crate::dvd::file_mb(&bdmv.join(format!("STREAM/{i:05}.m2ts")))).sum();
     Ok(MenuStage { nav, count, motion, size_mb, warnings })
 }
@@ -506,17 +506,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
 
     // 0. Tools and directories --------------------------------------------------------------
     let tools = cancellable(cancel, Toolchain::detect()).await?;
-    if tools.tsmuxer.is_none() {
-        return Err(BuildError::Tool(ToolError::NotFound(
-            "tsMuxeR nicht gefunden – für Blu-ray wird bin/tsMuxeR.exe benötigt (neben der Anwendung oder im PATH)".into(),
-        )));
-    }
-    log(Event::Step(tf!(
-        opts.ui_lang,
-        "tools_bd",
-        ffmpeg = tools.ffmpeg.display(),
-        tsmuxer = tools.tsmuxer.as_ref().map_or_else(String::new, |p| p.display().to_string())
-    )));
+    log(Event::Step(tf!(opts.ui_lang, "tools_bd", ffmpeg = tools.ffmpeg.display())));
     for note in &tools.notes {
         warn(log, note.clone());
     }
@@ -824,7 +814,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
     }
 
-    // 6. tsMuxeR ------------------------------------------------------------------------------
+    // 6. Mux ----------------------------------------------------------------------------------
     let project = BdProject {
         titles: titles
             .iter()
@@ -843,36 +833,28 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         resolution,
     };
     let menu_count = menus.as_ref().map_or(0, |m| m.count);
-    let mut meta = String::new();
     log(Event::Phase(BuildPhase::Authoring));
     log(Event::Eta(Eta {
         phase_label: tr(opts.ui_lang, "phase_bd_authoring").into(),
         ..Eta::new(JobPhase::Authoring, None, Some(authoring_estimate), burn_estimate)
     }));
-    log(Event::Step(tr(opts.ui_lang, "bd_tsmuxer").into()));
+    log(Event::Step(tr(opts.ui_lang, "bd_mux").into()));
     cancel.check()?;
-    // One tsMuxeR run (playlist + clip) per title after the menus (which are already in BD/).
+    // One mux run (playlist + clip) per title after the menus (which are already in BD/).
+    let bd_root = work.join("BD");
+    let bdmv_dir = bd_root.join("BDMV");
+    crate::bd_mux::create_skeleton(&bdmv_dir).at(&bdmv_dir)?;
     let mut mux_log = String::new();
     for i in 0..titles.len() {
         cancel.check()?;
-        let name = format!("bd_title_{:02}.meta", i + 1);
-        let text = project.title_meta_text(i, menu_count + i);
-        std::fs::write(work.join(&name), &text).at(&work)?;
-        meta.push_str(&text);
-        mux_log.push_str(&cancellable(cancel, tools.tsmuxer(&work, &name, "BD")).await?);
+        let job = project.mux_job(i, menu_count + i, &work, &bdmv_dir);
+        mux_log.push_str(&cancellable(cancel, crate::bd_mux::mux_title(&tools, &job)).await?);
     }
     let nav = menus.as_ref().map_or_else(|| bd_menu::plan_without_menus(titles.len()), |m| m.nav.clone());
-    write_navigation(&work.join("BD").join("BDMV"), &nav).at(&work)?;
+    write_navigation(&bdmv_dir, &nav).at(&work)?;
     cancel.check()?;
-    std::fs::write(work.join("tsmuxer.log"), &mux_log).at(&work)?;
-    let bd_root = work.join("BD");
-    if !bd_root.join("BDMV").join("index.bdmv").is_file() {
-        let tail: Vec<&str> = mux_log.lines().rev().take(15).collect();
-        return Err(BuildError::Internal(format!(
-            "tsMuxeR hat keinen BDMV-Ordner erzeugt:\n{}",
-            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        )));
-    }
+    std::fs::write(work.join("mux.log"), &mux_log).at(&work)?;
+    let meta = mux_log;
 
     let project_name =
         safe_folder_name(opts.project_name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(&default_project_name));
@@ -884,7 +866,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             std::fs::rename(&from, project_dir.join(folder)).at(&from)?;
         }
     }
-    // tsMuxeR 2.7 writes no CERTIFICATE folder; players and the image expect the empty skeleton.
+    // Players and the image expect the empty CERTIFICATE skeleton.
     let backup = project_dir.join("CERTIFICATE").join("BACKUP");
     std::fs::create_dir_all(&backup).at(&backup)?;
     let bdmv = project_dir.join("BDMV");

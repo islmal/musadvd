@@ -831,7 +831,7 @@ pub enum BdEncoder {
     Nvenc,
 }
 
-/// One title encoded as H.264 + AC-3 into `{stem}.mkv` for tsMuxeR.
+/// One title encoded as H.264 + AC-3 into `{stem}.mkv` for the BDAV muxer.
 #[derive(Debug, Clone)]
 pub struct BdEncodeJob<'a> {
     pub info: &'a MediaInfo,
@@ -1403,7 +1403,7 @@ pub fn custom_menu_args(
 }
 
 /// Blu-ray menu clip: the same graph on a square-pixel HD frame, encoded as H.264 + AC-3 (the
-/// settings of the title encodes, at a fixed 8 Mbit/s) for tsMuxeR.
+/// settings of the title encodes, at a fixed 8 Mbit/s) for the BDAV muxer.
 ///
 /// `intro_secs` (a whole number of frames, see `menu_anim::intro_frames`): the page opens with an
 /// intro of raw RGBA frames read from `pipe:0` (`Toolchain::ffmpeg_piped`) that covers the first

@@ -33,3 +33,11 @@ Only `dvdauthor` and `spumux` are built; `spuunmux`, `mpeg2desc` and `dvdunautho
 
 dvdauthor is GPL-2.0 (`bin/dvdauthor-COPYING.txt`). When distributing the binaries, ship or offer
 the corresponding source: the upstream commit above plus this directory.
+
+## tsMuxeR (BDAV oracle)
+
+The Blu-ray muxer (`src/bd_mux.rs`, `src/bd_clip.rs`) was written against tsMuxeR 2.7.0
+(<https://github.com/justdan96/tsMuxer/releases>, Apache-2.0); the binary is no longer shipped.
+To re-record `tests/fixtures/tsmuxer/*/{clpi.bin,mpls.bin,m2ts.json}` download the 2.7.0 release and run
+`TSMUXER_RECORD=<path>/tsMuxeR.exe cargo test --test tsmuxer_native`; each case's `oracle.meta` is the
+project file it was recorded from.

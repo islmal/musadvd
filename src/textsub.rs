@@ -331,6 +331,22 @@ mod tests {
     }
 
     #[test]
+    fn hd_cue_is_centred_at_the_bottom_and_scales_with_the_frame() {
+        let lines = ["Hallo Welt gjpq".to_string()];
+        let mut heights = Vec::new();
+        for (w, h) in [(1920u32, 1080u32), (1280, 720)] {
+            let (img, x, y) = render_cue_on(&Canvas::hd(w, h), &lines).unwrap();
+            let (x0, y0, x1, y1) = bbox(&img, x, y);
+            assert!(x1 < w && y1 < h && y0 > h * 3 / 4, "{x0} {y0} {x1} {y1}");
+            assert!(((x0 + x1) as i32 / 2 - w as i32 / 2).abs() <= 3);
+            assert!(img.pixels().all(|p| p.0[3] == 0 || *p == FILL || *p == EDGE));
+            heights.push(y1 - y0);
+        }
+        // 65 px em at 1080 lines (what tsMuxeR was configured with), two thirds of it at 720.
+        assert!(heights[0] > 45 && heights[0] * 2 > heights[1] * 3 - 6 && heights[0] * 2 < heights[1] * 3 + 12, "{heights:?}");
+    }
+
+    #[test]
     fn two_lines_stack_upwards_and_cyrillic_has_ink() {
         let (one, _, y1) = render_cue(TvStandard::Pal, &["Eins".into()]).unwrap();
         let (two, _, y2) = render_cue(TvStandard::Pal, &["Eins".into(), "Zwei".into()]).unwrap();

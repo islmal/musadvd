@@ -1,0 +1,7 @@
+MUXOPT --no-pcr-on-video-pid --new-audio-pes --blu-ray --vbr --custom-chapters=00:00:00.000;00:00:00.700 --vbv-len=500
+V_MPEG4/ISO/AVC, "in.mkv", insertSEI, contSPS, track=1
+A_AC3, "in.mkv", track=2, lang=deu
+A_DTS, "in.mkv", track=3, lang=eng
+A_LPCM, "in.mkv", track=4, lang=fra
+S_HDMV/PGS, "s1.sup", lang=deu
+S_HDMV/PGS, "s2.sup", lang=eng

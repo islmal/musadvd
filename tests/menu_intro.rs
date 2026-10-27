@@ -2,20 +2,19 @@
 //!
 //! Spike 1a: a menu clip is `[intro 0..T | loop T..]` with a playlist mark at `T`, and the loop
 //! restarts with `PlayPLatMark(pl, 1)`. The player then starts reading at the EP-map entry of that
-//! mark, so the IG display set (muxed by tsMuxeR 2.7.0 as a disguised PGS track) must not begin
+//! mark, so the IG display set (muxed by the native BDAV muxer) must not begin
 //! before that packet, and its composition must be presented exactly at `T`.
-//! Skipped (with a message) when ffmpeg or tsMuxeR are missing.
+//! Skipped (with a message) when ffmpeg is missing.
 
 use std::path::Path;
 
 use convertx_rust::author::MenuFrame;
 use convertx_rust::bd::BdRate;
-use convertx_rust::bd_author::menu_meta_text;
+use convertx_rust::bd_author::menu_job;
 use convertx_rust::encoder::{bd_custom_menu_args, BackgroundOverlay, CustomMenuMedia, MenuBackground};
 use convertx_rust::igs::{self, IgButton, IgMenu, IgObject};
 use convertx_rust::tools::Toolchain;
 
-const PG_PID: u16 = 0x1200;
 const IG_PID: u16 = 0x1400;
 const VIDEO_PID: u16 = 0x1011;
 const PCR_PID: u16 = 0x1001;
@@ -23,11 +22,7 @@ const PCR_PID: u16 = 0x1001;
 fn tools() -> Option<(tokio::runtime::Runtime, Toolchain)> {
     let rt = tokio::runtime::Runtime::new().unwrap();
     match rt.block_on(Toolchain::detect()) {
-        Ok(t) if t.tsmuxer.is_some() => Some((rt, t)),
-        Ok(_) => {
-            eprintln!("skipping: tsMuxeR not found");
-            None
-        }
+        Ok(t) => Some((rt, t)),
         Err(e) => {
             eprintln!("skipping: {e}");
             None
@@ -184,18 +179,14 @@ fn ig_display_set_starts_behind_the_entry_point_of_the_intro_mark() {
         rt.block_on(tools.ffmpeg(&args, t + 2.0, |_| {})).expect("menu clip");
 
         std::fs::write(dir.join("menu.sup"), igs::build_sup(&ig_menu(code, t90 as u32, sparse))).unwrap();
-        let meta = menu_meta_text("menu.mkv", Some("menu.sup"), 0, Some(t));
-        std::fs::write(dir.join("menu.meta"), meta).unwrap();
-        rt.block_on(tools.tsmuxer(&dir, "menu.meta", "BD")).expect("tsMuxeR");
-
         let bdmv = dir.join("BD").join("BDMV");
-        let report = check_clip(&bdmv, PG_PID, t90);
+        convertx_rust::bd_mux::create_skeleton(&bdmv).unwrap();
+        let job = menu_job(mkv, Some(dir.join("menu.sup")), 0, Some(t), false, rate, 1920, &bdmv, t + 2.0);
+        rt.block_on(convertx_rust::bd_mux::mux_title(&tools, &job)).expect("mux");
+
+        let report = check_clip(&bdmv, IG_PID, t90);
         eprintln!("[{num}/{den} sparse={sparse}] {}", report.0);
         failures.extend(report.1.into_iter().map(|f| format!("{num}/{den} sparse={sparse}: {f}")));
-        // bd_patch only relabels PIDs and segment types; the order must survive it.
-        convertx_rust::bd_patch::patch_menu(&bdmv, "00000", "00000", false, true).unwrap();
-        let patched = check_clip(&bdmv, IG_PID, t90);
-        failures.extend(patched.1.into_iter().map(|f| format!("{num}/{den} patched: {f}")));
     }
     let _ = std::fs::remove_dir_all(&base);
     assert!(failures.is_empty(), "{failures:#?}");

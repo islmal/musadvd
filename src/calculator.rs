@@ -108,7 +108,7 @@ impl DiscType {
         }
     }
 
-    /// Uses the Blu-ray build pipeline (H.264 + tsMuxeR, BDMV folder): BD-25/50 and AVCHD.
+    /// Uses the Blu-ray build pipeline (H.264 + native BDAV muxer, BDMV folder): BD-25/50 and AVCHD.
     pub fn is_bluray(self) -> bool {
         matches!(self, DiscType::Bd25 | DiscType::Bd50 | DiscType::Avchd5 | DiscType::Avchd9)
     }

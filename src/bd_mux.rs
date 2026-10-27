@@ -1,8 +1,9 @@
 //! Native BDAV muxer: H.264 + audio + PGS/IGS of one title or menu into an `.m2ts` with its clip
-//! and playlist files. Replaces tsMuxeR 2.7.0 (Apache-2.0), whose scheduling it follows: access
-//! units are written in DTS order, a PCR packet (PID 0x1001) every 7000 ticks of 90 kHz, PAT/PMT
-//! with it and SIT about once a second, and the 27 MHz arrival time stamps (ATS) interpolated
-//! between PCR packets. The PCR starts 500 ms before the first picture's PTS.
+//! and playlist files. Replaces tsMuxeR 2.7.0 (Apache-2.0; derived from its scheduling, see
+//! STATUS.md): access units are written in DTS order, with a PCR packet (PID 0x1001) every few
+//! thousand ticks of 90 kHz, PAT/PMT alongside and a SIT about once a second; the 27 MHz arrival
+//! time stamps (ATS) are interpolated between PCR packets. The PCR starts 500 ms before the first
+//! picture's PTS (tsMuxeR sent a PCR every 7000 ticks, here it is at least every 3000).
 //!
 //! ffmpeg is the demuxer: it copies the title's `.mkv` into an MPEG-TS pipe (one PES per picture
 //! or audio frame, LPCM as `pcm_bluray`), this module re-packetises that. Video timestamps are
@@ -22,7 +23,11 @@ use crate::tools::{ToolError, Toolchain};
 
 /// PTS of the first picture (600 s, like tsMuxeR): leaves room for the PCR and earlier DTS.
 const BASE_PTS: i64 = 54_000_000;
-const PCR_DELTA: i64 = 7000;
+/// A PCR packet at least every 3000 ticks (33 ms; at every picture in practice): tsMuxeR's 7000
+/// left up to 105 ms between two PCRs at 23.976 fps, the standard allows 100 ms.
+const PCR_DELTA: i64 = 3000;
+/// PAT / PMT with a PCR at least every 5000 ticks, so never more than 100 ms apart.
+const PSI_DELTA: i64 = 5000;
 const SIT_INTERVAL: i64 = 76_900;
 const VBV_LEN: i64 = 45_000;
 /// Files are padded to 32 packets (6144 bytes).
@@ -177,7 +182,7 @@ impl<W: Write> Packetizer<W> {
     }
 
     fn pat_pmt(&mut self, pcr: i64, force: bool) {
-        if force || pcr - self.last_pmt >= PCR_DELTA {
+        if force || pcr - self.last_pmt >= PSI_DELTA {
             self.last_pmt = pcr;
             self.pat();
             self.pmt();
@@ -442,16 +447,14 @@ fn is_idr(au: &[u8]) -> bool {
 /// Drops `user_data_unregistered` SEI (x264's version banner) from the first access unit; it
 /// would precede the access unit delimiter.
 fn strip_user_data_sei(au: &[u8]) -> Vec<u8> {
-    let starts: Vec<usize> = nal_starts(au).collect();
+    let nals: Vec<usize> = nal_starts(au).collect();
+    // Start of each NAL unit including its start code (4 bytes with the leading zero byte).
+    let unit = |at: usize| at - 3 - usize::from(at >= 4 && au[at - 4] == 0);
     let mut out = Vec::with_capacity(au.len());
-    for (i, &at) in starts.iter().enumerate() {
-        let end = starts.get(i + 1).map_or(au.len(), |&n| n - 3);
-        let user_data = au[at] & 31 == 6 && au.get(at + 1) == Some(&5);
-        if i == 0 {
-            out.extend(&au[..at.saturating_sub(3)]);
-        }
-        if !user_data {
-            out.extend(&au[at.saturating_sub(3)..end]);
+    for (i, &at) in nals.iter().enumerate() {
+        let end = nals.get(i + 1).map_or(au.len(), |&n| unit(n));
+        if !(au[at] & 31 == 6 && au.get(at + 1) == Some(&5)) {
+            out.extend(&au[unit(at)..end]);
         }
     }
     out
@@ -544,23 +547,55 @@ struct AudioClock {
     codec: Codec,
     samples: u64,
     info: Option<AudioInfo>,
+    /// LPCM: PCM bytes not yet cut into 5 ms frames, and the header bytes of the stream.
+    pcm: Vec<u8>,
+    header: [u8; 2],
+    frames: u64,
 }
 
 impl AudioClock {
-    fn au(&mut self, pes: Pes, pid: u16) -> io::Result<Au> {
-        let parse = match self.codec {
-            Codec::Ac3 => ac3_info,
-            Codec::Dts => dts_info,
-            _ => lpcm_info,
-        };
-        let (info, frame) = parse(&pes.payload).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Audiospur 0x{pid:x}: unerwartetes Frame-Format")))?;
+    fn new(codec: Codec) -> Self {
+        AudioClock { codec, samples: 0, info: None, pcm: Vec::new(), header: [0; 2], frames: 0 }
+    }
+
+    fn au(&mut self, pes: Pes, pid: u16) -> io::Result<Vec<Au>> {
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, format!("Audiospur 0x{pid:x}: unerwartetes Frame-Format"));
+        if self.codec == Codec::Lpcm {
+            let (info, _) = lpcm_info(&pes.payload).ok_or_else(bad)?;
+            self.info.get_or_insert(info);
+            self.header = [pes.payload[2], pes.payload[3]];
+            self.pcm.extend(&pes.payload[4..]);
+            return Ok(self.lpcm_frames(pid));
+        }
+        let (info, frame) = if self.codec == Codec::Ac3 { ac3_info(&pes.payload) } else { dts_info(&pes.payload) }.ok_or_else(bad)?;
         self.info.get_or_insert(info);
         let rate = self.info.map_or(48000, |i| i.rate) as u64;
         let pts = BASE_PTS + (self.samples * 90_000 / rate) as i64;
         self.samples += frame as u64;
         let dur = (self.samples * 90_000 / rate) as i64 - (pts - BASE_PTS);
-        let kind = if self.codec == Codec::Lpcm { Kind::Private } else { Kind::CoreAudio };
-        Ok(Au { pid, kind, pts, dts: pts, dur, payload: pes.payload })
+        Ok(vec![Au { pid, kind: Kind::CoreAudio, pts, dts: pts, dur, payload: pes.payload }])
+    }
+
+    /// ffmpeg's LPCM frames are 7.5 ms; BD LPCM access units are 5 ms (240 samples at 48 kHz),
+    /// cut from the contiguous sample bytes; a trailing partial frame is dropped.
+    fn lpcm_frames(&mut self, pid: u16) -> Vec<Au> {
+        let Some(info) = self.info else { return Vec::new() };
+        let bytes = if self.header[1] >> 6 == 1 { 2 } else { 3 };
+        let samples = info.rate / 200;
+        let frame_len = (samples * bytes * (info.channels as u32 + info.channels as u32 % 2)) as usize;
+        let mut out = Vec::new();
+        while self.pcm.len() >= frame_len {
+            let mut payload = Vec::with_capacity(4 + frame_len);
+            payload.extend((frame_len as u16).to_be_bytes());
+            // The first access unit carries the start flag (0x20 in the last header byte).
+            payload.extend([self.header[0], self.header[1] & 0xC0 | if self.frames == 0 { 0x20 } else { 0 }]);
+            payload.extend(self.pcm.drain(..frame_len));
+            let pts = BASE_PTS + (self.frames * samples as u64 * 90_000 / info.rate as u64) as i64;
+            let dur = ((self.frames + 1) * samples as u64 * 90_000 / info.rate as u64) as i64 - (pts - BASE_PTS);
+            out.push(Au { pid, kind: Kind::Private, pts, dts: pts, dur, payload });
+            self.frames += 1;
+        }
+        out
     }
 }
 
@@ -581,7 +616,7 @@ fn audio_stream(pid: u16, codec: Codec, lang: [u8; 3], info: AudioInfo) -> Strea
             es_info.extend([0x05, 0x04, b'A', b'C', b'-', b'3', 0x81, 0x04]);
             es_info.extend(info.descriptor_tail);
         }
-        Codec::Lpcm => es_info.extend([0x05, 0x08, b'H', b'D', b'M', b'V', 0xFF, 0x80, info.descriptor_tail[0], 0xFF]),
+        Codec::Lpcm => es_info.extend([0x05, 0x08, b'H', b'D', b'M', b'V', 0xFF, 0x80, presentation << 4 | rate_index, 0xFF]),
         _ => {}
     }
     Stream { pid, codec, lang, attr: presentation << 4 | rate_index, es_info }
@@ -694,7 +729,7 @@ impl MuxJob {
         // Video and audio come from ffmpeg; their stream details are known after the first frames.
         let mut reader = TsReader::new(ts);
         let mut video = VideoClock { n: 0, pts0: None, delay: 0, dur };
-        let mut audio: Vec<AudioClock> = self.audio.iter().map(|&(codec, _)| AudioClock { codec, samples: 0, info: None }).collect();
+        let mut audio: Vec<AudioClock> = self.audio.iter().map(|&(codec, _)| AudioClock::new(codec)).collect();
         let mut queues: Vec<VecDeque<Au>> = (0..1 + audio.len()).map(|_| VecDeque::new()).collect();
         let mut sub_queue: VecDeque<Au> = {
             sub_aus.sort_by_key(|a| (a.dts, a.pid));
@@ -710,11 +745,13 @@ impl MuxJob {
             if !ended {
                 match reader.next()? {
                     Some((idx, pes)) if idx <= audio.len() => {
-                        let au = if idx == 0 { video.au(pes, bd_clip::VIDEO_PID)? } else { audio[idx - 1].au(pes, bd_clip::AUDIO_PID + idx as u16 - 1)? };
                         if idx == 0 {
+                            let au = video.au(pes, bd_clip::VIDEO_PID)?;
                             max_idx_pts = max_idx_pts.max(au.pts);
+                            queues[0].push_back(au);
+                        } else {
+                            queues[idx].extend(audio[idx - 1].au(pes, bd_clip::AUDIO_PID + idx as u16 - 1)?);
                         }
-                        queues[idx].push_back(au);
                     }
                     Some((idx, _)) => return Err(bad(format!("ffmpeg lieferte unerwarteten Datenstrom {idx}"))),
                     None => ended = true,
@@ -798,4 +835,123 @@ pub async fn mux_title(tools: &Toolchain, job: &MuxJob) -> Result<String, ToolEr
         .ffmpeg_sink(&job.ffmpeg_args(), job.duration_secs, |_| {}, move |pipe| owned.mux(std::io::BufReader::with_capacity(1 << 20, pipe)))
         .await?;
     Ok(format!("{:05}.m2ts: {} Pakete, {} Bilder, {} Einstiegspunkte\n", job.number, summary.packets, summary.pictures, summary.idr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn crc_check_value() {
+        assert_eq!(crc32_mpeg(b"123456789"), 0x0376_E6E7);
+        // The PAT of every tsMuxeR clip.
+        let pat = unhex("00b0110000c100000000e01f0001e100");
+        assert_eq!(crc32_mpeg(&pat).to_be_bytes(), [0x23, 0x5A, 0xAB, 0x82]);
+    }
+
+    #[test]
+    fn pes_header_layouts() {
+        let au = |kind, pts, dts| Au { pid: 0x1011, kind, pts, dts, dur: 0, payload: vec![1, 2, 3] };
+        // Picture with PTS and DTS: flags 0x84 0xC0, 10 bytes of stamps, length without the first 6 bytes.
+        let v = pes_bytes(&au(Kind::Video { idr: false }, 54_000_000, 53_992_493));
+        assert_eq!(&v[..9], &[0, 0, 1, 0xE0, 0, 16, 0x84, 0xC0, 10]);
+        assert_eq!(&v[9..14], &[0x31, 0x0C, 0xDF, 0xF3, 0x01]);
+        assert_eq!(&v[14..19], &[0x11, 0x0C, 0xDF, 0xB8, 0x5B]);
+        assert_eq!(&v[19..], &[1, 2, 3]);
+        // Audio: private stream with the extension 0x71; PTS only.
+        let a = pes_bytes(&au(Kind::CoreAudio, 54_000_000, 54_000_000));
+        assert_eq!(&a[..9], &[0, 0, 1, 0xFD, 0, 14, 0x84, 0x81, 8]);
+        assert_eq!(&a[14..17], &[0x01, 0x81, 0x71]);
+        // Over 64 KiB the length stays 0.
+        let big = Au { payload: vec![0; 70_000], ..au(Kind::Video { idr: false }, 0, 0) };
+        assert_eq!(&pes_bytes(&big)[4..6], &[0, 0]);
+    }
+
+    #[test]
+    fn audio_frame_headers() {
+        // AC-3 stereo 192 kbit/s (first frame of tsMuxeR's test clip).
+        let (info, samples) = ac3_info(&unhex("0b77fe95144043e106f46370")).unwrap();
+        assert_eq!((info.channels, info.rate, samples, info.descriptor_tail), (2, 48000, 1536, [0x08, 0x28, 0x04, 0]));
+        // Mono: acmod 1, no mix levels in front of lfeon.
+        let (mono, _) = ac3_info(&unhex("0b77fe9514402f84")).unwrap();
+        assert_eq!((mono.channels, mono.descriptor_tail[2]), (1, 0x02));
+        // DTS core stereo, 512 samples per frame.
+        let (dts, samples) = dts_info(&unhex("7ffe8001fc3c3ff0b5e001380003ef7fe006db15")).unwrap();
+        assert_eq!((dts.channels, dts.rate, samples), (2, 48000, 512));
+        // BD LPCM, 24 bit stereo: 4-byte header, 5 ms = 240 samples * 6 bytes.
+        let mut f = vec![0x05, 0xA0, 0x31, 0xC0];
+        f.resize(4 + 1440, 0);
+        let (pcm, samples) = lpcm_info(&f).unwrap();
+        assert_eq!((pcm.channels, pcm.rate, samples), (2, 48000, 240));
+        assert!(ac3_info(&[0; 16]).is_none() && dts_info(&[0; 16]).is_none() && lpcm_info(&[0; 2]).is_none());
+    }
+
+    #[test]
+    fn lpcm_is_cut_into_5_ms_frames() {
+        let mut clock = AudioClock::new(Codec::Lpcm);
+        // ffmpeg's 7.5 ms frames: 360 stereo samples of 24 bit.
+        let frame = |fill: u8| {
+            let mut p = vec![0x08, 0x70, 0x31, 0xC0];
+            p.extend(vec![fill; 2160]);
+            Pes { pts: Some(0), dts: None, payload: p }
+        };
+        let mut aus = clock.au(frame(1), 0x1100).unwrap();
+        aus.extend(clock.au(frame(2), 0x1100).unwrap());
+        // 720 samples = 3 frames of 240; the first one has the start flag.
+        assert_eq!(aus.len(), 3);
+        assert_eq!(&aus[0].payload[..4], &[0x05, 0xA0, 0x31, 0xE0]);
+        assert_eq!(&aus[1].payload[..4], &[0x05, 0xA0, 0x31, 0xC0]);
+        assert_eq!(aus.iter().map(|a| a.pts - BASE_PTS).collect::<Vec<_>>(), vec![0, 450, 900]);
+        // The second frame's bytes continue the sample stream: frame 2 holds 120 old + 120 new samples.
+        assert_eq!((aus[1].payload[4], aus[1].payload[4 + 720], aus[2].payload[4]), (1, 2, 2));
+    }
+
+    #[test]
+    fn nal_helpers() {
+        let sps = [0, 0, 0, 1, 0x67, 1, 2];
+        let au = |nals: &[&[u8]]| nals.iter().flat_map(|n| n.iter().copied()).collect::<Vec<u8>>();
+        let aud = [0, 0, 0, 1, 0x09, 0x10];
+        let idr = [0, 0, 1, 0x65, 9];
+        let p = [0, 0, 1, 0x41, 9];
+        assert!(is_idr(&au(&[&aud, &sps, &idr])));
+        // No SPS in front: not a usable seek point; a P slice ends the search.
+        assert!(!is_idr(&au(&[&aud, &idr])) && !is_idr(&au(&[&aud, &p, &sps, &idr])));
+        // x264's banner (SEI payload type 5) before the AUD is dropped, other SEI stay.
+        let banner = [0, 0, 1, 0x06, 5, 2, 7, 7, 0x80];
+        let timing = [0, 0, 1, 0x06, 1, 1, 0, 0x80];
+        let stripped = strip_user_data_sei(&au(&[&banner, &aud, &timing, &idr]));
+        assert_eq!(stripped, au(&[&aud, &timing, &idr]));
+    }
+
+    #[test]
+    fn packetizer_pads_and_stamps() {
+        let streams = vec![Stream { pid: bd_clip::VIDEO_PID, codec: Codec::H264, lang: *b"und", attr: 0x61, es_info: vec![] }];
+        let mut out = Vec::new();
+        let (packets, ep) = {
+            let mut p = Packetizer::new(&mut out, streams);
+            for i in 0..4i64 {
+                let payload = [&[0, 0, 0, 1, 0x67][..], &[0, 0, 1, 0x65], &vec![0xAA; 1000 * (i as usize + 1)]].concat();
+                let au = Au { pid: bd_clip::VIDEO_PID, kind: Kind::Video { idr: true }, pts: BASE_PTS + i * 3754, dts: BASE_PTS + i * 3754 - 7508, dur: 3754, payload };
+                p.au(&au).unwrap();
+            }
+            p.finish().unwrap()
+        };
+        assert_eq!(out.len(), packets as usize * 192);
+        assert_eq!(packets % 32, 0, "whole 6144-byte units");
+        assert_eq!(ep.len(), 4);
+        // PAT, PMT, SIT, PCR, then the first picture; its entry points right behind them.
+        let pid = |n: usize| (u16::from(out[n * 192 + 5] & 0x1F) << 8) | u16::from(out[n * 192 + 6]);
+        assert_eq!((0..5).map(pid).collect::<Vec<_>>(), vec![0, 0x100, 0x1F, 0x1001, 0x1011]);
+        assert_eq!(ep[0], EpEntry { pts: BASE_PTS as u64, spn: 4, len: (6 + 1) * 192 });
+        // Arrival times rise; the PCR packet's equals its PCR (the first PCR is 500 ms before the first PTS).
+        let ats = |n: usize| u32::from_be_bytes(out[n * 192..n * 192 + 4].try_into().unwrap());
+        assert!((1..packets as usize).all(|n| ats(n) >= ats(n - 1)));
+        assert_eq!(ats(3) as i64, (BASE_PTS - VBV_LEN) * 300 & 0x3FFF_FFFF);
+        // The padding is null packets on PID 0x1FFF.
+        assert_eq!(pid(packets as usize - 1), 0x1FFF);
+    }
 }

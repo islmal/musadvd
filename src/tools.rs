@@ -1,6 +1,6 @@
-//! Locating and running the external tools natively: ffmpeg/ffprobe (plus tsMuxeR for
-//! Blu-ray); DVD authoring and subpicture muxing run in-process ([`crate::author`],
-//! [`crate::spumux`]).
+//! Locating and running the external tools natively: ffmpeg/ffprobe, the only ones left. DVD
+//! authoring, subpicture muxing and the Blu-ray muxer run in-process ([`crate::author`],
+//! [`crate::spumux`], [`crate::bd_mux`]).
 //!
 //! Lookup order for every tool:
 //! 1. `bin/` next to the running executable (all-in-one distribution),
@@ -158,8 +158,6 @@ pub struct RawStream {
 pub struct Toolchain {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
-    /// tsMuxeR, only needed for Blu-ray output (DVD builds work without it).
-    pub tsmuxer: Option<PathBuf>,
     /// Broken candidates that were skipped during detection.
     pub notes: Vec<String>,
     /// Priority of every ffmpeg process started by this toolchain.
@@ -237,15 +235,6 @@ async fn tool_works(path: &Path, version_check: bool) -> bool {
     }
 }
 
-/// tsMuxeR prints its banner when started without arguments; anything else is no tsMuxeR.
-async fn is_tsmuxer(path: &Path) -> bool {
-    let run = tool_command(path, ProcessPriority::Normal).stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-    match tokio::time::timeout(std::time::Duration::from_secs(20), run).await {
-        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).contains("tsMuxeR"),
-        _ => false,
-    }
-}
-
 /// First working candidate of `name`; skipped broken candidates are reported in `notes`.
 async fn locate(name: &str, version_check: bool, hint: &str, notes: &mut Vec<String>) -> Result<PathBuf, ToolError> {
     for candidate in tool_candidates(name) {
@@ -263,18 +252,9 @@ impl Toolchain {
         let ff_hint = "scoop install ffmpeg, or copy the real ffmpeg.exe/ffprobe.exe into bin/";
         let ffmpeg = locate("ffmpeg", true, ff_hint, &mut notes).await?;
         let ffprobe = locate("ffprobe", true, ff_hint, &mut notes).await?;
-        let mut tsmuxer = None;
-        for candidate in tool_candidates("tsMuxeR") {
-            if is_tsmuxer(&candidate).await {
-                tsmuxer = Some(candidate);
-                break;
-            }
-            notes.push(format!("{} ignoriert: kein tsMuxeR", candidate.display()));
-        }
         Ok(Toolchain {
             ffmpeg,
             ffprobe,
-            tsmuxer,
             notes,
             priority: ProcessPriority::Normal,
         })
@@ -314,16 +294,6 @@ impl Toolchain {
             Ok(Err(e)) => Err(failed(e.to_string())),
             Err(e) => Err(failed(e.to_string())),
         }
-    }
-
-    /// `tsMuxeR <meta> <out_dir>` in `dir` (meta file name relative to `dir`); returns its log.
-    pub async fn tsmuxer(&self, dir: &Path, meta: &str, out_dir: &str) -> Result<String, ToolError> {
-        let exe = self.tsmuxer.as_ref().ok_or_else(|| {
-            ToolError::NotFound("tsMuxeR nicht gefunden – bitte bin/tsMuxeR.exe bereitstellen (für Blu-ray-Ausgabe nötig)".into())
-        })?;
-        let mut cmd = self.command(exe);
-        cmd.args([meta, out_dir]).current_dir(dir).stdout(Stdio::piped());
-        run_capture("tsMuxeR", cmd).await
     }
 
     /// ffprobe with `args`; returns its stdout (e.g. JSON).
@@ -661,23 +631,6 @@ impl IntoOwnedFile for std::io::PipeReader {
         return Ok(std::os::windows::io::OwnedHandle::from(self).into());
         #[cfg(unix)]
         return Ok(std::os::fd::OwnedFd::from(self).into());
-    }
-}
-
-/// Runs a command, returning its captured output (stderr, plus stdout if the caller piped it);
-/// fails with the log tail on a non-zero exit.
-///
-/// Uses `spawn` + `wait_with_output` rather than `output()`: the latter forces stdout into a pipe
-/// and would discard a redirect to a file (spumux writes the muxed MPEG to stdout).
-async fn run_capture(tool: &str, mut cmd: Command) -> Result<String, ToolError> {
-    cmd.stderr(Stdio::piped());
-    let io = |error| ToolError::Io { tool: tool.to_string(), error };
-    let out = cmd.spawn().map_err(io)?.wait_with_output().await.map_err(io)?;
-    let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if out.status.success() {
-        Ok(log)
-    } else {
-        Err(ToolError::Failed { tool: tool.to_string(), status: out.status.to_string(), log: tail(&log, 30) })
     }
 }
 
