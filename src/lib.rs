@@ -3,6 +3,8 @@
 pub mod author;
 pub mod bd;
 pub mod bd_author;
+pub mod bd_clip;
+pub mod bd_mux;
 pub mod bd_menu;
 pub mod bd_patch;
 pub mod bd_template;

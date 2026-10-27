@@ -565,6 +565,34 @@ impl Toolchain {
         Ok(logs)
     }
 
+    /// ffmpeg writing to its stdout (`args` must end with `pipe:1`), consumed by `sink` on a
+    /// blocking thread (e.g. the native BDAV muxer); returns what `sink` returns.
+    pub async fn ffmpeg_sink<T: Send + 'static>(
+        &self,
+        args: &[OsString],
+        duration_secs: f64,
+        mut progress: impl FnMut(f64),
+        sink: impl FnOnce(std::fs::File) -> std::io::Result<T> + Send + 'static,
+    ) -> Result<T, ToolError> {
+        let io = |error| ToolError::Io { tool: "ffmpeg".into(), error };
+        let mut cmd = self.ffmpeg_command(args);
+        cmd.stdout(Stdio::piped());
+        let mut child = cmd.spawn().map_err(io)?;
+        let stdout = owned_file(child.stdout.take().expect("piped stdout")).map_err(io)?;
+        let task = tokio::task::spawn_blocking(move || sink(stdout));
+        let stderr = child.stderr.take().expect("piped stderr");
+        let log = drive_ffmpeg_stderr(stderr, duration_secs, &mut |p: FfmpegProgress| progress(p.fraction)).await;
+        let status = child.wait().await.map_err(io)?;
+        // A failing sink makes ffmpeg fail with a broken pipe: report the root cause.
+        let sunk = task.await.map_err(|e| ToolError::Failed { tool: "BDAV-Muxer".into(), status: String::new(), log: e.to_string() })?;
+        let value = sunk.map_err(|e| ToolError::Failed { tool: "BDAV-Muxer".into(), status: String::new(), log: e.to_string() })?;
+        if !status.success() {
+            return Err(ToolError::Failed { tool: "ffmpeg".into(), status: status.to_string(), log: tail(&log, 30) });
+        }
+        progress(1.0);
+        Ok(value)
+    }
+
     /// Hardware decoder that works for the video of `input` (tried for 2 s of decoding), or
     /// `None` to decode on the CPU.
     pub async fn probe_hwaccel(&self, input: &Path) -> Option<&'static str> {
