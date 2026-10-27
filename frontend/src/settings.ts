@@ -500,6 +500,16 @@ export function openSettings(current: AppSettings, info: SettingsInfo, onSaved: 
           ],
           "Automatisch: passende AC-3-/DTS-Spuren werden verlustfrei übernommen (DVD: AC-3 bis 448 kbps, DTS-Kern; Blu-ray: AC-3 bis 640 kbps, DTS/DTS-HD; AVCHD: AC-3), alles andere wird zu AC-3. LPCM gibt es für Blu-ray (bis 8 Kanäle, 24 Bit) und AVCHD (Stereo, 16 Bit); auf der DVD wird stattdessen AC-3 geschrieben. Geschnittene Videos und normalisierte Spuren werden immer neu kodiert.",
         ),
+        select(
+          "track_label_mode",
+          "Spurnamen in Menüs",
+          [
+            ["smart", "Intelligent (Sprache + Titel)"],
+            ["language", "Nur Sprache"],
+            ["generic", "Generisch (Tonspur 1)"],
+          ],
+          "Intelligent: Spuren gleicher Sprache bleiben unterscheidbar (201eSpanisch - Latino201c, sonst 201eSpanisch (2)201c). Gilt für die Spurliste und die Einstellungsmenüs der Disc.",
+        ),
         check(
           "loudnorm",
           "Lautstärke normalisieren (EBU R128)",

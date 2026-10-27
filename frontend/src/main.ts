@@ -473,7 +473,7 @@ function renderTitleList() {
     const audioSummary =
       t.meta.audio
         .filter((a) => t.audio.has(a.index))
-        .map((a) => `${a.languageName} ${audioChoice(t, a).layout}`)
+        .map((a) => `${audioChoice(t, a).label}`)
         .join(", ") || "kein Ton";
     const subsSummary = t.subs.size > 0 ? ` · ${t.subs.size} Untertitel` : "";
     const quality = calc ? calc.qualityPercent : 0;
@@ -699,14 +699,27 @@ function renderAudioTab(t: Title) {
         h(
           "div",
           { class: "track-main" },
-          h("span", { class: "track-lang" }, a.languageName),
-          a.title ? h("span", { class: "track-title" }, a.title) : null,
+          h("span", { class: "track-lang" }, a.displayLabel),
           a.default ? h("span", { class: "badge" }, "Standard") : null,
         ),
         h("span", { class: "track-detail" }, audioDetail(t, a)),
       );
     }),
   );
+}
+
+/** Re-probes the loaded files after the label mode changed: the engine owns the names. */
+async function relabelTitles() {
+  for (const t of state.titles) {
+    try {
+      const m = await probeFile(t.meta.path);
+      t.meta.audio = m.audio;
+      t.meta.subtitles = m.subtitles;
+    } catch (e) {
+      status(`Spurnamen konnten nicht aktualisiert werden: ${e}`, "error");
+    }
+  }
+  renderAll();
 }
 
 function audioDetail(t: Title, a: AudioTrack): string {
@@ -744,8 +757,7 @@ function renderSubtitleTab(t: Title) {
         h(
           "div",
           { class: "track-main" },
-          h("span", { class: "track-lang" }, s.languageName),
-          s.title ? h("span", { class: "track-title" }, s.title) : null,
+          h("span", { class: "track-lang" }, s.displayLabel),
           s.forced ? h("span", { class: "badge" }, "Forced") : null,
         ),
         h("span", { class: "track-detail" }, `#${s.index} · ${s.codec}${s.supported ? "" : " · nicht unterstützt"}`),
@@ -881,10 +893,10 @@ function editorTitles(): EditorTitle[] {
       // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
         .filter((a) => t.audio.has(a.index))
-        .map((a) => ({ source: a.index, label: a.title ? `${a.languageName} – ${a.title}` : a.languageName })),
+        .map((a) => ({ source: a.index, label: audioChoice(t, a).label })),
       subtitleTracks: t.meta.subtitles
         .filter((s) => t.subs.has(s.index) && s.supported)
-        .map((s) => ({ source: s.index, label: s.title ? `${s.languageName} – ${s.title}` : s.languageName })),
+        .map((s) => ({ source: s.index, label: s.displayLabel })),
     };
   });
 }
@@ -1405,7 +1417,9 @@ async function init() {
     if (state.converting || !state.settings) return;
     const info = await settingsInfo();
     openSettings(state.settings, info, (saved) => {
+      const relabel = saved.track_label_mode !== state.settings?.track_label_mode;
       state.settings = saved;
+      if (relabel) void relabelTitles();
       updateCustomDiscLabel();
       status("Einstellungen gespeichert.");
       void refreshLayoutCheck();

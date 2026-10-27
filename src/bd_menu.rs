@@ -811,6 +811,8 @@ mod tests {
             clip: ClipSource { path: "a.mkv".into(), start_secs: 10.0, has_audio: true },
             audio_sources: vec![1, 2],
             subtitle_sources: vec![3],
+            audio_labels: vec![],
+            subtitle_labels: vec![],
         }
     }
 

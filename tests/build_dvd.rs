@@ -127,7 +127,7 @@ fn builds_dvd_with_submenus() {
     assert_eq!(report.titles[0].aspect.as_str(), "16:9");
     assert_eq!(report.titles[1].aspect.as_str(), "4:3");
     assert_eq!(report.titles[0].chapters, 3);
-    assert_eq!(report.titles[0].audio, vec!["Deutsch 5.1", "Englisch Stereo"]);
+    assert_eq!(report.titles[0].audio, vec!["Deutsch (5.1)", "Englisch (Stereo)"]);
 
     // Menus: main + title 1 (root, chapters, settings) + title 2 (root only: 1 chapter, 1 track).
     assert_eq!(report.menu_pages, 1 + 3 + 1);

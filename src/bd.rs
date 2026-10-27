@@ -29,7 +29,7 @@ use crate::dvd::{
 };
 use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, EncodePhase, VideoProcessing, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
-use crate::probe::{self, language_name, MediaInfo, SubtitleKind, SubtitleStream};
+use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
 use crate::tools::{ToolError, Toolchain};
 
@@ -138,6 +138,7 @@ struct BdTitle {
     stem: String,
     rate: BdRate,
     audio_mode: AudioMode,
+    track_label_mode: probe::TrackLabelMode,
     video: VideoProcessing,
     audio_target: AudioTarget,
     loudnorm: bool,
@@ -163,6 +164,22 @@ impl BdTitle {
 
     fn audio_kbps(&self, layout: &Layout) -> u32 {
         self.audio_outs(layout).iter().map(|o| o.kbps()).sum()
+    }
+
+    /// Menu/report label of each selected audio stream, with the channel layout of its disc slot.
+    fn audio_labels(&self, layout: &Layout) -> Vec<String> {
+        let all = probe::audio_labels(&self.info, self.track_label_mode);
+        let outs = self.audio_outs(layout);
+        self.audio
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| outs.get(k).map_or_else(|| all[i].clone(), |o| probe::with_layout(&all[i], o.layout_label(), self.track_label_mode)))
+            .collect()
+    }
+
+    fn subtitle_labels(&self) -> Vec<String> {
+        let all = probe::subtitle_labels(&self.info, self.track_label_mode);
+        self.subs.iter().map(|&i| all[i].clone()).collect()
     }
 }
 
@@ -263,18 +280,12 @@ async fn encode_bd_title(
     if real <= 0.0 {
         return Err(BuildError::Internal(format!("{}: ffprobe meldet keine Laufzeit", mkv.display())));
     }
-    let audio = job
-        .audio_outs()
-        .into_iter()
-        .enumerate()
-        .map(|(k, out)| match t.audio.get(k).map(|&i| &t.info.audio[i]) {
-            Some(a) => format!("{} {}", language_name(a.language.as_deref()), out.layout_label()),
-            None => "Stille (Platzhalter)".to_string(),
-        })
-        .collect();
+    let mut labels = t.audio_labels(layout).into_iter();
+    let audio = (0..layout.audio_langs.len()).map(|k| if k < t.audio.len() { labels.next().unwrap_or_default() } else { "Stille (Platzhalter)".to_string() }).collect();
+    let sub_labels = t.subtitle_labels();
     let subtitles = (0..layout.subs.len())
         .map(|k| match t.sub_for(layout, k) {
-            Some(s) => language_name(s.language.as_deref()),
+            Some(_) => sub_labels[k].clone(),
             None => "leer (Platzhalter)".to_string(),
         })
         .collect();
@@ -328,7 +339,7 @@ fn chapter_samples(titles: &[BdTitle], groups: &[Range<usize>]) -> Vec<Vec<f64>>
 
 /// What the menu layout may refer to: one entry per group of merged titles (label, clip and
 /// tracks of the first file; chapters and duration summed up).
-fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>]) -> Vec<crate::layout::LayoutTitle> {
+fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>], disc: &Layout) -> Vec<crate::layout::LayoutTitle> {
     groups
         .iter()
         .map(|g| {
@@ -344,6 +355,8 @@ fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>]) -> Vec<crate::layo
                 },
                 audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
                 subtitle_sources: t.subs.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+                audio_labels: t.audio_labels(disc),
+                subtitle_labels: t.subtitle_labels(),
             }
         })
         .collect()
@@ -357,6 +370,7 @@ async fn build_menus(
     layout: &crate::layout::CustomLayout,
     titles: &[BdTitle],
     groups: &[Range<usize>],
+    disc: &Layout,
     opts: &BuildOptions,
     rate: BdRate,
     work: &Path,
@@ -375,7 +389,7 @@ async fn build_menus(
     };
     let (fw, fh) = opts.resolution.frame_size(TvStandard::Pal);
     let frame = MenuFrame::square(fw, fh);
-    let layout_titles = layout_titles(titles, groups);
+    let layout_titles = layout_titles(titles, groups, disc);
     crate::layout::validate_bd(layout, &layout_titles, frame).map_err(template)?;
     let traits = bd_menu::traits(layout, &layout_titles, frame);
     let members: Vec<Vec<usize>> = groups.iter().map(|g| titles[g.clone()].iter().map(|t| t.chapters.len()).collect()).collect();
@@ -556,6 +570,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             stem: format!("title_{:02}", i + 1),
             rate: bd_frame_rate(&[fps], opts.tv_standard, opts.resolution),
             audio_mode: opts.audio_mode,
+            track_label_mode: opts.track_label_mode,
             video: opts.video,
             audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
             loudnorm: opts.loudnorm,
@@ -620,6 +635,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     cancel.check()?;
     log(Event::Phase(BuildPhase::Menus));
     let template_layout;
+    let disc_layout = &layout;
     let menu_layout = match (&opts.custom_layout, opts.template.as_os_str().is_empty()) {
         (Some(layout), _) => {
             log(Event::Step(format!("Eigenes Menü-Layout: {} Menü(s)", layout.menus.len())));
@@ -633,7 +649,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 None
             } else {
                 let aspect = if opts.aspect_policy == crate::dvd::AspectPolicy::Standard { Aspect::Standard } else { Aspect::Wide };
-                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles, &groups), &vec![None; groups.len()], &chapter_samples(&titles, &groups), aspect)
+                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles, &groups, &layout), &vec![None; groups.len()], &chapter_samples(&titles, &groups), aspect)
                     .map_err(|e| BuildError::Template(e.to_string()))?;
                 for w in notes {
                     warn(log, w);
@@ -648,7 +664,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let menus = match menu_layout {
         Some(layout) => {
             log(Event::Eta(Eta::new(JobPhase::Menus, None, None, None)));
-            let stage = build_menus(&tools, layout, &titles, &groups, opts, menu_rate, &work, heavy_jobs, log).await?;
+            let stage = build_menus(&tools, layout, &titles, &groups, &disc_layout, opts, menu_rate, &work, heavy_jobs, log).await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
             }

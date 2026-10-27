@@ -117,6 +117,8 @@ fn all_templates_become_valid_blu_ray_menus() {
             clip: ClipSource { path: "a.mkv".into(), start_secs: 10.0, has_audio: true },
             audio_sources: vec![1, 2],
             subtitle_sources: vec![3, 4],
+            audio_labels: vec![],
+            subtitle_labels: vec![],
         })
         .collect();
     let frame = MenuFrame::square(1920, 1080);

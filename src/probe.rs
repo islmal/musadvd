@@ -104,6 +104,8 @@ pub struct AudioStream {
     pub channel_layout: String,
     /// ISO 639-2 tag as stored in the file (`ger`, `eng`, ...), if any.
     pub language: Option<String>,
+    /// Track name (`title` tag, else `name`) after [`clean_tag`]: junk and names that only repeat the
+    /// language are dropped.
     pub title: Option<String>,
     pub default: bool,
     /// Stream bitrate in bit/s as reported by ffprobe, if any.
@@ -127,6 +129,7 @@ pub struct SubtitleStream {
     pub codec: String,
     pub kind: SubtitleKind,
     pub language: Option<String>,
+    /// Like [`AudioStream::title`].
     pub title: Option<String>,
     pub forced: bool,
     /// Bitmap canvas size, if reported.
@@ -170,6 +173,7 @@ struct RawFormat {
 struct RawTags {
     language: Option<String>,
     title: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -229,6 +233,23 @@ fn tag(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "und")
 }
 
+/// The first usable track name of `title` / `name`: no junk (empty, digits only, MP4 handler names,
+/// overlong) and nothing that only repeats the language (code, German or English name), so labels never
+/// read "Spanisch - Spanish".
+fn clean_tag(tags: &RawTags, language: Option<&str>) -> Option<String> {
+    let lang = language.and_then(lookup);
+    [&tags.title, &tags.name].into_iter().flatten().map(|t| t.trim()).find_map(|t| {
+        let l = t.to_lowercase();
+        let junk = t.is_empty()
+            || t.chars().count() > 60
+            || t.chars().all(|c| c.is_ascii_digit())
+            || l.ends_with("handler")
+            || language.is_some_and(|code| l == code.to_lowercase())
+            || lang.is_some_and(|&(b, term, one, de, en)| [b, term, one, de, en].iter().any(|n| l == n.to_lowercase()));
+        (!junk).then(|| t.to_string())
+    })
+}
+
 /// Builds a [`MediaInfo`] from ffprobe's JSON output.
 pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeError> {
     let raw: RawProbe = serde_json::from_str(json).map_err(ProbeError::Json)?;
@@ -273,8 +294,8 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                 codec,
                 channels: s.channels.unwrap_or(2),
                 channel_layout: s.channel_layout.unwrap_or_default(),
+                title: clean_tag(&s.tags, tag(s.tags.language.clone()).as_deref()),
                 language: tag(s.tags.language),
-                title: tag(s.tags.title),
                 default: s.disposition.default == 1,
                 bit_rate: s.bit_rate.as_deref().and_then(|b| b.trim().parse().ok()),
                 sample_rate: s.sample_rate.as_deref().and_then(|b| b.trim().parse().ok()),
@@ -284,8 +305,8 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                 index: s.index,
                 kind: subtitle_kind(&codec),
                 codec,
+                title: clean_tag(&s.tags, tag(s.tags.language.clone()).as_deref()),
                 language: tag(s.tags.language),
-                title: tag(s.tags.title),
                 forced: s.disposition.forced == 1,
                 width: s.width.filter(|w| *w > 0),
                 height: s.height.filter(|h| *h > 0),
@@ -409,44 +430,44 @@ pub async fn probe(ffprobe: &Path, path: &Path) -> Result<MediaInfo, ProbeError>
 // Languages
 // ---------------------------------------------------------------------------
 
-/// (ISO 639-2/B, ISO 639-2/T, ISO 639-1, German name)
-const LANGUAGES: &[(&str, &str, &str, &str)] = &[
-    ("ger", "deu", "de", "Deutsch"),
-    ("eng", "eng", "en", "Englisch"),
-    ("fre", "fra", "fr", "Französisch"),
-    ("spa", "spa", "es", "Spanisch"),
-    ("ita", "ita", "it", "Italienisch"),
-    ("dut", "nld", "nl", "Niederländisch"),
-    ("por", "por", "pt", "Portugiesisch"),
-    ("pol", "pol", "pl", "Polnisch"),
-    ("rus", "rus", "ru", "Russisch"),
-    ("tur", "tur", "tr", "Türkisch"),
-    ("cze", "ces", "cs", "Tschechisch"),
-    ("slo", "slk", "sk", "Slowakisch"),
-    ("hun", "hun", "hu", "Ungarisch"),
-    ("swe", "swe", "sv", "Schwedisch"),
-    ("dan", "dan", "da", "Dänisch"),
-    ("nor", "nor", "no", "Norwegisch"),
-    ("fin", "fin", "fi", "Finnisch"),
-    ("gre", "ell", "el", "Griechisch"),
-    ("jpn", "jpn", "ja", "Japanisch"),
-    ("chi", "zho", "zh", "Chinesisch"),
-    ("kor", "kor", "ko", "Koreanisch"),
-    ("ara", "ara", "ar", "Arabisch"),
-    ("heb", "heb", "he", "Hebräisch"),
-    ("hin", "hin", "hi", "Hindi"),
-    ("ukr", "ukr", "uk", "Ukrainisch"),
-    ("rum", "ron", "ro", "Rumänisch"),
-    ("bul", "bul", "bg", "Bulgarisch"),
-    ("hrv", "hrv", "hr", "Kroatisch"),
-    ("srp", "srp", "sr", "Serbisch"),
-    ("tha", "tha", "th", "Thai"),
-    ("vie", "vie", "vi", "Vietnamesisch"),
+/// (ISO 639-2/B, ISO 639-2/T, ISO 639-1, German name, English name)
+const LANGUAGES: &[(&str, &str, &str, &str, &str)] = &[
+    ("ger", "deu", "de", "Deutsch", "German"),
+    ("eng", "eng", "en", "Englisch", "English"),
+    ("fre", "fra", "fr", "Französisch", "French"),
+    ("spa", "spa", "es", "Spanisch", "Spanish"),
+    ("ita", "ita", "it", "Italienisch", "Italian"),
+    ("dut", "nld", "nl", "Niederländisch", "Dutch"),
+    ("por", "por", "pt", "Portugiesisch", "Portuguese"),
+    ("pol", "pol", "pl", "Polnisch", "Polish"),
+    ("rus", "rus", "ru", "Russisch", "Russian"),
+    ("tur", "tur", "tr", "Türkisch", "Turkish"),
+    ("cze", "ces", "cs", "Tschechisch", "Czech"),
+    ("slo", "slk", "sk", "Slowakisch", "Slovak"),
+    ("hun", "hun", "hu", "Ungarisch", "Hungarian"),
+    ("swe", "swe", "sv", "Schwedisch", "Swedish"),
+    ("dan", "dan", "da", "Dänisch", "Danish"),
+    ("nor", "nor", "no", "Norwegisch", "Norwegian"),
+    ("fin", "fin", "fi", "Finnisch", "Finnish"),
+    ("gre", "ell", "el", "Griechisch", "Greek"),
+    ("jpn", "jpn", "ja", "Japanisch", "Japanese"),
+    ("chi", "zho", "zh", "Chinesisch", "Chinese"),
+    ("kor", "kor", "ko", "Koreanisch", "Korean"),
+    ("ara", "ara", "ar", "Arabisch", "Arabic"),
+    ("heb", "heb", "he", "Hebräisch", "Hebrew"),
+    ("hin", "hin", "hi", "Hindi", "Hindi"),
+    ("ukr", "ukr", "uk", "Ukrainisch", "Ukrainian"),
+    ("rum", "ron", "ro", "Rumänisch", "Romanian"),
+    ("bul", "bul", "bg", "Bulgarisch", "Bulgarian"),
+    ("hrv", "hrv", "hr", "Kroatisch", "Croatian"),
+    ("srp", "srp", "sr", "Serbisch", "Serbian"),
+    ("tha", "tha", "th", "Thai", "Thai"),
+    ("vie", "vie", "vi", "Vietnamesisch", "Vietnamese"),
 ];
 
-fn lookup(tag: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
+fn lookup(tag: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str)> {
     let t = tag.trim().to_ascii_lowercase();
-    LANGUAGES.iter().find(|(b, term, one, _)| *b == t || *term == t || *one == t)
+    LANGUAGES.iter().find(|(b, term, one, ..)| *b == t || *term == t || *one == t)
 }
 
 /// ISO 639-1 code for the DVD (`ger` -> `de`), `None` if unknown.
@@ -459,6 +480,72 @@ pub fn language_name(tag: Option<&str>) -> String {
     match tag {
         Some(t) => lookup(t).map_or_else(|| t.to_string(), |l| l.3.to_string()),
         None => "Unbekannt".to_string(),
+    }
+}
+
+/// How audio/subtitle tracks are named in the GUI and on menu buttons (setting `track_label_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackLabelMode {
+    /// "Tonspur 1", "Untertitel 2".
+    Generic,
+    /// "Spanisch".
+    LanguageOnly,
+    /// "Spanisch - Latino", else "Spanisch (2)" for duplicates, else "Spanisch".
+    #[default]
+    SmartMetadata,
+}
+
+impl TrackLabelMode {
+    /// `generic` / `language`; anything else is the default.
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "generic" => TrackLabelMode::Generic,
+            "language" => TrackLabelMode::LanguageOnly,
+            _ => TrackLabelMode::SmartMetadata,
+        }
+    }
+}
+
+/// One label per track, numbered over all tracks of the file (not the selection), so the GUI and the
+/// disc menus always show the same name for a stream.
+fn track_labels<'a>(tracks: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>, generic: &str, mode: TrackLabelMode) -> Vec<String> {
+    let named: Vec<(String, Option<&str>)> = tracks.map(|(lang, title)| (language_name(lang), title)).collect();
+    named
+        .iter()
+        .enumerate()
+        .map(|(i, (lang, title))| match (mode, title) {
+            (TrackLabelMode::Generic, _) => format!("{generic} {}", i + 1),
+            (TrackLabelMode::LanguageOnly, _) => lang.clone(),
+            (TrackLabelMode::SmartMetadata, Some(t)) => format!("{lang} - {t}"),
+            (TrackLabelMode::SmartMetadata, None) => {
+                let same = named.iter().filter(|(l, _)| l == lang).count();
+                let k = named[..=i].iter().filter(|(l, _)| l == lang).count();
+                if same > 1 { format!("{lang} ({k})") } else { lang.clone() }
+            }
+        })
+        .collect()
+}
+
+/// Labels of `info.audio`, without the channel suffix (see [`with_layout`]).
+pub fn audio_labels(info: &MediaInfo, mode: TrackLabelMode) -> Vec<String> {
+    track_labels(info.audio.iter().map(|a| (a.language.as_deref(), a.title.as_deref())), "Tonspur", mode)
+}
+
+/// Labels of `info.subtitles`, forced tracks marked.
+pub fn subtitle_labels(info: &MediaInfo, mode: TrackLabelMode) -> Vec<String> {
+    track_labels(info.subtitles.iter().map(|s| (s.language.as_deref(), s.title.as_deref())), "Untertitel", mode)
+        .into_iter()
+        .zip(&info.subtitles)
+        .map(|(l, s)| if s.forced { format!("{l} (forced)") } else { l })
+        .collect()
+}
+
+/// Audio label with the disc's channel layout ("Spanisch - Latino (Stereo)"): keeps a commentary in
+/// 5.1 and in stereo apart. Generic labels stay bare.
+pub fn with_layout(label: &str, layout: &str, mode: TrackLabelMode) -> String {
+    match mode {
+        TrackLabelMode::Generic => label.to_string(),
+        _ => format!("{label} ({layout})"),
     }
 }
 
@@ -611,6 +698,85 @@ mod tests {
         let i = parse_ffprobe_json(Path::new("a.avi"), json).unwrap();
         assert_eq!(i.duration_secs, 12.5);
         assert!((i.video.unwrap().display_aspect - 4.0 / 3.0).abs() < 1e-9);
+    }
+
+    /// File with the given `(kind, language, title, name, forced)` streams after a video stream.
+    fn tracks(streams: &[(&str, &str, &str, &str, bool)]) -> MediaInfo {
+        let json: Vec<String> = streams
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, lang, title, name, forced))| {
+                format!(
+                    r#"{{"index": {}, "codec_name": "{}", "codec_type": "{kind}", "tags": {{"language": "{lang}", "title": "{title}", "name": "{name}"}}, "disposition": {{"default": 0, "forced": {}}}}}"#,
+                    i + 1,
+                    if *kind == "audio" { "ac3" } else { "subrip" },
+                    u8::from(*forced)
+                )
+            })
+            .collect();
+        let json = format!(r#"{{"streams": [{{"index": 0, "codec_name": "h264", "codec_type": "video", "width": 720, "height": 576}}, {}]}}"#, json.join(","));
+        parse_ffprobe_json(Path::new("x.mkv"), &json).unwrap()
+    }
+
+    fn audio(streams: &[(&str, &str, &str)], mode: TrackLabelMode) -> Vec<String> {
+        let s: Vec<_> = streams.iter().map(|&(l, t, n)| ("audio", l, t, n, false)).collect();
+        audio_labels(&tracks(&s), mode)
+    }
+
+    #[test]
+    fn smart_labels_follow_the_fallback_chain() {
+        let smart = TrackLabelMode::SmartMetadata;
+        // P1 tag, P3 single language.
+        assert_eq!(audio(&[("spa", "Spanish (Latin America)", ""), ("ger", "", "")], smart), ["Spanisch - Spanish (Latin America)", "Deutsch"]);
+        // P2: duplicates without tags are numbered; a tagged duplicate keeps its tag but still counts.
+        assert_eq!(audio(&[("spa", "", ""), ("spa", "", "")], smart), ["Spanisch (1)", "Spanisch (2)"]);
+        assert_eq!(audio(&[("spa", "Latino", ""), ("spa", "", "")], smart), ["Spanisch - Latino", "Spanisch (2)"]);
+        // `ger` and `deu` are the same language; unknown languages are grouped too.
+        assert_eq!(audio(&[("ger", "", ""), ("deu", "", ""), ("und", "", ""), ("", "", "")], smart), ["Deutsch (1)", "Deutsch (2)", "Unbekannt (1)", "Unbekannt (2)"]);
+        // `name` is used when `title` is missing or junk.
+        assert_eq!(audio(&[("eng", "", "Commentary"), ("eng", "SoundHandler", "Director")], smart), ["Englisch - Commentary", "Englisch - Director"]);
+    }
+
+    #[test]
+    fn junk_and_redundant_tags_are_dropped() {
+        let smart = TrackLabelMode::SmartMetadata;
+        for junk in ["Spanish", "spanisch", "SPA", "es", "  ", "2", "SoundHandler", &"x".repeat(61)] {
+            assert_eq!(audio(&[("spa", junk, "")], smart), ["Spanisch"], "{junk:?}");
+        }
+        // Two tracks both tagged "Spanish" fall back to numbering instead of identical labels.
+        assert_eq!(audio(&[("spa", "Spanish", ""), ("spa", "Spanish", "")], smart), ["Spanisch (1)", "Spanisch (2)"]);
+        // Unknown language: only the raw code counts as redundant.
+        assert_eq!(audio(&[("xyz", "xyz", ""), ("xyz", "Klingon", "")], smart), ["xyz (1)", "xyz - Klingon"]);
+        let info = tracks(&[("audio", "spa", " Latino ", "", false)]);
+        assert_eq!(info.audio[0].title.as_deref(), Some("Latino"), "the GUI shows the cleaned tag");
+    }
+
+    #[test]
+    fn generic_and_language_only_modes() {
+        let s = [("spa", "Latino", ""), ("spa", "", "")];
+        assert_eq!(audio(&s, TrackLabelMode::Generic), ["Tonspur 1", "Tonspur 2"]);
+        assert_eq!(audio(&s, TrackLabelMode::LanguageOnly), ["Spanisch", "Spanisch"]);
+        assert_eq!(TrackLabelMode::from_setting("generic"), TrackLabelMode::Generic);
+        assert_eq!(TrackLabelMode::from_setting("language"), TrackLabelMode::LanguageOnly);
+        assert_eq!(TrackLabelMode::from_setting("smart"), TrackLabelMode::SmartMetadata);
+        assert_eq!(TrackLabelMode::from_setting("bogus"), TrackLabelMode::SmartMetadata);
+    }
+
+    #[test]
+    fn subtitle_labels_mark_forced_tracks() {
+        let info = tracks(&[("subtitle", "ger", "", "", true), ("subtitle", "ger", "SDH", "", false), ("audio", "ger", "", "", false)]);
+        assert_eq!(subtitle_labels(&info, TrackLabelMode::SmartMetadata), ["Deutsch (1) (forced)", "Deutsch - SDH"]);
+        assert_eq!(subtitle_labels(&info, TrackLabelMode::Generic), ["Untertitel 1 (forced)", "Untertitel 2"]);
+        assert_eq!(audio_labels(&info, TrackLabelMode::SmartMetadata), ["Deutsch"], "audio and subtitles are numbered apart");
+    }
+
+    #[test]
+    fn channel_suffix_keeps_equal_tags_apart() {
+        let smart = TrackLabelMode::SmartMetadata;
+        assert_eq!(with_layout("Englisch - Commentary", "5.1", smart), "Englisch - Commentary (5.1)");
+        assert_eq!(with_layout("Englisch - Commentary", "Stereo", smart), "Englisch - Commentary (Stereo)");
+        assert_eq!(with_layout("Spanisch", "Stereo", TrackLabelMode::LanguageOnly), "Spanisch (Stereo)");
+        assert_eq!(with_layout("Tonspur 1", "Stereo", TrackLabelMode::Generic), "Tonspur 1");
     }
 
     #[test]
