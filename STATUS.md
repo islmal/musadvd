@@ -36,7 +36,7 @@ through one native subtitle stage per stream; text subs are rendered to bitmaps 
 with the CLI through `burner::burn_video_ts`.
 
 **Blu-ray / AVCHD** (`DiscType::Bd25/Bd50/Avchd5/Avchd9`; `build_dvd` hands over to `bd::build_bd`):
-per title libx264 or `h264_nvenc` High@4.1 → MKV → one native mux run per title (`bd_mux::mux_title`: ffmpeg `-c copy` → MPEG-TS pipe → re-packetised BDAV m2ts + CLPI/MPLS by `bd_clip`; own playlist + clip, own
+per title libx264 or a hardware H.264 encoder (`h264_nvenc`/`h264_qsv`/`h264_amf`, setting `hw_accel_mode`) High@4.1 → MKV → one native mux run per title (`bd_mux::mux_title`: ffmpeg `-c copy` → MPEG-TS pipe → re-packetised BDAV m2ts + CLPI/MPLS by `bd_clip`; own playlist + clip, own
 frame rate) → our own `index.bdmv`/`MovieObject.bdmv` (`hdmv.rs`, `bd_menu.rs`) → own UDF 2.50 writer
 (`udf250.rs`, metadata partition, no ISO bridge). Menus: same `CustomLayout` on a 1920×1080 canvas;
 buttons become an **IGS** stream (`igs.rs`, real ICS segments, muxed on PID 0x1400 with a still-mode playlist). Text subtitles are rendered natively to PGS (`pgs.rs`, `textsub::Canvas::hd`). ConvertX templates reach it through `bd_template.rs`: page
@@ -101,8 +101,8 @@ only (same source, different trim).
   `GPR1` chapter mark, `GPR2` play-all. BD titles are entered with `JumpTitle` (VLC timebar), menus with
   `JumpObject`.
 - **BDAV muxer** (`bd_mux.rs`): AUs are written in DTS order; PCR on PID 0x1001 starts 500 ms before the first PTS (first PTS = 600 s), ATS interpolated between PCR packets, padded to 6144 bytes. Video PTS/DTS are regenerated on the exact frame grid (ffmpeg only has ms stamps), audio PTS from sample counts, LPCM re-cut into 5 ms frames. Deviations from tsMuxeR: PCR every ≤3000 ticks (its 7000 gave 105 ms at 23.976), SPS/HRD SEI not rewritten (x264/NVENC already emit them), x264 banner SEI dropped, no T-STD simulation. Oracle: `tests/tsmuxer_native.rs` + `tests/fixtures/tsmuxer/` (playlist byte-identical, CLPI identical except SPN/packet count, PES stamps/PSI identical; re-record with `TSMUXER_RECORD`).
-- Encoder choice per BD title: NVENC unless the rate needs `fake-interlaced` (1080i → x264); max 4
-  parallel NVENC jobs. DVD MPEG-2 stays software (VBV compliance).
+- Encoder choice per BD title (`bd::title_encoders`): the encoder of `HwAccelMode` (default NVIDIA; probed first via `probe_hw_encoder`, failure → x264 + warning) unless the rate needs `fake-interlaced` (1080i → x264); max 4
+  parallel hw jobs. The mode also orders the GPU decoder probes (`tools::hwaccel_candidates`, only with `hw_decode`). Old `bd_hw_encode` is not migrated; unknown `hw_accel_mode` values load as the default (`#[serde(other)]` on the last variant). DVD MPEG-2 stays software (VBV compliance).
 
 **Quirks (easy to get wrong)**
 - ffmpeg input `-ss` + stream-copied audio is *not* cut at the start in this build (N-125875) → trimmed
@@ -111,7 +111,7 @@ only (same source, different trim).
   dvdauthor audio formats are `ac3`, `mp2`, `pcm`, `dts` (not `lpcm`).
 - `-loglevel error` (normal runs) hides loudnorm/cropdetect output; `ffprobe -show_entries` prints
   columns in struct order, not requested order.
-- BD has no 1080p25/29.97 → x264 `fake-interlaced` (flagged 1080i); NVENC cannot do that.
+- BD has no 1080p25/29.97 → x264 `fake-interlaced` (flagged 1080i); the hardware encoders cannot do that.
 - `TT_SRPT` VTS start sector is relative to `VIDEO_TS.IFO` in contiguous DVD order; VTS-internal
   addresses are relative to the VTS IFO. Work-dir marker is `.convertx-work/.convertx-work`.
 - Custom DVD layouts: coordinates are TV storage pixels (720 wide, non-square); VTSM menu numbers
@@ -120,8 +120,9 @@ only (same source, different trim).
 
 ## 3. Roadmap & Known Issues
 
-**Last recorded test run (2026-10-27):** `cargo test --workspace`: all green (lib 363), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
+**Last recorded test run (2026-10-28):** `cargo test --workspace`: all green (lib 367), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
 **Next (prioritised)**
+- Manual (user): GUI dropdown "Hardware-Beschleunigung" (save, reopen), one BD build with NVIDIA; QSV/AMF on real Intel/AMD hardware.
 - Plan docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md is done (phases 1–3). Still manual (user): VLC on one BD + one AVCHD folder (seek, chapters, menu loop/intro, text + PGS subtitles, LPCM/DTS); standalone player.
 - Known quirk: dvdauthor reads one `audpts` entry past the array for a subpicture that starts after the VOBU (uninitialised there); native assumes 0 (matches the oracle). VOB split at 524,272 sectors only unit-tested, no ≥1 GiB run.
 1. Live player hardening **acceptance** in the release window (4K HEVC HDR smooth + colours, crop, DVD source without combing, CSP `media-src` under `http://tauri.localhost`); only then consider `-hwaccel` → docs/plans/2026-10-26-live-player-hardening.md
@@ -141,6 +142,7 @@ only (same source, different trim).
    DVD LPCM muxer; per-title audio mode; Ctrl+C for `build-dvd`.
 
 **Known issues / limitations**
+- QSV/AMF never run on real hardware (only the fallback path here): BD compliance (HRD/VBV, slices, GOP) of their output unverified; AMF has no slice option; `d3d11va` before `cuda` for NVIDIA decoding not benchmarked.
 - Still German in every language: `BuildError`/probe errors, warnings from menu/template/encoder modules, dvdauthor output, Burn dialog texts (`burn.rs`).
 - Never verified on any standalone player or real disc: Blu-ray menus, AVCHD, mixed-rate BD, any Burn
   Studio operation, the direct write engine. Single-layer DVD burning and one DVD+R DL write work
@@ -167,6 +169,8 @@ only (same source, different trim).
   conversion blocked until fixed). Merge: mixed audio formats in a group re-encode all tracks (not only the differing one).
 
 ## 4. Milestone Changelog (last 10)
+- **2026-10-28 – DVD closed GOPs + continuous audio PTS:** `EncodeJob::video_codec_args` adds `-flags +cgop -sc_threshold 1000000000` (no more `GOP may not be closed` per chapter cell); re-encoded DVD audio always ends in `aresample=48000:async=1:min_hard_comp=0.01` (`DVD_AUDIO_SYNC`, fills PTS gaps with silence; copies untouched, BD unchanged). Verified: new `dvd_audio::authoring_log_is_clean_with_chapters_and_loudnorm` (red before, green after), full `cargo test --workspace`, gui + Unix check. Closed GOPs cost a little bitrate; chapters snap to the nearest GOP (≤ 0.48 s).
+- **2026-10-28 – GPU vendor selection:** `HwAccelMode` (none/nvidia/intel/amd) replaces `bd_hw_encode` in `AppSettings`/`BuildOptions`/CLI (`--hw-accel`, `--no-hw-encode` = none); `BdEncoder::{Qsv,Amf}` with verified option names, `Toolchain::probe_hw_encoder`, `hwaccel_candidates`, locale keys `settings.hw_accel*`/`engine.bd_hw_unavailable`/`bd_encoder_hw`, dropdown in the "Leistung" group. Verified: full `cargo test --workspace` (incl. new `hw_encoder_options_exist`, 3-vendor fallback test), gui + Unix check, `npm run build`, `check-i18n`. Not checked: GUI dropdown by hand, QSV/AMF hardware.
 - **2026-10-28 – Title drag reorder + merge pre-check:** pointer-event drag on `#title-list` (`initTitleDrag`, delegated; HTML5 DnD is swallowed by `dragDropEnabled`), `moveTitle` clears `mergeWithPrevious` of the moved title; `mergeMismatches` (mirrors `dvd::check_group_shapes`) marks cards `.merge-bad` and blocks convert; pure helpers in `frontend/src/order.ts`. Custom layouts stay blocked by `layoutIsStale` after reorder. Verified: `scripts/check-order.mjs`, `npm run build`, `cargo check -p convertx-gui`, manual GUI checks by the user.
 - **2026-10-27 – Native authoring cleanup (plan phase 3):** `.ref-src/` removed; locale keys, `CLAUDE.md`, `tauri.conf.json`, `release.yml` (ffmpeg only) already free of dvdauthor/tsMuxeR. Verified: full `cargo test --workspace`, gui + Unix check, `npm run build`.
 - **2026-10-27 – Native BDAV muxer (plan phase 2):** `bd_mux` (ffmpeg TS pipe → m2ts), `bd_clip` (CLPI/MPLS), `pgs` (text → PGS), `Toolchain::ffmpeg_sink`; `tsMuxeR.exe`, `bd_patch`, `Toolchain.tsmuxer`, tsMuxeR locale texts removed. Verified: `tests/tsmuxer_native.rs` (4 cases vs recorded tsMuxeR 2.7.0 output, packet/ATS/PCR/CC/EP-map validators, ffprobe), IG menu playlist byte-identical to the patched oracle, `bluray`, `menu_intro` (packet-level IG timing), full `cargo test --workspace`, gui + Unix check, `npm run build`. Not checked: VLC/standalone playback, ≥4 GB title, T-STD buffers, golden PNG of a 1080p cue (structural test only).
@@ -175,5 +179,3 @@ only (same source, different trim).
 - **2026-10-27 – Typed spumux `MenuTooComplex` error path:** `SpumuxError::TooComplex` -> `ToolError::MenuTooComplex` -> `BuildError::MenuTooComplex` (manual `From<ToolError>`), localised via `BuildError::message(ui_lang)` (GUI + CLI) from `engine.err_menu_too_complex`. Verified: new unit test in `dvd.rs`, `cargo test --workspace`, `check-i18n`, `npm run build`, gui + Unix check; not with a real 12-button menu build.
 - **2026-10-27 – Native subpicture muxer (hybrid pipeline):** `src/spumux.rs` ports spumux (Ghidra decompile) for menu masks and bitmap subtitles; `spumux.exe` remains for text subtitles + fallback. Verified: 9 golden tests byte-identical to `bin/spumux.exe` (subtitles: overlap/open end/crop/multi-sector; menus: default+explicit nav, opaque palettes, 2-group case), unit tests incl. trial limit, `custom_menu` (dvdauthor accepts it, disc colours checked), `bitmap_subs`, `real_templates`, `menu_intro`, `motion_menu`, `ntsc`, Unix check. Not checked on a standalone player.
 - **2026-10-27 – Release workflow + in-app updater:** `.github/workflows/release.yml` (tag `v*` = `tauri.conf.json` version) builds the signed NSIS installer via tauri-action (latest ffmpeg release build fetched from gyan.dev (9.0.1 URL is gone), MSVC) and uploads `latest.json`; `tauri-plugin-updater` checks it at GUI start (`main.ts checkForUpdate`, prompt, passive install). Needs repo secret `TAURI_SIGNING_PRIVATE_KEY` (key in `~/.tauri/convertx-rust.key`, pubkey in `tauri.conf.json`; losing it breaks updates). Never run in CI; update flow untested.
-- **2026-10-27 – Runtime-loaded locale files:** no embedded JSON anymore; `UiLang` code struct, cached leaked catalogs, `get_available_languages`/`get_locale_data`, CLI `--ui-lang` any code. Verified: `cargo test --workspace`, gui + Unix check, `npm run build` (hint text absent from bundle); not clicked through in the real GUI.
-- **2026-10-27 – i18n German/English/Russian + audio track rename:** see Key design decisions. Own audio names: `StreamSelection.audio_names` -> `MediaInfo.audio_names` -> `probe::audio_labels` (GUI input in the Audio tab, session only, not persisted). Verified: workspace tests, gui + Unix check, `npm run build`, browser smoke test with mocked backend; not by hand in the Tauri GUI or a real conversion; Cyrillic glyphs in template menu fonts unchecked.

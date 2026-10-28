@@ -249,11 +249,6 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
           t("settings.menueAnimationenIntro"),
           t("settings.spieltBeiMenuesAus"),
         ),
-        check(
-          "bd_hw_encode",
-          t("settings.hardwareEncodingNvidiaNvenc"),
-          t("settings.kodiertBluRayVideos"),
-        ),
       ),
     ],
     encoding: () => [
@@ -285,6 +280,17 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
           "hw_decode",
           t("settings.gpuDecodingVerwendenCuda"),
           t("settings.dieQuellvideosWerdenAuf"),
+        ),
+        select(
+          "hw_accel_mode",
+          t("settings.hw_accel_mode"),
+          [
+            ["none", t("settings.hw_accel.none")],
+            ["nvidia", t("settings.hw_accel.nvidia")],
+            ["intel", t("settings.hw_accel.intel")],
+            ["amd", t("settings.hw_accel.amd")],
+          ],
+          t("settings.hw_accel_mode_hint"),
         ),
         check(
           "fast_encode",

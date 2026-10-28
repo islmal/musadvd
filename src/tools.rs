@@ -17,6 +17,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+use crate::config::HwAccelMode;
+use crate::encoder::BdEncoder;
+
 #[derive(Debug)]
 pub enum ToolError {
     NotFound(String),
@@ -565,10 +568,8 @@ impl Toolchain {
 
     /// Hardware decoder that works for the video of `input` (tried for 2 s of decoding), or
     /// `None` to decode on the CPU.
-    pub async fn probe_hwaccel(&self, input: &Path) -> Option<&'static str> {
-        let candidates: &[&'static str] =
-            if cfg!(windows) { &["cuda", "d3d11va", "qsv"] } else { &["cuda", "vaapi", "qsv"] };
-        for &hw in candidates {
+    pub async fn probe_hwaccel(&self, input: &Path, mode: HwAccelMode) -> Option<&'static str> {
+        for &hw in hwaccel_candidates(mode) {
             let mut cmd = self.command(&self.ffmpeg);
             cmd.args(["-hide_banner", "-nostdin", "-loglevel", "warning", "-hwaccel", hw, "-t", "2", "-i"])
                 .arg(input)
@@ -586,24 +587,28 @@ impl Toolchain {
         None
     }
 
-    /// Checks that `h264_nvenc` works with the Blu-ray options (10 test frames); `Err` is a short
-    /// German reason for the log.
-    pub async fn probe_nvenc(&self) -> Result<(), String> {
+    /// Checks that a hardware encoder works with the Blu-ray options (10 test frames); `Err` is a
+    /// short reason for the log.
+    pub async fn probe_hw_encoder(&self, enc: BdEncoder) -> Result<(), String> {
         let mut cmd = self.command(&self.ffmpeg);
         cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=24000/1001"])
-            .args(["-frames:v", "10", "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc", "-profile:v", "high", "-level:v", "4.1"])
-            .args(crate::encoder::nvenc_bd_options())
+            .args(["-frames:v", "10", "-pix_fmt", "yuv420p", "-c:v", enc.codec(), "-profile:v", "high", "-level:v", "4.1"])
+            .args(enc.bd_options())
             .args(["-f", "null", "-"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await else {
-            return Err("NVENC-Test nicht ausführbar".into());
+            return Err(format!("{}-Test nicht ausführbar", enc.label()));
         };
         if out.status.success() {
-            Ok(())
-        } else {
-            Err(nvenc_failure_reason(&String::from_utf8_lossy(&out.stderr)))
+            return Ok(());
         }
+        let log = String::from_utf8_lossy(&out.stderr);
+        Err(if enc == BdEncoder::Nvenc {
+            nvenc_failure_reason(&log)
+        } else {
+            log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unbekannter Fehler").trim().into()
+        })
     }
 }
 
@@ -634,6 +639,25 @@ impl IntoOwnedFile for std::io::PipeReader {
     }
 }
 
+/// Hardware decoders tried for a GPU vendor, in order; without a vendor all of them.
+pub fn hwaccel_candidates(mode: HwAccelMode) -> &'static [&'static str] {
+    if cfg!(windows) {
+        match mode {
+            HwAccelMode::Nvidia => &["d3d11va", "cuda"],
+            HwAccelMode::Amd => &["d3d11va"],
+            HwAccelMode::Intel => &["qsv", "d3d11va"],
+            HwAccelMode::None => &["cuda", "d3d11va", "qsv"],
+        }
+    } else {
+        match mode {
+            HwAccelMode::Nvidia => &["vaapi", "cuda"],
+            HwAccelMode::Amd => &["vaapi"],
+            HwAccelMode::Intel => &["qsv", "vaapi"],
+            HwAccelMode::None => &["cuda", "vaapi", "qsv"],
+        }
+    }
+}
+
 /// Maps an ffmpeg NVENC failure log to a short German reason.
 pub fn nvenc_failure_reason(log: &str) -> String {
     let l = log.to_ascii_lowercase();
@@ -660,6 +684,15 @@ mod tests {
     fn stray_quote_in_path() {
         let p = path_entries(std::ffi::OsStr::new(r#"C:\a;C:\Program Files\dotnet";C:\b; ;"C:\c d""#));
         assert_eq!(p, vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\Program Files\dotnet"), PathBuf::from(r"C:\b"), PathBuf::from(r"C:\c d")]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn hwaccel_lists() {
+        assert_eq!(hwaccel_candidates(HwAccelMode::Nvidia), ["d3d11va", "cuda"]);
+        assert_eq!(hwaccel_candidates(HwAccelMode::Amd), ["d3d11va"]);
+        assert_eq!(hwaccel_candidates(HwAccelMode::Intel), ["qsv", "d3d11va"]);
+        assert_eq!(hwaccel_candidates(HwAccelMode::None), ["cuda", "d3d11va", "qsv"]);
     }
 
     #[test]

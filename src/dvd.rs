@@ -27,6 +27,7 @@ use crate::author::{
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
 use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
 use crate::menu_anim;
+use crate::config::HwAccelMode;
 use crate::i18n::tr;
 use crate::tf;
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
@@ -343,8 +344,9 @@ pub struct BuildOptions {
     /// Decode the sources on the GPU when a working hardware decoder is found (falls back to
     /// the CPU otherwise).
     pub hw_decode: bool,
-    /// Blu-ray: encode H.264 with NVIDIA NVENC when it works (1080i rates and failures use x264).
-    pub bd_hw_encode: bool,
+    /// GPU vendor: Blu-ray H.264 hardware encoder when it works (1080i rates and failures use
+    /// x264) and, with `hw_decode`, the order of the GPU decoders tried.
+    pub hw_accel: HwAccelMode,
     /// Play the intro animations of a ConvertX template's menu pages (off = the
     /// finished pages straight away, as without animation data).
     pub menu_animations: bool,
@@ -886,12 +888,15 @@ async fn encode_title(
     video_kbps: u32,
     two_pass: bool,
     fast: bool,
-    hw_decode: bool,
+    hw_decode: Option<HwAccelMode>,
     tv: TvStandard,
     resolution: Resolution,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>), BuildError> {
-    let hwaccel = if hw_decode { tools.probe_hwaccel(&t.info.path).await } else { None };
+    let hwaccel = match hw_decode {
+        Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
+        None => None,
+    };
     let audio: Vec<_> = t.audio.iter().map(|&a| &t.info.audio[a]).collect();
     let audio_filters = if t.loudnorm {
         let tracks: Vec<_> = audio.iter().map(|a| Some(*a)).collect();
@@ -1661,7 +1666,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .map(|t| {
             let (t, tools, work) = (t.clone(), tools.clone(), work.clone());
             let video_kbps = plan.video_kbps.min(DVD_MAX_TOTAL_KBPS - t.audio_kbps());
-            let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode);
+            let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
                 encode_title(&tools, &t, &work, video_kbps, two_pass, fast, hw_decode, tv, resolution, progress).await
             })

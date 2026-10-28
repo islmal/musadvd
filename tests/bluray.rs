@@ -12,6 +12,8 @@ use std::sync::OnceLock;
 use convertx_rust::author::{Resolution, TvStandard};
 use convertx_rust::burner::udf250;
 use convertx_rust::calculator::DiscType;
+use convertx_rust::config::HwAccelMode;
+use convertx_rust::encoder::BdEncoder;
 use convertx_rust::dvd::{self, BuildOptions, BuildReport, StreamSelection};
 use convertx_rust::tools::Toolchain;
 
@@ -221,43 +223,60 @@ fn hd720_ntsc_single_clip() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// NVENC on (the app default): with a working GPU/driver the encode uses it, otherwise it falls back
-/// to x264 with a warning; either way the result is the same High@4.1 stream.
+/// Hardware encoder selected (NVIDIA, Intel, AMD): with a working GPU/driver the encode uses it,
+/// otherwise it falls back to x264 with a warning; either way the result is the same High@4.1 stream.
 #[test]
-fn hw_encode_uses_nvenc_or_falls_back() {
+fn hw_encode_uses_hw_encoder_or_falls_back() {
     let Some((rt, tools)) = tools() else { return };
-    let dir = std::env::temp_dir().join(format!("cx_bluray_nvenc_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let (a, _) = make_clips(&tools, &dir.join("clips"));
-    let opts = BuildOptions {
-        inputs: vec![a],
-        disc: DiscType::Bd25,
-        output: dir.join("out"),
-        resolution: Resolution::Hd720,
-        fast_encode: true,
-        bd_hw_encode: true,
-        selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None, ..StreamSelection::default() }],
-        ..BuildOptions::default()
-    };
-    let (mut steps, mut warnings) = (Vec::new(), Vec::new());
-    let report = rt
-        .block_on(dvd::build_dvd(&opts, &mut |e| match e {
-            dvd::Event::Step(s) => steps.push(s),
-            dvd::Event::Warning(w) => warnings.push(w),
-            _ => {}
-        }))
-        .unwrap_or_else(|e| panic!("build failed: {e}"));
-    let nvenc = rt.block_on(tools.probe_nvenc());
-    match &nvenc {
-        Ok(()) => assert!(steps.iter().any(|s| s.contains("NVENC (h264_nvenc)")), "{steps:?}"),
-        Err(reason) => assert!(warnings.iter().any(|w| w.contains("x264") && w.contains(reason.as_str())), "{reason}: {warnings:?}"),
+    for mode in [HwAccelMode::Nvidia, HwAccelMode::Intel, HwAccelMode::Amd] {
+        let enc = mode.bd_encoder().unwrap();
+        let dir = std::env::temp_dir().join(format!("cx_bluray_hw_{mode:?}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, _) = make_clips(&tools, &dir.join("clips"));
+        let opts = BuildOptions {
+            inputs: vec![a],
+            disc: DiscType::Bd25,
+            output: dir.join("out"),
+            resolution: Resolution::Hd720,
+            fast_encode: true,
+            hw_accel: mode,
+            selections: vec![StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), label: None, chapters: None, ..StreamSelection::default() }],
+            ..BuildOptions::default()
+        };
+        let (mut steps, mut warnings) = (Vec::new(), Vec::new());
+        let report = rt
+            .block_on(dvd::build_dvd(&opts, &mut |e| match e {
+                dvd::Event::Step(s) => steps.push(s),
+                dvd::Event::Warning(w) => warnings.push(w),
+                _ => {}
+            }))
+            .unwrap_or_else(|e| panic!("{mode:?}: build failed: {e}"));
+        match rt.block_on(tools.probe_hw_encoder(enc)) {
+            Ok(()) => assert!(steps.iter().any(|s| s.contains(enc.label())), "{mode:?}: {steps:?}"),
+            // The reason text can differ between two probe runs (pointer addresses in ffmpeg logs).
+            Err(reason) => assert!(warnings.iter().any(|w| w.contains("x264") && w.contains(enc.label())), "{mode:?} {reason}: {warnings:?}"),
+        }
+        let m2ts = report.project_dir.join("BDMV/STREAM/00000.m2ts");
+        let v = probe(&tools, &m2ts, "v:0", "stream=codec_name,width,height,profile,level");
+        for want in ["codec_name=h264", "width=1280", "profile=High", "level=41"] {
+            assert!(v.contains(want), "{mode:?}: {want} in {v}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
-    let m2ts = report.project_dir.join("BDMV/STREAM/00000.m2ts");
-    let v = probe(&tools, &m2ts, "v:0", "stream=codec_name,width,height,profile,level");
-    for want in ["codec_name=h264", "width=1280", "profile=High", "level=41"] {
-        assert!(v.contains(want), "{want} in {v}");
+}
+
+/// Guards against option typos for encoders we cannot run here (no Intel/AMD GPU): every private
+/// option we pass must be listed by `ffmpeg -h encoder=<name>`.
+#[test]
+fn hw_encoder_options_exist() {
+    let Some((_rt, tools)) = tools() else { return };
+    for enc in [BdEncoder::Qsv, BdEncoder::Amf] {
+        let out = std::process::Command::new(&tools.ffmpeg).args(["-hide_banner", "-h"]).arg(format!("encoder={}", enc.codec())).output().unwrap();
+        let help = String::from_utf8_lossy(&out.stdout);
+        for opt in enc.bd_options().into_iter().filter(|o| o.starts_with('-')) {
+            assert!(help.lines().any(|l| l.split_whitespace().next() == Some(opt)), "{opt} missing for {}: {help}", enc.codec());
+        }
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A 6 s 1280×720 clip with one 5.1 track at 48 kHz in `codec` (`ac3` copies, `dca` is experimental).
@@ -639,7 +658,7 @@ mod menus {
             output: dir.join("out"),
             resolution: Resolution::Hd720,
             fast_encode: true,
-            bd_hw_encode: false,
+            hw_accel: HwAccelMode::None,
             project_name: Some("BDMENU".into()),
             custom_layout: Some(layout),
             selections: vec![

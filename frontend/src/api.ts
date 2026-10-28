@@ -246,7 +246,7 @@ export interface AppSettings {
   default_subtitle_language: string;
   force_first_subtitle: boolean;
   hw_decode: boolean;
-  bd_hw_encode: boolean;
+  hw_accel_mode: "none" | "nvidia" | "intel" | "amd";
   menu_animations: boolean;
   fast_encode: boolean;
   audio_mode: "auto" | "ac3" | "lpcm";

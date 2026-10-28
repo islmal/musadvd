@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::author::{PlaybackOptions, Resolution, TvStandard};
-use crate::encoder::{AudioMode, Deinterlace, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
+use crate::encoder::{AudioMode, BdEncoder, Deinterlace, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::i18n::{available_languages, tr, UiLang};
@@ -42,6 +42,32 @@ pub const BURN_SPEEDS: &[&str] = &["auto", "max", "16", "12", "8", "6", "4", "2.
 /// Choices that are stored but not implemented by the engine yet (none since Half D1, SIF and
 /// the SP/MP/LP profiles were added; kept for the GUI's "noch nicht unterstützt" marks).
 pub const UNSUPPORTED_CHOICES: &[&str] = &[];
+
+/// GPU vendor for Blu-ray/AVCHD encoding and GPU decoding. Unknown values in a settings file
+/// become the default instead of failing the whole file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HwAccelMode {
+    None,
+    Intel,
+    Amd,
+    /// Last: `#[serde(other)]` has to be on the last variant.
+    #[default]
+    #[serde(other)]
+    Nvidia,
+}
+
+impl HwAccelMode {
+    /// H.264 encoder of the vendor; `None` = software only.
+    pub fn bd_encoder(self) -> Option<BdEncoder> {
+        match self {
+            HwAccelMode::None => None,
+            HwAccelMode::Nvidia => Some(BdEncoder::Nvenc),
+            HwAccelMode::Intel => Some(BdEncoder::Qsv),
+            HwAccelMode::Amd => Some(BdEncoder::Amf),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -77,8 +103,9 @@ pub struct AppSettings {
     pub process_priority: String,
     /// Decode the sources on the GPU (CUDA/D3D11VA/QSV) when available.
     pub hw_decode: bool,
-    /// Blu-ray: encode with NVIDIA NVENC when available (falls back to x264).
-    pub bd_hw_encode: bool,
+    /// GPU vendor for Blu-ray/AVCHD H.264 encoding and GPU decoding (falls back to x264/CPU).
+    // shortcut: old bd_hw_encode=false is not migrated (NVENC back on), add a migration if users complain
+    pub hw_accel_mode: HwAccelMode,
     /// Play the intro animations of template menus.
     pub menu_animations: bool,
     /// Draft encoding without trellis quantisation (about 40 % faster, slightly lower quality).
@@ -150,7 +177,7 @@ impl Default for AppSettings {
             max_concurrent_encodes: default_jobs(),
             process_priority: PROCESS_PRIORITIES[0].into(),
             hw_decode: false,
-            bd_hw_encode: true,
+            hw_accel_mode: HwAccelMode::default(),
             menu_animations: true,
             fast_encode: false,
             auto_chapter_enabled: true,
@@ -802,7 +829,7 @@ impl AppSettings {
         opts.video = self.video_processing();
         opts.loudnorm = self.loudnorm;
         opts.hw_decode = self.hw_decode;
-        opts.bd_hw_encode = self.bd_hw_encode;
+        opts.hw_accel = self.hw_accel_mode;
         opts.menu_animations = self.menu_animations;
         opts.fast_encode = self.fast_encode;
         if opts.project_name.is_none() && !self.default_volume_label.is_empty() {
@@ -1030,10 +1057,22 @@ mod burn_settings_tests {
 
         let mut opts = BuildOptions::default();
         s.apply_to(&mut opts);
-        assert!(opts.hw_decode && opts.fast_encode && opts.bd_hw_encode);
-        assert!(AppSettings::default().bd_hw_encode, "NVENC is on by default");
+        assert!(opts.hw_decode && opts.fast_encode && opts.hw_accel == HwAccelMode::Nvidia);
+        assert_eq!(AppSettings::default().hw_accel_mode, HwAccelMode::Nvidia, "NVENC is on by default");
         let old: AppSettings = serde_json::from_str(r#"{"hw_decode":true}"#).unwrap();
-        assert!(old.bd_hw_encode, "settings files without the field keep the default");
+        assert_eq!(old.hw_accel_mode, HwAccelMode::Nvidia, "settings files without the field keep the default");
+        let amd = AppSettings { hw_accel_mode: HwAccelMode::Amd, ..AppSettings::default() };
+        let mut o = BuildOptions::default();
+        amd.apply_to(&mut o);
+        assert_eq!(o.hw_accel, HwAccelMode::Amd);
+        // Lowercase round trip; an unknown value falls back without dropping the other fields.
+        for (s, m) in [("none", HwAccelMode::None), ("nvidia", HwAccelMode::Nvidia), ("intel", HwAccelMode::Intel), ("amd", HwAccelMode::Amd)] {
+            let p: AppSettings = serde_json::from_str(&format!(r#"{{"hw_accel_mode":"{s}"}}"#)).unwrap();
+            assert_eq!(p.hw_accel_mode, m);
+            assert!(serde_json::to_string(&p).unwrap().contains(&format!(r#""hw_accel_mode":"{s}""#)));
+        }
+        let bad: AppSettings = serde_json::from_str(r#"{"hw_accel_mode":"foo","tv_standard":"NTSC"}"#).unwrap();
+        assert_eq!((bad.hw_accel_mode, bad.tv_standard.as_str()), (HwAccelMode::Nvidia, "NTSC"));
         assert!(old.menu_animations && opts.menu_animations, "menu intros are on by default");
         assert_eq!(opts.project_name.as_deref(), Some("URLAUB_AM_MEER_2025_"), "default project name");
         // An explicit project name wins.

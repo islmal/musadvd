@@ -142,7 +142,11 @@ enum Command {
         /// QSV; falls back to the CPU).
         #[arg(long)]
         hw_decode: bool,
-        /// Blu-ray: do not use NVIDIA NVENC for H.264 (always x264).
+        /// GPU vendor for Blu-ray H.264 encoding and the GPU decoder order (falls back to
+        /// x264/CPU when the GPU does not work).
+        #[arg(long, value_enum, default_value = "nvidia")]
+        hw_accel: HwAccelArg,
+        /// Same as --hw-accel none (wins over --hw-accel).
         #[arg(long)]
         no_hw_encode: bool,
         /// Skip the intro animations of template menus.
@@ -292,6 +296,25 @@ fn parse_burn_speed(s: &str) -> Result<String, String> {
 
 fn parse_title(s: &str) -> Result<TitleSpec, String> {
     TitleSpec::parse_cli(s).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HwAccelArg {
+    None,
+    Nvidia,
+    Intel,
+    Amd,
+}
+
+impl From<HwAccelArg> for convertx_rust::config::HwAccelMode {
+    fn from(a: HwAccelArg) -> Self {
+        match a {
+            HwAccelArg::None => Self::None,
+            HwAccelArg::Nvidia => Self::Nvidia,
+            HwAccelArg::Intel => Self::Intel,
+            HwAccelArg::Amd => Self::Amd,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -788,6 +811,7 @@ fn main() -> ExitCode {
             motion_silent,
             jobs,
             hw_decode,
+            hw_accel,
             no_hw_encode,
             no_menu_animations,
             audio,
@@ -865,7 +889,7 @@ fn main() -> ExitCode {
                 selections,
                 parallel_jobs: jobs.map(usize::from),
                 hw_decode,
-                bd_hw_encode: !no_hw_encode,
+                hw_accel: if no_hw_encode { HwAccelArg::None } else { hw_accel }.into(),
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
                 track_label_mode: track_labels.into(),

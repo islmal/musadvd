@@ -22,6 +22,7 @@ use crate::bd_menu::{self, BdNav};
 use crate::hdmv;
 use crate::bd_author::{BdProject, BdSubTrack, BdTitleFiles, SubKind};
 use crate::calculator::{Clamp, DiscType, EncodingProfile};
+use crate::config::HwAccelMode;
 use crate::dvd::{
     apply_selection, available_cpus, cancellable, chapter_starts, custom_chapters, default_jobs, display_path, job, remove_old_output,
     run_limited, safe_folder_name, select_streams, unique_dir, AtPath, BuildError, BuildOptions, BuildPhase, BuildReport,
@@ -35,9 +36,15 @@ use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
 use crate::tools::Toolchain;
 
-/// Parallel NVENC encodes. GeForce drivers limit concurrent sessions; the CPU-side scaling is the
-/// real limit anyway. shortcut: not measured yet, set after the real-GPU run.
-const NVENC_MAX_JOBS: usize = 4;
+/// Parallel hardware encodes. GeForce drivers limit concurrent NVENC sessions; the CPU-side scaling
+/// is the real limit anyway. shortcut: not measured yet (QSV/AMF not at all), set after the real-GPU run.
+const HW_MAX_JOBS: usize = 4;
+
+/// Encoder per title: `fake_interlaced` (1080i) rates cannot be flagged by the hardware
+/// encoders and always use x264.
+fn title_encoders(hw: Option<BdEncoder>, rates: impl Iterator<Item = BdRate>) -> Vec<BdEncoder> {
+    rates.map(|r| if r.fake_interlaced { BdEncoder::X264 } else { hw.unwrap_or(BdEncoder::X264) }).collect()
+}
 
 /// Parallel encodes of moving menus. shortcut: not measured, raise once RAM use per menu is known.
 const MOTION_MENU_MAX_JOBS: usize = 2;
@@ -209,13 +216,16 @@ async fn encode_bd_title(
     layout: &Layout,
     work: &Path,
     video_kbps: u32,
-    (two_pass, fast, hw_decode): (bool, bool, bool),
+    (two_pass, fast, hw_decode): (bool, bool, Option<HwAccelMode>),
     encoder: BdEncoder,
     (maxrate_kbps, bufsize_kbit): (u32, u32),
     resolution: Resolution,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>, f64), BuildError> {
-    let hwaccel = if hw_decode { tools.probe_hwaccel(&t.info.path).await } else { None };
+    let hwaccel = match hw_decode {
+        Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
+        None => None,
+    };
     let duration = t.info.duration_secs;
 
     let mut extract: Vec<(usize, &SubtitleStream)> = Vec::new();
@@ -708,25 +718,22 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         (false, true) => "1-Pass, schnell",
         (false, false) => "1-Pass",
     };
-    // NVENC cannot flag 1080i, so titles with fake-interlaced rates use x264.
-    let nvenc_ok = if !opts.bd_hw_encode {
-        false
-    } else {
-        match tools.probe_nvenc().await {
-            Ok(()) => true,
+    let hw = match opts.hw_accel.bd_encoder() {
+        None => None,
+        Some(enc) => match tools.probe_hw_encoder(enc).await {
+            Ok(()) => Some(enc),
             Err(reason) => {
-                warn(log, tf!(opts.ui_lang, "bd_nvenc_unavailable", reason = reason));
-                false
+                warn(log, tf!(opts.ui_lang, "bd_hw_unavailable", encoder = enc.label(), reason = reason));
+                None
             }
-        }
+        },
     };
-    let encoders: Vec<BdEncoder> =
-        titles.iter().map(|t| if nvenc_ok && !t.rate.fake_interlaced { BdEncoder::Nvenc } else { BdEncoder::X264 }).collect();
-    if nvenc_ok {
-        let nv = encoders.iter().filter(|e| **e == BdEncoder::Nvenc).count();
-        log(Event::Step(tf!(opts.ui_lang, "bd_encoder_nvenc", nv = nv, count = count)));
+    let encoders = title_encoders(hw, titles.iter().map(|t| t.rate));
+    if let Some(enc) = hw {
+        let nv = encoders.iter().filter(|e| **e == enc).count();
+        log(Event::Step(tf!(opts.ui_lang, "bd_encoder_hw", encoder = enc.label(), nv = nv, count = count)));
     }
-    let encode_jobs = if encoders.iter().all(|e| *e == BdEncoder::Nvenc) { heavy_jobs.min(NVENC_MAX_JOBS) } else { heavy_jobs }.min(count);
+    let encode_jobs = if encoders.iter().all(|e| e.is_hw()) { heavy_jobs.min(HW_MAX_JOBS) } else { heavy_jobs }.min(count);
     log(Event::Step(tf!(opts.ui_lang, "bd_encode_titles", count = count, passes = passes, jobs = encode_jobs, kbps = plan.video_kbps)));
     log(Event::Phase(BuildPhase::Encoding { index: 0, count }));
     let limits = opts.disc.limits();
@@ -740,7 +747,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         .map(|(t, &encoder)| {
             let (t, tools, work, layout) = (t.clone(), tools.clone(), work.clone(), layout.clone());
             let video_kbps = plan.video_kbps.min(max_total.saturating_sub(t.audio_kbps(&layout)));
-            let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode);
+            let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
                 encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, resolution, progress).await
             })
@@ -904,6 +911,18 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_encoders_per_mode() {
+        let prog = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let i1080 = BdRate { fps: (25, 1), fake_interlaced: true };
+        for mode in [HwAccelMode::Nvidia, HwAccelMode::Intel, HwAccelMode::Amd] {
+            let enc = mode.bd_encoder().unwrap();
+            assert_eq!(title_encoders(Some(enc), [i1080, prog].into_iter()), vec![BdEncoder::X264, enc]);
+        }
+        assert_eq!(HwAccelMode::None.bd_encoder(), None);
+        assert_eq!(title_encoders(None, [i1080, prog].into_iter()), vec![BdEncoder::X264; 2]);
+    }
 
     fn rate(f: &[f64], tv: TvStandard, res: Resolution) -> (u32, u32, bool) {
         let r = bd_frame_rate(f, tv, res);

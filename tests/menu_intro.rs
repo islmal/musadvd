@@ -11,6 +11,7 @@ use std::path::Path;
 use convertx_rust::author::MenuFrame;
 use convertx_rust::bd::BdRate;
 use convertx_rust::bd_author::menu_job;
+use convertx_rust::config::HwAccelMode;
 use convertx_rust::encoder::{bd_custom_menu_args, BackgroundOverlay, CustomMenuMedia, MenuBackground};
 use convertx_rust::igs::{self, IgButton, IgMenu, IgObject};
 use convertx_rust::tools::Toolchain;
@@ -424,7 +425,7 @@ mod build {
             output: dir.join("out"),
             resolution: Resolution::Hd720,
             fast_encode: true,
-            bd_hw_encode: false,
+            hw_accel: HwAccelMode::None,
             keep_work: true,
             menu_animations,
             project_name: Some("INTRO".into()),
@@ -636,7 +637,7 @@ mod build {
             output: dir.join("out"),
             resolution: Resolution::Hd720,
             fast_encode: true,
-            bd_hw_encode: false,
+            hw_accel: HwAccelMode::None,
             menu_animations: true,
             template: tpl.to_path_buf(),
             motion_duration: Some(3.0),
