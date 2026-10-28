@@ -1,3 +1,4 @@
+//! Origin: port of dvdauthor (Copyright (C) 2002 Scott Smith, GPL-2.0-or-later); see THIRD_PARTY_NOTICES.md.
 //! IFO / BUP writer for DVD-Video: video manager (`VIDEO_TS.IFO`) and video title sets
 //! (`VTS_nn_0.IFO`), with all tables and program chains.
 //!

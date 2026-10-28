@@ -1,3 +1,4 @@
+//! Origin: derived from tsMuxer 2.7.0 (Apache-2.0, justdan96/tsMuxer); see THIRD_PARTY_NOTICES.md.
 //! Native BDAV muxer: H.264 + audio + PGS/IGS of one title or menu into an `.m2ts` with its clip
 //! and playlist files. Replaces tsMuxeR 2.7.0 (Apache-2.0; derived from its scheduling, see
 //! STATUS.md): access units are written in DTS order, with a PCR packet (PID 0x1001) every few

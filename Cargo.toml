@@ -9,7 +9,8 @@ resolver = "2"
 name = "convertx-rust"
 version = "0.1.0"
 edition = "2021"
-description = "Clean-room DVD authoring helpers: ConvertX template parser and DVD5/DVD9 bitrate calculator"
+description = "DVD, Blu-ray and AVCHD authoring engine and CLI with ConvertX template menus and Burn Studio"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "convertx_rust"
@@ -26,7 +27,7 @@ clap = { version = "4", features = ["derive"] }
 image = "0.25"
 tokio = { version = "1", features = ["full"] }
 regex = "1"
-# Text rendering for menu labels (pure Rust, uses the Windows TTF fonts).
+# Text rendering for menu labels (pure Rust, uses the bundled DejaVu font).
 ab_glyph = "0.2"
 # 8-bit palette PNG output for spumux subpicture masks (same version `image` uses).
 png = "0.18"

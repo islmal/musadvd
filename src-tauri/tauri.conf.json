@@ -32,7 +32,8 @@
     "resources": {
       "../bin/*.exe": "bin/",
       "../frontend/src/locales/*.json": "locales/",
-      "../bin/dvdauthor-COPYING.txt": "bin/dvdauthor-COPYING.txt"
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     }
   },
   "plugins": {

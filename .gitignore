@@ -10,7 +10,7 @@ dist/
 frontend/dist/
 
 # Third-party tool binaries: ffmpeg/ffprobe are ~220 MB each (above GitHub's file limit) –
-# copy the real ffmpeg.exe/ffprobe.exe into bin/ locally (see STATUS.md §4.1).
+# copy the real ffmpeg.exe/ffprobe.exe into bin/ locally (see README.md).
 # The dvdauthor oracle (tools/oracle) is built on demand into bin/ and ignored.
 bin/ffmpeg.exe
 bin/ffprobe.exe

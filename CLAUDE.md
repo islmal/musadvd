@@ -47,5 +47,4 @@ cargo check --lib --tests --target x86_64-unknown-linux-gnu             # Unix b
 - Patch scripts through Bash heredocs lose backslashes (regexes, `\n`, Windows paths) – write
   such scripts to a file first.
 - Source files are LF (`core.autocrlf=true`); an editor writing CRLF is harmless.
-- Never run a real burn / write to a drive without the user's explicit go (hardware: Pioneer
-  BDR-209M on `F:`).
+- Never run a real burn / write to a drive without the user's explicit go.

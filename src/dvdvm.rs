@@ -1,3 +1,4 @@
+//! Origin: port of dvdauthor (Copyright (C) 2002 Scott Smith, GPL-2.0-or-later); see THIRD_PARTY_NOTICES.md.
 //! DVD virtual-machine command compiler: the command subset of dvdauthor's `<pre>`, `<post>`,
 //! `<button>` and `<fpc>` strings (see `author.rs`) compiled to 8-byte VM instructions.
 //!

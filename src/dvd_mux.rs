@@ -1,3 +1,4 @@
+//! Origin: port of dvdauthor (Copyright (C) 2002 Scott Smith, GPL-2.0-or-later); see THIRD_PARTY_NOTICES.md.
 //! DVD-Video VOB processing: scanning the program streams of titles and menus, marking cells and
 //! programs, writing the output VOB files and filling in their NAV packs.
 //!

@@ -1,3 +1,4 @@
+//! Origin: behaviour of dvdauthor's spumux (Copyright (C) 2002, 2003 Scott Smith, Jan Panteltje, GPL-2.0-or-later); see THIRD_PARTY_NOTICES.md.
 //! Native replacement for `spumux -m dvd` on bitmap subpictures: encodes palette PNGs into DVD
 //! subpicture units (RLE fields + SP_DCSQ command sequences) and multiplexes them as private
 //! stream 1 (`0xBD`) PES packets into an MPEG-2 program stream.

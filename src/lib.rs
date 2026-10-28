@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of ConvertX-style DVD authoring building blocks.
+//! DVD, Blu-ray and AVCHD authoring building blocks (parts are ports of GPL code, see THIRD_PARTY_NOTICES.md).
 
 pub mod author;
 pub mod bd;

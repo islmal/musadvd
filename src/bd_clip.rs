@@ -1,3 +1,4 @@
+//! Origin: derived from tsMuxer 2.7.0 (Apache-2.0, justdan96/tsMuxer); see THIRD_PARTY_NOTICES.md.
 //! Clip information (`.clpi`) and playlist (`.mpls`) files of one muxed clip, in the layout
 //! tsMuxeR 2.7.0 writes with `--blu-ray` (version `0200`; port of `CLPIParser::compose*` and
 //! `MPLSParser::compose*`, field by field checked against its output).
