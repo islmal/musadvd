@@ -391,6 +391,9 @@ fn audio_track_args(n: usize, out: AudioOut, filter: Option<&str>) -> Vec<OsStri
     a
 }
 
+/// Resampler of re-encoded DVD audio: 48 kHz with gap filling (see `EncodeJob::encode_args`).
+const DVD_AUDIO_SYNC: &str = "aresample=48000:async=1:min_hard_comp=0.01";
+
 /// EBU R128 target: integrated loudness, true peak and loudness range.
 const LOUDNORM_TARGET: &str = "I=-23:TP=-1:LRA=20";
 
@@ -597,6 +600,8 @@ impl EncodeJob<'_> {
         let mut a: Vec<OsString> = [
             "-c:v", "mpeg2video", "-threads", "0", "-pix_fmt", "yuv420p", "-r", self.tv.frame_rate(), "-g", &gop, "-bf", "2",
             "-dc", "9", "-qmin", "2", "-mbd", "rd",
+            // Closed GOPs: dvdauthor warns on every chapter cell otherwise; mpeg2video refuses +cgop with scene-change detection.
+            "-flags", "+cgop", "-sc_threshold", "1000000000",
         ]
         .map(s)
         .to_vec();
@@ -710,7 +715,12 @@ impl EncodeJob<'_> {
             a.extend([s("-map"), format!("0:{}", track.index).into()]);
         }
         for (n, out) in self.audio_outs().into_iter().enumerate() {
-            a.extend(audio_track_args(n, out, filter_of(&self.audio_filters, n)));
+            // async fills timestamp gaps with silence, so the AC-3 PTS stay on the 2880-tick grid dvd_mux checks.
+            let filter = match filter_of(&self.audio_filters, n) {
+                Some(f) => format!("{f},{DVD_AUDIO_SYNC}"),
+                None => DVD_AUDIO_SYNC.to_string(),
+            };
+            a.extend(audio_track_args(n, out, Some(&filter)));
         }
         a.extend(["-sn", "-dn", "-f", "dvd", "-muxrate", &format!("{DVD_MUX_RATE_KBPS}k"), "-packetsize", "2048"].map(s));
         a.push(output.into());
@@ -808,6 +818,15 @@ pub fn nvenc_bd_options() -> [&'static str; 16] {
     ]
 }
 
+/// Blu-ray Intel Quick Sync private options (verified against `ffmpeg -h encoder=h264_qsv`);
+/// slices and closed GOP are the generic `-slices` / `-flags +cgop` in [`BdEncodeJob::qsv_args`].
+pub const QSV_BD_OPTIONS: &[&str] = &["-aud", "1", "-forced_idr", "1", "-pic_timing_sei", "1"];
+
+/// Blu-ray AMD AMF options (verified against `ffmpeg -h encoder=h264_amf`). AMF has no slice
+/// option. shortcut: slice count / BD compliance of AMF output unchecked, verify on AMD hardware.
+pub const AMF_BD_OPTIONS: &[&str] =
+    &["-usage", "transcoding", "-rc", "vbr_peak", "-enforce_hrd", "1", "-aud", "1", "-forced_idr", "1"];
+
 /// Default peak video rate of the Blu-ray encodes (x264 VBV, kbit/s) and its buffer.
 pub const BD_MAXRATE_KBPS: u32 = 40_000;
 pub const BD_BUFSIZE_KBIT: u32 = 30_000;
@@ -829,6 +848,45 @@ pub enum BdEncoder {
     X264,
     /// NVIDIA `h264_nvenc`; its "2-pass" is the single-run `-multipass fullres`.
     Nvenc,
+    /// Intel Quick Sync `h264_qsv`; no 2-pass.
+    Qsv,
+    /// AMD `h264_amf`; no 2-pass.
+    Amf,
+}
+
+impl BdEncoder {
+    pub fn label(self) -> &'static str {
+        match self {
+            BdEncoder::X264 => "x264",
+            BdEncoder::Nvenc => "NVENC (h264_nvenc)",
+            BdEncoder::Qsv => "QSV (h264_qsv)",
+            BdEncoder::Amf => "AMF (h264_amf)",
+        }
+    }
+
+    pub fn is_hw(self) -> bool {
+        self != BdEncoder::X264
+    }
+
+    /// ffmpeg codec name of a hardware encoder.
+    pub fn codec(self) -> &'static str {
+        match self {
+            BdEncoder::X264 => "libx264",
+            BdEncoder::Nvenc => "h264_nvenc",
+            BdEncoder::Qsv => "h264_qsv",
+            BdEncoder::Amf => "h264_amf",
+        }
+    }
+
+    /// Blu-ray options shared by the encode and the availability probe.
+    pub fn bd_options(self) -> Vec<&'static str> {
+        match self {
+            BdEncoder::X264 => vec![],
+            BdEncoder::Nvenc => nvenc_bd_options().to_vec(),
+            BdEncoder::Qsv => QSV_BD_OPTIONS.to_vec(),
+            BdEncoder::Amf => AMF_BD_OPTIONS.to_vec(),
+        }
+    }
 }
 
 /// One title encoded as H.264 + AC-3 into `{stem}.mkv` for the BDAV muxer.
@@ -891,8 +949,11 @@ impl BdEncodeJob<'_> {
     }
 
     fn video_codec_args(&self) -> Vec<OsString> {
-        if self.encoder == BdEncoder::Nvenc {
-            return self.nvenc_args();
+        match self.encoder {
+            BdEncoder::Nvenc => return self.nvenc_args(),
+            BdEncoder::Qsv => return self.qsv_args(),
+            BdEncoder::Amf => return self.amf_args(),
+            BdEncoder::X264 => {}
         }
         let mut x264 = String::from("slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1");
         if self.rate.fake_interlaced {
@@ -923,6 +984,34 @@ impl BdEncodeJob<'_> {
             a.extend(["-multipass", "fullres"].map(OsString::from));
         }
         a.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(OsString::from));
+        a
+    }
+
+    /// Rate control, GOP and colour tags shared by the QSV and AMF encodes.
+    fn hw_rate_args(&self, a: &mut Vec<OsString>) {
+        a.extend(["-b:v".into(), format!("{}k", self.video_kbps).into()]);
+        a.extend(["-maxrate".into(), format!("{}k", self.maxrate_kbps).into(), "-bufsize".into(), format!("{}k", self.bufsize_kbit).into()]);
+        a.extend(["-g".into(), self.rate.keyint().to_string().into(), "-bf".into(), "3".into()]);
+        a.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(OsString::from));
+    }
+
+    fn qsv_args(&self) -> Vec<OsString> {
+        let preset = if self.fast { "veryfast" } else { "slow" };
+        let mut a: Vec<OsString> =
+            ["-c:v", "h264_qsv", "-preset", preset, "-profile:v", "high", "-level:v", "41", "-slices", "4", "-flags", "+cgop"]
+                .map(OsString::from)
+                .to_vec();
+        a.extend(QSV_BD_OPTIONS.iter().map(OsString::from));
+        self.hw_rate_args(&mut a);
+        a
+    }
+
+    fn amf_args(&self) -> Vec<OsString> {
+        let quality = if self.fast { "speed" } else { "quality" };
+        let mut a: Vec<OsString> =
+            ["-c:v", "h264_amf", "-quality", quality, "-profile:v", "high", "-level:v", "4.1"].map(OsString::from).to_vec();
+        a.extend(AMF_BD_OPTIONS.iter().map(OsString::from));
+        self.hw_rate_args(&mut a);
         a
     }
 
@@ -1745,7 +1834,10 @@ mod tests {
         assert!(joined.contains("-g 12 -bf 2"));
         assert!(joined.contains("-b:v 5000k -maxrate 9140k -bufsize 1835k -aspect 16:9"));
         // Video and both AC-3 tracks go straight into one DVD program stream (no mux pass).
-        assert!(joined.contains("-map 0:1 -map 0:2 -c:a:0 ac3 -ar:a:0 48000 -b:a:0 448k -ac:a:0 6 -c:a:1 ac3 -ar:a:1 48000 -b:a:1 192k -ac:a:1 2"), "{joined}");
+        assert!(joined.contains("-map 0:1 -map 0:2 -c:a:0 ac3 -ar:a:0 48000 -b:a:0 448k -ac:a:0 6 -filter:a:0 aresample=48000:async=1:min_hard_comp=0.01 -c:a:1 ac3 -ar:a:1 48000 -b:a:1 192k -ac:a:1 2 -filter:a:1 aresample=48000:async=1:min_hard_comp=0.01"), "{joined}");
+        assert!(joined.contains("-flags +cgop -sc_threshold 1000000000"), "{joined}");
+        let first: Vec<String> = job.first_pass_args().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(first.join(" ").contains("-flags +cgop -sc_threshold 1000000000"));
         assert!(joined.ends_with("-sn -dn -f dvd -muxrate 10080k -packetsize 2048 pipe:1"), "{joined}");
         assert!(!joined.contains(".m2v") && !joined.contains(".ac3") && !joined.contains("srt"));
 
@@ -1768,7 +1860,7 @@ mod tests {
         let strings = |a: Vec<OsString>| a.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
         let without_trellis = |a: Vec<String>| {
             let i = a.iter().position(|x| x == "-trellis").expect("default encode uses trellis");
-            assert_eq!(a[i - 2..=i + 1], ["-mbd", "rd", "-trellis", "1"]);
+            assert_eq!(a[i - 2..=i + 1], ["-sc_threshold", "1000000000", "-trellis", "1"]);
             [&a[..i], &a[i + 2..]].concat()
         };
         let fast = EncodeJob { fast: true, two_pass: true, ..job.clone() };
@@ -1778,7 +1870,7 @@ mod tests {
             (strings(fast.first_pass_args()), strings(slow.first_pass_args())),
         ] {
             assert!(!f.iter().any(|x| x == "-trellis"), "{f:?}");
-            assert!(f.join(" ").contains("-mbd rd -color_primaries bt470bg"), "{f:?}");
+            assert!(f.join(" ").contains("-mbd rd -flags +cgop -sc_threshold 1000000000 -color_primaries bt470bg"), "{f:?}");
             assert_eq!(f, without_trellis(s));
         }
     }
@@ -2099,6 +2191,32 @@ mod tests {
         assert!(!two.x264_two_pass());
         let a = strings(two.encode_args("out.mkv"));
         assert!(a.contains("-multipass fullres") && !a.contains("-pass") && !a.contains("passlogfile"), "{a}");
+    }
+
+    #[test]
+    fn bd_qsv_args() {
+        let info = bd_info();
+        let job = BdEncodeJob { encoder: BdEncoder::Qsv, two_pass: true, hwaccel: Some("qsv"), ..bd_job(&info) };
+        let a = strings(job.encode_args("out.mkv"));
+        assert!(a.starts_with("-y -hwaccel qsv -i in.mkv"), "{a}");
+        for want in ["-c:v h264_qsv -preset slow", "-slices 4 -flags +cgop", "-aud 1", "-forced_idr 1", "-maxrate 40000k", "-bf 3"] {
+            assert!(a.contains(want), "{want} in {a}");
+        }
+        assert!(!a.contains("x264") && !a.contains("-pass") && !job.x264_two_pass(), "{a}");
+        assert!(strings(BdEncodeJob { fast: true, ..job }.encode_args("o")).contains("-preset veryfast"));
+    }
+
+    #[test]
+    fn bd_amf_args() {
+        let info = bd_info();
+        let job = BdEncodeJob { encoder: BdEncoder::Amf, two_pass: true, hwaccel: Some("d3d11va"), ..bd_job(&info) };
+        let a = strings(job.encode_args("out.mkv"));
+        assert!(a.starts_with("-y -hwaccel d3d11va -i in.mkv"), "{a}");
+        for want in ["-c:v h264_amf -quality quality", "-usage transcoding", "-rc vbr_peak", "-enforce_hrd 1", "-aud 1", "-maxrate 40000k", "-bf 3"] {
+            assert!(a.contains(want), "{want} in {a}");
+        }
+        assert!(!a.contains("x264") && !a.contains("-pass") && !job.x264_two_pass(), "{a}");
+        assert!(strings(BdEncodeJob { fast: true, ..job }.encode_args("o")).contains("-quality speed"));
     }
 
     #[test]

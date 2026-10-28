@@ -229,3 +229,39 @@ fn loudnorm_brings_the_title_to_minus_23_lufs() {
     assert!(audio_of(&tools, &report)[0].starts_with("ac3,2,192000"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn authoring_log_is_clean_with_chapters_and_loudnorm() {
+    let Some((rt, tools)) = setup() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_dvdaudio_log_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("clips")).unwrap();
+    // AAC 44.1 kHz with a 12.3 ms audio offset: the resample chain used to leave PTS gaps.
+    let src = dir.join("clips").join("src.mp4");
+    ffmpeg(
+        &tools,
+        &[
+            "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:d=90", "-itsoffset", "0.0123", "-f", "lavfi", "-i", "sine=f=440:d=90:sample_rate=44100",
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", src.to_str().unwrap(),
+        ],
+    );
+    let opts = BuildOptions {
+        inputs: vec![src],
+        disc: DiscType::Dvd5,
+        template: PathBuf::from(TEMPLATE),
+        output: dir.join("out"),
+        fast_encode: true,
+        no_title_menu_for_single_title: true,
+        loudnorm: true,
+        chapters: dvd::ChapterSettings { interval_secs: 30.0, ..Default::default() },
+        keep_work: true,
+        selections: vec![only_audio()],
+        ..BuildOptions::default()
+    };
+    let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));
+    let log = std::fs::read_to_string(report.work_dir.as_ref().unwrap().join("authoring.log")).unwrap();
+    for bad in ["GOP may not be closed", "Discontinuity", "moves backwards"] {
+        assert!(!log.contains(bad), "{bad:?} in authoring.log:\n{log}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
