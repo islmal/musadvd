@@ -248,7 +248,8 @@ fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
     }
     std::fs::remove_dir_all(project).map_err(|e| format!("{}: {e}", project.display()))?;
     if let Some(output) = project.parent() {
-        let work = output.join(WORK_DIR);
+        let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let work = output.join(format!("{name}{WORK_DIR}"));
         // Only our own work directory (it carries a marker file of the same name).
         if work.join(WORK_DIR).is_file() {
             let _ = std::fs::remove_dir_all(work);
@@ -473,7 +474,7 @@ mod tests {
         std::fs::create_dir_all(&vts).unwrap();
         std::fs::create_dir_all(dir.join("Film").join("AUDIO_TS")).unwrap();
         std::fs::write(vts.join("VIDEO_TS.IFO"), b"x").unwrap();
-        let work = dir.join(WORK_DIR);
+        let work = dir.join(format!("Film{WORK_DIR}"));
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(work.join(WORK_DIR), b"").unwrap();
         // A foreign file protects the folder.

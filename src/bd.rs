@@ -4,7 +4,7 @@
 //! ```text
 //! <output>/<project>/BDMV/         playlist, clip info, m2ts streams
 //! <output>/<project>/CERTIFICATE/
-//! <output>/.convertx-work/         title_NN.mkv, subtitle files, mux.log
+//! <output>/<project>.convertx-work/        title_NN.mkv, subtitle files, mux.log
 //! ```
 //!
 //! Every title gets its own mux run (one playlist + clip each), so each keeps its own frame
@@ -522,7 +522,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }
     std::fs::create_dir_all(&opts.output).at(&opts.output)?;
     let out = display_path(std::fs::canonicalize(&opts.output).at(&opts.output)?);
-    let work = out.join(WORK_DIR);
+    let work = crate::dvd::work_dir(&out, opts);
     if work.join(WORK_DIR).is_file() {
         remove_old_output(&work).await?;
     } else if work.exists() {

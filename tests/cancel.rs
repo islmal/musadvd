@@ -80,10 +80,15 @@ fn cancel_during_encoding() {
     assert!(cancelled_at.elapsed() < Duration::from_secs(10), "cancel took {:?}", cancelled_at.elapsed());
 
     // Nothing left behind: no work directory, no project folder, no running ffmpeg.
-    assert!(!out.join(".convertx-work").exists(), "work directory removed");
+    assert!(!has_work_dir(&out), "work directory removed");
     let leftovers: Vec<_> = std::fs::read_dir(&out).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
     std::thread::sleep(Duration::from_millis(500));
     assert!(process_count(&ffmpeg_image) <= before, "ffmpeg processes were killed");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// True if the output directory still holds a `<project>.convertx-work` folder.
+fn has_work_dir(out: &std::path::Path) -> bool {
+    std::fs::read_dir(out).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".convertx-work"))
 }

@@ -142,7 +142,7 @@ fn builds_dvd_with_submenus() {
     assert_eq!(report.video_ts, out.join("Test").join("VIDEO_TS"));
     // The work directory (intermediate MPEGs, menu PNGs, logs) is removed after the build.
     assert!(report.work_dir.is_none());
-    assert!(!out.join(".convertx-work").exists());
+    assert!(!has_work_dir(&out));
     assert_eq!(
         std::fs::read_dir(&out).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).collect::<Vec<_>>(),
         vec![std::ffi::OsString::from("Test")],
@@ -198,4 +198,9 @@ fn merged_inputs_share_one_titleset() {
     // Both members were encoded in the first member's 16:9 aspect.
     assert!(report.titles.iter().all(|t| t.aspect.as_str() == "16:9"));
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// True if the output directory still holds a `<project>.convertx-work` folder.
+fn has_work_dir(out: &std::path::Path) -> bool {
+    std::fs::read_dir(out).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".convertx-work"))
 }

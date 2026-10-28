@@ -68,7 +68,7 @@ fn auto_start_sequential_loop() {
     // Without a menu title the project (folder and heading) is named after the first video.
     let out = dir.join("out");
     assert!(out.join("clip1").join("VIDEO_TS").join("VIDEO_TS.IFO").is_file());
-    assert!(!out.join(".convertx-work").exists(), "work directory removed after success");
+    assert!(!has_work_dir(&out), "work directory removed after success");
     assert!(xml.contains("<fpc>g1 = 0; jump title 1;</fpc>"), "auto start");
     assert!(xml.contains("<pre>jump title 2;</pre>"), "title 1 -> title 2");
     assert!(xml.contains("<pre>jump title 1;</pre>"), "title 2 -> title 1 (loop)");
@@ -120,4 +120,9 @@ fn single_title_with_own_menu_but_no_title_menu() {
     assert!(xml.contains("<post>call menu;</post>"), "after playback back to the title's menu");
     assert!(!xml.contains("vmgm menu"), "back buttons to the missing main menu are hidden");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// True if the output directory still holds a `<project>.convertx-work` folder.
+fn has_work_dir(out: &std::path::Path) -> bool {
+    std::fs::read_dir(out).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".convertx-work"))
 }

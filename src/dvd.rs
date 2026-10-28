@@ -3,7 +3,7 @@
 //! Output layout:
 //! ```text
 //! <output>/<project>/VIDEO_TS/  finished DVD-Video structure ("<project> (2)" if taken)
-//! <output>/.convertx-work/      menu PNGs, spumux/dvdauthor XMLs, title MPEGs, logs;
+//! <output>/<project>.convertx-work/  menu PNGs, spumux/dvdauthor XMLs, title MPEGs, logs;
 //!                               removed after the build unless `keep_work`
 //! ```
 
@@ -213,6 +213,19 @@ pub fn safe_folder_name(name: &str) -> String {
         cleaned.push('_');
     }
     cleaned
+}
+
+/// Temporary authoring directory `<out>/<project name>.convertx-work`. It is created before
+/// probing, so the name comes from `opts` (same precedence as the default project folder name).
+/// Distinct names let two projects build into one output directory in parallel.
+pub fn work_dir(out: &Path, opts: &BuildOptions) -> PathBuf {
+    let non_blank = |s: &Option<String>| s.clone().filter(|s| !s.trim().is_empty());
+    let name = non_blank(&opts.project_name)
+        .or_else(|| non_blank(&opts.menu_title))
+        .or_else(|| opts.selections.first().and_then(|s| non_blank(&s.label)))
+        .or_else(|| opts.inputs.first().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    out.join(format!("{}{WORK_DIR}", safe_folder_name(&name)))
 }
 
 /// `<parent>/<name>`, or `<name> (2)`, `<name> (3)`, ... if that already exists: an earlier
@@ -1037,7 +1050,7 @@ pub async fn build_dvd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send))
     if matches!(result, Err(BuildError::Cancelled)) {
         log(Event::Step(tr(opts.ui_lang, "cancelled_cleanup").into()));
         if let Ok(out) = std::fs::canonicalize(&opts.output) {
-            let work = display_path(out).join(WORK_DIR);
+            let work = work_dir(&display_path(out), opts);
             if work.join(WORK_DIR).is_file() {
                 if let Err(e) = remove_old_output(&work).await {
                     log(Event::Warning(tf!(opts.ui_lang, "workdir_delete_failed", err = e)));
@@ -1079,7 +1092,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     // Temporary work directory; a leftover from an aborted run (recognised by its marker) is
     // removed. The authoring writes into it with plain ASCII names, the finished VIDEO_TS is then
     // moved into the project folder.
-    let work = out.join(WORK_DIR);
+    let work = work_dir(&out, opts);
     if work.join(WORK_DIR).is_file() {
         remove_old_output(&work).await?;
     } else if work.exists() {
@@ -1886,6 +1899,21 @@ mod tests {
                 .collect(),
             trim: None, audio_names: Default::default(),
         }
+    }
+
+    #[test]
+    fn work_dir_name_precedence() {
+        let out = Path::new("out");
+        let name = |o: &BuildOptions| work_dir(out, o).file_name().unwrap().to_string_lossy().into_owned();
+        let mut o = BuildOptions { inputs: vec!["x/clip.mkv".into()], ..BuildOptions::default() };
+        assert_eq!(name(&o), "clip.convertx-work");
+        o.menu_title = Some("Menü".into());
+        o.project_name = Some("  ".into());
+        assert_eq!(name(&o), "Menü.convertx-work");
+        o.project_name = Some("Urlaub 2025".into());
+        assert_eq!(name(&o), "Urlaub 2025.convertx-work");
+        o.project_name = Some("a/b:c".into());
+        assert_eq!(name(&o), "a_b_c.convertx-work");
     }
 
     #[test]

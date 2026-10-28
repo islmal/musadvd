@@ -94,7 +94,7 @@ enum Command {
         /// Language of fixed menu texts.
         #[arg(long, default_value = "de")]
         ui_lang: String,
-        /// Keep the work directory (<output>/.convertx-work: intermediate MPEGs, menu PNGs, logs).
+        /// Keep the work directory (<output>/<project>.convertx-work: intermediate MPEGs, menu PNGs, logs).
         #[arg(long)]
         keep_work: bool,
         /// 2-pass video encoding: an analysis run before the final encode. Takes about twice as
