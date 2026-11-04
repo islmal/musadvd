@@ -58,7 +58,7 @@ enum Command {
         #[arg(long)]
         debug_frames: bool,
     },
-    /// Probe, encode, render all menus and author a complete VIDEO_TS.
+    /// Probe, encode, render all menus and author a complete VIDEO_TS. Ctrl+C cancels.
     BuildDvd {
         /// Input videos (.mkv, .mp4, ...), one title each.
         #[arg(long, num_args = 1.., required = true)]
@@ -178,7 +178,7 @@ enum Command {
     },
     /// List DVD writers and the disc in each drive.
     Drives,
-    /// Create a burnable disc image (UDF 1.02 + ISO 9660) from a VIDEO_TS folder.
+    /// Create a burnable disc image (UDF 1.02 + ISO 9660) from a VIDEO_TS folder. Ctrl+C cancels.
     MakeIso {
         /// The VIDEO_TS folder.
         video_ts: PathBuf,
@@ -661,9 +661,26 @@ fn main() -> ExitCode {
             }
         }
         Command::MakeIso { video_ts, output, label } => {
-            use convertx_rust::burner::{create_disc_image, layerbreak::Capacities};
+            use convertx_rust::burner::{
+                create_disc_image,
+                layerbreak::{Capacities, PlanError},
+                udf::ImageError,
+            };
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+            let cancel = Arc::new(AtomicBool::new(false));
+            {
+                let cancel = cancel.clone();
+                std::thread::spawn(move || {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+                    if rt.block_on(tokio::signal::ctrl_c()).is_ok() {
+                        cancel.store(true, Ordering::SeqCst);
+                        eprintln!("\nAbbruch angefordert (Ctrl+C) …");
+                    }
+                });
+            }
             let mut shown = 0;
-            match create_disc_image(&video_ts, &output, &label, Capacities::DVD, &Default::default(), |p| {
+            match create_disc_image(&video_ts, &output, &label, Capacities::DVD, &cancel, |p| {
                 let pct = (p * 100.0) as u32;
                 if pct >= shown + 10 {
                     shown = pct;
@@ -686,6 +703,11 @@ fn main() -> ExitCode {
                         });
                     }
                     ExitCode::SUCCESS
+                }
+                Err(PlanError::Image(ImageError::Cancelled)) => {
+                    eprintln!();
+                    eprintln!("Abgebrochen.");
+                    ExitCode::from(130)
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -920,6 +942,19 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Ctrl+C cancels the build: tools are killed, work directory is removed.
+            // Pressing it a second time exits immediately.
+            let cancel = opts.cancel.clone();
+            runtime.spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    eprintln!("\nAbbruch angefordert (Ctrl+C) …");
+                    cancel.cancel();
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        eprintln!("\nSofortiger Abbruch.");
+                        std::process::exit(130);
+                    }
+                }
+            });
             let mut last_pct = u32::MAX;
             let mut eta_text = String::new();
             let mut on_event = move |ev: Event| match ev {
@@ -994,6 +1029,11 @@ fn main() -> ExitCode {
                         None => println!("  Arbeitsordner wurde entfernt (mit --keep-work behalten)"),
                     }
                     ExitCode::SUCCESS
+                }
+                Err(convertx_rust::dvd::BuildError::Cancelled) => {
+                    eprintln!();
+                    eprintln!("Abgebrochen.");
+                    ExitCode::from(130)
                 }
                 Err(e) => {
                     eprintln!();
