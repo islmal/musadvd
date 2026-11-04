@@ -122,6 +122,7 @@ only (same source, different trim).
 
 **Last recorded test run (2026-10-28):** `cargo test --workspace`: all green (lib 368), `cargo check -p convertx-gui`, Unix burner check and `npm run build` (incl. `check-i18n`) ok. i18n language switch and runtime locales (copy `locales/` next to the release exe, add `xx.json`) not clicked through in the real GUI. Release workflow never run (MSVC vs. local gnu toolchain, ffmpeg URL unverified). Merge UI, merged motion chapter menus and track labels (dual-Spanish MKV, BD settings menu in VLC) not checked by hand.
 **Next (prioritised)**
+- [planned] Burn Studio: Auto max 4x, fixed 4x/8x/12x choices, CSS warning (detection only) → docs/plans/2026-11-04-studio-safe-speed-css-check.md
 - Manual (user): old PR refs `refs/pull/1..7/head` on GitHub still hold the pre-rewrite history (e-mail, `bin/*.exe`) – ask GitHub Support to purge (or recreate the repo) BEFORE setting visibility to Public; then Settings → Visibility, description/topics, "Keep my email private".
 - Manual (user): GUI dropdown "Hardware-Beschleunigung" (save, reopen), one BD build with NVIDIA; QSV/AMF on real Intel/AMD hardware.
 - Plan docs/plans/2026-10-27-native-dvdauthor-tsmuxer.md is done (phases 1–3). Still manual (user): VLC on one BD + one AVCHD folder (seek, chapters, menu loop/intro, text + PGS subtitles, LPCM/DTS); standalone player.
