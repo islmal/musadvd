@@ -190,6 +190,22 @@ pub fn open_disc(_drive: &DriveInfo, _io: &StudioIo) -> Result<Box<dyn SectorSou
     Err(BurnError::Unsupported("Lesen von Disc nur unter Windows".into()))
 }
 
+/// Queries the drive via MMC READ DISC STRUCTURE (format 0x01) whether the current disc is CSS/CPPM protected.
+pub fn disc_css(drive: &DriveInfo, io: &StudioIo) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        let t = transport(drive, &StudioIo { backend: "auto".into(), ..io.clone() }).ok()?;
+        let cmd = super::spti::read_disc_structure(false, 0, 0, 0x01, 8);
+        let resp = super::spti::query(&*t, "READ DISC STRUCTURE (Copyright)", &cmd, 8).ok()?;
+        super::spti::parse_copyright_info(&resp)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (drive, io);
+        None
+    }
+}
+
 /// An image to burn or compare with: `.iso`, a `.cue` (single data track, 2048 or 2352 bytes
 /// per sector), or a `.dvd` / `.mds` layout file. Also returns the layer break found in a layout
 /// file next to the image.
@@ -406,7 +422,7 @@ fn one_x_for(sectors: u64) -> f64 {
 #[derive(Debug, Clone)]
 pub struct WriteJob {
     pub drive: DriveInfo,
-    /// `auto` (rules from the settings, then the default), `max`, or a speed in x.
+    /// `auto` (rules from the settings, then safe 4x), `max`, or a speed in x.
     pub speed: String,
     /// A rewritable disc with old content may be erased/overwritten.
     pub erase: bool,
@@ -415,6 +431,9 @@ pub struct WriteJob {
     pub volume: String,
     pub image: String,
 }
+
+/// Default speed cap for Burn Studio's "Auto" mode: safe 4x burn speed across all media types.
+pub const STUDIO_AUTO_SPEED: &str = "4";
 
 /// The speed wish after the auto-speed rules (first match on media ID and drive wins).
 pub fn resolve_speed(settings: &BurnStudioSettings, drive: &DriveInfo, media_id: &str, wish: &str) -> String {
@@ -430,7 +449,7 @@ pub fn resolve_speed(settings: &BurnStudioSettings, drive: &DriveInfo, media_id:
             let (m, d) = (r.media_id.trim().to_lowercase(), r.drive.trim().to_lowercase());
             (m.is_empty() || id.contains(&m)) && (d.is_empty() || name.contains(&d)) && !(m.is_empty() && d.is_empty())
         })
-        .map_or("auto".into(), |r| r.speed.clone())
+        .map_or(STUDIO_AUTO_SPEED.into(), |r| r.speed.clone())
 }
 
 fn burn_dispatch(
@@ -566,6 +585,9 @@ pub fn write(ctx: &Ctx, job: &WriteJob, make_source: &(dyn Fn() -> Result<Box<dy
 
 /// Burns an image file (`.iso`, `.cue`, `.dvd`, `.mds`).
 pub fn write_image(ctx: &Ctx, drive: &DriveInfo, image: &Path, speed: &str, erase: bool) -> Result<Outcome, String> {
+    if super::css::image_scrambled(image) == Some(true) {
+        ctx.log("Warnung: Dieses Image enthält CSS-verschlüsselte Sektoren. Eine Kopie auf einem Rohling ist nicht abspielbar.");
+    }
     let (probe, layer_break) = open_image(image)?;
     let volume = isoread::IsoImage::open(File::open(image).map_err(|e| e.to_string())?).map(|i| i.label).unwrap_or_default();
     drop(probe);
@@ -622,6 +644,9 @@ fn eject_if(ctx: &Ctx, drive: &DriveInfo, wanted: bool) {
 /// Reads the disc in `drive` into `out` (split and layout file from the settings).
 pub fn read(ctx: &Ctx, drive: &DriveInfo, out: &Path) -> Result<Outcome, String> {
     let (s, r) = (&ctx.settings, &ctx.settings.read);
+    if disc_css(drive, &s.io) == Some(true) {
+        ctx.log("Diese Disc ist CSS-geschützt. Eine Kopie als Image ist auf einem Rohling nicht abspielbar.");
+    }
     let details = drive_details(drive, &s.io).ok();
     let mut disc = open_disc(drive, &s.io).map_err(|e| e.to_string())?;
     let total = disc.sectors();
@@ -825,6 +850,7 @@ pub fn build_input(paths: &[PathBuf], label: &str) -> BuildInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::burner::MediaType;
     use crate::config::SpeedRule;
 
     fn drive(name: &str) -> DriveInfo {
@@ -841,9 +867,38 @@ mod tests {
         let d = drive("PIONEER BD-RW (F:)");
         assert_eq!(resolve_speed(&s, &d, "cmc mag-m01-00", "auto"), "8", "media ID first");
         assert_eq!(resolve_speed(&s, &d, "RITEK-S04-66", "auto"), "4", "then the drive");
-        assert_eq!(resolve_speed(&s, &drive("LG"), "RITEK", "auto"), "auto", "an all-empty rule never matches");
+        assert_eq!(resolve_speed(&s, &drive("LG"), "RITEK", "auto"), STUDIO_AUTO_SPEED, "an all-empty rule never matches");
         assert_eq!(resolve_speed(&s, &d, "CMC MAG", "12"), "12", "an explicit speed beats the rules");
-        assert_eq!(resolve_speed(&BurnStudioSettings::default(), &d, "x", ""), "auto");
+        assert_eq!(resolve_speed(&BurnStudioSettings::default(), &d, "x", ""), STUDIO_AUTO_SPEED);
+    }
+
+    #[test]
+    fn studio_auto_is_capped_at_4x() {
+        let x = |v: f64| (v * MediaType::Dvd5.sectors_per_sec_1x()).round() as u32;
+        let s = BurnStudioSettings::default();
+        let d = drive("DRIVE");
+        // DVD [16, 8, 6, 4, 2.4] -> 4x
+        let speeds = [x(16.0), x(8.0), x(6.0), x(4.0), x(2.4)];
+        let wish = resolve_speed(&s, &d, "ID", "auto");
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish), WriteSpeed::Specific(x(4.0)));
+        // DVD [16, 12, 8] -> 8x (nearest below 4x doesn't exist, so slowest offered: 8x)
+        let speeds_fast = [x(16.0), x(12.0), x(8.0)];
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds_fast, &wish), WriteSpeed::Specific(x(8.0)));
+        // Empty list -> Specific(4x)
+        assert_eq!(preferred_speed(MediaType::Dvd5, &[], &wish), WriteSpeed::Specific(x(4.0)));
+        // BD [12, 6, 4] -> 4x
+        let bd_speeds = [26_341, 13_170, 8_780];
+        assert_eq!(preferred_speed(MediaType::Bd25, &bd_speeds, &wish), WriteSpeed::Specific(8_780));
+        // Wish max -> Max
+        let wish_max = resolve_speed(&s, &d, "ID", "max");
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish_max), WriteSpeed::Max);
+        // Matching rule wins
+        let rule_s = BurnStudioSettings {
+            auto_speed: vec![SpeedRule { media_id: "ID".into(), drive: "".into(), speed: "8".into() }],
+            ..Default::default()
+        };
+        let wish_rule = resolve_speed(&rule_s, &d, "ID", "auto");
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish_rule), WriteSpeed::Specific(x(8.0)));
     }
 
     #[test]

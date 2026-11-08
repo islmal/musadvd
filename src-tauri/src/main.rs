@@ -854,6 +854,7 @@ fn main() {
             burn_studio::studio_lock,
             burn_studio::studio_build_plan,
             burn_studio::studio_inspect,
+            burn_studio::studio_image_scrambled,
             burn_studio::studio_write_image,
             burn_studio::studio_write_files,
             burn_studio::studio_discovery,

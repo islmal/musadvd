@@ -3,6 +3,7 @@
 //! elsewhere).
 
 pub mod builder;
+pub mod css;
 pub mod graph;
 pub mod isoread;
 pub mod label;
@@ -310,9 +311,9 @@ pub fn preferred_speed(media: MediaType, speeds: &[u32], pref: &str) -> WriteSpe
     let pref = pref.trim_end_matches(['x', 'X']);
     let Ok(x) = pref.replace(',', ".").parse::<f64>() else { return default_speed(media, speeds) };
     if speeds.is_empty() {
-        return WriteSpeed::Max;
+        return WriteSpeed::Specific((x * media.sectors_per_sec_1x()).round() as u32);
     }
-    let want = x * media.sectors_per_sec_1x() * 1.02; // tolerance: 8x is reported as 5410 or 5540
+    let want = x * media.sectors_per_sec_1x() * 1.03; // tolerance: 8x is reported as 5410 or 5540
     let pick = speeds.iter().copied().filter(|&s| s as f64 <= want).max().or_else(|| speeds.iter().copied().min()).unwrap();
     WriteSpeed::Specific(pick)
 }
@@ -743,6 +744,9 @@ mod tests {
         assert_eq!(preferred_speed(MediaType::Dvd9, &speeds, "auto"), WriteSpeed::Specific(x(4.0)));
         assert_eq!(preferred_speed(MediaType::Dvd9, &speeds, "max"), WriteSpeed::Max);
         assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "8"), WriteSpeed::Specific(x(8.0)));
+        assert_eq!(preferred_speed(MediaType::Dvd5, &[5540], "8"), WriteSpeed::Specific(5540), "8x tolerance covers 5540");
+        assert_eq!(preferred_speed(MediaType::Dvd5, &[2770], "4"), WriteSpeed::Specific(2770), "4x tolerance covers 2770");
+        assert_eq!(preferred_speed(MediaType::Dvd5, &[], "4"), WriteSpeed::Specific((4.0 * MediaType::Dvd5.sectors_per_sec_1x()).round() as u32), "numeric wish on empty list");
         assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "12x"), WriteSpeed::Specific(x(8.0)), "nearest below");
         assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "2,4"), WriteSpeed::Specific(x(2.4)));
         assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "1"), WriteSpeed::Specific(x(2.4)), "slowest offered");

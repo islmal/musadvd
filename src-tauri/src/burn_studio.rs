@@ -324,6 +324,16 @@ fn delete_image(ctx: &Ctx, image: &Path, o: &mut Outcome) {
 }
 
 #[tauri::command]
+pub async fn studio_image_scrambled(image: String) -> Option<bool> {
+    tokio::task::spawn_blocking(move || {
+        convertx_rust::burner::css::image_scrambled(Path::new(&image))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
 pub fn studio_write_image(
     app: AppHandle,
     state: State<'_, StudioState>,

@@ -772,6 +772,11 @@ pub fn drive_info(t: &dyn ScsiTransport) -> DriveDetails {
     d
 }
 
+/// READ DISC STRUCTURE format 0x01 (Copyright Information): returns true when the disc is CSS/CPPM protected.
+pub fn parse_copyright_info(b: &[u8]) -> Option<bool> {
+    (b.len() >= 5).then(|| b[4] != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1074,5 +1079,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn parse_copyright_info_detects_protection() {
+        assert_eq!(parse_copyright_info(&[]), None);
+        assert_eq!(parse_copyright_info(&[0, 2, 0, 0]), None);
+        // byte 4 = 0 -> not protected
+        assert_eq!(parse_copyright_info(&[0, 4, 0, 0, 0, 0]), Some(false));
+        // byte 4 != 0 (e.g. 1 = CSS/CPPM) -> protected
+        assert_eq!(parse_copyright_info(&[0, 4, 0, 0, 1, 0]), Some(true));
     }
 }

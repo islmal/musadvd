@@ -3,6 +3,7 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { openLayerBreak } from "./layerbreak";
+import { speedChoices } from "./speeds";
 import { el, fmtBytes, fmtSectors, modal } from "./ui";
 import { fmtNumber, t } from "../i18n";
 
@@ -40,18 +41,13 @@ const oneX = (media: api.MediaInfo) => (media.media_type === "bd25" || media.med
 
 export function speedOptions(media: api.MediaInfo | null): [string, string][] {
   const opts: [string, string][] = [["auto", t("studio.views.auto")], ["max", t("studio.views.maximal")]];
+  const reportedX: number[] = [];
   if (media?.present) {
-    const seen = new Set<string>();
     for (const s of media.speeds) {
-      // The exact value goes to the engine (8x is reported as ~8.2x of the nominal rate).
-      const x = s / oneX(media);
-      const value = x.toFixed(1).replace(/\.0$/, "");
-      if (!seen.has(value)) {
-        seen.add(value);
-        opts.push([value, `${Math.abs(x - Math.round(x)) < 0.3 ? Math.round(x) : value}x`]);
-      }
+      reportedX.push(s / oneX(media));
     }
   }
+  opts.push(...speedChoices(reportedX));
   return opts;
 }
 
@@ -234,12 +230,28 @@ function viewWriteImage(host: Host): HTMLElement {
   row.querySelector("button")!.addEventListener("click", () => setTimeout(() => (remembered.image = input.value), 0));
   const erase = el("input", { type: "checkbox", checked: remembered.erase, onchange: (e: Event) => (remembered.erase = (e.target as HTMLInputElement).checked) });
   const go = el("button", { class: "btn primary big" }, t("studio.views.brennen"));
-  go.addEventListener("click", () => {
+  go.addEventListener("click", async () => {
     const d = host.drive();
     if (!d) return host.note(t("studio.views.bitteEinLaufwerkWaehlen"));
     if (!input.value.trim()) return host.note(t("studio.views.bitteEinImageWaehlen"));
     const image = input.value.trim();
-    host.run(t("studio.views.imageSchreiben", { baseName: baseName(image) }), () => api.writeImage(d.id, image, host.speed(), remembered.erase));
+    const startBurn = () => {
+      host.run(t("studio.views.imageSchreiben", { baseName: baseName(image) }), () => api.writeImage(d.id, image, host.speed(), remembered.erase));
+    };
+
+    const isScrambled = await api.imageScrambled(image).catch(() => null);
+    if (isScrambled === true) {
+      modal(
+        t("studio.views.cssModalTitle"),
+        el("div", {}, el("p", {}, t("studio.views.cssModalText"))),
+        [
+          { label: t("studio.views.abbrechen"), primary: false },
+          { label: t("studio.views.trotzdemBrennen"), primary: true, onClick: () => startBurn() },
+        ]
+      );
+      return;
+    }
+    startBurn();
   });
   return el(
     "div",
