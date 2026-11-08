@@ -542,6 +542,8 @@ pub struct EncodeJob<'a> {
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
     pub audio_mode: AudioMode,
+    /// Per-track audio mode overrides; if empty or index not found, falls back to `audio_mode`.
+    pub audio_modes: Vec<AudioMode>,
     /// Audio filter (loudnorm) per audio track; a filtered track is never copied. Missing
     /// entries mean no filter.
     pub audio_filters: Vec<Option<String>>,
@@ -672,7 +674,10 @@ impl EncodeJob<'_> {
         self.audio
             .iter()
             .enumerate()
-            .map(|(n, a)| plan_audio(a, AudioTarget::Dvd, self.audio_mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
+            .map(|(n, a)| {
+                let mode = self.audio_modes.get(n).copied().unwrap_or(self.audio_mode);
+                plan_audio(a, AudioTarget::Dvd, mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some())
+            })
             .collect()
     }
 
@@ -1823,6 +1828,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
             audio_filters: vec![],
         };
         let args: Vec<String> = job.encode_args("pipe:1").iter().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -2367,11 +2373,43 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
             audio_filters: vec![],
         };
         let args: Vec<String> = job.encode_args("o.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.join(" ").contains("-c:a:0 copy -sn"), "{args:?}");
         assert_eq!(job.audio_kbps_total(), 384);
+    }
+
+    #[test]
+    fn selective_audio_modes_in_dvd_job() {
+        let mut info = bd_info();
+        info.audio = vec![
+            audio("ac3", 6, Some(384), Some(48_000), None),
+            audio("aac", 2, Some(192), Some(48_000), None),
+        ];
+        let job = EncodeJob {
+            info: &info,
+            audio: vec![&info.audio[0], &info.audio[1]],
+            subtitles: vec![],
+            video_kbps: 5000,
+            aspect: Aspect::Wide,
+            dir: PathBuf::from("w"),
+            stem: "t".into(),
+            two_pass: false,
+            fast: false,
+            tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
+            video: Default::default(),
+            hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![AudioMode::Auto, AudioMode::Ac3],
+            audio_filters: vec![],
+        };
+        let outs = job.audio_outs();
+        assert_eq!(outs.len(), 2);
+        assert!(matches!(outs[0], AudioOut::Copy { .. }), "track 0 should remain stream copy");
+        assert!(matches!(outs[1], AudioOut::Ac3 { .. }), "track 1 should be re-encoded to AC-3");
     }
 
     #[test]
@@ -2405,6 +2443,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
             audio_filters: vec![],
         };
         let dvd = strings(job.encode_args("o.mpg"));

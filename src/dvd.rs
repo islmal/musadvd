@@ -493,16 +493,24 @@ pub(crate) fn check_group_shapes(members: &[MemberShape]) -> Result<(), BuildErr
 }
 
 /// Makes the members of a merged DVD title compatible: all use the first member's aspect and,
-/// if the audio formats differ at some track, all are re-encoded to AC-3.
+/// if the audio formats differ at track index k, only track k across all members is re-encoded to AC-3.
+/// Compliant tracks matching across all members remain stream-copied.
 fn harmonize_group(members: &mut [TitlePlan]) {
     let Some(first) = members.first() else { return };
-    let formats = |m: &TitlePlan| m.audio_outs().iter().map(|o| o.dvdauthor_format()).collect::<Vec<_>>();
-    let (aspect, first_formats) = (first.aspect, formats(first));
-    let same_audio = members.iter().all(|m| formats(m) == first_formats);
+    let aspect = first.aspect;
+    let track_count = first.audio.len();
     for m in members.iter_mut() {
         m.aspect = aspect;
-        if !same_audio {
-            m.audio_mode = AudioMode::Ac3;
+    }
+    for k in 0..track_count {
+        let first_format = members[0].audio_outs().get(k).map(|o| o.dvdauthor_format());
+        let same = members.iter().all(|m| m.audio_outs().get(k).map(|o| o.dvdauthor_format()) == first_format);
+        if !same {
+            for m in members.iter_mut() {
+                if let Some(mode) = m.audio_modes.get_mut(k) {
+                    *mode = AudioMode::Ac3;
+                }
+            }
         }
     }
 }
@@ -647,6 +655,7 @@ struct TitlePlan {
     chapter_titles: Vec<Option<String>>,
     aspect: Aspect,
     audio_mode: AudioMode,
+    audio_modes: Vec<AudioMode>,
     track_label_mode: TrackLabelMode,
     ui_lang: UiLang,
     video: VideoProcessing,
@@ -675,7 +684,14 @@ impl TitlePlan {
     }
 
     fn audio_outs(&self) -> Vec<AudioOut> {
-        self.audio.iter().map(|&i| plan_audio(&self.info.audio[i], AudioTarget::Dvd, self.audio_mode, self.loudnorm || self.info.trim.is_some())).collect()
+        self.audio
+            .iter()
+            .enumerate()
+            .map(|(idx, &i)| {
+                let mode = self.audio_modes.get(idx).copied().unwrap_or(self.audio_mode);
+                plan_audio(&self.info.audio[i], AudioTarget::Dvd, mode, self.loudnorm || self.info.trim.is_some())
+            })
+            .collect()
     }
 
     fn audio_kbps(&self) -> u32 {
@@ -931,6 +947,7 @@ async fn encode_title(
         resolution,
         hwaccel,
         audio_mode: t.audio_mode,
+        audio_modes: t.audio_modes.clone(),
         video: t.video,
         audio_filters,
     };
@@ -1133,6 +1150,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             None => chapter_starts(&info, opts.chapters.interval_secs, opts.chapters.min_video_secs),
         };
         let aspect = opts.aspect_policy.aspect_for(info.video.as_ref().map_or(16.0 / 9.0, |v| v.display_aspect));
+        let audio_modes = vec![opts.audio_mode; audio.len()];
         titles.push(TitlePlan {
             label,
             audio,
@@ -1141,6 +1159,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
             audio_mode: opts.audio_mode,
+            audio_modes,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
             video: opts.video,
@@ -2177,5 +2196,100 @@ mod tests {
         let chosen = StreamSelection { audio: Some(vec![3]), subtitles: Some(vec![]), ..StreamSelection::default() };
         let (audio, subs, _) = select_streams(&src, &chosen, &opts, "Film");
         assert_eq!((audio, subs), (vec![2], vec![]));
+    }
+
+    #[test]
+    fn harmonize_group_selective_audio_reencode() {
+        use crate::probe::AudioStream;
+
+        let mut info1 = info(60.0, vec![]);
+        info1.audio = vec![
+            AudioStream {
+                index: 1,
+                codec: "ac3".into(),
+                channels: 2,
+                channel_layout: "stereo".into(),
+                language: Some("eng".into()),
+                title: None,
+                default: true,
+                bit_rate: Some(192_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+            AudioStream {
+                index: 2,
+                codec: "dts".into(),
+                channels: 6,
+                channel_layout: "5.1".into(),
+                language: Some("ger".into()),
+                title: None,
+                default: false,
+                bit_rate: Some(768_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+        ];
+        let mut info2 = info(60.0, vec![]);
+        info2.audio = vec![
+            AudioStream {
+                index: 1,
+                codec: "ac3".into(),
+                channels: 2,
+                channel_layout: "stereo".into(),
+                language: Some("eng".into()),
+                title: None,
+                default: true,
+                bit_rate: Some(192_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+            AudioStream {
+                index: 2,
+                codec: "aac".into(),
+                channels: 2,
+                channel_layout: "stereo".into(),
+                language: Some("ger".into()),
+                title: None,
+                default: false,
+                bit_rate: Some(128_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+        ];
+
+        let make_title = |info: MediaInfo, stem: &str| TitlePlan {
+            info,
+            label: stem.into(),
+            audio: vec![0, 1],
+            subtitles: vec![],
+            chapters: vec![0.0],
+            chapter_titles: vec![None],
+            aspect: Aspect::Wide,
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![AudioMode::Auto, AudioMode::Auto],
+            track_label_mode: TrackLabelMode::SmartMetadata,
+            ui_lang: UiLang::DE,
+            video: VideoProcessing::default(),
+            loudnorm: false,
+            motion_secs: 15.0,
+            stem: stem.into(),
+            thumbnail: None,
+            chapter_thumbs: vec![],
+        };
+
+        let mut group = vec![make_title(info1, "part1"), make_title(info2, "part2")];
+        harmonize_group(&mut group);
+
+        // Track 0 was ac3 on both -> remains Auto / Copy
+        assert_eq!(group[0].audio_modes[0], AudioMode::Auto);
+        assert_eq!(group[1].audio_modes[0], AudioMode::Auto);
+        assert!(matches!(group[0].audio_outs()[0], AudioOut::Copy { .. }));
+        assert!(matches!(group[1].audio_outs()[0], AudioOut::Copy { .. }));
+
+        // Track 1 differed (ac3 vs aac) -> both re-encoded to AC-3
+        assert_eq!(group[0].audio_modes[1], AudioMode::Ac3);
+        assert_eq!(group[1].audio_modes[1], AudioMode::Ac3);
+        assert!(matches!(group[0].audio_outs()[1], AudioOut::Ac3 { .. }));
+        assert!(matches!(group[1].audio_outs()[1], AudioOut::Ac3 { .. }));
     }
 }
