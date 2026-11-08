@@ -136,12 +136,44 @@ const DEFAULT_ACTION: [[u8; 4]; 4] = [[0, 0, 0, 0], [255, 128, 0, 200], [255, 12
 // Fonts and text
 // ---------------------------------------------------------------------------
 
-fn fonts_dir() -> PathBuf {
-    let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-    PathBuf::from(windir).join("Fonts")
+/// DejaVu Sans bundled font data (from `assets/fonts/DejaVuSans.ttf`).
+static BUNDLED_DEJAVU_FONT: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
+
+fn bundled_font() -> FontArc {
+    static FONT: std::sync::OnceLock<FontArc> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| FontArc::try_from_slice(BUNDLED_DEJAVU_FONT).expect("bundled DejaVu Sans font is valid")).clone()
 }
 
-/// Candidate font files for a family (regular, bold, italic, bold italic) in `%WINDIR%\Fonts`.
+/// System font directories on Windows and Unix/macOS, cached and filtered to existing directories.
+fn font_dirs() -> &'static [PathBuf] {
+    static DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| {
+        let mut dirs = Vec::new();
+        if let Some(windir) = std::env::var_os("WINDIR").or_else(|| std::env::var_os("SystemRoot")) {
+            dirs.push(PathBuf::from(windir).join("Fonts"));
+        } else if cfg!(windows) {
+            dirs.push(PathBuf::from(r"C:\Windows\Fonts"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join(r"Microsoft\Windows\Fonts"));
+        }
+        // Common Unix / macOS font directories
+        dirs.push(PathBuf::from("/usr/share/fonts"));
+        dirs.push(PathBuf::from("/usr/local/share/fonts"));
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            dirs.push(home.join(".local/share/fonts"));
+            dirs.push(home.join(".fonts"));
+            dirs.push(home.join("Library/Fonts"));
+        }
+        dirs.push(PathBuf::from("/Library/Fonts"));
+        dirs.push(PathBuf::from("/System/Library/Fonts"));
+        dirs.retain(|d| d.is_dir());
+        dirs
+    })
+}
+
+/// Candidate font files for a family (regular, bold, italic, bold italic) in system font directories.
 fn font_candidates(style: &TextStyle) -> Vec<PathBuf> {
     let family = style.font_name.trim().to_ascii_lowercase();
     let variants: Option<[&str; 4]> = match family.as_str() {
@@ -161,18 +193,22 @@ fn font_candidates(style: &TextStyle) -> Vec<PathBuf> {
         _ => None,
     };
     let variant = (style.bold as usize) | ((style.italic as usize) << 1);
-    let dir = fonts_dir();
+    let dirs = font_dirs();
     let mut out = Vec::new();
     if let Some(f) = &style.font_file {
         out.push(PathBuf::from(f));
-        out.push(dir.join(f));
+        for dir in dirs {
+            out.push(dir.join(f));
+        }
     }
-    if let Some(v) = variants {
-        out.push(dir.join(v[variant]));
-        out.push(dir.join(v[0]));
+    for dir in dirs {
+        if let Some(v) = variants {
+            out.push(dir.join(v[variant]));
+            out.push(dir.join(v[0]));
+        }
+        out.push(dir.join(format!("{}.ttf", family.replace(' ', ""))));
+        out.push(dir.join("arial.ttf"));
     }
-    out.push(dir.join(format!("{}.ttf", family.replace(' ', ""))));
-    out.push(dir.join("arial.ttf"));
     out
 }
 
@@ -305,10 +341,18 @@ impl TextOverflow {
 /// "Arial Rounded MT Bold"), in order.
 const FALLBACK_FONTS: &[&str] = &["arial.ttf", "segoeui.ttf", "seguisym.ttf"];
 
-/// Template font followed by the fallback fonts that exist on this system.
+/// Template font followed by system fallback fonts and the bundled DejaVu Sans.
 fn font_chain(style: &TextStyle) -> Vec<FontArc> {
     let mut chain: Vec<FontArc> = font_for(style).into_iter().collect();
-    chain.extend(FALLBACK_FONTS.iter().filter_map(|f| load_font(&fonts_dir().join(f))));
+    let dirs = font_dirs();
+    for f in FALLBACK_FONTS {
+        if let Some(font) = dirs.iter().find_map(|dir| load_font(&dir.join(f))) {
+            chain.push(font);
+        }
+    }
+    // Always include the bundled DejaVu Sans as final fallback so text rendering
+    // never fails completely if system fonts are missing.
+    chain.push(bundled_font());
     chain
 }
 
