@@ -338,8 +338,27 @@ impl TextOverflow {
     }
 }
 /// Fonts used for characters the template font does not have (e.g. Cyrillic in
-/// "Arial Rounded MT Bold"), in order.
-const FALLBACK_FONTS: &[&str] = &["arial.ttf", "segoeui.ttf", "seguisym.ttf"];
+/// "Arial Rounded MT Bold" or CJK ideographs), in order.
+pub(crate) const FALLBACK_FONTS: &[&str] = &[
+    "arial.ttf",
+    "segoeui.ttf",
+    "seguisym.ttf",
+    // CJK fallbacks for Windows
+    "msyh.ttc",
+    "msgothic.ttc",
+    "malgun.ttf",
+    "simsun.ttc",
+    "yugothr.ttc",
+    // CJK fallbacks for Linux
+    "NotoSansCJK-Regular.ttc",
+    "wqy-zenhei.ttc",
+    "wqy-microhei.ttc",
+    "DroidSansFallbackFull.ttf",
+    // CJK fallbacks for macOS
+    "PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "AppleSDGothicNeo.ttc",
+];
 
 /// Template font followed by system fallback fonts and the bundled DejaVu Sans.
 fn font_chain(style: &TextStyle) -> Vec<FontArc> {
@@ -354,6 +373,23 @@ fn font_chain(style: &TextStyle) -> Vec<FontArc> {
     // never fails completely if system fonts are missing.
     chain.push(bundled_font());
     chain
+}
+
+/// Font chain for native subtitle rendering: bundled DejaVu Sans first, followed by system fallbacks (CJK etc.).
+pub(crate) fn subtitle_font_chain() -> Vec<FontArc> {
+    static CHAIN: OnceLock<Vec<FontArc>> = OnceLock::new();
+    CHAIN
+        .get_or_init(|| {
+            let mut chain = vec![bundled_font()];
+            let dirs = font_dirs();
+            for f in FALLBACK_FONTS {
+                if let Some(font) = dirs.iter().find_map(|dir| load_font(&dir.join(f))) {
+                    chain.push(font);
+                }
+            }
+            chain
+        })
+        .clone()
 }
 
 /// One laid-out character: which font of the chain renders it, and its glyph there.
@@ -1549,6 +1585,16 @@ mod tests {
         assert!(placed.iter().all(|p| p.id.0 != 0), "every character has a real glyph");
         assert!(placed[0].font > 0, "Cyrillic comes from a fallback font");
         assert_eq!(placed[6].font, 0, "Latin stays in the template font");
+    }
+
+    /// CJK titles (Chinese, Japanese, Korean) fall back to system CJK fonts.
+    #[test]
+    fn cjk_uses_fallback_font() {
+        let fonts = font_chain(&rounded_style());
+        let placed = place_chars(&fonts, "中文 日本語 한국어");
+        if fonts.len() > 1 {
+            assert!(placed[0].id.0 != 0, "CJK character '中' has a resolved glyph");
+        }
     }
 
     #[test]

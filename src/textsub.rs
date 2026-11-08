@@ -7,16 +7,14 @@
 //! outline, hard (non-anti-aliased) edges, last baseline 13 px above the bottom margin, wrapping at
 //! the width between the side margins, `<i>`/`<b>` ignored.
 //!
-//! The font is bundled (DejaVu Sans, `assets/fonts/`), so the result does not depend on the
-//! machine's fonts. shortcut: no shaping or bidi (spumux used fribidi), so Arabic/Hebrew cues
-//! come out unjoined and in logical order; the build warns for such subtitle languages. Upgrade
-//! with `unicode-bidi` + a shaper when RTL matters.
+//! The font is bundled (DejaVu Sans, `assets/fonts/`), with system fallback fonts for CJK and
+//! characters missing in DejaVu Sans. RTL scripts (Hebrew, Arabic) are reordered visually using
+//! `unicode-bidi`.
 
-use std::sync::OnceLock;
-
-use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontArc, GlyphId, PxScale, ScaleFont};
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
+use unicode_bidi::BidiInfo;
 
 use crate::author::TvStandard;
 use crate::subpic::{Decoded, Picture};
@@ -34,12 +32,31 @@ const FRAME_TRIM: u32 = 2;
 const FILL: Rgba<u8> = Rgba([255, 255, 255, 255]);
 const EDGE: Rgba<u8> = Rgba([0, 0, 0, 255]);
 
-/// DejaVu Sans (free licence, `assets/fonts/DejaVu-LICENSE.txt`).
-static FONT_DATA: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
+/// Scale of font `f` for an em height of `em_px` pixels.
+fn font_scale(f: &FontArc, em_px: f32) -> PxScale {
+    PxScale::from(em_px * f.height_unscaled() / f.units_per_em().unwrap_or(f.height_unscaled()))
+}
 
-fn font() -> &'static FontRef<'static> {
-    static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
-    FONT.get_or_init(|| FontRef::try_from_slice(FONT_DATA).expect("bundled font is valid"))
+/// One laid-out character: which font of the chain renders it, and its glyph there.
+#[derive(Clone, Copy)]
+struct Placed {
+    font: usize,
+    id: GlyphId,
+}
+
+fn place_chars(fonts: &[FontArc], text: &str) -> Vec<Placed> {
+    text.chars()
+        .map(|c| {
+            fonts
+                .iter()
+                .enumerate()
+                .find_map(|(i, f)| {
+                    let id = f.glyph_id(c);
+                    (id.0 != 0).then_some(Placed { font: i, id })
+                })
+                .unwrap_or(Placed { font: 0, id: fonts[0].glyph_id(c) })
+        })
+        .collect()
 }
 
 /// One subtitle: seconds from the title start and its text lines (markup removed).
@@ -140,42 +157,53 @@ impl Canvas {
     }
 }
 
-fn scaled(em: f32) -> ab_glyph::PxScaleFont<&'static FontRef<'static>> {
-    let f = font();
-    f.as_scaled(PxScale::from(em * f.height_unscaled() / f.units_per_em().unwrap_or(f.height_unscaled())))
-}
-
-fn text_width_em(text: &str, em: f32) -> f32 {
-    let sf = scaled(em);
+fn text_width_em(fonts: &[FontArc], text: &str, em: f32) -> f32 {
+    let placed = place_chars(fonts, text);
     let mut w = 0.0;
-    let mut prev = None;
-    for c in text.chars() {
-        let id = sf.glyph_id(c);
-        if let Some(p) = prev {
-            w += sf.kern(p, id);
+    let mut prev: Option<Placed> = None;
+    for &p in &placed {
+        let sf = fonts[p.font].as_scaled(font_scale(&fonts[p.font], em));
+        if let Some(q) = prev.filter(|q| q.font == p.font) {
+            w += sf.kern(q.id, p.id);
         }
-        w += sf.h_advance(id);
-        prev = Some(id);
+        w += sf.h_advance(p.id);
+        prev = Some(p);
     }
     w
 }
 
+/// Reorders a text line for visual LTR display (Unicode Bidirectional Algorithm for RTL scripts).
+pub fn reorder_bidi(text: &str) -> String {
+    let bidi_info = BidiInfo::new(text, None);
+    if bidi_info.paragraphs.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for para in &bidi_info.paragraphs {
+        let line = para.range.clone();
+        out.push_str(&bidi_info.reorder_line(para, line));
+    }
+    out
+}
+
 #[cfg(test)]
 fn text_width(text: &str) -> f32 {
-    text_width_em(text, EM_PX)
+    let fonts = crate::menu::subtitle_font_chain();
+    text_width_em(&fonts, text, EM_PX)
 }
 
 /// Greedy word wrap to `max_w` pixels (a single longer word stays on its own line).
 pub fn wrap(text: &str, max_w: f32) -> Vec<String> {
-    wrap_em(text, max_w, EM_PX)
+    let fonts = crate::menu::subtitle_font_chain();
+    wrap_em(&fonts, text, max_w, EM_PX)
 }
 
-fn wrap_em(text: &str, max_w: f32, em: f32) -> Vec<String> {
+fn wrap_em(fonts: &[FontArc], text: &str, max_w: f32, em: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut cur = String::new();
     for word in text.split_whitespace() {
         let joined = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-        if cur.is_empty() || text_width_em(&joined, em) <= max_w {
+        if cur.is_empty() || text_width_em(fonts, &joined, em) <= max_w {
             cur = joined;
         } else {
             lines.push(std::mem::replace(&mut cur, word.to_string()));
@@ -195,22 +223,28 @@ pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u3
 
 /// [`render_cue`] on any [`Canvas`].
 pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32, u32)> {
+    let fonts = crate::menu::subtitle_font_chain();
     let (fw, fh) = c.size;
-    let lines: Vec<String> = cue_lines.iter().flat_map(|l| wrap_em(l, (fw - 2 * c.side) as f32, c.em)).collect();
+    let max_w = (fw - 2 * c.side) as f32;
+    let lines: Vec<String> = cue_lines
+        .iter()
+        .flat_map(|l| wrap_em(&fonts, l, max_w, c.em))
+        .map(|l| reorder_bidi(&l))
+        .collect();
     if lines.is_empty() {
         return None;
     }
-    let sf = scaled(c.em);
+    let sf0 = fonts[0].as_scaled(font_scale(&fonts[0], c.em));
     let last_baseline = (fh - c.trim - c.bottom) as i32 - c.baseline_above;
     let n = lines.len() as i32;
     let first_baseline = last_baseline - (n - 1) * c.pitch;
 
     // Coverage in frame coordinates, but only over the cue's bounding box.
-    let widest = lines.iter().map(|l| text_width_em(l, c.em)).fold(0.0f32, f32::max);
+    let widest = lines.iter().map(|l| text_width_em(&fonts, l, c.em)).fold(0.0f32, f32::max);
     let x0 = (((fw as f32 - widest) / 2.0).floor() as i32 - c.outline - 2).max(0);
     let x1 = (((fw as f32 + widest) / 2.0).ceil() as i32 + c.outline + 2).min(fw as i32);
-    let y0 = (first_baseline - sf.ascent().ceil() as i32 - c.outline - 1).max(0);
-    let y1 = (last_baseline + (-sf.descent()).ceil() as i32 + c.outline + 1).min(fh as i32);
+    let y0 = (first_baseline - sf0.ascent().ceil() as i32 - c.outline - 1).max(0);
+    let y1 = (last_baseline + (-sf0.descent()).ceil() as i32 + c.outline + 1).min(fh as i32);
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
@@ -218,17 +252,20 @@ pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32
     let mut ink = vec![false; w * h];
     for (i, line) in lines.iter().enumerate() {
         let baseline = (first_baseline + i as i32 * c.pitch) as f32;
-        let mut caret = ((fw as f32 - text_width_em(line, c.em)) / 2.0).floor();
-        let mut prev = None;
-        for c in line.chars() {
-            let id = sf.glyph_id(c);
-            if let Some(p) = prev {
-                caret += sf.kern(p, id);
+        let mut caret = ((fw as f32 - text_width_em(&fonts, line, c.em)) / 2.0).floor();
+        let placed = place_chars(&fonts, line);
+        let mut prev: Option<Placed> = None;
+        for &p in &placed {
+            let font = &fonts[p.font];
+            let scale = font_scale(font, c.em);
+            let sf = font.as_scaled(scale);
+            if let Some(q) = prev.filter(|q| q.font == p.font) {
+                caret += sf.kern(q.id, p.id);
             }
-            let glyph = id.with_scale_and_position(sf.scale(), point(caret, baseline));
-            caret += sf.h_advance(id);
-            prev = Some(id);
-            if let Some(o) = font().outline_glyph(glyph) {
+            let glyph = p.id.with_scale_and_position(scale, point(caret, baseline));
+            caret += sf.h_advance(p.id);
+            prev = Some(p);
+            if let Some(o) = font.outline_glyph(glyph) {
                 let b = o.px_bounds();
                 o.draw(|px, py, cov| {
                     let (x, y) = (b.min.x as i32 + px as i32 - x0, b.min.y as i32 + py as i32 - y0);
@@ -361,5 +398,36 @@ mod tests {
         assert!(render_cue(TvStandard::Pal, &["   ".into()]).is_none());
         let (img, x, _) = render_cue(TvStandard::Pal, &["W".repeat(80)]).unwrap();
         assert!(x + img.width() <= 720);
+    }
+
+    #[test]
+    fn cjk_subtitles_render_with_fallback() {
+        // CJK text falls back to system fonts (e.g. msyh, msgothic, malgun, etc.)
+        let (img, x, y) = render_cue(TvStandard::Pal, &["你好，世界！ 日本語 한국어".into()]).unwrap();
+        assert!(img.width() > 0 && img.height() > 0);
+        let fill_count = img.pixels().filter(|p| **p == FILL).count();
+        assert!(fill_count > 100, "CJK subtitle should render visible fill ink, got {fill_count}");
+        let (x0, y0, x1, y1) = bbox(&img, x, y);
+        assert!(x1 < 720 && y1 < 576, "{x0} {y0} {x1} {y1}");
+    }
+
+    #[test]
+    fn rtl_hebrew_and_arabic_bidi_reorder() {
+        // Pure Hebrew text is reversed in visual order
+        let hebrew = "שלום";
+        let reordered = reorder_bidi(hebrew);
+        assert_ne!(reordered, hebrew);
+        assert_eq!(reordered, "םולש");
+
+        // Mixed LTR and RTL
+        let mixed = "Hello שלום World";
+        let reordered_mixed = reorder_bidi(mixed);
+        assert!(reordered_mixed.starts_with("Hello "));
+        assert!(reordered_mixed.ends_with(" World"));
+        assert!(reordered_mixed.contains("םולש"));
+
+        // Renders onto the frame with visible ink
+        let (img, _, _) = render_cue(TvStandard::Pal, &[mixed.into()]).unwrap();
+        assert!(img.pixels().filter(|p| **p == FILL).count() > 100);
     }
 }

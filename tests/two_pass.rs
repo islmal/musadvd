@@ -70,6 +70,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         video: Default::default(),
         hwaccel: None,
         audio_mode: Default::default(),
+        audio_modes: vec![],
         audio_filters: vec![],
     }
 }
