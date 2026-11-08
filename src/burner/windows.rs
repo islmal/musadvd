@@ -744,6 +744,34 @@ fn burn_feed(
     let letter = letter.trim_end_matches('\\').to_string();
     // Dropped before the disc is ejected.
     let tray_lock = options.lock_tray.then(|| power::drive_letter(&letter).and_then(|l| TrayLock::acquire(l).ok())).flatten();
+
+    // On DVD+R DL, set the layer boundary before configuring and writing through IMAPI2.
+    // Changing the layer structure invalidates IMAPI's internal recorder state and requires
+    // a brief firmware settle time and a fresh IDiscFormat2Data instance.
+    let mut format = format;
+    if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
+        if media.layer_break_supported {
+            set_layer_break(&rec, l0).map_err(at("Layerwechsel setzen"))?;
+            // Wait for drive firmware to finish L0 allocation and mark the write feature current.
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Ok(f) = format_for(&rec) {
+                    let ready = unsafe { f.IsCurrentMediaSupported(&rec).map(|b| b.as_bool()).unwrap_or(false) };
+                    format = f;
+                    if ready {
+                        break;
+                    }
+                }
+            }
+        } else {
+            let _ = progress_tx.send(BurnProgress::new(
+                BurnPhase::Preparing,
+                0.0,
+                format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
+            ));
+        }
+    }
+
     unsafe {
         // DVD+R DL: forcing the close fails at the end of the write on some drives
         // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
@@ -759,17 +787,6 @@ fn burn_feed(
             WriteSpeed::Specific(s) => s as i32,
         };
         format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(|e| step("Schreibgeschwindigkeit setzen", e))?;
-    }
-    if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
-        if media.layer_break_supported {
-            set_layer_break(&rec, l0).map_err(at("Layerwechsel setzen"))?;
-        } else {
-            let _ = progress_tx.send(BurnProgress::new(
-                BurnPhase::Preparing,
-                0.0,
-                format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
-            ));
-        }
     }
     let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
     // IMAPI's write events report the real position; the image stream reports until the
