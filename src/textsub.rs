@@ -172,13 +172,119 @@ fn text_width_em(fonts: &[FontArc], text: &str, em: f32) -> f32 {
     w
 }
 
-/// Reorders a text line for visual LTR display (Unicode Bidirectional Algorithm for RTL scripts).
-pub fn reorder_bidi(text: &str) -> String {
-    let bidi_info = BidiInfo::new(text, None);
-    if bidi_info.paragraphs.is_empty() {
-        return text.to_string();
+struct ArabicForms {
+    isolated: char,
+    final_form: char,
+    initial: Option<char>,
+    medial: Option<char>,
+}
+
+fn arabic_forms(c: char) -> Option<ArabicForms> {
+    match c {
+        '\u{0621}' => Some(ArabicForms { isolated: '\u{FE80}', final_form: '\u{FE80}', initial: None, medial: None }),
+        '\u{0622}' => Some(ArabicForms { isolated: '\u{FE81}', final_form: '\u{FE82}', initial: None, medial: None }),
+        '\u{0623}' => Some(ArabicForms { isolated: '\u{FE83}', final_form: '\u{FE84}', initial: None, medial: None }),
+        '\u{0624}' => Some(ArabicForms { isolated: '\u{FE85}', final_form: '\u{FE86}', initial: None, medial: None }),
+        '\u{0625}' => Some(ArabicForms { isolated: '\u{FE87}', final_form: '\u{FE88}', initial: None, medial: None }),
+        '\u{0626}' => Some(ArabicForms { isolated: '\u{FE89}', final_form: '\u{FE8A}', initial: Some('\u{FE8B}'), medial: Some('\u{FE8C}') }),
+        '\u{0627}' => Some(ArabicForms { isolated: '\u{FE8D}', final_form: '\u{FE8E}', initial: None, medial: None }),
+        '\u{0628}' => Some(ArabicForms { isolated: '\u{FE8F}', final_form: '\u{FE90}', initial: Some('\u{FE91}'), medial: Some('\u{FE92}') }),
+        '\u{0629}' => Some(ArabicForms { isolated: '\u{FE93}', final_form: '\u{FE94}', initial: None, medial: None }),
+        '\u{062A}' => Some(ArabicForms { isolated: '\u{FE95}', final_form: '\u{FE96}', initial: Some('\u{FE97}'), medial: Some('\u{FE98}') }),
+        '\u{062B}' => Some(ArabicForms { isolated: '\u{FE99}', final_form: '\u{FE9A}', initial: Some('\u{FE9B}'), medial: Some('\u{FE9C}') }),
+        '\u{062C}' => Some(ArabicForms { isolated: '\u{FE9D}', final_form: '\u{FE9E}', initial: Some('\u{FE9F}'), medial: Some('\u{FEA0}') }),
+        '\u{062D}' => Some(ArabicForms { isolated: '\u{FEA1}', final_form: '\u{FEA2}', initial: Some('\u{FEA3}'), medial: Some('\u{FEA4}') }),
+        '\u{062E}' => Some(ArabicForms { isolated: '\u{FEA5}', final_form: '\u{FEA6}', initial: Some('\u{FEA7}'), medial: Some('\u{FEA8}') }),
+        '\u{062F}' => Some(ArabicForms { isolated: '\u{FEA9}', final_form: '\u{FEAA}', initial: None, medial: None }),
+        '\u{0630}' => Some(ArabicForms { isolated: '\u{FEAB}', final_form: '\u{FEAC}', initial: None, medial: None }),
+        '\u{0631}' => Some(ArabicForms { isolated: '\u{FEAD}', final_form: '\u{FEAE}', initial: None, medial: None }),
+        '\u{0632}' => Some(ArabicForms { isolated: '\u{FEAF}', final_form: '\u{FEB0}', initial: None, medial: None }),
+        '\u{0633}' => Some(ArabicForms { isolated: '\u{FEB1}', final_form: '\u{FEB2}', initial: Some('\u{FEB3}'), medial: Some('\u{FEB4}') }),
+        '\u{0634}' => Some(ArabicForms { isolated: '\u{FEB5}', final_form: '\u{FEB6}', initial: Some('\u{FEB7}'), medial: Some('\u{FEB8}') }),
+        '\u{0635}' => Some(ArabicForms { isolated: '\u{FEB9}', final_form: '\u{FEBA}', initial: Some('\u{FEBB}'), medial: Some('\u{FEBC}') }),
+        '\u{0636}' => Some(ArabicForms { isolated: '\u{FEBD}', final_form: '\u{FEBE}', initial: Some('\u{FEBF}'), medial: Some('\u{FEC0}') }),
+        '\u{0637}' => Some(ArabicForms { isolated: '\u{FEC1}', final_form: '\u{FEC2}', initial: Some('\u{FEC3}'), medial: Some('\u{FEC4}') }),
+        '\u{0638}' => Some(ArabicForms { isolated: '\u{FEC5}', final_form: '\u{FEC6}', initial: Some('\u{FEC7}'), medial: Some('\u{FEC8}') }),
+        '\u{0639}' => Some(ArabicForms { isolated: '\u{FEC9}', final_form: '\u{FECA}', initial: Some('\u{FECB}'), medial: Some('\u{FECC}') }),
+        '\u{063A}' => Some(ArabicForms { isolated: '\u{FECD}', final_form: '\u{FECE}', initial: Some('\u{FECF}'), medial: Some('\u{FED0}') }),
+        '\u{0640}' => Some(ArabicForms { isolated: '\u{0640}', final_form: '\u{0640}', initial: Some('\u{0640}'), medial: Some('\u{0640}') }),
+        '\u{0641}' => Some(ArabicForms { isolated: '\u{FED1}', final_form: '\u{FED2}', initial: Some('\u{FED3}'), medial: Some('\u{FED4}') }),
+        '\u{0642}' => Some(ArabicForms { isolated: '\u{FED5}', final_form: '\u{FED6}', initial: Some('\u{FED7}'), medial: Some('\u{FED8}') }),
+        '\u{0643}' => Some(ArabicForms { isolated: '\u{FED9}', final_form: '\u{FEDA}', initial: Some('\u{FEDB}'), medial: Some('\u{FEDC}') }),
+        '\u{0644}' => Some(ArabicForms { isolated: '\u{FEDD}', final_form: '\u{FEDE}', initial: Some('\u{FEDF}'), medial: Some('\u{FEE0}') }),
+        '\u{0645}' => Some(ArabicForms { isolated: '\u{FEE1}', final_form: '\u{FEE2}', initial: Some('\u{FEE3}'), medial: Some('\u{FEE4}') }),
+        '\u{0646}' => Some(ArabicForms { isolated: '\u{FEE5}', final_form: '\u{FEE6}', initial: Some('\u{FEE7}'), medial: Some('\u{FEE8}') }),
+        '\u{0647}' => Some(ArabicForms { isolated: '\u{FEE9}', final_form: '\u{FEEA}', initial: Some('\u{FEEB}'), medial: Some('\u{FEEC}') }),
+        '\u{0648}' => Some(ArabicForms { isolated: '\u{FEED}', final_form: '\u{FEEE}', initial: None, medial: None }),
+        '\u{0649}' => Some(ArabicForms { isolated: '\u{FEEF}', final_form: '\u{FEF0}', initial: None, medial: None }),
+        '\u{064A}' => Some(ArabicForms { isolated: '\u{FEF1}', final_form: '\u{FEF2}', initial: Some('\u{FEF3}'), medial: Some('\u{FEF4}') }),
+        _ => None,
     }
+}
+
+fn lam_alef(alef: char, connects_prev: bool) -> Option<char> {
+    match alef {
+        '\u{0622}' => Some(if connects_prev { '\u{FEF6}' } else { '\u{FEF5}' }),
+        '\u{0623}' => Some(if connects_prev { '\u{FEF8}' } else { '\u{FEF7}' }),
+        '\u{0625}' => Some(if connects_prev { '\u{FEFA}' } else { '\u{FEF9}' }),
+        '\u{0627}' => Some(if connects_prev { '\u{FEFC}' } else { '\u{FEFB}' }),
+        _ => None,
+    }
+}
+
+fn connects_left(c: char) -> bool {
+    arabic_forms(c).is_some_and(|f| f.initial.is_some())
+}
+
+fn connects_right(c: char) -> bool {
+    arabic_forms(c).is_some()
+}
+
+/// Shapes Arabic characters into contextual Presentation Forms-B (isolated, initial, medial, final)
+/// and Lam-Alef ligatures for cursive display.
+pub fn shape_arabic(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\u{0644}' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            let connects_prev = i > 0 && connects_left(chars[i - 1]);
+            if let Some(ligature) = lam_alef(next, connects_prev) {
+                out.push(ligature);
+                i += 2;
+                continue;
+            }
+        }
+
+        if let Some(forms) = arabic_forms(c) {
+            let connects_prev = i > 0 && connects_left(chars[i - 1]);
+            let connects_next = i + 1 < chars.len() && connects_right(chars[i + 1]) && forms.initial.is_some();
+            let shaped = match (connects_prev, connects_next) {
+                (true, true) => forms.medial.unwrap_or(forms.final_form),
+                (false, true) => forms.initial.unwrap_or(forms.isolated),
+                (true, false) => forms.final_form,
+                (false, false) => forms.isolated,
+            };
+            out.push(shaped);
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Reorders a text line for visual LTR display (Unicode Bidirectional Algorithm for RTL scripts,
+/// with Arabic cursive shaping).
+pub fn reorder_bidi(text: &str) -> String {
+    let shaped = shape_arabic(text);
+    let bidi_info = BidiInfo::new(&shaped, None);
+    if bidi_info.paragraphs.is_empty() {
+        return shaped;
+    }
+    let mut out = String::with_capacity(shaped.len());
     for para in &bidi_info.paragraphs {
         let line = para.range.clone();
         out.push_str(&bidi_info.reorder_line(para, line));
@@ -419,6 +525,15 @@ mod tests {
         assert_ne!(reordered, hebrew);
         assert_eq!(reordered, "םולש");
 
+        // Arabic cursive shaping and Lam-Alef ligature: "سلام" (Seen + Lam + Alef + Meem)
+        // Seen (initial 0xFEB3), Lam-Alef (final ligature 0xFEFC), Meem (isolated 0xFEE1)
+        let arabic = "سلام";
+        let shaped = shape_arabic(arabic);
+        assert_eq!(shaped, "\u{FEB3}\u{FEFC}\u{FEE1}");
+        // reorder_bidi puts shaped Arabic into visual order for LTR rendering
+        let reordered_ar = reorder_bidi(arabic);
+        assert_eq!(reordered_ar, "\u{FEE1}\u{FEFC}\u{FEB3}");
+
         // Mixed LTR and RTL
         let mixed = "Hello שלום World";
         let reordered_mixed = reorder_bidi(mixed);
@@ -427,7 +542,7 @@ mod tests {
         assert!(reordered_mixed.contains("םולש"));
 
         // Renders onto the frame with visible ink
-        let (img, _, _) = render_cue(TvStandard::Pal, &[mixed.into()]).unwrap();
+        let (img, _, _) = render_cue(TvStandard::Pal, &[mixed.into(), arabic.into()]).unwrap();
         assert!(img.pixels().filter(|p| **p == FILL).count() > 100);
     }
 }
