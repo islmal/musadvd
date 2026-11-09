@@ -41,3 +41,4 @@ SYSTEM_STATE.txt
 .ref-src/
 bin/dvdauthor.exe
 bin/spumux.exe
+*.lnk
