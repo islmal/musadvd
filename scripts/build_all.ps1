@@ -14,7 +14,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "==> Building release binaries..."
 cargo build --release --bin convertx-rust
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo build --release -p convertx-gui
+npx tauri build --no-bundle
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Update shortcuts
