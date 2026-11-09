@@ -266,6 +266,41 @@ fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnErro
     }
 }
 
+/// Returns true if IMAPI2 reports at least one write feature page as currently active.
+/// Many USB-to-SATA bridge chipsets (e.g. for external Pioneer / LG writers) fail to report
+/// write feature pages in GET CONFIGURATION RT=01 (current features), causing IMAPI2's
+/// `IDiscFormat2Data::Write` to fail immediately with `E_IMAPI_RECORDER_FEATURE_IS_NOT_CURRENT`
+/// (0xC0AA020B / 0x80004005).
+pub fn is_write_feature_current(rec: &IDiscRecorder2) -> bool {
+    unsafe {
+        let Ok(sa) = rec.CurrentFeaturePages() else { return true };
+        let vs = variants(sa);
+        let features: Vec<i32> = vs.iter().filter_map(|v| variant_i32(v)).collect();
+        clear(vs);
+        // MMC write feature pages:
+        // 0x0020 (Random Writable), 0x0021 (Incremental Streaming), 0x0022 (Sector Erasable),
+        // 0x0023 (Formattable), 0x0024 (Defect Management), 0x0025 (Write Once),
+        // 0x0026 (Restricted Overwrite), 0x0027 (CD-RW CAV), 0x0028 (MRW),
+        // 0x002A (DVD+RW), 0x002B (DVD+R / DVD+R DL), 0x002C (Rigid Restricted Overwrite),
+        // 0x002D (CD Track at Once), 0x002E (CD Mastering), 0x002F (DVD-R/-RW Write),
+        // 0x0033 (Layer Jump Recording), 0x0037 (CD-RW Media Write), 0x0038 (BD-R Pseudo-Overwrite),
+        // 0x003A (DVD+RW Dual Layer), 0x0040 (BD-R Write), 0x0041 (BD-RE Write).
+        features.iter().any(|&f| {
+            matches!(f, 0x0020..=0x002F | 0x0033 | 0x0037..=0x003A | 0x0040..=0x0043)
+        })
+    }
+}
+
+/// Helper to query write feature status for a drive ID.
+pub fn is_imapi_write_feature_current(drive_id: &str) -> bool {
+    let _com = match Com::init() {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let Ok(rec) = recorder(drive_id) else { return true };
+    is_write_feature_current(&rec)
+}
+
 /// Where the bytes of the image come from.
 enum Feed {
     /// An image file: IMAPI may seek in it.
@@ -634,6 +669,14 @@ impl OpticalBurner for ImapiBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
+        let _com = Com::init()?;
+        if let Ok(rec) = recorder(drive_id) {
+            if !is_write_feature_current(&rec) {
+                let source = Box::new(super::source::FileSource::open(iso_path)?);
+                let direct = super::mmcwrite::DirectOptions::default();
+                return super::mmcwrite::burn_direct(drive_id, true, source, speed, options, &direct, cancel, &progress_tx);
+            }
+        }
         let file = File::open(iso_path)?;
         let len = file.metadata()?.len();
         let feed = Feed::File(file);
@@ -654,6 +697,13 @@ impl OpticalBurner for ImapiBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
+        let _com = Com::init()?;
+        if let Ok(rec) = recorder(drive_id) {
+            if !is_write_feature_current(&rec) {
+                let direct = super::mmcwrite::DirectOptions::default();
+                return super::mmcwrite::burn_direct(drive_id, true, source, speed, options, &direct, cancel, &progress_tx);
+            }
+        }
         let sectors = source.sectors();
         if options.verify && !source.rewindable() {
             return Err(BurnError::Unsupported("Die Überprüfung braucht eine Quelle, die erneut gelesen werden kann".into()));
@@ -829,7 +879,15 @@ fn burn_feed(
         }
         // Where it broke (data handed to IMAPI runs a little ahead of the disc).
         let at = pos.load(Ordering::Relaxed) as f64 * 100.0 / len.max(1) as f64;
-        return Err(match backend(e) {
+        let code = e.code().0 as u32;
+        let err = backend(e);
+        let msg = err.to_string();
+        if at == 0.0 && (code == 0xC0AA020B || msg.contains("Featureseite") || msg.contains("feature page")) {
+            return Err(BurnError::Backend(format!(
+                "{msg} - USB-Laufwerksbrücke meldet Schreibfeature nicht an IMAPI2. Bitte in den Einstellungen unter E/A „SPTI Direkt“ auswählen oder Backend auf „auto“ belassen."
+            )));
+        }
+        return Err(match err {
             BurnError::Backend(m) => BurnError::Backend(format!("{m} - beim Schreiben, {at:.1} % der Daten an IMAPI übergeben")),
             other => other,
         });

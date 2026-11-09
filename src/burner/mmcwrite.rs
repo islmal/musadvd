@@ -536,22 +536,23 @@ pub fn burn_direct(
     if let (None, super::WriteSpeed::Specific(s)) = (direct.speed_kbps, speed) {
         direct.speed_kbps = Some(s * 2048 / 1000); // sectors/s → kB/s
     }
+    let letter = {
+        let _com = Com::init()?;
+        volume_paths(&recorder(drive_id)?).into_iter().next().and_then(|p| super::power::drive_letter(&p))
+    };
     if spti_transport {
-        let letter = {
-            let _com = Com::init()?;
-            volume_paths(&recorder(drive_id)?).into_iter().next().and_then(|p| super::power::drive_letter(&p))
+        if let Some(letter) = letter {
+            if let Ok(t) = SptiTransport::open(letter) {
+                let _volume = if direct.lock_volume { DriveHandle::open(letter, true).ok().filter(|h| h.lock_volume().is_ok()) } else { None };
+                return burn_direct_with(&t, source, options, &direct, cancel, tx);
+            }
         }
-        .ok_or_else(|| BurnError::Backend("Das Laufwerk hat keinen Laufwerksbuchstaben".into()))?;
-        let t = SptiTransport::open(letter)?;
-        let _volume = if direct.lock_volume { DriveHandle::open(letter, true).ok().filter(|h| h.lock_volume().is_ok()) } else { None };
-        burn_direct_with(&t, source, options, &direct, cancel, tx)
-    } else {
-        let t = ImapiExTransport::open(drive_id)?;
-        t.acquire_exclusive("convertx-rust")?;
-        let r = burn_direct_with(&t, source, options, &direct, cancel, tx);
-        t.release_exclusive();
-        r
     }
+    let t = ImapiExTransport::open(drive_id)?;
+    t.acquire_exclusive("convertx-rust")?;
+    let r = burn_direct_with(&t, source, options, &direct, cancel, tx);
+    t.release_exclusive();
+    r
 }
 
 #[cfg(test)]

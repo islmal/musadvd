@@ -461,9 +461,22 @@ fn burn_dispatch(
     tx: mpsc::Sender<super::BurnProgress>,
 ) -> Result<(), BurnError> {
     #[cfg(windows)]
-    if ctx.settings.io.backend == "direct" {
-        let direct = super::mmcwrite::DirectOptions::from_settings(&ctx.settings.write, &ctx.settings.io);
-        return super::mmcwrite::burn_direct(&drive.id, ctx.settings.io.transport == "spti", source, speed, options, &direct, &ctx.cancel, &tx);
+    {
+        let use_direct = match ctx.settings.io.backend.as_str() {
+            "direct" => true,
+            "auto" => {
+                let missing_write_feature = !super::windows::is_imapi_write_feature_current(&drive.id);
+                if missing_write_feature {
+                    ctx.log("Hinweis: Laufwerk meldet keine aktive IMAPI2-Schreibfeatureseite (USB-Bridge-Inkompatibilität). Schalte automatisch auf SPTI-Direkt um.");
+                }
+                missing_write_feature
+            }
+            _ => false,
+        };
+        if use_direct {
+            let direct = super::mmcwrite::DirectOptions::from_settings(&ctx.settings.write, &ctx.settings.io);
+            return super::mmcwrite::burn_direct(&drive.id, ctx.settings.io.transport == "spti", source, speed, options, &direct, &ctx.cancel, &tx);
+        }
     }
     system_burner().burn_source(&drive.id, source, speed, options, &ctx.cancel, tx)
 }
