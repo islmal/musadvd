@@ -34,7 +34,7 @@ use crate::i18n::{tr, UiLang};
 use crate::tf;
 use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
-use crate::tools::Toolchain;
+use crate::tools::{ToolError, Toolchain};
 
 /// Parallel hardware encodes. GeForce drivers limit concurrent NVENC sessions; the CPU-side scaling
 /// is the real limit anyway. shortcut: not measured yet (QSV/AMF not at all), set after the real-GPU run.
@@ -125,7 +125,8 @@ pub(crate) fn harmonise(audio: &[Vec<Option<String>>], subs: &[Vec<BdSubTrack>])
 }
 
 fn sub_track(s: &SubtitleStream) -> BdSubTrack {
-    BdSubTrack { kind: if s.kind == SubtitleKind::Text { SubKind::Text } else { SubKind::Pgs }, lang: s.language.clone() }
+    let is_text = s.kind == SubtitleKind::Text || s.codec == "dvb_teletext";
+    BdSubTrack { kind: if is_text { SubKind::Text } else { SubKind::Pgs }, lang: s.language.clone() }
 }
 
 /// Both subtitle kinds end up as PGS `.sup` files (text cues are rendered natively).
@@ -242,7 +243,7 @@ async fn encode_bd_title(
     if let Some(args) = encoder::extract_subtitle_args(&t.info, &extract, work, &t.stem) {
         tools.ffmpeg(&args, duration, |_| {}).await?;
     }
-    // Text cues become PGS on the title's HD canvas.
+    // Text cues and nonstandard bitmap subtitles become PGS on the title's HD canvas.
     let (w, h) = resolution.frame_size(TvStandard::Pal);
     for &(k, s) in &extract {
         if sub_track(s).kind == SubKind::Text {
@@ -251,6 +252,40 @@ async fn encode_bd_title(
             let text = std::fs::read(&srt).at(&srt)?;
             let (cues, _skipped) = crate::textsub::parse_srt(&String::from_utf8_lossy(&text));
             std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h), t.rate.fps)).at(&sup)?;
+        } else if matches!(s.codec.as_str(), "dvd_subtitle" | "dvb_subtitle" | "xsub") {
+            let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
+            let json = if s.codec == "dvd_subtitle" {
+                tools.ffprobe_output(&subpic::vobsub_probe_args(&t.info.path, s.index)).await?
+            } else {
+                let temp_vob = work.join(format!("{}_temp_sub_{}.vob", t.stem, k));
+                let mut args = vec!["-y".into()];
+                args.extend(t.info.input_args());
+                args.extend(["-map".into(), format!("0:{}", s.index).into(), "-c:s".into(), "dvdsub".into(), "-f".into(), "dvd".into()]);
+                args.push(temp_vob.as_os_str().to_owned());
+                tools.ffmpeg(&args, duration, |_| {}).await?;
+                let probe_args = subpic::vobsub_probe_args(&temp_vob, 0);
+                let json = tools.ffprobe_output(&probe_args).await?;
+                let _ = std::fs::remove_file(&temp_vob);
+                json
+            };
+            let v = t.info.video.as_ref().expect("probed file has video");
+            let fallback = (720, if v.width == 720 { v.height } else if v.height >= 576 { 576 } else { 480 });
+            let trim = t.info.trim;
+            let fps = t.rate.fps;
+            let canvas_size = (w, h);
+            let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, subpic::SubpicError> {
+                let mut probe = subpic::parse_vobsub_probe(&json)?;
+                if let Some(tr) = trim {
+                    probe = probe.trimmed(tr.start, tr.end);
+                }
+                let (palette, size) = subpic::parse_idx_header(&String::from_utf8_lossy(&probe.extradata));
+                let decoded = subpic::decode_vobsub(&probe.packets, palette.as_ref(), size.unwrap_or(fallback));
+                Ok(crate::pgs::build_sup_from_pictures(&decoded.pictures, canvas_size, fps))
+            })
+            .await
+            .map_err(|e| ToolError::Failed { tool: "VobSub-zu-PGS".into(), status: String::new(), log: e.to_string() })?
+            .map_err(|e| ToolError::Failed { tool: "VobSub-zu-PGS".into(), status: String::new(), log: e.to_string() })?;
+            std::fs::write(&sup, bytes).at(&sup)?;
         }
     }
 
@@ -558,7 +593,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         // Only SRT-like text and PGS can go on a BD here.
         subs.retain(|&s| {
             let s = &info.subtitles[s];
-            let ok = s.kind == SubtitleKind::Text || s.codec == "hdmv_pgs_subtitle";
+            let ok = s.kind == SubtitleKind::Text || matches!(s.codec.as_str(), "hdmv_pgs_subtitle" | "dvd_subtitle" | "dvb_subtitle" | "xsub" | "dvb_teletext");
             if !ok {
                 warn(log, tf!(opts.ui_lang, "bd_sub_unsupported", label = label, index = s.index, codec = s.codec));
             }

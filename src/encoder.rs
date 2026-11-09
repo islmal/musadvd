@@ -749,6 +749,7 @@ pub fn extract_subtitle_args(info: &MediaInfo, tracks: &[(usize, &SubtitleStream
         let map = format!("0:{}", sub.index);
         let (codec, format) = match (sub.kind, sub.codec.as_str()) {
             (SubtitleKind::Text, _) => ("srt", "srt"),
+            (_, "dvb_teletext") => ("srt", "srt"),
             (_, "hdmv_pgs_subtitle") => ("copy", "sup"),
             _ => continue,
         };
@@ -777,7 +778,7 @@ pub async fn run_encode(
     }
     for (n, sub) in job.subtitles.iter().enumerate() {
         let xml = job.subtitle_xml(n);
-        let text = if sub.kind == SubtitleKind::Text {
+        let text = if sub.kind == SubtitleKind::Text || sub.codec == "dvb_teletext" {
             text_subtitle_xml(job, n, sub).await?
         } else {
             bitmap_subtitle_xml(tools, job, n, sub).await?
@@ -1110,6 +1111,30 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
             let v = job.info.video.as_ref().expect("probed file has video");
             let trim = job.info.trim;
             // Canvas: the .idx size, else the DVD raster the source belongs to.
+            let fallback = (720, if v.width == 720 { v.height } else if v.height >= 576 { 576 } else { 480 });
+            tokio::task::spawn_blocking(move || {
+                let mut probe = subpic::parse_vobsub_probe(&json)?;
+                if let Some(t) = trim {
+                    probe = probe.trimmed(t.start, t.end);
+                }
+                let (palette, size) = subpic::parse_idx_header(&String::from_utf8_lossy(&probe.extradata));
+                Ok(subpic::decode_vobsub(&probe.packets, palette.as_ref(), size.unwrap_or(fallback)))
+            })
+            .await
+            .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+        }
+        "dvb_subtitle" | "xsub" => {
+            let temp_vob = job.dir.join(format!("{}_temp_sub_{}.vob", job.stem, n));
+            let mut args = vec!["-y".into()];
+            args.extend(job.info.input_args());
+            args.extend(["-map".into(), format!("0:{}", sub.index).into(), "-c:s".into(), "dvdsub".into(), "-f".into(), "dvd".into()]);
+            args.push(temp_vob.as_os_str().to_owned());
+            tools.ffmpeg(&args, job.info.duration_secs, |_| {}).await?;
+            let probe_args = subpic::vobsub_probe_args(&temp_vob, 0);
+            let json = tools.ffprobe_output(&probe_args).await?;
+            let _ = std::fs::remove_file(&temp_vob);
+            let v = job.info.video.as_ref().expect("probed file has video");
+            let trim = job.info.trim;
             let fallback = (720, if v.width == 720 { v.height } else if v.height >= 576 { 576 } else { 480 });
             tokio::task::spawn_blocking(move || {
                 let mut probe = subpic::parse_vobsub_probe(&json)?;

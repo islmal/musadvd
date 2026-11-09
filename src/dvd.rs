@@ -2172,7 +2172,7 @@ mod tests {
         };
         let mut src = info(60.0, vec![]);
         src.audio = vec![a(1, "eng"), a(2, "ger"), a(3, "fra")];
-        src.subtitles = vec![s(4, "subrip", SubtitleKind::Text), s(5, "dvb_subtitle", SubtitleKind::Bitmap)];
+        src.subtitles = vec![s(4, "subrip", SubtitleKind::Text), s(5, "unknown_bitmap", SubtitleKind::Bitmap)];
         let opts = BuildOptions {
             audio_langs: vec!["de".into(), "en".into()],
             preferred_audio_lang: Some("de".into()),
@@ -2184,7 +2184,7 @@ mod tests {
         let (audio, subs, notes) = select_streams(&src, &none, &opts, "Film");
         assert_eq!(audio, vec![1, 0]);
         assert_eq!(subs, vec![0]);
-        assert!(notes.len() == 1 && notes[0].contains("dvb_subtitle"), "{notes:?}");
+        assert!(notes.len() == 1 && notes[0].contains("unknown_bitmap"), "{notes:?}");
 
         // No language matches: the first track, with a warning.
         let jp = BuildOptions { audio_langs: vec!["ja".into()], ..BuildOptions::default() };

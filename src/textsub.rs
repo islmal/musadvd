@@ -32,6 +32,73 @@ const FRAME_TRIM: u32 = 2;
 const FILL: Rgba<u8> = Rgba([255, 255, 255, 255]);
 const EDGE: Rgba<u8> = Rgba([0, 0, 0, 255]);
 
+/// Subtitle alignment within the canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubAlignment {
+    #[default]
+    BottomCenter,
+    BottomLeft,
+    BottomRight,
+    TopCenter,
+    TopLeft,
+    TopRight,
+    MiddleCenter,
+    MiddleLeft,
+    MiddleRight,
+}
+
+/// One character with formatting properties.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StyledChar {
+    pub c: char,
+    pub italic: bool,
+    pub bold: bool,
+    pub color: Rgba<u8>,
+}
+
+/// Parses a color string into RGBA (`#rrggbb`, `#rgb`, or color names).
+fn parse_color(s: &str) -> Option<Rgba<u8>> {
+    let s = s.trim().trim_matches(|c| c == '\'' || c == '"');
+    if let Some(hex) = s.strip_prefix('#') {
+        if hex.len() == 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            return Some(Rgba([r, g, b, 255]));
+        } else if hex.len() == 3 {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+            return Some(Rgba([r, g, b, 255]));
+        }
+    }
+    match s.to_ascii_lowercase().as_str() {
+        "yellow" => Some(Rgba([255, 255, 0, 255])),
+        "white" => Some(Rgba([255, 255, 255, 255])),
+        "cyan" | "aqua" => Some(Rgba([0, 255, 255, 255])),
+        "green" | "lime" => Some(Rgba([0, 255, 0, 255])),
+        "magenta" | "fuchsia" => Some(Rgba([255, 0, 255, 255])),
+        "red" => Some(Rgba([255, 0, 0, 255])),
+        "blue" => Some(Rgba([0, 0, 255, 255])),
+        "black" => Some(Rgba([0, 0, 0, 255])),
+        "gray" | "grey" => Some(Rgba([128, 128, 128, 255])),
+        _ => None,
+    }
+}
+
+/// Parses an SSA/ASS color `&HBBGGRR&` or `&HBBGGRR`.
+fn parse_ass_color(s: &str) -> Option<Rgba<u8>> {
+    let s = s.trim().trim_start_matches("&H").trim_start_matches("&h").trim_end_matches('&');
+    if s.len() == 6 {
+        let b = u8::from_str_radix(&s[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+        let r = u8::from_str_radix(&s[4..6], 16).ok()?;
+        Some(Rgba([r, g, b, 255]))
+    } else {
+        None
+    }
+}
+
 /// Scale of font `f` for an em height of `em_px` pixels.
 fn font_scale(f: &FontArc, em_px: f32) -> PxScale {
     PxScale::from(em_px * f.height_unscaled() / f.units_per_em().unwrap_or(f.height_unscaled()))
@@ -59,7 +126,7 @@ fn place_chars(fonts: &[FontArc], text: &str) -> Vec<Placed> {
         .collect()
 }
 
-/// One subtitle: seconds from the title start and its text lines (markup removed).
+/// One subtitle: seconds from the title start and its text lines (markup preserved).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
     pub start: f64,
@@ -80,8 +147,151 @@ fn parse_time(s: &str) -> Option<f64> {
     Some(h.trim().parse::<f64>().ok()? * 3600.0 + m.trim().parse::<f64>().ok()? * 60.0 + sec.trim().parse::<f64>().ok()? + frac)
 }
 
+/// Extracts alignment tags (like `{\an8}`, `{\a6}`) from cue lines and returns the detected alignment
+/// and the lines with alignment overrides stripped.
+pub fn extract_alignment(lines: &[String]) -> (SubAlignment, Vec<String>) {
+    let mut align = SubAlignment::BottomCenter;
+    let mut out_lines = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut cur = String::with_capacity(line.len());
+        let mut i = 0;
+        let bytes = line.as_bytes();
+        while i < bytes.len() {
+            if bytes[i] == b'{' {
+                if let Some(end) = line[i..].find('}') {
+                    let tag = &line[i + 1..i + end];
+                    let mut tag_rest = Vec::new();
+                    for part in tag.split('\\') {
+                        let trimmed = part.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        match trimmed {
+                            "an1" | "a1" => align = SubAlignment::BottomLeft,
+                            "an2" | "a2" => align = SubAlignment::BottomCenter,
+                            "an3" | "a3" => align = SubAlignment::BottomRight,
+                            "an4" => align = SubAlignment::MiddleLeft,
+                            "an5" => align = SubAlignment::MiddleCenter,
+                            "an6" => align = SubAlignment::MiddleRight,
+                            "an7" | "a9" => align = SubAlignment::TopLeft,
+                            "an8" | "a6" | "a10" => align = SubAlignment::TopCenter,
+                            "an9" | "a11" => align = SubAlignment::TopRight,
+                            other => tag_rest.push(other),
+                        }
+                    }
+                    if !tag_rest.is_empty() {
+                        cur.push('{');
+                        for (idx, r) in tag_rest.iter().enumerate() {
+                            if idx > 0 || tag.starts_with('\\') {
+                                cur.push('\\');
+                            }
+                            cur.push_str(r);
+                        }
+                        cur.push('}');
+                    }
+                    i += end + 1;
+                    continue;
+                }
+            }
+            cur.push(bytes[i] as char);
+            i += 1;
+        }
+        out_lines.push(cur);
+    }
+    (align, out_lines)
+}
+
+/// Parses a line into styled characters, interpreting formatting tags (`<i>`, `<b>`, `<font color="...">`, etc.).
+pub fn parse_styled_line(line: &str) -> Vec<StyledChar> {
+    let mut out = Vec::with_capacity(line.len());
+    let mut italic = false;
+    let mut bold = false;
+    let mut color_stack: Vec<Rgba<u8>> = Vec::new();
+
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            for tc in chars.by_ref() {
+                if tc == '>' {
+                    break;
+                }
+                tag.push(tc);
+            }
+            let trimmed = tag.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower == "i" || lower == "em" {
+                italic = true;
+            } else if lower == "/i" || lower == "/em" {
+                italic = false;
+            } else if lower == "b" || lower == "strong" {
+                bold = true;
+            } else if lower == "/b" || lower == "/strong" {
+                bold = false;
+            } else if lower == "/font" {
+                color_stack.pop();
+            } else if lower.starts_with("font") {
+                if let Some(col_idx) = lower.find("color") {
+                    let rest = &trimmed[col_idx + 5..];
+                    if let Some(eq_idx) = rest.find('=') {
+                        let val = rest[eq_idx + 1..].trim();
+                        let col_str = if val.starts_with('"') {
+                            val.strip_prefix('"').and_then(|v| v.split('"').next()).unwrap_or("")
+                        } else if val.starts_with('\'') {
+                            val.strip_prefix('\'').and_then(|v| v.split('\'').next()).unwrap_or("")
+                        } else {
+                            val.split_whitespace().next().unwrap_or("")
+                        };
+                        if let Some(parsed) = parse_color(col_str) {
+                            color_stack.push(parsed);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if c == '{' {
+            let mut tag = String::new();
+            for tc in chars.by_ref() {
+                if tc == '}' {
+                    break;
+                }
+                tag.push(tc);
+            }
+            for part in tag.split('\\') {
+                let part = part.trim();
+                let lower = part.to_ascii_lowercase();
+                if lower == "i1" || lower == "i" {
+                    italic = true;
+                } else if lower == "i0" {
+                    italic = false;
+                } else if lower == "b1" || lower == "b" {
+                    bold = true;
+                } else if lower == "b0" {
+                    bold = false;
+                } else if lower.starts_with("c&h") || lower.starts_with("1c&h") {
+                    let s = if lower.starts_with("1c&h") { &part[2..] } else { &part[1..] };
+                    if let Some(col) = parse_ass_color(s) {
+                        color_stack.push(col);
+                    }
+                }
+            }
+            continue;
+        }
+
+        let cur_color = color_stack.last().copied().unwrap_or(FILL);
+        match c {
+            '\t' => out.push(StyledChar { c: ' ', italic, bold, color: cur_color }),
+            c if c.is_control() => {}
+            c => out.push(StyledChar { c, italic, bold, color: cur_color }),
+        }
+    }
+    out
+}
+
 /// Removes `<…>` tags and `{\…}` override blocks.
-fn strip_markup(line: &str) -> String {
+pub fn strip_markup(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let (mut tag, mut brace) = (false, false);
     for c in line.chars() {
@@ -100,7 +310,7 @@ fn strip_markup(line: &str) -> String {
 }
 
 /// Parses SRT text. Returns the cues (text-less ones dropped) and the number of blocks skipped
-/// because their time line could not be read.
+/// because their time line could not be read. Markup is preserved in cue lines.
 pub fn parse_srt(text: &str) -> (Vec<Cue>, usize) {
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
     let (mut cues, mut skipped) = (Vec::new(), 0);
@@ -122,7 +332,10 @@ pub fn parse_srt(text: &str) -> (Vec<Cue>, usize) {
             skipped += 1;
             continue;
         };
-        let lines: Vec<String> = lines.map(strip_markup).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<String> = lines
+            .map(|l| l.trim().to_string())
+            .filter(|l| !strip_markup(l).is_empty())
+            .collect();
         if !lines.is_empty() {
             cues.push(Cue { start, end, lines });
         }
@@ -321,6 +534,59 @@ fn wrap_em(fonts: &[FontArc], text: &str, max_w: f32, em: f32) -> Vec<String> {
     lines
 }
 
+fn wrap_styled_em(fonts: &[FontArc], chars: &[StyledChar], max_w: f32, em: f32) -> Vec<Vec<StyledChar>> {
+    let mut lines = Vec::new();
+    let mut cur: Vec<StyledChar> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let word_start = i;
+        while i < chars.len() && !chars[i].c.is_whitespace() {
+            i += 1;
+        }
+        let word = &chars[word_start..i];
+        if cur.is_empty() {
+            cur.extend_from_slice(word);
+        } else {
+            let mut test_line = cur.clone();
+            test_line.push(StyledChar { c: ' ', italic: false, bold: false, color: FILL });
+            test_line.extend_from_slice(word);
+            let test_str: String = test_line.iter().map(|sc| sc.c).collect();
+            if text_width_em(fonts, &test_str, em) <= max_w {
+                cur = test_line;
+            } else {
+                lines.push(std::mem::replace(&mut cur, word.to_vec()));
+            }
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+fn reorder_styled_bidi(chars: &[StyledChar]) -> Vec<StyledChar> {
+    let raw_text: String = chars.iter().map(|sc| sc.c).collect();
+    let shaped = shape_arabic(&raw_text);
+    let bidi_info = BidiInfo::new(&shaped, None);
+    if bidi_info.paragraphs.is_empty() || !bidi_info.has_rtl() {
+        return chars.to_vec();
+    }
+    let mut out = Vec::with_capacity(chars.len());
+    for para in &bidi_info.paragraphs {
+        let line = para.range.clone();
+        let reordered_str = bidi_info.reorder_line(para, line);
+        let base_style = chars.first().copied().unwrap_or(StyledChar { c: ' ', italic: false, bold: false, color: FILL });
+        for c in reordered_str.chars() {
+            out.push(StyledChar { c, italic: base_style.italic, bold: base_style.bold, color: base_style.color });
+        }
+    }
+    out
+}
+
 /// Renders one cue on a `tv` frame; returns the picture and its top-left corner in the frame, or
 /// `None` when nothing is visible.
 pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u32, u32)> {
@@ -332,36 +598,82 @@ pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32
     let fonts = crate::menu::subtitle_font_chain();
     let (fw, fh) = c.size;
     let max_w = (fw - 2 * c.side) as f32;
-    let lines: Vec<String> = cue_lines
+    let (alignment, cue_lines) = extract_alignment(cue_lines);
+    let lines: Vec<Vec<StyledChar>> = cue_lines
         .iter()
-        .flat_map(|l| wrap_em(&fonts, l, max_w, c.em))
-        .map(|l| reorder_bidi(&l))
+        .flat_map(|l| {
+            let styled = parse_styled_line(l);
+            wrap_styled_em(&fonts, &styled, max_w, c.em)
+        })
+        .map(|l| reorder_styled_bidi(&l))
+        .filter(|l| !l.is_empty())
         .collect();
     if lines.is_empty() {
         return None;
     }
     let sf0 = fonts[0].as_scaled(font_scale(&fonts[0], c.em));
-    let last_baseline = (fh - c.trim - c.bottom) as i32 - c.baseline_above;
     let n = lines.len() as i32;
-    let first_baseline = last_baseline - (n - 1) * c.pitch;
+    let (first_baseline, last_baseline) = match alignment {
+        SubAlignment::TopCenter | SubAlignment::TopLeft | SubAlignment::TopRight => {
+            let first = (c.trim + c.bottom) as i32 + sf0.ascent().ceil() as i32;
+            let last = first + (n - 1) * c.pitch;
+            (first, last)
+        }
+        SubAlignment::MiddleCenter | SubAlignment::MiddleLeft | SubAlignment::MiddleRight => {
+            let total_h = (n - 1) * c.pitch + sf0.ascent().ceil() as i32 + (-sf0.descent()).ceil() as i32;
+            let y_mid = (fh / 2) as i32;
+            let first = y_mid - total_h / 2 + sf0.ascent().ceil() as i32;
+            let last = first + (n - 1) * c.pitch;
+            (first, last)
+        }
+        _ => {
+            let last = (fh - c.trim - c.bottom) as i32 - c.baseline_above;
+            let first = last - (n - 1) * c.pitch;
+            (first, last)
+        }
+    };
 
-    // Coverage in frame coordinates, but only over the cue's bounding box.
-    let widest = lines.iter().map(|l| text_width_em(&fonts, l, c.em)).fold(0.0f32, f32::max);
-    let x0 = (((fw as f32 - widest) / 2.0).floor() as i32 - c.outline - 2).max(0);
-    let x1 = (((fw as f32 + widest) / 2.0).ceil() as i32 + c.outline + 2).min(fw as i32);
+    let line_strings: Vec<String> = lines.iter().map(|l| l.iter().map(|sc| sc.c).collect()).collect();
+    let line_widths: Vec<f32> = line_strings.iter().map(|s| text_width_em(&fonts, s, c.em)).collect();
+    let widest = line_widths.iter().copied().fold(0.0f32, f32::max);
+
+    let (x0, x1) = match alignment {
+        SubAlignment::TopLeft | SubAlignment::BottomLeft | SubAlignment::MiddleLeft => {
+            let x0 = (c.side as i32 - c.outline - 2).max(0);
+            let x1 = ((c.side as f32 + widest).ceil() as i32 + c.outline + 2).min(fw as i32);
+            (x0, x1)
+        }
+        SubAlignment::TopRight | SubAlignment::BottomRight | SubAlignment::MiddleRight => {
+            let x0 = (((fw - c.side) as f32 - widest).floor() as i32 - c.outline - 2).max(0);
+            let x1 = ((fw - c.side) as i32 + c.outline + 2).min(fw as i32);
+            (x0, x1)
+        }
+        _ => {
+            let x0 = (((fw as f32 - widest) / 2.0).floor() as i32 - c.outline - 2).max(0);
+            let x1 = (((fw as f32 + widest) / 2.0).ceil() as i32 + c.outline + 2).min(fw as i32);
+            (x0, x1)
+        }
+    };
     let y0 = (first_baseline - sf0.ascent().ceil() as i32 - c.outline - 1).max(0);
     let y1 = (last_baseline + (-sf0.descent()).ceil() as i32 + c.outline + 1).min(fh as i32);
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    let mut ink = vec![false; w * h];
+    let mut ink: Vec<Option<Rgba<u8>>> = vec![None; w * h];
     for (i, line) in lines.iter().enumerate() {
         let baseline = (first_baseline + i as i32 * c.pitch) as f32;
-        let mut caret = ((fw as f32 - text_width_em(&fonts, line, c.em)) / 2.0).floor();
-        let placed = place_chars(&fonts, line);
+        let lw = line_widths[i];
+        let mut caret = match alignment {
+            SubAlignment::TopLeft | SubAlignment::BottomLeft | SubAlignment::MiddleLeft => c.side as f32,
+            SubAlignment::TopRight | SubAlignment::BottomRight | SubAlignment::MiddleRight => (fw - c.side) as f32 - lw,
+            _ => ((fw as f32 - lw) / 2.0).floor(),
+        };
+        let line_str = &line_strings[i];
+        let placed = place_chars(&fonts, line_str);
         let mut prev: Option<Placed> = None;
-        for &p in &placed {
+        for (idx, &p) in placed.iter().enumerate() {
+            let sc = line[idx];
             let font = &fonts[p.font];
             let scale = font_scale(font, c.em);
             let sf = font.as_scaled(scale);
@@ -374,9 +686,23 @@ pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32
             if let Some(o) = font.outline_glyph(glyph) {
                 let b = o.px_bounds();
                 o.draw(|px, py, cov| {
-                    let (x, y) = (b.min.x as i32 + px as i32 - x0, b.min.y as i32 + py as i32 - y0);
-                    if cov >= 0.5 && x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                        ink[y as usize * w + x as usize] = true;
+                    if cov < 0.5 {
+                        return;
+                    }
+                    let mut gx = b.min.x as i32 + px as i32;
+                    let gy = b.min.y as i32 + py as i32;
+                    if sc.italic {
+                        let dy = baseline - gy as f32;
+                        gx += (dy * 0.213).round() as i32;
+                    }
+                    let x = gx - x0;
+                    let y = gy - y0;
+                    let d_max = if sc.bold { 1 } else { 0 };
+                    for ddx in 0..=d_max {
+                        let cur_x = x + ddx;
+                        if cur_x >= 0 && y >= 0 && (cur_x as usize) < w && (y as usize) < h {
+                            ink[y as usize * w + cur_x as usize] = Some(sc.color);
+                        }
                     }
                 });
             }
@@ -387,12 +713,13 @@ pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32
     let r = c.outline;
     for y in 0..h as i32 {
         for x in 0..w as i32 {
-            let px = if ink[y as usize * w + x as usize] {
-                FILL
+            let idx = y as usize * w + x as usize;
+            let px = if let Some(fill_color) = ink[idx] {
+                fill_color
             } else if (-r..=r).any(|dy| {
                 (-r..=r).any(|dx| {
                     let (xx, yy) = (x + dx, y + dy);
-                    dx * dx + dy * dy <= r * r + 1 && xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h && ink[yy as usize * w + xx as usize]
+                    dx * dx + dy * dy <= r * r + 1 && xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h && ink[yy as usize * w + xx as usize].is_some()
                 })
             }) {
                 EDGE
@@ -427,11 +754,42 @@ mod tests {
         let (cues, skipped) = parse_srt(src);
         assert_eq!(skipped, 1);
         assert_eq!(cues.len(), 2, "{cues:?}");
-        assert_eq!(cues[0], Cue { start: 1.0, end: 2.5, lines: vec!["Hallo".into(), "Welt".into()] });
+        assert_eq!(cues[0], Cue { start: 1.0, end: 2.5, lines: vec!["<i>Hallo</i>".into(), "{\\an8}Welt".into()] });
         assert_eq!((cues[1].start, cues[1].end), (60.25, 3600.0));
+        assert_eq!(strip_markup(&cues[0].lines[0]), "Hallo");
+        assert_eq!(strip_markup(&cues[0].lines[1]), "Welt");
         // Blocks without an index line are accepted.
         let (c, s) = parse_srt("00:00:01,000 --> 00:00:02,000\nA\n");
         assert_eq!((c.len(), s), (1, 0));
+    }
+
+    #[test]
+    fn top_alignment_and_markup_rendering() {
+        // Top alignment renders cue near the top of the frame
+        let (img_top, x_top, y_top) = render_cue(TvStandard::Pal, &["{\\an8}Oben zentriert".into()]).unwrap();
+        let (x0, y0, x1, _y1) = bbox(&img_top, x_top, y_top);
+        assert!(y0 < 100, "Top aligned cue should be near the top: {y0}");
+        let centre = (x0 + x1) as i32 / 2;
+        assert!((centre - 720 / 2).abs() <= 5, "top centre: {centre}");
+
+        // Normal bottom cue has y0 > 400
+        let (img_bot, x_bot, y_bot) = render_cue(TvStandard::Pal, &["Unten zentriert".into()]).unwrap();
+        let (_, y0_bot, _, _) = bbox(&img_bot, x_bot, y_bot);
+        assert!(y0_bot > 400, "Bottom cue should be near the bottom: {y0_bot}");
+
+        // Colored subtitle markup: yellow fill
+        let (img_yellow, _, _) = render_cue(TvStandard::Pal, &["<font color=\"yellow\">Gelber Text</font>".into()]).unwrap();
+        let yellow = Rgba([255, 255, 0, 255]);
+        let yellow_count = img_yellow.pixels().filter(|p| **p == yellow).count();
+        assert!(yellow_count > 100, "Yellow subtitle should have yellow ink: {yellow_count}");
+
+        // Italic slant produces ink
+        let (img_italic, _, _) = render_cue(TvStandard::Pal, &["<i>Kursiver Text</i>".into()]).unwrap();
+        assert!(img_italic.pixels().any(|p| *p == FILL));
+
+        // Bold text produces ink
+        let (img_bold, _, _) = render_cue(TvStandard::Pal, &["<b>Fetter Text</b>".into()]).unwrap();
+        assert!(img_bold.pixels().any(|p| *p == FILL));
     }
 
     #[test]
