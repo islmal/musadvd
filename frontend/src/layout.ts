@@ -140,14 +140,71 @@ export function referencedTitles(layout: CustomLayout): Set<number> {
 }
 
 /**
+ * Remaps all 1-based title references in a custom layout using a mapping (oldTitle -> newTitle).
+ * Used when titles are reordered or moved, preserving custom menus across title list edits.
+ */
+export function remapLayoutTitles(layout: CustomLayout, mapFn: (oldTitle: number) => number | undefined): void {
+  for (const m of layout.menus) {
+    if (typeof m.title === "number") {
+      const next = mapFn(m.title);
+      if (next !== undefined) m.title = next;
+    }
+    if (m.background.video && typeof m.background.video.title === "number") {
+      const next = mapFn(m.background.video.title);
+      if (next !== undefined) m.background.video.title = next;
+    }
+    if (m.audio.type === "title" && typeof m.audio.title === "number") {
+      const next = mapFn(m.audio.title);
+      if (next !== undefined) m.audio.title = next;
+    }
+    for (const e of m.elements) {
+      if (e.type === "video" && typeof e.title === "number") {
+        const next = mapFn(e.title);
+        if (next !== undefined) e.title = next;
+      }
+      if (e.action && "title" in e.action && typeof e.action.title === "number") {
+        const next = mapFn(e.action.title);
+        if (next !== undefined) e.action.title = next;
+      }
+    }
+  }
+}
+
+/**
+ * Re-maps a custom layout when titles are reordered or removed, based on their file paths.
+ * Returns true if remapping succeeded for all referenced titles.
+ */
+export function remapLayoutByPaths(layout: CustomLayout, oldPaths: string[], newPaths: string[]): boolean {
+  const map = new Map<number, number>();
+  for (let i = 0; i < oldPaths.length; i++) {
+    const newIdx = newPaths.indexOf(oldPaths[i]);
+    if (newIdx >= 0) {
+      map.set(i + 1, newIdx + 1);
+    }
+  }
+  remapLayoutTitles(layout, (oldTitle) => map.get(oldTitle));
+  const refs = referencedTitles(layout);
+  return [...refs].every((t) => t >= 1 && t <= newPaths.length);
+}
+
+/**
  * Whether `layout` was made for other videos than `titles` (a stored layout from an earlier
- * project). With a stored `key` the video list must match exactly; for layouts without one
- * (older versions) it must refer to every current title and to no title beyond them.
+ * project). With a stored `key` the video list must match exactly (or be a reordering of the same videos);
+ * for layouts without one (older versions) it must refer to every current title and to no title beyond them.
  */
 export function madeForOtherTitles(layout: CustomLayout, key: string | null, titles: EditorTitle[]): boolean {
-  if (key !== null) return key !== titlesKey(titles);
   const refs = referencedTitles(layout);
-  return [...refs].some((t) => t > titles.length) || titles.some((t) => !refs.has(t.index));
+  if ([...refs].some((t) => t > titles.length)) return true;
+  if (key !== null) {
+    if (key === titlesKey(titles)) return false;
+    const oldPaths = key.split("\n");
+    const currentPaths = titles.map((t) => t.path);
+    if (oldPaths.length === currentPaths.length && oldPaths.every((p) => currentPaths.includes(p))) {
+      return false;
+    }
+    return true;
+  }
+  return titles.some((t) => !refs.has(t.index));
 }
 
 /** Label of chapter `n` (1-based): the source's chapter name or "Kapitel n". */

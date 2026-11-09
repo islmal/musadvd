@@ -5,7 +5,7 @@ import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
-import { isButton, isMoving, madeForOtherTitles, menuClipSecs, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
+import { isButton, isMoving, madeForOtherTitles, menuClipSecs, remapLayoutByPaths, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
 import { moveItem, shapeMismatch } from "./order";
@@ -348,9 +348,16 @@ function removeSelected() {
   state.splitUndo = null;
   const i = state.titles.findIndex((t) => t.id === state.selected);
   if (i < 0) return;
+  const oldPaths = state.titles.map((t) => t.meta.path);
   state.titles.splice(i, 1);
   normalizeMerge();
   state.selected = state.titles[Math.min(i, state.titles.length - 1)]?.id ?? null;
+  if (state.customLayout) {
+    const newPaths = state.titles.map((t) => t.meta.path);
+    remapLayoutByPaths(state.customLayout, oldPaths, newPaths);
+    state.customLayoutKey = titlesKey(editorTitles());
+    void refreshLayoutCheck();
+  }
   renderAll();
   scheduleCalc();
 }
@@ -392,9 +399,16 @@ function moveSelected(delta: number) {
 function moveTitle(from: number, to: number) {
   if (from === to || !state.titles[from]) return;
   state.splitUndo = null;
+  const oldPaths = state.titles.map((t) => t.meta.path);
   moveItem(state.titles, from, to);
   state.titles[to].mergeWithPrevious = false;
   normalizeMerge();
+  if (state.customLayout) {
+    const newPaths = state.titles.map((t) => t.meta.path);
+    remapLayoutByPaths(state.customLayout, oldPaths, newPaths);
+    state.customLayoutKey = titlesKey(editorTitles());
+    void refreshLayoutCheck();
+  }
   renderAll();
   scheduleCalc();
 }
@@ -448,6 +462,10 @@ async function splitByChapters(t: Title) {
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
+  if (state.settings?.bd_single_video) {
+    state.settings.bd_single_video = false;
+    saveSettings();
+  }
   state.splitUndo = { original: t, ids: news.map((n) => n.id), index: i };
   state.selected = news[0].id;
   renderAll();

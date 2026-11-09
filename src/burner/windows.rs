@@ -751,18 +751,28 @@ fn burn_feed(
     let mut format = format;
     if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
         if media.layer_break_supported {
+            drop(format);
             set_layer_break(&rec, l0).map_err(at("Layerwechsel setzen"))?;
+            let _ = progress_tx.send(BurnProgress::new(
+                BurnPhase::Preparing,
+                0.0,
+                "Warte auf Laufwerksbereitschaft (Layerwechsel) …",
+            ));
             // Wait for drive firmware to finish L0 allocation and mark the write feature current.
-            for _ in 0..6 {
+            let mut settled = None;
+            for _ in 0..24 {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 if let Ok(f) = format_for(&rec) {
                     let ready = unsafe { f.IsCurrentMediaSupported(&rec).map(|b| b.as_bool()).unwrap_or(false) };
-                    format = f;
                     if ready {
+                        settled = Some(f);
                         break;
                     }
                 }
             }
+            format = settled.ok_or_else(|| {
+                BurnError::Backend("Laufwerk ist nach dem Setzen des Layerwechsels nicht bereit (Feature nicht aktuell)".into())
+            })?;
         } else {
             let _ = progress_tx.send(BurnProgress::new(
                 BurnPhase::Preparing,

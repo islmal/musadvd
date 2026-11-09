@@ -14,6 +14,7 @@ import {
   chapterLabel,
   draftLayout,
   madeForOtherTitles,
+  remapLayoutByPaths,
   emptyMenu,
   isButton,
   isBdFrame,
@@ -90,10 +91,13 @@ export function requestClose(): boolean {
 /** Mounts the menu editor into the document body (the editor window). */
 export function mountMenuEditor(opts: EditorOptions) {
   const { titles, tv } = opts;
-  // A stored layout for other videos would show their titles: start from a draft for the
-  // current ones instead (the old layout stays reachable with "Rückgängig").
+  if (opts.layout && opts.layoutTitlesKey) {
+    const oldPaths = opts.layoutTitlesKey.split("\n");
+    const newPaths = titles.map((t) => t.path);
+    remapLayoutByPaths(opts.layout, oldPaths, newPaths);
+  }
   const stale = !!opts.layout && madeForOtherTitles(opts.layout, opts.layoutTitlesKey, titles);
-  let L: CustomLayout = structuredClone(opts.layout && !stale ? opts.layout : draftLayout(titles, tv, opts.heading));
+  let L: CustomLayout = structuredClone(opts.layout ?? draftLayout(titles, tv, opts.heading));
   let menuIdx = 0;
   let selIds: string[] = [];
   let closed = false;
