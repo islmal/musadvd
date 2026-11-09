@@ -956,11 +956,14 @@ mod tests {
     /// Enumerates the real drives (no disc access beyond IMAPI queries).
     #[test]
     fn enumerate_drives() {
+        let _com = Com::init().expect("COM init");
         let drives = ImapiBurner.list_drives().expect("IMAPI2 available");
         for d in &drives {
             eprintln!("drive: {d:?}");
             let media = ImapiBurner.probe_media(&d.id).expect("probe");
             eprintln!("  media: {media:?}");
+            let rec = recorder(&d.id).unwrap();
+            let _ = is_write_feature_current(&rec);
         }
     }
 }
