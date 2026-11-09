@@ -2166,7 +2166,10 @@ pub fn fix_vobus(files: &VobFiles, set: &PgcSet, ctx_for: &dyn Fn(usize) -> dvdv
                     {
                         vobuindex
                     } else {
-                        // dvdauthor reads one entry past the array here (never written, so zero in practice).
+                        // In dvdauthor C (dvdvob.c), id + 1 is guaranteed in-bounds by the preceding branch:
+                        // findspuidx returns id in -1..len-1; the first branch handled id >= 0 with SPU overlapping this VOBU,
+                        // and the else-if handled id + 1 == numaudpts or next SPU starting at/after this VOBU.
+                        // Thus, (id + 1) as usize < ach.audpts.len() is guaranteed, with defensive fallback to 0.
                         findvobubysect(vob, ach.audpts.get((id + 1) as usize).map_or(0, |a| a.asect))
                     };
                     let back = target < vobuindex;
