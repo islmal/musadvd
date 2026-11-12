@@ -739,6 +739,8 @@ export function mountMenuEditor(opts: EditorOptions) {
   const TL_ROW_H = 32;
   const TL_BTN_H = 18;
   type TlHit = { x: number; y: number; w: number; h: number; kind: "ruler" | "markerT" | "markerL" | "button"; id?: string; tip?: string };
+  /** Drop indicator (canvas y) while a button row is dragged in the name column. */
+  let tlDropY: number | null = null;
   /** Hit boxes in canvas CSS pixels from the last draw, bottom-most first. */
   let tlHits: TlHit[] = [];
   let tlRaf = 0;
@@ -968,10 +970,19 @@ export function mountMenuEditor(opts: EditorOptions) {
         ctx.fillStyle = r.sel ? accent : css.color;
         ctx.font = font(11, r.id ? (r.sel ? 700 : 400) : 600);
         ctx.fillText(r.label, r.id ? 20 : 8, y + r.h / 2);
+        if (r.id) {
+          // grip: the row can be dragged to change the stacking order
+          ctx.fillStyle = muted;
+          ctx.fillText("⋮⋮", 7, y + r.h / 2);
+        }
         ctx.restore();
         if (r.id) hits.push({ x: 0, y: Math.max(y, TL_RULER_H), w: vw, h: Math.min(r.h, y + r.h - TL_RULER_H), kind: "button", id: r.id });
       }
       y += r.h + TL_GAP;
+    }
+    if (tlDropY !== null) {
+      ctx.fillStyle = accent;
+      ctx.fillRect(0, tlDropY - 1, vw, 2);
     }
 
     // ---- ruler (fixed vertically) ----
@@ -1041,7 +1052,9 @@ export function mountMenuEditor(opts: EditorOptions) {
   tlCanvas.addEventListener("pointermove", (ev) => {
     if (tlCanvas.hasPointerCapture(ev.pointerId)) return;
     const h = tlHitAt(ev);
-    tlCanvas.style.cursor = !h ? "" : h.kind === "markerT" || h.kind === "markerL" ? "ew-resize" : "pointer";
+    const inNames = ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W;
+    tlCanvas.style.cursor =
+      !h ? "" : h.kind === "markerT" || h.kind === "markerL" ? "ew-resize" : h.kind === "button" && inNames ? "grab" : "pointer";
     tlCanvas.title = h?.tip ?? "";
   });
   tlCanvas.addEventListener("pointerdown", (ev) => {
@@ -1055,6 +1068,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       renderStage();
       renderProps();
       requestTimelineDraw();
+      if (ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W) dragRow(ev, b.id);
     } else if (h.kind === "markerT") {
       dragOnRuler(ev, (secs) => {
         m.introSecs = snapToClosedGop(Math.max(0, Math.min(60, secs)));
@@ -1072,6 +1086,52 @@ export function mountMenuEditor(opts: EditorOptions) {
       dragOnRuler(ev, (secs) => setPlayhead(secs));
     }
   });
+  /**
+   * Drags a button row in the name column; dropping it before/after another row moves the element
+   * there in `elements`, which is the stacking order (one undo step). Below 4 px it stays a click.
+   */
+  function dragRow(ev: PointerEvent, id: string) {
+    ev.preventDefault();
+    const y0 = ev.clientY;
+    let target: { id: string; after: boolean } | null = null;
+    const mv = (e: PointerEvent) => {
+      if (tlDropY === null && Math.abs(e.clientY - y0) < 4) return;
+      const y = e.clientY - tlCanvas.getBoundingClientRect().top;
+      const rows = tlHits.filter((h) => h.kind === "button");
+      const h = rows.find((r) => y < r.y + r.h + TL_GAP) ?? rows[rows.length - 1];
+      if (!h?.id) return;
+      const after = y >= h.y + h.h / 2;
+      target = { id: h.id, after };
+      tlDropY = after ? h.y + h.h + TL_GAP / 2 : h.y - TL_GAP / 2;
+      tlCanvas.style.cursor = "grabbing";
+      requestTimelineDraw();
+    };
+    const up = () => {
+      tlCanvas.removeEventListener("pointermove", mv);
+      tlCanvas.removeEventListener("pointerup", up);
+      tlCanvas.removeEventListener("pointercancel", up);
+      const dropped = tlDropY !== null ? target : null;
+      tlDropY = null;
+      tlCanvas.style.cursor = "";
+      if (dropped) moveElement(id, dropped.id, dropped.after);
+      else requestTimelineDraw();
+    };
+    tlCanvas.setPointerCapture(ev.pointerId);
+    tlCanvas.addEventListener("pointermove", mv);
+    tlCanvas.addEventListener("pointerup", up);
+    tlCanvas.addEventListener("pointercancel", up);
+  }
+  function moveElement(id: string, targetId: string, after: boolean) {
+    const all = menu().elements;
+    const from = all.findIndex((e) => e.id === id);
+    if (from < 0 || id === targetId) return;
+    const before = JSON.stringify(L);
+    const [e] = all.splice(from, 1);
+    all.splice(all.findIndex((x) => x.id === targetId) + (after ? 1 : 0), 0, e);
+    if (JSON.stringify(L) === before) return;
+    pushHistory(before);
+    renderAll();
+  }
   tlScroll.addEventListener("scroll", requestTimelineDraw, { passive: true });
   new ResizeObserver(requestTimelineDraw).observe(tlScroll);
 
