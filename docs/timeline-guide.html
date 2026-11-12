@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><title>Men&uuml;-Editor: Timeline-Anleitung</title>
+<style>
+@page { size: A4; margin: 18mm; }
+body { font: 11pt/1.5 "Segoe UI", Arial, sans-serif; color: #1e293b; }
+h1 { font-size: 22pt; margin: 0 0 4pt; } h2 { font-size: 14pt; margin: 18pt 0 6pt; border-bottom: 2px solid #3b82f6; padding-bottom: 2pt; }
+.sub { color: #64748b; margin-bottom: 14pt; }
+.box { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 8pt 10pt; margin: 8pt 0; }
+.warn { background: #fefce8; border-left-color: #eab308; }
+table { border-collapse: collapse; width: 100%; margin: 6pt 0; } td, th { border: 1px solid #cbd5e1; padding: 4pt 7pt; text-align: left; vertical-align: top; } th { background: #f1f5f9; }
+kbd { background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px; padding: 0 4px; font-size: 9.5pt; }
+svg { width: 100%; margin: 6pt 0; } ol li, ul li { margin-bottom: 3pt; }
+</style></head><body>
+<h1>Men&uuml;-Editor &ndash; Timeline-Ansicht</h1>
+<div class="sub">So baust du ein bewegtes DVD-Men&uuml; mit Intro und Schleife</div>
+
+<h2>1. Die Idee in drei S&auml;tzen</h2>
+<p>Ein bewegtes DVD-Men&uuml; hat bis zu zwei Teile: ein <b>Intro</b>, das nur <b>einmal</b> abgespielt wird (z.&nbsp;B. Logo-Animation), und eine <b>Schleife</b>, die danach <b>immer wieder</b> l&auml;uft, bis der Zuschauer einen Button dr&uuml;ckt. Die <b>Buttons</b> sind erst anklickbar, wenn das Intro vorbei ist &ndash; so macht es jede Kauf-DVD.</p>
+<p>Die Timeline zeigt dir genau das: links die Spur-Namen, rechts die Zeitachse. Es gibt nur <b>zwei Marker</b>, die du verschiebst.</p>
+
+<svg viewBox="0 0 700 175" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial" font-size="11">
+  <rect x="0" y="0" width="700" height="175" fill="#0f172a" rx="6"/>
+  <rect x="10" y="12" width="680" height="22" fill="#1e293b"/>
+  <text x="14" y="27" fill="#94a3b8">0:00</text><text x="250" y="27" fill="#94a3b8">0:06</text>
+  <rect x="160" y="14" width="78" height="14" rx="7" fill="#3b82f6"/><text x="165" y="25" fill="#fff" font-size="9" font-weight="bold">Intro-Ende</text>
+  <rect x="590" y="14" width="96" height="14" rx="7" fill="#22c55e"/><text x="597" y="25" fill="#fff" font-size="9" font-weight="bold">Schleifenende</text>
+  <rect x="10" y="40" width="150" height="32" fill="#1d4ed8" opacity=".6"/><text x="18" y="60" fill="#bfdbfe">Intro &middot; spielt einmal</text>
+  <rect x="160" y="40" width="530" height="32" fill="#16a34a" opacity=".6"/><text x="168" y="60" fill="#bbf7d0">Schleife &middot; wiederholt sich</text>
+  <rect x="10" y="78" width="680" height="32" fill="#7e22ce" opacity=".45"/><text x="18" y="98" fill="#e9d5ff">Ton</text>
+  <rect x="10" y="116" width="150" height="32" fill="#475569"/><text x="18" y="136" fill="#cbd5e1">noch nicht anklickbar</text>
+  <rect x="160" y="116" width="530" height="32" fill="#ca8a04" opacity=".6"/><text x="168" y="136" fill="#fef9c3">anklickbar</text>
+  <line x1="95" y1="12" x2="95" y2="165" stroke="#ef4444" stroke-width="2"/><text x="100" y="168" fill="#fca5a5" font-size="10">Playhead</text>
+  <text x="20" y="168" fill="#94a3b8" font-size="10">Video / Ton / Buttons</text>
+</svg>
+
+<h2>2. Timeline ein- und ausschalten</h2>
+<p>Oben in der Mitte: <b>Einfach</b> blendet die Timeline aus (reines Layout-Bearbeiten). <b>Erweitert (Timeline)</b> zeigt sie unter der B&uuml;hne und passt die Zoomstufe automatisch an.</p>
+
+<h2>3. Die Elemente der Timeline</h2>
+<table>
+<tr><th style="width:28%">Element</th><th>Bedeutung</th></tr>
+<tr><td><b>Roter Playhead</b></td><td>Die &bdquo;aktuelle Zeit&ldquo;. Die B&uuml;hne dar&uuml;ber zeigt, wie das Men&uuml; zu diesem Zeitpunkt aussieht. Im Lineal klicken oder ziehen setzt ihn.</td></tr>
+<tr><td><b>Blauer Marker &bdquo;Intro-Ende&ldquo;</b></td><td>Ziehen bestimmt, wie lang das Intro ist. Ganz links (0) = kein Intro. Er rastet automatisch auf 0,6&nbsp;s-Schritte ein (DVD-Pflicht, damit die Schleife nahtlos ist).</td></tr>
+<tr><td><b>Gr&uuml;ner Marker &bdquo;Schleifenende&ldquo;</b></td><td>Ziehen bestimmt, wie lang die Schleife ist (entspricht &bdquo;Dauer&ldquo; im Eigenschaften-Panel).</td></tr>
+<tr><td><b>Spur Video</b></td><td>Blau = Intro, gr&uuml;n = Schleife. Bei Video-Hintergrund oder Video-Element erscheinen Vorschaubilder.</td></tr>
+<tr><td><b>Spur Ton</b></td><td>Zeigt, ob das Men&uuml; Ton hat. Der Ton l&auml;uft in der Schleife.</td></tr>
+<tr><td><b>Spur Buttons</b></td><td>Schraffiert = noch nicht anklickbar (Intro), gold = anklickbar. Darunter steht <b>eine Zeile pro Button</b>; Klick darauf w&auml;hlt den Button auf der B&uuml;hne aus.</td></tr>
+</table>
+
+<h2>4. Schritt f&uuml;r Schritt: Men&uuml; mit Intro bauen</h2>
+<ol>
+<li>Men&uuml; links w&auml;hlen, oben <b>Erweitert (Timeline)</b> klicken.</li>
+<li>Hintergrund festlegen (Eigenschaften &rarr; Hintergrund &rarr; <i>Video eines Titels</i> oder Bild) und Texte/Buttons platzieren. Buttons zeichnest du mit <b>+ Button-Bereich</b> direkt auf die B&uuml;hne.</li>
+<li>Den roten Playhead im Lineal auf die Stelle ziehen, an der das Intro enden soll (z.&nbsp;B. 3&nbsp;s) &rarr; <b>Intro endet hier</b>. Oder den blauen Marker direkt ziehen.</li>
+<li>Den gr&uuml;nen Marker auf das gew&uuml;nschte Schleifenende ziehen.</li>
+<li><b>&#9654; Vorschau</b> (oder <kbd>Leertaste</kbd>): Das Intro l&auml;uft einmal, danach l&auml;uft nur noch die Schleife. W&auml;hrend des Intros sind Buttons auf der B&uuml;hne abgedunkelt mit dem Hinweis &bdquo;Subpicture inaktiv&ldquo; &ndash; sie bleiben aber bearbeitbar.</li>
+<li><b>&Uuml;bernehmen</b> klicken. Beim Erstellen der DVD baut das Programm Intro und Schleife automatisch.</li>
+</ol>
+<div class="box"><b>Kein Intro gew&uuml;nscht?</b> Button <b>Kein Intro</b> klicken (erscheint nur, wenn ein Intro existiert). Dann l&auml;uft das Men&uuml; sofort in der Schleife und alle Buttons sind von Anfang an aktiv.</div>
+
+<h2>5. Bedienung &amp; Tastatur</h2>
+<table>
+<tr><td><kbd>Leertaste</kbd></td><td>Vorschau starten/pausieren</td></tr>
+<tr><td><kbd>&larr;</kbd> / <kbd>&rarr;</kbd> (nichts ausgew&auml;hlt)</td><td>Playhead um 1 Frame; mit <kbd>Umschalt</kbd> um 15 (PAL) bzw. 18 (NTSC) Frames</td></tr>
+<tr><td><kbd>Pos1</kbd></td><td>Playhead an den Anfang</td></tr>
+<tr><td>Zoom-Regler / <b>Einpassen</b></td><td>Zeitachse vergr&ouml;&szlig;ern, oder so w&auml;hlen, dass alles ins Fenster passt</td></tr>
+<tr><td><kbd>Strg</kbd>+<kbd>Z</kbd></td><td>R&uuml;ckg&auml;ngig (auch f&uuml;r Marker-Verschiebungen)</td></tr>
+</table>
+
+<h2>6. Gut zu wissen</h2>
+<ul>
+<li><b>Warum 0,6&nbsp;s-Raster?</b> Eine nahtlose Schleife muss an einer GOP-Grenze beginnen (15 Frames PAL / 18 Frames NTSC). Deshalb springen die Marker.</li>
+<li>Alle Buttons teilen sich dieselbe Aktivzeit (ab Intro-Ende). Individuelle Ein-/Ausblend-Zeiten pro Button gibt es (noch) nicht.</li>
+<li>Die Tonspur wird als Schleife abgespielt; eine Wellenform-Anzeige gibt es noch nicht.</li>
+<li>Maximal 36 Buttons pro Men&uuml;, Buttons d&uuml;rfen sich nicht &uuml;berlappen.</li>
+</ul>
+<div class="box warn"><b>Tipp:</b> Eher kurze Intros (2&ndash;6&nbsp;s) und Schleifen ab etwa 10&nbsp;s verwenden &ndash; sehr kurze Schleifen wirken ruckelig und l&auml;ngere Men&uuml;s vergr&ouml;&szlig;ern die DVD nur unn&ouml;tig.</div>
+</body></html>
