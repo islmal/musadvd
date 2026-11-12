@@ -227,3 +227,111 @@ fn easter_egg_transparent_mask() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// External video files (menu editor "Externes Video") as background and element: the page
+/// keeps their paths and start offsets, and the ffmpeg menu command seeks each one there.
+/// Only the plan and the arguments are checked, nothing is encoded.
+#[test]
+fn external_video_files_reach_menu_args_with_their_offsets() {
+    use convertx_rust::encoder::{self, Fit, MenuBackground, MenuLayer};
+    use std::ffi::OsString;
+
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dvdauthor");
+    let (bg_file, el_file) = (fixtures.join("in_ntsc_3s.mpg"), fixtures.join("in_ac3_dts_3s.mpg"));
+    if !bg_file.exists() || !el_file.exists() {
+        eprintln!("skip: dvdauthor fixtures missing");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("cx_test_ext_video_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let video = Element {
+        id: "clip".into(),
+        content: layout::Content::Video { title: 0, start_secs: Some(2.0), fit: Fit::Contain, path: Some(el_file.clone()) },
+        x: 400.0,
+        y: 60.0,
+        w: 280.0,
+        h: 160.0,
+        rotation: 0,
+        opacity: 1.0,
+        action: None,
+        highlight: None,
+        group: None,
+        intro: Vec::new(),
+        easter_egg: false,
+    };
+    let play = Element {
+        id: "play".into(),
+        content: layout::Content::Text {
+            text: "Film".into(),
+            font: "Arial".into(),
+            size: 32.0,
+            color: "#FFFFFF".into(),
+            align: "center".into(),
+            bold: false,
+            italic: false,
+            shadow: false,
+            wrap: false,
+        },
+        x: 60.0,
+        y: 460.0,
+        w: 300.0,
+        h: 60.0,
+        rotation: 0,
+        opacity: 1.0,
+        action: Some(Action::PlayTitle { title: 1 }),
+        highlight: None,
+        group: None,
+        intro: Vec::new(),
+        easter_egg: false,
+    };
+    let menu = CustomMenu {
+        id: "main".into(),
+        name: "Extern".into(),
+        role: MenuRole::Title,
+        title: None,
+        background: Background {
+            video: Some(layout::VideoRef { title: 0, start_secs: Some(1.0), path: Some(bg_file.clone()) }),
+            ..Background::default()
+        },
+        duration_secs: Some(6.0),
+        audio: MenuSound::None,
+        intro_secs: None,
+        elements: vec![video, play],
+    };
+    let layout = CustomLayout {
+        version: 1,
+        canvas: Canvas::default(),
+        highlight: Highlight::default(),
+        animations: true,
+        fast_play: None,
+        menus: vec![menu],
+    };
+
+    let res = layout::build_custom_menus(&layout, &[dummy_title()], TvStandard::Pal, &dir, 6.0).unwrap();
+    let files = &res.pages[0].1;
+    assert_eq!(files.motion_secs, Some(6.0));
+    let media = files.custom.as_ref().expect("custom page media");
+
+    // The plan: file paths win over the (unused) title 0, offsets are kept, files bring no sound.
+    match &media.background {
+        MenuBackground::Video { clip, .. } => {
+            assert_eq!((&clip.path, clip.start_secs, clip.has_audio), (&bg_file, 1.0, false));
+        }
+        other => panic!("background should be the video file, got {other:?}"),
+    }
+    let clips: Vec<_> = media.layers.iter().filter_map(|l| if let MenuLayer::Video { clip, .. } = l { Some(clip) } else { None }).collect();
+    assert_eq!(clips.len(), 1, "one video layer: {:?}", media.layers);
+    assert_eq!((&clips[0].path, clips[0].start_secs), (&el_file, 2.0));
+
+    // The ffmpeg command: each file is an input seeked to its own start.
+    let args = encoder::custom_menu_args(TvStandard::Pal, media, 6.0, None, None, &dir.join("m.mpg"));
+    let seeks = |file: &std::path::Path, start: &str| {
+        args.windows(6).any(|w| w[0] == "-ss" && w[1] == start && w[4] == "-i" && w[5] == OsString::from(file))
+    };
+    assert!(seeks(&bg_file, "1.000"), "background input: {args:?}");
+    assert!(seeks(&el_file, "2.000"), "element input: {args:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
