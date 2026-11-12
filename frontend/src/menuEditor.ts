@@ -738,8 +738,8 @@ export function mountMenuEditor(opts: EditorOptions) {
   const TL_GAP = 4;
   const TL_ROW_H = 32;
   const TL_BTN_H = 18;
-  type TlHit = { x: number; y: number; w: number; h: number; kind: "ruler" | "markerT" | "markerL" | "button"; id?: string; tip?: string };
-  /** Drop indicator (canvas y) while a button row is dragged in the name column. */
+  type TlHit = { x: number; y: number; w: number; h: number; kind: "ruler" | "markerT" | "markerL" | "element"; id?: string; tip?: string };
+  /** Drop indicator (canvas y) while an element row is dragged in the name column. */
   let tlDropY: number | null = null;
   /** Hit boxes in canvas CSS pixels from the last draw, bottom-most first. */
   let tlHits: TlHit[] = [];
@@ -803,9 +803,8 @@ export function mountMenuEditor(opts: EditorOptions) {
     const total = timelineTotal();
     const px = pxPerSec();
     const trackW = total * px + 40;
-    const buttons = m.elements.filter(isButton);
     tlSizer.style.width = `${TL_NAME_W + trackW}px`;
-    tlSizer.style.height = `${TL_RULER_H + TL_GAP + 3 * (TL_ROW_H + TL_GAP) + buttons.length * (TL_BTN_H + TL_GAP) + 8}px`;
+    tlSizer.style.height = `${TL_RULER_H + TL_GAP + 3 * (TL_ROW_H + TL_GAP) + m.elements.length * (TL_BTN_H + TL_GAP) + 8}px`;
 
     const vw = tlScroll.clientWidth;
     const vh = tlScroll.clientHeight;
@@ -920,7 +919,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       },
     });
     rows.push({
-      label: tr("menuEditor.tlButtons", { n: buttons.length }),
+      label: tr("menuEditor.tlLayers", { n: m.elements.length }),
       h: TL_ROW_H,
       sel: false,
       draw: (y, h) => {
@@ -928,16 +927,21 @@ export function mountMenuEditor(opts: EditorOptions) {
         region(T, loopSecs, y, h, "rgba(234, 179, 8, 0.35)", "#eab308", tr("menuEditor.tlActive"), "#fef08a", 10);
       },
     });
-    for (const b of buttons) {
+    // NLE order: the top row is the frontmost layer (last in `elements`)
+    for (const e of [...m.elements].reverse()) {
+      const name =
+        e.type === "text" ? e.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlText") : e.type === "image" ? tr("menuEditor.bild2") : videoLabel(e);
       rows.push({
-        label: b.type === "text" ? b.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlButton") : actionLabel(b.action),
+        label: e.type !== "text" && isButton(e) ? actionLabel(e.action) : name,
         h: TL_BTN_H,
-        sel: isSel(b.id),
-        id: b.id,
-        draw: (y, h) => {
-          if (T > 0) region(0, T, y, h, "#1e293b", "#64748b", "", "", 10, true);
-          region(T, loopSecs, y, h, "rgba(234, 179, 8, 0.35)", "#eab308", actionLabel(b.action), "#fef08a", 10);
-        },
+        sel: isSel(e.id),
+        id: e.id,
+        draw: isButton(e)
+          ? (y, h) => {
+              if (T > 0) region(0, T, y, h, "#1e293b", "#64748b", "", "", 10, true);
+              region(T, loopSecs, y, h, "rgba(234, 179, 8, 0.35)", "#eab308", actionLabel(e.action), "#fef08a", 10);
+            }
+          : (y, h) => region(0, T + loopSecs, y, h, "rgba(100, 116, 139, 0.35)", "#64748b", name, "#cbd5e1", 10),
       });
     }
     let y = TL_RULER_H + TL_GAP - sy;
@@ -976,7 +980,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           ctx.fillText("⋮⋮", 7, y + r.h / 2);
         }
         ctx.restore();
-        if (r.id) hits.push({ x: 0, y: Math.max(y, TL_RULER_H), w: vw, h: Math.min(r.h, y + r.h - TL_RULER_H), kind: "button", id: r.id });
+        if (r.id) hits.push({ x: 0, y: Math.max(y, TL_RULER_H), w: vw, h: Math.min(r.h, y + r.h - TL_RULER_H), kind: "element", id: r.id });
       }
       y += r.h + TL_GAP;
     }
@@ -1054,14 +1058,14 @@ export function mountMenuEditor(opts: EditorOptions) {
     const h = tlHitAt(ev);
     const inNames = ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W;
     tlCanvas.style.cursor =
-      !h ? "" : h.kind === "markerT" || h.kind === "markerL" ? "ew-resize" : h.kind === "button" && inNames ? "grab" : "pointer";
+      !h ? "" : h.kind === "markerT" || h.kind === "markerL" ? "ew-resize" : h.kind === "element" && inNames ? "grab" : "pointer";
     tlCanvas.title = h?.tip ?? "";
   });
   tlCanvas.addEventListener("pointerdown", (ev) => {
     const h = tlHitAt(ev);
     if (ev.button !== 0 || !h) return;
     const m = menu();
-    if (h.kind === "button") {
+    if (h.kind === "element") {
       const b = m.elements.find((e) => e.id === h.id);
       if (!b) return;
       selIds = groupMembers(b).map((x) => x.id);
@@ -1087,8 +1091,8 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   });
   /**
-   * Drags a button row in the name column; dropping it before/after another row moves the element
-   * there in `elements`, which is the stacking order (one undo step). Below 4 px it stays a click.
+   * Drags an element row in the name column; dropping it above/below another row moves the element
+   * in front of/behind it in `elements` (the stacking order, one undo step). Below 4 px it stays a click.
    */
   function dragRow(ev: PointerEvent, id: string) {
     ev.preventDefault();
@@ -1097,7 +1101,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     const mv = (e: PointerEvent) => {
       if (tlDropY === null && Math.abs(e.clientY - y0) < 4) return;
       const y = e.clientY - tlCanvas.getBoundingClientRect().top;
-      const rows = tlHits.filter((h) => h.kind === "button");
+      const rows = tlHits.filter((h) => h.kind === "element");
       const h = rows.find((r) => y < r.y + r.h + TL_GAP) ?? rows[rows.length - 1];
       if (!h?.id) return;
       const after = y >= h.y + h.h / 2;
@@ -1113,7 +1117,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       const dropped = tlDropY !== null ? target : null;
       tlDropY = null;
       tlCanvas.style.cursor = "";
-      if (dropped) moveElement(id, dropped.id, dropped.after);
+      // rows run top = frontmost, so visually below a row means before it in `elements`
+      if (dropped) moveElement(id, dropped.id, !dropped.after);
       else requestTimelineDraw();
     };
     tlCanvas.setPointerCapture(ev.pointerId);
