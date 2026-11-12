@@ -27,6 +27,7 @@ import {
   type CustomLayout,
   type CustomMenu,
   type EditorTitle,
+  type ElementKey,
   type Fit,
   type LayoutElement,
   type TextElement,
@@ -738,7 +739,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   const TL_GAP = 4;
   const TL_ROW_H = 32;
   const TL_BTN_H = 18;
-  type TlHit = { x: number; y: number; w: number; h: number; kind: "ruler" | "markerT" | "markerL" | "element"; id?: string; tip?: string };
+  type TlHit = { x: number; y: number; w: number; h: number; kind: "ruler" | "markerT" | "markerL" | "element" | "keyframe"; id?: string; key?: number; tip?: string };
   /** Drop indicator (canvas y) while an element row is dragged in the name column. */
   let tlDropY: number | null = null;
   /** Hit boxes in canvas CSS pixels from the last draw, bottom-most first. */
@@ -861,7 +862,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     };
 
     // ---- rows (clipped below the ruler, right of the name column) ----
-    const rows: { label: string; h: number; sel: boolean; id?: string; draw: (y: number, h: number) => void }[] = [];
+    const rows: { label: string; h: number; sel: boolean; id?: string; keys?: ElementKey[]; draw: (y: number, h: number) => void }[] = [];
     const vid = m.background.video ?? m.elements.find((e): e is VideoElement => e.type === "video");
     rows.push({
       label: tr("menuEditor.tlVideo"),
@@ -936,6 +937,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         h: TL_BTN_H,
         sel: isSel(e.id),
         id: e.id,
+        keys: T > 0 ? e.intro : undefined,
         draw: isButton(e)
           ? (y, h) => {
               if (T > 0) region(0, T, y, h, "#1e293b", "#64748b", "", "", 10, true);
@@ -965,6 +967,23 @@ export function mountMenuEditor(opts: EditorOptions) {
           ctx.lineWidth = 1;
           ctx.strokeRect(X(0) + 0.5, y + 0.5, trackW - 1, r.h - 1);
         }
+        // intro keyframes: NLE diamonds at their time
+        const d = r.h / 2 - 2;
+        r.keys?.forEach((k) => {
+          const cx = X(k.t);
+          const cy = y + r.h / 2;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy - d);
+          ctx.lineTo(cx + d, cy);
+          ctx.lineTo(cx, cy + d);
+          ctx.lineTo(cx - d, cy);
+          ctx.closePath();
+          ctx.fillStyle = "#ffffff";
+          ctx.fill();
+          ctx.strokeStyle = "#0f172a";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        });
         ctx.restore();
         // name column (fixed horizontally)
         ctx.save();
@@ -981,6 +1000,10 @@ export function mountMenuEditor(opts: EditorOptions) {
         }
         ctx.restore();
         if (r.id) hits.push({ x: 0, y: Math.max(y, TL_RULER_H), w: vw, h: Math.min(r.h, y + r.h - TL_RULER_H), kind: "element", id: r.id });
+        r.keys?.forEach((k, i) => {
+          const cx = X(k.t);
+          if (cx >= TL_NAME_W) hits.push({ x: cx - 7, y: Math.max(y, TL_RULER_H), w: 14, h: r.h, kind: "keyframe", id: r.id, key: i, tip: `${k.t.toFixed(2)} s` });
+        });
       }
       y += r.h + TL_GAP;
     }
@@ -1058,7 +1081,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     const h = tlHitAt(ev);
     const inNames = ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W;
     tlCanvas.style.cursor =
-      !h ? "" : h.kind === "markerT" || h.kind === "markerL" ? "ew-resize" : h.kind === "element" && inNames ? "grab" : "pointer";
+      !h ? "" : h.kind === "markerT" || h.kind === "markerL" || h.kind === "keyframe" ? "ew-resize" : h.kind === "element" && inNames ? "grab" : "pointer";
     tlCanvas.title = h?.tip ?? "";
   });
   tlCanvas.addEventListener("pointerdown", (ev) => {
@@ -1073,6 +1096,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       renderProps();
       requestTimelineDraw();
       if (ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W) dragRow(ev, b.id);
+    } else if (h.kind === "keyframe") {
+      dragKeyframe(ev, h.id!, h.key!);
     } else if (h.kind === "markerT") {
       dragOnRuler(ev, (secs) => {
         m.introSecs = snapToClosedGop(Math.max(0, Math.min(60, secs)));
@@ -1126,6 +1151,57 @@ export function mountMenuEditor(opts: EditorOptions) {
     tlCanvas.addEventListener("pointerup", up);
     tlCanvas.addEventListener("pointercancel", up);
   }
+  /** Element by id in the current menu (re-resolved: a snapshot undo replaces the objects). */
+  const elementOf = (mi: number, id: string) => L.menus[mi]?.elements.find((e) => e.id === id);
+  /** Time-shifts one intro key between its neighbours (and 0..introSecs); one undo step. */
+  function dragKeyframe(ev: PointerEvent, id: string, i: number) {
+    const mi = menuIdx;
+    const m = menu();
+    const keys = elementOf(mi, id)?.intro;
+    if (!keys?.[i]) return;
+    const T = m.introSecs ?? 0;
+    const lo = keys[i - 1]?.t ?? 0;
+    const hi = keys[i + 1]?.t ?? T;
+    const commit = beginEdit(() => [elementOf(mi, id)!], ["intro"], renderAll);
+    const secsAt = (e: PointerEvent) => (e.clientX - tlCanvas.getBoundingClientRect().left - TL_NAME_W + tlScroll.scrollLeft) / pxPerSec();
+    const mv = (e: PointerEvent) => {
+      keys[i].t = Math.round(Math.min(hi, Math.max(lo, secsAt(e))) * 100) / 100;
+      tlCanvas.title = `${keys[i].t.toFixed(2)} s`;
+      requestTimelineDraw();
+    };
+    const up = () => {
+      tlCanvas.removeEventListener("pointermove", mv);
+      tlCanvas.removeEventListener("pointerup", up);
+      tlCanvas.removeEventListener("pointercancel", up);
+      if (commit()) renderAll();
+    };
+    ev.preventDefault();
+    tlCanvas.setPointerCapture(ev.pointerId);
+    tlCanvas.addEventListener("pointermove", mv);
+    tlCanvas.addEventListener("pointerup", up);
+    tlCanvas.addEventListener("pointercancel", up);
+  }
+  // Double-click on an element track inside the intro adds a key there (copy of the nearest key, or of the element).
+  tlCanvas.addEventListener("dblclick", (ev) => {
+    const r = tlCanvas.getBoundingClientRect();
+    if (ev.clientX - r.left < TL_NAME_W) return;
+    const h = tlHits.find((x) => x.kind === "element" && ev.clientY - r.top >= x.y && ev.clientY - r.top < x.y + x.h);
+    const m = menu();
+    const T = m.introSecs ?? 0;
+    const t = Math.round(((ev.clientX - r.left - TL_NAME_W + tlScroll.scrollLeft) / pxPerSec()) * 100) / 100;
+    if (!h?.id || T <= 0 || t < 0 || t > T) return;
+    const mi = menuIdx;
+    const e = elementOf(mi, h.id);
+    if (!e) return;
+    const keys = e.intro ?? [];
+    if (keys.some((k) => Math.abs(k.t - t) < 0.01)) return;
+    const near = keys.reduce<ElementKey | null>((b, k) => (!b || Math.abs(k.t - t) < Math.abs(b.t - t) ? k : b), null);
+    const src = near ?? e;
+    const commit = beginEdit(() => [elementOf(mi, h.id!)!], ["intro"], renderAll);
+    e.intro = [...keys, { t, x: src.x, y: src.y, w: src.w, h: src.h, opacity: src.opacity }].sort((a, b) => a.t - b.t);
+    commit();
+    renderAll();
+  });
   function moveElement(id: string, targetId: string, after: boolean) {
     const all = menu().elements;
     const from = all.findIndex((e) => e.id === id);
