@@ -19,7 +19,7 @@ use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
-    bd_button_rect, button_colors, clip_of, element_name, fit_image, frame_box, frame_font_size, parse_color, rotate, Action,
+    bd_button_rect, button_colors, clip_of, element_name, video_clip, fit_image, frame_box, frame_font_size, parse_color, rotate, Action,
     Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
 use crate::menu;
@@ -202,7 +202,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                     }
                     go(to_title(first_file(*title as u32) + file as u32), local, 0)
                 }
-                Action::Menu { menu } if intro => {
+                Action::Menu { menu, .. } if intro => {
                     let target = by_id(menu);
                     // Next / previous page of the same menu: no intro again. Role and title are not enough: a
                     // title's root and chapter menus share both but are different menus.
@@ -210,7 +210,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                     let paged = to.role == from.role && to.title == from.title && page_family(&to.id) == page_family(&from.id);
                     via_dispatcher(if paged { KIND_PAGED } else { KIND_MENU }, menu_obj(target))
                 }
-                Action::Menu { menu } => vec![hdmv::jump_object(menu_obj(by_id(menu)))],
+                Action::Menu { menu, .. } => vec![hdmv::jump_object(menu_obj(by_id(menu)))],
                 Action::SetAudio { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
                     let n = lt.and_then(|lt| lt.audio_sources.iter().position(|s| s == source)).unwrap_or(0) as u32 + 1;
@@ -231,6 +231,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                         None => vec![hdmv::set_stream(0)],
                     }
                 }
+                Action::CustomVm { .. } => vec![],
             };
             per.push(Some(cmds));
         }
@@ -628,14 +629,14 @@ fn render_page(
                     sprites.push(sprite(Pixels::Image(img)));
                 }
             }
-            Content::Video { title, start_secs, fit } => {
+            Content::Video { title, start_secs, fit, path } => {
                 flush(&mut current, &mut layers)?;
                 if d.intro && visible {
                     sprites.push(sprite(Pixels::Slot { index: slots.len(), width: w, height: h }));
                     slots.push(layers.len());
                 }
                 layers.push(MenuLayer::Video {
-                    clip: clip_of(d.titles, *title, *start_secs),
+                    clip: video_clip(d.titles, *title, *start_secs, path.as_ref()),
                     x: x.max(0) as u32,
                     y: y.max(0) as u32,
                     width: w,
@@ -745,7 +746,7 @@ fn render_page(
     };
 
     let background = match (&menu.background.video, &menu.background.image) {
-        (Some(v), _) => MenuBackground::Video { clip: clip_of(d.titles, v.title, v.start_secs), blur: menu.background.blur },
+        (Some(v), _) => MenuBackground::Video { clip: video_clip(d.titles, v.title, v.start_secs, v.path.as_ref()), blur: menu.background.blur },
         (None, Some(img)) => MenuBackground::Image { path: PathBuf::from(img), blur: menu.background.blur },
         (None, None) => MenuBackground::Color(parse_color(&menu.background.color).unwrap_or([0, 0, 0])),
     };
@@ -828,6 +829,7 @@ mod tests {
             highlight: None,
             group: None,
             intro: Vec::new(),
+            easter_egg: false,
             content: Content::Text {
                 text: "Play".into(),
                 font: "Arial".into(),
@@ -863,12 +865,13 @@ mod tests {
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),
             animations: true,
+            fast_play: None,
             menus: vec![
                 menu("main", MenuRole::Title, None, vec![
                     button(100.0, 100.0, Action::PlayTitle { title: 1 }),
                     button(100.0, 300.0, Action::PlayChapter { title: 2, chapter: 3 }),
                     button(100.0, 500.0, Action::PlayAll),
-                    button(100.0, 700.0, Action::Menu { menu: "set".into() }),
+                    button(100.0, 700.0, Action::menu("set")),
                 ]),
                 menu("set", MenuRole::Settings, Some(1), vec![
                     button(100.0, 100.0, Action::SetAudio { source: 2 }),
@@ -1061,7 +1064,7 @@ mod tests {
     /// and the last have a decorative element that fades in.
     fn intro_layout() -> CustomLayout {
         let mut l = layout();
-        l.menus.push(menu("main-p2", MenuRole::Title, None, vec![button(100.0, 100.0, Action::Menu { menu: "main".into() })]));
+        l.menus.push(menu("main-p2", MenuRole::Title, None, vec![button(100.0, 100.0, Action::menu("main"))]));
         let mut fade = button(900.0, 900.0, Action::PlayAll);
         fade.action = None;
         fade.intro = vec![
@@ -1132,9 +1135,9 @@ mod tests {
     fn a_roots_chapter_menu_is_another_menu_not_a_page_of_it() {
         let mut l = intro_layout();
         // Root and chapter menus of a title share role and title, like the template translation makes them.
-        l.menus.push(menu("root-1", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::Menu { menu: "chap-1-p1".into() })]));
-        l.menus.push(menu("chap-1-p1", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::Menu { menu: "chap-1-p2".into() })]));
-        l.menus.push(menu("chap-1-p2", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::Menu { menu: "root-1".into() })]));
+        l.menus.push(menu("root-1", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::menu("chap-1-p1"))]));
+        l.menus.push(menu("chap-1-p1", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::menu("chap-1-p2"))]));
+        l.menus.push(menu("chap-1-p2", MenuRole::Root, Some(1), vec![button(100.0, 100.0, Action::menu("root-1"))]));
         let (_, n) = intro_nav(&l);
         let to = |kind, index| [hdmv::mov(4, Op::Imm(kind)), hdmv::mov(5, Op::Imm(index)), hdmv::jump_object(10)];
         assert_eq!(cmds(&n, 3, 0), &to(2, 6), "root -> chapters: fresh entry, intro plays");

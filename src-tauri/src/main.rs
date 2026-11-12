@@ -371,6 +371,16 @@ async fn title_frame(state: State<'_, AppState>, path: String, at_secs: f64) -> 
     Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
+/// Audio peaks (0–255, `WAVEFORM_PEAKS_PER_SEC` per second) of `secs` of `path` from `start_secs`
+/// (menu editor timeline). Piped from ffmpeg, nothing touches the disk.
+#[tauri::command]
+async fn audio_waveform(state: State<'_, AppState>, path: String, start_secs: f64, secs: f64) -> Result<Vec<u8>, String> {
+    let tools = toolchain(&state).await?;
+    let args = convertx_rust::encoder::waveform_args(Path::new(&path), start_secs.max(0.0), secs.clamp(1.0, 900.0));
+    let pcm = tools.ffmpeg_output(&args).await.map_err(|e| e.to_string())?;
+    Ok(convertx_rust::encoder::waveform_peaks(&pcm))
+}
+
 /// The whole picture of a video at `at_secs` as JPEG data URL, `width` pixels wide, in display
 /// proportions (crop inspector).
 #[tauri::command]
@@ -506,6 +516,9 @@ struct ProjectSettings {
     /// Blu-ray menus from the editor: clip length of every menu in seconds (1 for stills).
     #[serde(default)]
     bd_menu_secs: Vec<f64>,
+    /// Custom DVD/BD layout from the WYSIWYG editor.
+    #[serde(default)]
+    custom_layout: Option<convertx_rust::layout::CustomLayout>,
 }
 
 #[derive(Serialize)]
@@ -555,6 +568,8 @@ fn project_calculation(settings: ProjectSettings, profile: EncodingProfile) -> R
     // A Blu-ray has menus only from the editor (8 Mbit/s H.264 + AC-3 + muxing ≈ 1.1 MB/s).
     let menu_mb = if settings.disc.is_bluray() {
         settings.bd_menu_secs.iter().sum::<f64>() * BD_MENU_MB_PER_SEC
+    } else if let Some(layout) = &settings.custom_layout {
+        dvd::estimate_custom_layout_mb(layout, settings.motion_duration.unwrap_or(DEFAULT_MOTION_SECS))
     } else {
         dvd::estimate_menu_mb(settings.titles.len(), settings.motion_menu, settings.motion_duration.unwrap_or(DEFAULT_MOTION_SECS))
     };
@@ -837,6 +852,7 @@ fn main() {
             burn::startup_burn,
             burn::open_folder,
             title_frame,
+            audio_waveform,
             preview::preview_stream,
             preview::preview_stop,
             source_frame,
@@ -889,6 +905,7 @@ mod tests {
             motion_menu: false,
             motion_duration: None,
             bd_menu_secs: vec![],
+            custom_layout: None,
         }, EncodingProfile::Auto)
         .unwrap();
         assert_eq!(r.target_mb, 4300);
@@ -907,6 +924,7 @@ mod tests {
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
+            custom_layout: None,
         }, EncodingProfile::Auto)
         .unwrap();
         assert_eq!(r.clamp, "min");
@@ -924,6 +942,7 @@ mod tests {
             motion_menu: false,
             motion_duration: None,
             bd_menu_secs: vec![],
+            custom_layout: None,
         };
         let auto = project_calculation(project(), EncodingProfile::Auto).unwrap();
         let lp = project_calculation(project(), EncodingProfile::Lp).unwrap();
@@ -940,6 +959,7 @@ mod tests {
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
+            custom_layout: None,
         };
         let r = project_calculation(project(DiscType::Bd25), EncodingProfile::Auto).unwrap();
         assert_eq!(r.target_mb, 22_900);
@@ -965,7 +985,7 @@ mod tests {
     fn avchd_estimate_uses_avchd_limits() {
         let titles = vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0 }];
         let r = project_calculation(
-            ProjectSettings { disc: DiscType::Avchd5, titles: titles.clone(), motion_menu: false, motion_duration: None, bd_menu_secs: vec![] },
+            ProjectSettings { disc: DiscType::Avchd5, titles: titles.clone(), motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
             EncodingProfile::Auto,
         )
         .unwrap();
@@ -974,7 +994,7 @@ mod tests {
         // Ten hours do not fit a DVD-5 as AVCHD even at the 2000 kbps floor.
         let long = TitleLoad { duration_secs: 10.0 * 3600.0, ..titles[0] };
         let r = project_calculation(
-            ProjectSettings { disc: DiscType::Avchd5, titles: vec![long], motion_menu: false, motion_duration: None, bd_menu_secs: vec![] },
+            ProjectSettings { disc: DiscType::Avchd5, titles: vec![long], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
             EncodingProfile::Auto,
         )
         .unwrap();
@@ -1011,9 +1031,43 @@ mod tests {
 
     #[test]
     fn empty_project() {
-        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None, bd_menu_secs: vec![] }, EncodingProfile::Auto).unwrap();
+        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None }, EncodingProfile::Auto).unwrap();
         assert_eq!(r.target_mb, 7950);
         assert!(r.fits);
+    }
+
+    #[test]
+    fn dvd_calculation_uses_custom_layout_estimate() {
+        let still_menu = convertx_rust::layout::CustomMenu {
+            id: "m1".into(),
+            name: "Main".into(),
+            role: convertx_rust::layout::MenuRole::Title,
+            title: None,
+            background: convertx_rust::layout::Background::default(),
+            duration_secs: None,
+            audio: convertx_rust::layout::MenuSound::None,
+            intro_secs: None,
+            elements: vec![],
+        };
+        let l = convertx_rust::layout::CustomLayout {
+            version: 1,
+            canvas: convertx_rust::layout::Canvas::default(),
+            highlight: convertx_rust::layout::Highlight::default(),
+            animations: true,
+            menus: vec![still_menu],
+            fast_play: None,
+        };
+        let s = ProjectSettings {
+            disc: DiscType::Dvd5,
+            titles: vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0 }],
+            motion_menu: true,
+            motion_duration: Some(25.0),
+            bd_menu_secs: vec![],
+            custom_layout: Some(l),
+        };
+        let r = project_calculation(s, EncodingProfile::Auto).unwrap();
+        // Custom layout has 1 still menu (0.15 MB), not the template estimate (7*0.15 + 2*5.5 = 12.05 MB)
+        assert_eq!(r.menu_mb, 0.15);
     }
 
     #[test]

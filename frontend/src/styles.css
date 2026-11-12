@@ -1522,6 +1522,119 @@ input.time {
   z-index: 10;
 }
 
+/* Center timeline integration */
+.ed-center.has-timeline {
+  grid-template-rows: auto 1fr auto;
+}
+
+.ed-aabb-preview {
+  position: absolute;
+  border: 2px dashed var(--gold, #eab308);
+  background: rgba(234, 179, 8, 0.2);
+  pointer-events: none;
+  z-index: 100;
+}
+
+/* Inactive button in Cell 1 (hli_ss == 0) */
+.ed-el.is-button.hli-inactive {
+  opacity: 0.25 !important;
+  outline: 2px dashed #94a3b8 !important;
+}
+
+.ed-hli-badge {
+  position: absolute;
+  bottom: -20px;
+  left: 0;
+  font-size: 9px;
+  background: #475569;
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* Hidden Easter Egg */
+.ed-el.is-easter-egg {
+  outline: 2px dashed #a855f7 !important;
+}
+
+.ed-easter-egg-badge {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  font-size: 10px;
+  font-weight: 600;
+  background: #a855f7;
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* Multi-Track Studio Timeline */
+.ed-center { grid-template-columns: minmax(0, 1fr); }
+.ed-timeline-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  height: 280px;
+  user-select: none;
+  font-size: 11px;
+}
+.ed-timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.ed-timeline-timecode {
+  font-family: monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--gold, #eab308);
+  background: #000;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.ed-gop-pill {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--panel-3, #334155);
+  color: var(--muted, #94a3b8);
+}
+.ed-timeline-hint {
+  padding: 4px 12px;
+  color: var(--muted, #94a3b8);
+  line-height: 1.35;
+  border-bottom: 1px solid var(--border);
+}
+.ed-tl-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
+.ed-tl-sizer { min-width: 100%; min-height: 100%; }
+.ed-tl-canvas { position: sticky; left: 0; top: 0; display: block; }
+
+.ed-audio-crossfade {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.2), rgba(236, 72, 153, 0.6));
+  border-left: 1px dashed #ec4899;
+  font-size: 9px;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  color: #fbcfe8;
+}
+
 .ed-layers {
   display: grid;
   gap: 6px;
@@ -2342,3 +2455,38 @@ input.time {
   justify-self: start;
   margin-top: 4px;
 }
+
+/* DVD menu limit warning and info */
+.menu-limit-warn {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: rgba(214, 69, 69, 0.1);
+  border: 1px solid var(--bad);
+  border-radius: var(--radius);
+  color: var(--bad);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.menu-limit-warn strong {
+  display: block;
+  font-size: 13.5px;
+  margin-bottom: 4px;
+}
+
+.menu-limit-warn p {
+  margin: 0;
+}
+
+.menu-limit-info {
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+.menu-limit-info.warn {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+/* Timeline: video thumbnails and per-button rows */
+

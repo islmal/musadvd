@@ -11,12 +11,33 @@ export type GradientOverlay = "none" | "bottomDark" | "vignette" | "dim";
 export type Action =
   | { type: "playTitle"; title: number }
   | { type: "playChapter"; title: number; chapter: number }
-  | { type: "menu"; menu: string }
+  | { type: "menu"; menu: string; transition?: TransitionVideo | null }
   | { type: "playAll" }
   /** Source stream index (ffprobe) of the audio track; root/settings menus only. */
   | { type: "setAudio"; source: number }
   /** Source stream index of the subtitle, `null` = subtitles off. */
-  | { type: "setSubtitle"; source: number | null };
+  | { type: "setSubtitle"; source: number | null }
+  /** Custom conditional VM script (e.g. "if (g4 == 1) link button 2; else jump menu 3;"). */
+  | { type: "customVm"; script: string };
+
+export type VideoAssetSource =
+  | { source: "title"; title: number; startSecs?: number | null }
+  | { source: "file"; path: string; inPointSecs?: number | null };
+
+export interface TransitionVideo {
+  video: VideoAssetSource;
+  durationSecs: number;
+  audio?: MenuSound;
+}
+
+export interface ElementKey {
+  t: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  opacity: number;
+}
 
 interface ElementBase {
   id: string;
@@ -32,6 +53,10 @@ interface ElementBase {
   highlight?: { color: string; selectColor: string } | null;
   /** Editor-only grouping: elements sharing a value move together; ignored by the build. */
   group?: string | null;
+  /** Intro animation keyframes. */
+  intro?: ElementKey[];
+  /** Hidden Easter Egg: Button hitbox and navigation active, but subpicture highlight is 100% transparent. */
+  easterEgg?: boolean;
 }
 
 export interface TextElement extends ElementBase {
@@ -56,9 +81,12 @@ export interface ImageElement extends ElementBase {
 
 export interface VideoElement extends ElementBase {
   type: "video";
+  /** 1-based project title; ignored (0) when `path` is set. */
   title: number;
   startSecs?: number | null;
   fit: Fit;
+  /** External video file instead of a title. */
+  path?: string;
 }
 
 export type LayoutElement = TextElement | ImageElement | VideoElement;
@@ -68,7 +96,8 @@ export type MenuSound = { type: "none" } | { type: "title"; title: number; start
 export interface Background {
   color: string;
   image?: string | null;
-  video?: { title: number; startSecs?: number | null } | null;
+  /** A project title, or an external file when `path` is set (then `title` is ignored). */
+  video?: { title: number; startSecs?: number | null; path?: string } | null;
   blur: number;
   gradientOverlay?: GradientOverlay;
 }
@@ -81,13 +110,26 @@ export interface CustomMenu {
   background: Background;
   durationSecs?: number | null;
   audio: MenuSound;
+  introSecs?: number | null;
   elements: LayoutElement[];
+}
+
+export type FastPlayMenuTarget = "vtsmRoot" | "vmgmMain";
+
+export interface FastPlayConfig {
+  enabled: boolean;
+  timeoutSecs: number;
+  targetTitle: number;
+  menuTarget: FastPlayMenuTarget;
+  splash?: Background | null;
+  audio?: MenuSound;
 }
 
 export interface CustomLayout {
   version: number;
   canvas: { width: number; height: number };
   highlight: { color: string; selectColor: string; opacity: number };
+  fastPlay?: FastPlayConfig | null;
   menus: CustomMenu[];
 }
 
@@ -131,9 +173,9 @@ export function titlesKey(titles: EditorTitle[]): string {
 export function referencedTitles(layout: CustomLayout): Set<number> {
   const refs = layout.menus.flatMap((m) => [
     m.title ?? 0,
-    m.background.video?.title ?? 0,
+    m.background.video?.path ? 0 : (m.background.video?.title ?? 0),
     m.audio.type === "title" ? m.audio.title : 0,
-    ...m.elements.map((e) => (e.type === "video" ? e.title : 0)),
+    ...m.elements.map((e) => (e.type === "video" && !e.path ? e.title : 0)),
     ...m.elements.map((e) => (e.action && "title" in e.action ? e.action.title : 0)),
   ]);
   return new Set(refs.filter((t) => t > 0));
@@ -149,7 +191,7 @@ export function remapLayoutTitles(layout: CustomLayout, mapFn: (oldTitle: number
       const next = mapFn(m.title);
       if (next !== undefined) m.title = next;
     }
-    if (m.background.video && typeof m.background.video.title === "number") {
+    if (m.background.video && !m.background.video.path && typeof m.background.video.title === "number") {
       const next = mapFn(m.background.video.title);
       if (next !== undefined) m.background.video.title = next;
     }
@@ -158,7 +200,7 @@ export function remapLayoutTitles(layout: CustomLayout, mapFn: (oldTitle: number
       if (next !== undefined) m.audio.title = next;
     }
     for (const e of m.elements) {
-      if (e.type === "video" && typeof e.title === "number") {
+      if (e.type === "video" && !e.path && typeof e.title === "number") {
         const next = mapFn(e.title);
         if (next !== undefined) e.title = next;
       }

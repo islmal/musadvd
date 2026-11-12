@@ -744,7 +744,9 @@ fn choose_reps(pixels: &[[u8; 4]]) -> Vec<[u8; 4]> {
     let (sum_r, sum_g, sum_b, sum_a) = translucent.iter().fold((0u64, 0u64, 0u64, 0u64), |(r, g, b, a), p| {
         (r + p[0] as u64, g + p[1] as u64, b + p[2] as u64, a + p[3] as u64)
     });
-    let edge = [(sum_r / trans_count) as u8, (sum_g / trans_count) as u8, (sum_b / trans_count) as u8, (sum_a / trans_count) as u8];
+    // Quantize RGB to multiples of 16 so cues share palette entries instead of diverging by single bits
+    let quant = |v: u64| ((((v / trans_count) as u32 + 8) / 16 * 16).min(255)) as u8;
+    let edge = [quant(sum_r), quant(sum_g), quant(sum_b), (sum_a / trans_count) as u8];
 
     let op_reps = representatives(&opaque);
     if op_reps.len() == 1 {

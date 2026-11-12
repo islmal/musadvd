@@ -95,9 +95,12 @@ pub struct ButtonDef {
 }
 
 /// Whether `xml` is a plain bitmap subtitle stream this module can mux (no text rendering, no
-/// buttons).
+/// buttons). Handles both populated streams with `<spu>` tags and empty streams without subtitles.
 pub fn handles_xml(xml: &str) -> bool {
-    xml.contains("<spu ") && !xml.contains("<textsub") && !xml.contains("<button") && !xml.contains("highlight=")
+    (xml.contains("<spu ") || (xml.contains("<subpictures") && xml.contains("<stream>")))
+        && !xml.contains("<textsub")
+        && !xml.contains("<button")
+        && !xml.contains("highlight=")
 }
 
 /// Whether `xml` is a menu subpicture (highlight/select masks with buttons).
@@ -1190,6 +1193,21 @@ mod tests {
         assert_eq!((d[0].start, d[0].end, d[0].x, d[0].y, d[0].force), (90_000, Some(225_000), 10, 20, true));
         assert_eq!((d[1].end, d[1].force), (None, false));
         assert!(!handles_xml("<subpictures><stream><textsub/></stream></subpictures>"));
+
+        let empty_xml = "<subpictures format=\"PAL\">\n  <stream>\n  </stream>\n</subpictures>";
+        assert!(handles_xml(empty_xml));
+        let empty_d = parse_xml(empty_xml, Path::new("w")).unwrap();
+        assert!(empty_d.is_empty());
+    }
+
+    #[test]
+    fn empty_subtitle_stream_muxes_without_error() {
+        let empty_xml = "<subpictures format=\"PAL\">\n  <stream>\n  </stream>\n</subpictures>";
+        let defs = parse_xml(empty_xml, Path::new("w")).unwrap();
+        let mut out = Vec::new();
+        let stats = mux(std::io::Cursor::new(vec![]), &mut out, defs, 0).unwrap();
+        assert_eq!(stats.added, 0);
+        assert_eq!(stats.skipped, 0);
     }
 
     #[test]

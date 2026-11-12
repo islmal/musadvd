@@ -591,6 +591,7 @@ mod menus {
             highlight: None,
             group: None,
             intro: Vec::new(),
+            easter_egg: false,
         }
     }
 
@@ -615,6 +616,7 @@ mod menus {
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),
             animations: true,
+            fast_play: None,
             menus: vec![
                 menu("main", MenuRole::Title, None, vec![
                     button(200.0, "Film 1", Action::PlayTitle { title: 1 }),
@@ -624,13 +626,13 @@ mod menus {
                 ]),
                 menu("root", MenuRole::Root, Some(1), vec![
                     button(200.0, "Abspielen", Action::PlayTitle { title: 1 }),
-                    button(320.0, "Einstellungen", Action::Menu { menu: "set".into() }),
+                    button(320.0, "Einstellungen", Action::menu("set")),
                 ]),
                 menu("set", MenuRole::Settings, Some(1), vec![
                     button(200.0, "Ton 2", Action::SetAudio { source: 2 }),
                     button(320.0, "Untertitel an", Action::SetSubtitle { source: Some(3) }),
                     button(440.0, "Untertitel aus", Action::SetSubtitle { source: None }),
-                    button(560.0, "Zurück", Action::Menu { menu: "root".into() }),
+                    button(560.0, "Zurück", Action::menu("root")),
                 ]),
             ],
         }

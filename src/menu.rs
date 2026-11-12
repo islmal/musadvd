@@ -1422,6 +1422,8 @@ fn render_menu_page(
             motion: motion_page,
             pre: None,
             intro_secs,
+            pause_secs: None,
+            post: None,
         };
         Ok(((spec, files), warnings))
     }
@@ -1504,6 +1506,7 @@ pub fn render_menu_set(opts: &MenuSetOptions) -> Result<MenuSetSummary, MenuErro
         playback: Default::default(),
         tv: TvStandard::Pal,
         title_pre: None,
+        fast_play: None,
         titlesets: titles
             .into_iter()
             .enumerate()

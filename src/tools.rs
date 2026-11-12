@@ -285,7 +285,7 @@ impl Toolchain {
         };
         let text = std::fs::read_to_string(dir.join(xml)).map_err(|error| ToolError::Io { tool: tool.clone(), error })?;
         if !crate::spumux::handles_xml(&text) && !crate::spumux::is_menu_xml(&text) {
-            return Err(failed("subpicture XML without <spu> elements".into()));
+            return Err(failed("unsupported subpicture XML".into()));
         }
         let defs = crate::spumux::parse_xml(&text, dir).map_err(|e| failed(e.to_string()))?;
         let (input, output) = (open(dir.join(input), false)?, open(dir.join(output), true)?);
@@ -308,6 +308,19 @@ impl Toolchain {
             return Err(ToolError::Failed { tool: "ffprobe".into(), status: out.status.to_string(), log: tail(&log, 30) });
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// ffmpeg with `args` (ending in `pipe:1`); returns its stdout.
+    pub async fn ffmpeg_output(&self, args: &[OsString]) -> Result<Vec<u8>, ToolError> {
+        let io = |error| ToolError::Io { tool: "ffmpeg".into(), error };
+        let mut cmd = self.command(&self.ffmpeg);
+        cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]).args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = cmd.output().await.map_err(io)?;
+        if !out.status.success() {
+            let log = String::from_utf8_lossy(&out.stderr).into_owned();
+            return Err(ToolError::Failed { tool: "ffmpeg".into(), status: out.status.to_string(), log: tail(&log, 30) });
+        }
+        Ok(out.stdout)
     }
 
     /// Runs ffmpeg with `args`, reporting progress (0..1) for an output of `duration_secs`.
@@ -497,7 +510,7 @@ impl Toolchain {
             let fail = |log: String| ToolError::Failed { tool: tool.clone(), status: String::new(), log };
             let text = std::fs::read_to_string(dir.join(xml)).map_err(|e| fail(e.to_string()))?;
             if !crate::spumux::handles_xml(&text) {
-                return Err(fail("subtitle XML without <spu> elements".into()));
+                return Err(fail("unsupported subtitle XML".into()));
             }
             let defs = crate::spumux::parse_xml(&text, dir).map_err(|e| fail(e.to_string()))?;
             let sink: Box<dyn std::io::Write + Send> = if last {

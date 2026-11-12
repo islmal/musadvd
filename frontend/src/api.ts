@@ -405,6 +405,8 @@ export const saveLayout = (path: string, layout: CustomLayout) => invoke<void>("
 export const imagePreview = (path: string) => invoke<string>("image_preview", { path });
 /** A frame of a video as data URL. */
 export const titleFrame = (path: string, atSecs: number) => invoke<string>("title_frame", { path, atSecs });
+/** Audio peaks 0–255, 40 per second (`encoder::WAVEFORM_PEAKS_PER_SEC`). */
+export const audioWaveform = (path: string, startSecs: number, secs: number) => invoke<number[]>("audio_waveform", { path, startSecs, secs });
 /** The whole picture of a video at `atSecs`, `width` px wide, as data URL (crop inspector). */
 export const sourceFrame = (path: string, atSecs: number, width: number) => invoke<string>("source_frame", { path, atSecs, width });
 /** Black bars of a video (inside the section, if given). */

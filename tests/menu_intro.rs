@@ -353,7 +353,7 @@ mod build {
     const SLOT: (f64, f64, f64, f64) = (960.0, 300.0, 800.0, 450.0);
 
     fn element(content: Content, (x, y, w, h): (f64, f64, f64, f64), action: Option<Action>, intro: Vec<ElementKey>) -> Element {
-        Element { id: String::new(), content, x, y, w, h, rotation: 0, opacity: 1.0, action, highlight: None, group: None, intro }
+        Element { id: String::new(), content, x, y, w, h, rotation: 0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false }
     }
 
     fn text(s: &str) -> Content {
@@ -386,7 +386,7 @@ mod build {
                 elements: vec![
                     element(text("Hallo Intro"), headline, None, keys(vec![key(0.0, headline, 0.0), key(INTRO, headline, 1.0)])),
                     element(
-                        Content::Video { title: 1, start_secs: Some(SOURCE_START), fit: convertx_rust::encoder::Fit::Cover },
+                        Content::Video { title: 1, start_secs: Some(SOURCE_START), fit: convertx_rust::encoder::Fit::Cover, path: None },
                         SLOT,
                         None,
                         keys(vec![key(0.0, (SLOT.0 + SLOT.2 / 2.0, SLOT.1 + SLOT.3 / 2.0, 0.0, 0.0), 1.0), key(INTRO, SLOT, 1.0)]),
@@ -394,6 +394,7 @@ mod build {
                     element(text("Start"), (100.0, 400.0, 400.0, 100.0), Some(Action::PlayTitle { title: 1 }), Vec::new()),
                 ],
             }],
+            fast_play: None,
         }
     }
 
@@ -584,7 +585,7 @@ mod build {
         assert!(st.success());
         let backgrounds = [
             ("pic", Background { image: Some(picture.to_string_lossy().into_owned()), blur: 6.0, overlay: BackgroundOverlay::Dim, ..Background::default() }, false),
-            ("clip", Background { video: Some(VideoRef { title: 1, start_secs: Some(SOURCE_START) }), blur: 3.0, overlay: BackgroundOverlay::Vignette, ..Background::default() }, true),
+            ("clip", Background { video: Some(VideoRef { title: 1, start_secs: Some(SOURCE_START), path: None }), blur: 3.0, overlay: BackgroundOverlay::Vignette, ..Background::default() }, true),
         ];
         for (name, background, moving) in backgrounds {
             let Fixture { dir, report } = build(&rt, &tools, name, layout_on(true, true, background), true);

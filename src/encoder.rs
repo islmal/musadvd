@@ -1212,6 +1212,27 @@ pub fn frame_args(input: &Path, at_secs: f64, width: u32, output: &Path) -> Vec<
     ]
 }
 
+/// Peaks per second of [`waveform_peaks`] (menu editor timeline).
+pub const WAVEFORM_PEAKS_PER_SEC: u32 = 40;
+/// Decode rate for the waveform: high enough that a peak is a real amplitude, not an alias.
+const WAVEFORM_RATE: u32 = 2000;
+
+/// Arguments decoding `secs` of the first audio stream of `input` from `start_secs` as mono
+/// unsigned 8-bit PCM to stdout (input for [`waveform_peaks`]).
+pub fn waveform_args(input: &Path, start_secs: f64, secs: f64) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["-ss".into(), format!("{start_secs:.3}").into(), "-t".into(), format!("{secs:.3}").into(), "-i".into()];
+    args.push(input.as_os_str().to_owned());
+    args.extend(["-vn", "-ac", "1", "-ar", &WAVEFORM_RATE.to_string(), "-acodec", "pcm_u8", "-f", "u8", "pipe:1"].map(OsString::from));
+    args
+}
+
+/// Folds `pcm_u8` samples (silence = 128) into one 0–255 peak per 1/[`WAVEFORM_PEAKS_PER_SEC`] s.
+pub fn waveform_peaks(pcm: &[u8]) -> Vec<u8> {
+    pcm.chunks((WAVEFORM_RATE / WAVEFORM_PEAKS_PER_SEC) as usize)
+        .map(|c| c.iter().map(|&s| s.abs_diff(128)).max().unwrap_or(0).saturating_mul(2))
+        .collect()
+}
+
 /// A moving preview inside a motion menu, in output (PAL/NTSC frame) coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoSlot {
@@ -1505,11 +1526,12 @@ pub fn custom_menu_args(
     media: &CustomMenuMedia,
     duration_secs: f64,
     audio: Option<&ClipSource>,
+    intro_secs: Option<f64>,
     output: &Path,
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
     let frame = MenuFrame::from(tv);
-    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3", None);
+    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3", intro_secs);
     a.extend(
         [
             "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
@@ -1517,6 +1539,16 @@ pub fn custom_menu_args(
         ]
         .map(OsString::from),
     );
+    if let Some(t) = intro_secs {
+        a.extend([
+            "-force_key_frames".into(),
+            format!("expr:gte(t,{:.3})", t).into(),
+            "-flags".into(),
+            "+cgop".into(),
+            "-sc_threshold".into(),
+            "1000000000".into(),
+        ]);
+    }
     a.push(output.as_os_str().to_owned());
     a
 }
@@ -1642,7 +1674,7 @@ pub fn intro_background_stream(frame: &MenuFrame, rate: BdRate, media: &CustomMe
 /// the clip's end back to the mark `t`: the last `x` seconds fade from the clip's own end into the
 /// sound at [t - x, t], so the signal continues.
 fn menu_sound_filters(f: &mut Vec<String>, audio_input: usize, d: &str, duration_secs: f64, intro_secs: Option<f64>) {
-    let head = format!("[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo");
+    let head = format!("[{audio_input}:a:0]{DVD_AUDIO_SYNC},aformat=sample_fmts=fltp:channel_layouts=stereo");
     match intro_secs {
         Some(t) => {
             let x = t.min(0.5);
@@ -1752,6 +1784,16 @@ pub fn menu_still_args(tv: TvStandard, png: &Path, output: &Path) -> Vec<OsStrin
 mod tests {
     use super::*;
     use crate::probe::SubtitleKind;
+
+    #[test]
+    fn waveform_peaks_fold_amplitude() {
+        // 50 samples per peak: silence, a full swing, a small swing, then a short tail.
+        let mut pcm = vec![128u8; 50];
+        pcm.extend([128u8; 49].iter().chain(&[0]));
+        pcm.extend([138u8; 50]);
+        pcm.extend([128u8, 255]);
+        assert_eq!(waveform_peaks(&pcm), vec![0, 255, 20, 254]);
+    }
 
     fn video(w: u32, h: u32, dar: f64, field_order: &str) -> VideoStream {
         VideoStream {
@@ -1999,7 +2041,7 @@ mod tests {
                 MenuLayer::Image("over.png".into()),
             ],
         };
-        let a = joined(&custom_menu_args(TvStandard::Pal, &media, 20.0, Some(&clip("music.mp3")), Path::new("m.mpg")));
+        let a = joined(&custom_menu_args(TvStandard::Pal, &media, 20.0, Some(&clip("music.mp3")), None, Path::new("m.mpg")));
         // Inputs in order: background, layers, sound.
         let order: Vec<usize> = ["bg.jpg", "under.png", "movie.mkv", "over.png", "music.mp3"]
             .iter()
@@ -2020,7 +2062,7 @@ mod tests {
 
         // Colour background, no layers, silence, NTSC.
         let still = CustomMenuMedia { background: MenuBackground::Color([0x10, 0x20, 0xA0]), overlay: BackgroundOverlay::None, layers: vec![] };
-        let a = joined(&custom_menu_args(TvStandard::Ntsc, &still, 1.0, None, Path::new("m.mpg")));
+        let a = joined(&custom_menu_args(TvStandard::Ntsc, &still, 1.0, None, None, Path::new("m.mpg")));
         assert!(a.contains("color=c=0x1020A0:s=720x480:r=30000/1001:d=1.000"), "{a}");
         assert!(a.contains("[bg]format=yuv420p,setdar=4/3[vout]") && a.contains("[1:a]asetpts=N/SR/TB[aout]"), "{a}");
         assert!(a.contains("-target ntsc-dvd"));
@@ -2028,7 +2070,7 @@ mod tests {
         // Shading over the background.
         let with = |overlay| {
             let m = CustomMenuMedia { overlay, ..media.clone() };
-            joined(&custom_menu_args(TvStandard::Pal, &m, 20.0, None, Path::new("m.mpg")))
+            joined(&custom_menu_args(TvStandard::Pal, &m, 20.0, None, None, Path::new("m.mpg")))
         };
         let a = with(BackgroundOverlay::Vignette);
         assert!(a.contains("gblur=sigma=8.0,vignette=angle=PI/4,format=rgba,setsar=1[bg]"), "{a}");
@@ -2039,6 +2081,11 @@ mod tests {
         assert!(a.contains("color=c=black:s=720x576:r=25:d=0.04,format=rgba,geq=r=0:g=0:b=0:a='215*clip((Y/H-0.35)/0.65\\,0\\,1)',loop=loop=-1:size=1,trim=duration=20.000"), "{a}");
         // The shaded background is what the first layer goes onto.
         assert!(a.contains("[bg0][shade]overlay=0:0:format=rgb[bg];") && a.contains("[bg][l0]overlay"), "{a}");
+
+        // Custom menu with intro: forced closed GOP at intro split boundary
+        let intro_args = joined(&custom_menu_args(TvStandard::Pal, &still, 23.0, None, Some(3.0), Path::new("m.mpg")));
+        assert!(intro_args.contains("-force_key_frames expr:gte(t,3.000)"), "{intro_args}");
+        assert!(intro_args.contains("-flags +cgop -sc_threshold 1000000000"), "{intro_args}");
     }
 
     fn strings(a: Vec<OsString>) -> String {

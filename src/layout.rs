@@ -37,6 +37,7 @@ use crate::author::{
 };
 use crate::encoder::{BackgroundOverlay, CustomMenuMedia, Fit, MenuBackground, MenuLayer};
 use crate::menu::{self, IndexedImage, MenuPageFiles};
+use crate::menu_anim;
 
 pub const LAYOUT_VERSION: u32 = 1;
 /// Loop length of a moving custom menu when the layout does not say.
@@ -58,6 +59,13 @@ fn yes() -> bool {
     true
 }
 
+fn default_fastplay_timeout() -> u8 {
+    10
+}
+fn default_title_1() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomLayout {
@@ -71,7 +79,41 @@ pub struct CustomLayout {
     /// Play the menus' intro animations (layouts of the menu editor: Blu-ray only; `false` = the finished pages straight away).
     #[serde(default = "yes")]
     pub animations: bool,
+    /// Optional FastPlay configuration (VMGM Menu 1 interactive countdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_play: Option<FastPlayConfig>,
     pub menus: Vec<CustomMenu>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FastPlayConfig {
+    pub enabled: bool,
+    /// Countdown duration in seconds before automatic playback starts (default: 10s).
+    #[serde(default = "default_fastplay_timeout")]
+    pub timeout_secs: u8,
+    /// Target title to play on timeout (defaults to Title 1).
+    #[serde(default = "default_title_1")]
+    pub target_title: u32,
+    /// Destination when remote 'MENU' or on-screen 'Main Menu' is triggered.
+    #[serde(default)]
+    pub menu_target: FastPlayMenuTarget,
+    /// Optional splash/announcement background (still image or short video).
+    #[serde(default)]
+    pub splash: Option<Background>,
+    /// Optional voiceover audio ("FastPlay will begin in a moment...").
+    #[serde(default)]
+    pub audio: MenuSound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum FastPlayMenuTarget {
+    /// Jump directly to Title 1's Root Menu in VTSM (`jump titleset 1 menu`).
+    #[default]
+    VtsmRoot,
+    /// Jump to the Main Title Menu in VMGM (`jump menu 1` / `jump menu 2`).
+    VmgmMain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -177,11 +219,16 @@ impl Default for Background {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoRef {
-    /// 1-based title.
+    /// 1-based title (unused when `path` is set).
+    #[serde(default)]
     pub title: u32,
-    /// Start in the title (default: 10 % of its runtime).
+    /// Start in the title (default: 10 % of its runtime) or in the file (default: 0).
     #[serde(default)]
     pub start_secs: Option<f64>,
+    /// External video file instead of a title. An optional field rather than a tagged enum keeps
+    /// every saved layout (`{title, startSecs}`) loading unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -221,6 +268,9 @@ pub struct Element {
     /// value holds, after the last one the last key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub intro: Vec<ElementKey>,
+    /// Hidden Easter Egg: Button hitbox and navigation active, but subpicture highlight is 100% transparent.
+    #[serde(default)]
+    pub easter_egg: bool,
 }
 
 /// Box and opacity of an element `t` seconds into the intro (canvas coordinates; the box may lie
@@ -280,28 +330,59 @@ pub enum Content {
         #[serde(default)]
         fit: Fit,
     },
-    /// Moving clip of a title.
+    /// Moving clip of a title, or of an external file when `path` is set (then `title` is unused).
     Video {
+        #[serde(default)]
         title: u32,
         #[serde(default)]
         start_secs: Option<f64>,
         #[serde(default = "cover")]
         fit: Fit,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
     PlayTitle { title: u32 },
     PlayChapter { title: u32, chapter: u32 },
-    Menu { menu: String },
+    Menu {
+        menu: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition: Option<TransitionVideo>,
+    },
     PlayAll,
     /// Select the audio track with this source stream index (ffprobe index of the input) – the
     /// build maps it to the DVD audio stream number. Root/settings menus only.
     SetAudio { source: u32 },
     /// Select the subtitle with this source stream index (`null` = subtitles off).
     SetSubtitle { source: Option<u32> },
+    /// Custom conditional VM script (e.g. "if (g4 == 1) link button 2; else jump menu 3;")
+    CustomVm { script: String },
+}
+
+impl Action {
+    pub fn menu(id: impl Into<String>) -> Self {
+        Action::Menu { menu: id.into(), transition: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransitionVideo {
+    pub video: VideoAssetSource,
+    pub duration_secs: f64,
+    #[serde(default)]
+    pub audio: MenuSound,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "camelCase")]
+pub enum VideoAssetSource {
+    Title { title: u32, start_secs: Option<f64> },
+    File { path: PathBuf, in_point_secs: Option<f64> },
 }
 
 impl CustomLayout {
@@ -492,8 +573,10 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
             }
         }
         if let Some(v) = &m.background.video {
-            if !title_ok(v.title) {
-                errs.push(menu(format!("Hintergrundvideo: Titel {} existiert nicht", v.title)));
+            match &v.path {
+                Some(p) if !p.is_file() => errs.push(menu(format!("Hintergrundvideo nicht gefunden: {}", p.display()))),
+                None if !title_ok(v.title) => errs.push(menu(format!("Hintergrundvideo: Titel {} existiert nicht", v.title))),
+                _ => {}
             }
         }
         match &m.audio {
@@ -535,6 +618,11 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                         errs.push(el(&format!("Bild nicht gefunden: {src}")));
                     }
                 }
+                Content::Video { path: Some(p), .. } => {
+                    if !p.is_file() {
+                        errs.push(el(&format!("Video nicht gefunden: {}", p.display())));
+                    }
+                }
                 Content::Video { title, .. } => {
                     if !title_ok(*title) {
                         errs.push(el(&format!("Titel {title} existiert nicht")));
@@ -567,8 +655,13 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                         )));
                     }
                 }
-                Action::Menu { menu: target } if !layout.menus.iter().any(|x| &x.id == target) => {
+                Action::Menu { menu: target, .. } if !layout.menus.iter().any(|x| &x.id == target) => {
                     errs.push(el(&format!("verweist auf ein unbekanntes Menü „{target}“")))
+                }
+                Action::CustomVm { script } => {
+                    if crate::dvdvm::parse(script).is_err() {
+                        errs.push(el(&format!("ungültiges VM-Skript: „{script}“")));
+                    }
                 }
                 Action::SetAudio { .. } | Action::SetSubtitle { .. } => {
                     // Streams belong to a titleset: only its own root/settings menus can set them.
@@ -660,14 +753,38 @@ pub struct NavigationPlan {
     pub main_menu_pages: Vec<u32>,
     /// Number of visible VMGM menus.
     pub title_menus: u32,
+    /// Base PGC number of the first visible title menu in the VMGM (1, or 2 when FastPlay occupies PGC 1).
+    pub vmgm_base: u32,
+    /// Bridge PGCs for menu-to-menu transition videos.
+    pub bridges: Vec<BridgePgc>,
+}
+
+/// A Bridge PGC that plays a transition video before navigating to the target menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BridgePgc {
+    pub placement: Placement,
+    pub post_cmd: String,
+    pub transition: TransitionVideo,
+    pub vob: String,
 }
 
 const ROUTER_PLAY: u32 = 1000;
 const ROUTER_ENTER: u32 = 2000;
 const DISPATCH_MENU: u32 = 100;
 
-/// Computes placements, button commands, dispatchers and the router for `titles` titles.
+/// Computes placements, button commands, dispatchers and the router for `titles` titles,
+/// with VMGM title menus starting at PGC 1.
 pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Result<NavigationPlan, LayoutError> {
+    plan_navigation_with_offset(layout, title_info, 1)
+}
+
+/// Computes placements, button commands, dispatchers and the router for `titles` titles,
+/// with VMGM title menus starting at `vmgm_base` (e.g. 2 when a First Play menu occupies PGC 1).
+pub fn plan_navigation_with_offset(
+    layout: &CustomLayout,
+    title_info: &[LayoutTitle],
+    vmgm_base: u32,
+) -> Result<NavigationPlan, LayoutError> {
     let titles = title_info.len();
     // 1. Visible menus: title menus in the VMGM; root menus, then settings menus, in their
     //    title's VTSM (`roots` holds both, in that order).
@@ -721,7 +838,7 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
             Action::PlayAll if from.is_some() => {
                 router_codes.insert(ROUTER_PLAY + 1);
             }
-            Action::Menu { menu } => {
+            Action::Menu { menu, .. } => {
                 let Some(&target) = by_id.get(menu.as_str()) else { continue };
                 if let Some(t) = location(target) {
                     if from != Some(t) {
@@ -743,7 +860,7 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
     let has_dispatcher: Vec<bool> = codes.iter().map(|c| !c.is_empty()).collect();
     let mut placement = vec![Placement::Vmgm(0); layout.menus.len()];
     for (n, &i) in title_menus.iter().enumerate() {
-        placement[i] = Placement::Vmgm(n as u32 + 1);
+        placement[i] = Placement::Vmgm(vmgm_base + n as u32);
     }
     for (t, list) in roots.iter().enumerate() {
         for (j, &i) in list.iter().enumerate() {
@@ -751,7 +868,79 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
             placement[i] = Placement::Vtsm { title: t as u32 + 1, pgc, index: j as u32 + 1 };
         }
     }
-    let router_no = (!router_codes.is_empty()).then_some(title_menus.len() as u32 + 1);
+
+    // 3b. Bridge PGCs for menu-to-menu transitions.
+    let mut bridges = Vec::new();
+    let mut next_vmgm_bridge = vmgm_base + title_menus.len() as u32;
+    let mut next_vtsm_bridge: Vec<u32> = (0..titles)
+        .map(|t| roots[t].len() as u32 + 1 + has_dispatcher[t] as u32)
+        .collect();
+    let mut bridge_button_cmds: HashMap<(usize, usize), String> = HashMap::new();
+
+    for (mi, m) in layout.menus.iter().enumerate() {
+        let from = location(mi);
+        for (ei, e) in m.elements.iter().enumerate() {
+            let Some(Action::Menu { menu, transition: Some(tr) }) = &e.action else { continue };
+            let Some(&target) = by_id.get(menu.as_str()) else { continue };
+            let to = location(target);
+
+            let vob_name = match &tr.video {
+                VideoAssetSource::File { path, .. } => {
+                    let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                    if file_name.ends_with(".mpg") {
+                        file_name.to_string()
+                    } else {
+                        format!("cm_trans_{:02}.mpg", bridges.len() + 1)
+                    }
+                }
+                VideoAssetSource::Title { .. } => format!("cm_trans_{:02}.mpg", bridges.len() + 1),
+            };
+
+            let (bridge_placement, btn_cmd) = match from {
+                None => {
+                    let pgc = next_vmgm_bridge;
+                    next_vmgm_bridge += 1;
+                    (Placement::Vmgm(pgc), format!("jump menu {pgc};"))
+                }
+                Some(t) if to == Some(t) => {
+                    let pgc = next_vtsm_bridge[t as usize - 1];
+                    next_vtsm_bridge[t as usize - 1] += 1;
+                    (Placement::Vtsm { title: t, pgc, index: 0 }, format!("jump menu {pgc};"))
+                }
+                Some(_) => {
+                    let pgc = next_vmgm_bridge;
+                    next_vmgm_bridge += 1;
+                    (Placement::Vmgm(pgc), format!("jump vmgm menu {pgc};"))
+                }
+            };
+
+            let post_cmd = match (bridge_placement, placement[target]) {
+                (Placement::Vmgm(_), Placement::Vmgm(n)) => format!("jump menu {n};"),
+                (Placement::Vmgm(_), Placement::Vtsm { title, index, .. }) => {
+                    let g2 = if index > 1 { DISPATCH_MENU + index } else { 0 };
+                    if g2 > 0 {
+                        format!("g2 = {g2}; jump titleset {title} menu;")
+                    } else {
+                        format!("jump titleset {title} menu;")
+                    }
+                }
+                (Placement::Vtsm { title: t_br, .. }, Placement::Vtsm { title: t_dest, pgc, .. }) if t_br == t_dest => {
+                    format!("jump menu {pgc};")
+                }
+                _ => unreachable!("invalid bridge placement topology"),
+            };
+
+            bridge_button_cmds.insert((mi, ei), btn_cmd);
+            bridges.push(BridgePgc {
+                placement: bridge_placement,
+                post_cmd,
+                transition: tr.clone(),
+                vob: vob_name,
+            });
+        }
+    }
+    let num_vmgm_bridges = bridges.iter().filter(|b| matches!(b.placement, Placement::Vmgm(_))).count() as u32;
+    let router_no = (!router_codes.is_empty()).then_some(vmgm_base + title_menus.len() as u32 + num_vmgm_bridges);
 
     // 4. Where each title's playback returns to: the first title menu that plays it.
     let main_menu_pages: Vec<u32> = (1..=titles as u32)
@@ -764,7 +953,7 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
                         matches!(e.action, Some(Action::PlayTitle { title }) | Some(Action::PlayChapter { title, .. }) if title == t)
                     })
                 })
-                .map_or(1, |(n, _)| n as u32 + 1)
+                .map_or(vmgm_base, |(n, _)| vmgm_base + n as u32)
         })
         .collect();
 
@@ -780,7 +969,11 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
     for (mi, m) in layout.menus.iter().enumerate() {
         let from = location(mi);
         let mut per = Vec::new();
-        for e in &m.elements {
+        for (ei, e) in m.elements.iter().enumerate() {
+            if let Some(cmd) = bridge_button_cmds.get(&(mi, ei)) {
+                per.push(Some(cmd.clone()));
+                continue;
+            }
             let Some(action) = &e.action else {
                 per.push(None);
                 continue;
@@ -817,7 +1010,7 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
                     let Placement::Vtsm { pgc, .. } = placement[mi] else { unreachable!("validated: VTSM menus only") };
                     format!("subtitle = 0; jump menu {pgc};")
                 }
-                Action::Menu { menu } => {
+                Action::Menu { menu, .. } => {
                     let target = by_id[menu.as_str()];
                     match (placement[target], from) {
                         (Placement::Vmgm(n), None) => format!("jump menu {n};"),
@@ -829,6 +1022,7 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
                         }
                     }
                 }
+                Action::CustomVm { script } => script.clone(),
             };
             per.push(Some(cmd));
         }
@@ -870,7 +1064,7 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
                 c.push_str(&format!("if (g3 eq {code}) jump title {}; ", code - ROUTER_PLAY));
             }
         }
-        c.push_str("jump menu 1;");
+        c.push_str(&format!("jump menu {vmgm_base};"));
         (r, c)
     });
 
@@ -902,6 +1096,8 @@ pub fn plan_navigation(layout: &CustomLayout, title_info: &[LayoutTitle]) -> Res
         router,
         main_menu_pages,
         title_menus: title_menus.len() as u32,
+        vmgm_base,
+        bridges,
     })
 }
 
@@ -987,12 +1183,28 @@ pub(crate) fn frame_font_size(size: f32, canvas: Canvas, frame: impl Into<MenuFr
     size * frame.into().height as f32 / canvas.height as f32
 }
 
+/// Clip of a video element or background: the external `path` if set, else the title's clip.
+/// A file's own sound is never used (menu sound is chosen separately).
+pub(crate) fn video_clip(titles: &[LayoutTitle], title: u32, start: Option<f64>, path: Option<&PathBuf>) -> ClipSource {
+    match path {
+        Some(p) => ClipSource { path: p.clone(), start_secs: start.unwrap_or(0.0).max(0.0), has_audio: false },
+        None => clip_of(titles, title, start),
+    }
+}
+
 pub(crate) fn clip_of(titles: &[LayoutTitle], title: u32, start: Option<f64>) -> ClipSource {
     let t = &titles[title as usize - 1];
     match start {
         Some(s) => ClipSource { start_secs: s.clamp(0.0, (t.duration_secs - crate::menu::DEFAULT_MOTION_SECS).max(0.0)), ..t.clip.clone() },
         None => t.clip.clone(),
     }
+}
+
+/// Box of an element in frame pixels (keys scale like [`frame_box`], but stay fractional).
+fn frame_key(k: &ElementKey, canvas: Canvas, tv: TvStandard) -> ElementKey {
+    let (fw, fh) = tv.size();
+    let (sx, sy) = (fw as f64 / canvas.width as f64, fh as f64 / canvas.height as f64);
+    ElementKey { x: k.x * sx, y: k.y * sy, w: k.w * sx, h: k.h * sy, ..*k }
 }
 
 struct PageOutput {
@@ -1030,6 +1242,10 @@ fn render_custom_page(
         Ok(())
     };
 
+    let has_intro = layout.animations && menu.intro_secs.is_some_and(|s| s > 0.0);
+    let mut sprites: Vec<menu_anim::Sprite> = Vec::new();
+    let mut slots: Vec<usize> = Vec::new();
+
     // Button colours: with one pair, pixel value 1 is the colour and 2 its half-transparent
     // edge (smooth text outlines); with several pairs every pair gets its own value 1..=3.
     let alpha = (layout.highlight.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -1064,6 +1280,13 @@ fn render_custom_page(
         let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         // Glyph coverage of a text button, for its highlight shape.
         let mut text_cov = None;
+
+        let sprite = |pixels: menu_anim::Pixels| {
+            let keys = if e.rotation == 0 { e.intro.iter().map(|k| frame_key(k, canvas, tv)).collect() } else { Vec::new() };
+            menu_anim::Sprite { pixels, rect: (x as f64, y as f64, w as f64, h as f64), opacity: e.opacity, keys }
+        };
+        let visible = e.opacity > 0.0 || !e.intro.is_empty();
+
         match &e.content {
             Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
                 let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, align, bw, bh);
@@ -1075,17 +1298,27 @@ fn render_custom_page(
                 menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
                 let img = rotate(img, e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                if has_intro && visible {
+                    sprites.push(sprite(menu_anim::Pixels::Image(img)));
+                }
                 text_cov = Some(cov);
             }
             Content::Image { src, fit } => {
                 let src_img = image::open(src).map_err(|err| io(Path::new(src), &err))?.to_rgba8();
                 let img = rotate(fit_image(&src_img, bw, bh, *fit, tv.menu_pixel_aspect(), e.rotation % 180 == 90), e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                if has_intro && visible {
+                    sprites.push(sprite(menu_anim::Pixels::Image(img)));
+                }
             }
-            Content::Video { title, start_secs, fit } => {
+            Content::Video { title, start_secs, fit, path } => {
                 flush(&mut current, &mut layers)?;
+                if has_intro && visible {
+                    sprites.push(sprite(menu_anim::Pixels::Slot { index: slots.len(), width: w, height: h }));
+                    slots.push(layers.len());
+                }
                 layers.push(MenuLayer::Video {
-                    clip: clip_of(titles, *title, *start_secs),
+                    clip: video_clip(titles, *title, *start_secs, path.as_ref()),
                     x: x.max(0) as u32,
                     y: y.max(0) as u32,
                     width: w,
@@ -1104,37 +1337,39 @@ fn render_custom_page(
         };
         // Pixel value of this button's colour pair.
         let value = pairs.iter().position(|p| *p == button_colors(layout, e)).unwrap_or(0).min(MAX_COLOR_PAIRS - 1) as u8 + 1;
-        // Highlight shape: the glyphs of a text button, a frame around everything else.
-        match &text_cov {
-            Some(cov) => {
-                for py in 0..cov.height {
-                    for px in 0..cov.width {
-                        let v = cov.at(px as i64, py as i64);
-                        let idx = if smooth_edges {
-                            if v >= 0.5 { 1 } else if v >= 0.15 { 2 } else { 0 }
-                        } else if v >= 0.35 {
-                            value
-                        } else {
-                            0
-                        };
-                        let (tx, ty) = (x + px as i64, y + py as i64);
-                        if idx > 0 && tx >= 0 && ty >= 0 && (tx as u32) < fw && (ty as u32) < fh {
-                            let i = (ty as u32 * fw + tx as u32) as usize;
-                            highlight.pixels[i] = idx;
-                            select.pixels[i] = idx;
+        // Highlight shape: the glyphs of a text button, a frame around everything else. Skip if Easter Egg.
+        if !e.easter_egg {
+            match &text_cov {
+                Some(cov) => {
+                    for py in 0..cov.height {
+                        for px in 0..cov.width {
+                            let v = cov.at(px as i64, py as i64);
+                            let idx = if smooth_edges {
+                                if v >= 0.5 { 1 } else if v >= 0.15 { 2 } else { 0 }
+                            } else if v >= 0.35 {
+                                value
+                            } else {
+                                0
+                            };
+                            let (tx, ty) = (x + px as i64, y + py as i64);
+                            if idx > 0 && tx >= 0 && ty >= 0 && (tx as u32) < fw && (ty as u32) < fh {
+                                let i = (ty as u32 * fw + tx as u32) as usize;
+                                highlight.pixels[i] = idx;
+                                select.pixels[i] = idx;
+                            }
                         }
                     }
                 }
-            }
-            None => {
-                let t = ((rect.x1 - rect.x0).min(rect.y1 - rect.y0) / 20).clamp(2, 6);
-                for py in rect.y0..rect.y1 {
-                    for px in rect.x0..rect.x1 {
-                        let edge = px < rect.x0 + t || px >= rect.x1 - t || py < rect.y0 + t || py >= rect.y1 - t;
-                        if edge {
-                            let i = (py * fw + px) as usize;
-                            highlight.pixels[i] = value;
-                            select.pixels[i] = value;
+                None => {
+                    let t = ((rect.x1 - rect.x0).min(rect.y1 - rect.y0) / 20).clamp(2, 6);
+                    for py in rect.y0..rect.y1 {
+                        for px in rect.x0..rect.x1 {
+                            let edge = px < rect.x0 + t || px >= rect.x1 - t || py < rect.y0 + t || py >= rect.y1 - t;
+                            if edge {
+                                let i = (py * fw + px) as usize;
+                                highlight.pixels[i] = value;
+                                select.pixels[i] = value;
+                            }
                         }
                     }
                 }
@@ -1155,8 +1390,28 @@ fn render_custom_page(
     flush(&mut current, &mut layers)?;
     author::compute_navigation(&mut buttons);
 
+    let intro = if has_intro {
+        let end = sprites.iter().flat_map(|s| s.keys.iter().map(|k| k.t)).fold(0.0f64, f64::max);
+        let raw_secs = menu.intro_secs.unwrap_or(0.0);
+        let frames = menu_anim::dvd_intro_frames(raw_secs.max(end), tv);
+        let rate = menu_anim::dvd_rate(tv);
+        let secs = frames as f64 * rate.fps.1 as f64 / rate.fps.0 as f64;
+        let ticks = menu_anim::intro_ticks(frames, rate);
+        Some(menu_anim::Intro {
+            frames,
+            secs,
+            ticks,
+            end,
+            sprites,
+            slots,
+        })
+    } else {
+        None
+    };
+    let intro_secs = intro.as_ref().map(|i| i.secs);
+
     let background = match (&menu.background.video, &menu.background.image) {
-        (Some(v), _) => MenuBackground::Video { clip: clip_of(titles, v.title, v.start_secs), blur: menu.background.blur },
+        (Some(v), _) => MenuBackground::Video { clip: video_clip(titles, v.title, v.start_secs, v.path.as_ref()), blur: menu.background.blur },
         (None, Some(img)) => MenuBackground::Image { path: PathBuf::from(img), blur: menu.background.blur },
         (None, None) => MenuBackground::Color(parse_color(&menu.background.color).unwrap_or([0, 0, 0])),
     };
@@ -1173,17 +1428,22 @@ fn render_custom_page(
             }
         }
     };
-    let moving = matches!(background, MenuBackground::Video { .. })
+    let moving = intro.is_some()
+        || matches!(background, MenuBackground::Video { .. })
         || layers.iter().any(|l| matches!(l, MenuLayer::Video { .. }))
         || audio.is_some();
-    let secs = menu.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0);
+    let loop_secs = menu.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0);
+    let total_motion_secs = match &intro {
+        Some(i) => Some(i.secs + if moving { loop_secs } else { 1.0 }),
+        None => moving.then_some(loop_secs),
+    };
 
     let hl_name = format!("{prefix}_hl.png");
     let sel_name = format!("{prefix}_sel.png");
     let xml_path = out_dir.join(format!("{prefix}_spumux.xml"));
     highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
     select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
-    std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, 0.0)).map_err(|e| io(&xml_path, &e))?;
+    std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, intro_secs.unwrap_or(0.0))).map_err(|e| io(&xml_path, &e))?;
     let files = MenuPageFiles {
         background: out_dir.join(&hl_name),
         highlight: out_dir.join(&hl_name),
@@ -1192,13 +1452,169 @@ fn render_custom_page(
         vob: format!("{prefix}.mpg"),
         foreground: None,
         video_slots: vec![],
-        motion_secs: moving.then_some(secs),
+        motion_secs: total_motion_secs,
         audio,
         custom: Some(CustomMenuMedia { background, overlay: menu.background.overlay, layers }),
-        intro: None,
+        intro,
         intro_fill: [0; 3],
     };
     Ok(PageOutput { files, buttons, motion: moving, warnings })
+}
+
+/// Renders the FastPlay announcement page (VMGM Menu 1).
+fn render_fastplay_page(
+    fp: &FastPlayConfig,
+    main_menu_target: FastPlayMenuTarget,
+    titles: &[LayoutTitle],
+    tv: TvStandard,
+    out_dir: &Path,
+) -> Result<(MenuSpec, MenuPageFiles), LayoutError> {
+    let io = |p: &Path, e: &dyn fmt::Display| LayoutError(vec![format!("{}: {e}", p.display())]);
+    let (fw, fh) = tv.size();
+    let prefix = "cm_fastplay";
+
+    let (background, overlay) = match &fp.splash {
+        Some(bg) => {
+            let b = match (&bg.video, &bg.image) {
+                (Some(v), _) => MenuBackground::Video { clip: video_clip(titles, v.title, v.start_secs, v.path.as_ref()), blur: bg.blur },
+                (None, Some(img)) => MenuBackground::Image { path: PathBuf::from(img), blur: bg.blur },
+                (None, None) => MenuBackground::Color(parse_color(&bg.color).unwrap_or([16, 20, 32])),
+            };
+            (b, bg.overlay)
+        }
+        None => (MenuBackground::Color([16, 20, 32]), BackgroundOverlay::None),
+    };
+
+    let audio = match &fp.audio {
+        MenuSound::None => None,
+        MenuSound::File { path } => Some(ClipSource { path: path.into(), start_secs: 0.0, has_audio: true }),
+        MenuSound::Title { title, start_secs } => {
+            let clip = clip_of(titles, *title, *start_secs);
+            if clip.has_audio { Some(clip) } else { None }
+        }
+    };
+
+    let mut layers: Vec<MenuLayer> = Vec::new();
+    if fp.splash.is_none() {
+        let mut img = RgbaImage::new(fw, fh);
+        let font = "Arial";
+        let cov_title = menu::text_coverage("FastPlay", font, 40.0, true, false, false, "center", fw, 60);
+        menu::blend_coverage(&mut img, &cov_title, [255, 255, 255, 255], 0, (fh * 20 / 100) as i64, 255);
+
+        let cov_sub = menu::text_coverage("Wiedergabe startet in Kürze...", font, 24.0, false, false, false, "center", fw, 40);
+        menu::blend_coverage(&mut img, &cov_sub, [200, 200, 200, 255], 0, (fh * 35 / 100) as i64, 255);
+
+        let b1_cov = menu::text_coverage("FastPlay", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
+        menu::blend_coverage(&mut img, &b1_cov, [255, 255, 255, 255], (fw * 12 / 100) as i64, (fh * 76 / 100) as i64, 255);
+
+        let b2_cov = menu::text_coverage("Hauptmenü", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
+        menu::blend_coverage(&mut img, &b2_cov, [255, 255, 255, 255], (fw * 54 / 100) as i64, (fh * 76 / 100) as i64, 255);
+
+        let text_path = out_dir.join(format!("{prefix}_text.png"));
+        img.save(&text_path).map_err(|e| io(&text_path, &e))?;
+        layers.push(MenuLayer::Image(text_path));
+    }
+
+    let alpha = 216u8;
+    let hl_palette = [[0, 0, 0, 0], [255, 210, 0, alpha], [255, 210, 0, alpha / 2], [0, 0, 0, 0]];
+    let sel_palette = [[0, 0, 0, 0], [255, 106, 0, alpha], [255, 106, 0, alpha / 2], [0, 0, 0, 0]];
+    let mut highlight = IndexedImage::new(fw, fh, hl_palette);
+    let mut select = IndexedImage::new(fw, fh, sel_palette);
+
+    let b1_rect = Rect {
+        x0: ((fw * 12 / 100) & !1),
+        y0: ((fh * 74 / 100) & !1),
+        x1: (((fw * 46 / 100) | 1).min(fw - 1)),
+        y1: (((fh * 88 / 100) | 1).min(fw - 1)),
+    };
+    let b2_rect = Rect {
+        x0: ((fw * 54 / 100) & !1),
+        y0: ((fh * 74 / 100) & !1),
+        x1: (((fw * 88 / 100) | 1).min(fw - 1)),
+        y1: (((fh * 88 / 100) | 1).min(fw - 1)),
+    };
+
+    let draw_box = |img: &mut IndexedImage, r: Rect| {
+        let t = 3u32;
+        for py in r.y0..r.y1 {
+            for px in r.x0..r.x1 {
+                if px < r.x0 + t || px >= r.x1 - t || py < r.y0 + t || py >= r.y1 - t {
+                    let idx = (py * fw + px) as usize;
+                    img.pixels[idx] = 1;
+                }
+            }
+        }
+    };
+    draw_box(&mut highlight, b1_rect);
+    draw_box(&mut highlight, b2_rect);
+    draw_box(&mut select, b1_rect);
+    draw_box(&mut select, b2_rect);
+
+    let main_menu_cmd = match main_menu_target {
+        FastPlayMenuTarget::VtsmRoot => format!("g1 = 0; jump titleset {} menu;", fp.target_title),
+        FastPlayMenuTarget::VmgmMain => "g1 = 0; jump menu 2;".to_string(),
+    };
+
+    let buttons = vec![
+        MenuButton {
+            name: "b1".into(),
+            template_index: 0,
+            location: "CUSTOM".into(),
+            rect: b1_rect,
+            action: ButtonAction::Commands(format!("g1 = 0; jump title {};", fp.target_title)),
+            label: Some("FastPlay".into()),
+            thumbnail: None,
+            clip: None,
+            nav: Navigation { right: Some("b2".into()), ..Default::default() },
+        },
+        MenuButton {
+            name: "b2".into(),
+            template_index: 1,
+            location: "CUSTOM".into(),
+            rect: b2_rect,
+            action: ButtonAction::Commands(main_menu_cmd),
+            label: Some("Hauptmenü".into()),
+            thumbnail: None,
+            clip: None,
+            nav: Navigation { left: Some("b1".into()), ..Default::default() },
+        },
+    ];
+
+    let hl_name = format!("{prefix}_hl.png");
+    let sel_name = format!("{prefix}_sel.png");
+    let xml_path = out_dir.join(format!("{prefix}_spumux.xml"));
+    highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
+    select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
+    std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, 0.0)).map_err(|e| io(&xml_path, &e))?;
+
+    let moving = matches!(background, MenuBackground::Video { .. }) || audio.is_some();
+    let duration = fp.timeout_secs as f64;
+
+    let spec = MenuSpec {
+        vob: format!("{prefix}.mpg"),
+        buttons,
+        entry: None,
+        motion: moving,
+        pre: Some("g1 = 0; g2 = 0;".to_string()),
+        intro_secs: None,
+        pause_secs: Some(fp.timeout_secs),
+        post: Some(format!("jump title {};", fp.target_title)),
+    };
+    let files = MenuPageFiles {
+        background: out_dir.join(&hl_name),
+        highlight: out_dir.join(&hl_name),
+        select: out_dir.join(&sel_name),
+        spumux_xml: xml_path,
+        vob: format!("{prefix}.mpg"),
+        foreground: None,
+        video_slots: vec![],
+        motion_secs: moving.then_some(duration),
+        audio,
+        custom: Some(CustomMenuMedia { background, overlay, layers }),
+        intro: None,
+        intro_fill: [0; 3],
+    };
+    Ok((spec, files))
 }
 
 /// Validates the layout, plans its navigation and renders every menu into `out_dir`
@@ -1211,7 +1627,9 @@ pub fn build_custom_menus(
     default_secs: f64,
 ) -> Result<CustomMenus, LayoutError> {
     validate(layout, titles, tv)?;
-    let nav = plan_navigation(layout, titles)?;
+    let has_fastplay = layout.fast_play.as_ref().is_some_and(|fp| fp.enabled);
+    let vmgm_base = if has_fastplay { 2 } else { 1 };
+    let nav = plan_navigation_with_offset(layout, titles, vmgm_base)?;
     let rendered: Vec<PageOutput> = layout
         .menus
         .par_iter()
@@ -1228,6 +1646,13 @@ pub fn build_custom_menus(
     }
     let mut pages = Vec::new();
     let mut warnings = Vec::new();
+
+    if let Some(fp) = layout.fast_play.as_ref().filter(|fp| fp.enabled) {
+        let (fp_spec, fp_files) = render_fastplay_page(fp, fp.menu_target, titles, tv, out_dir)?;
+        vmgm_menus.push(fp_spec.clone());
+        pages.push((fp_spec, fp_files));
+    }
+
     // Title menus first (VMGM order), then root menus per title (layout order within a title).
     let mut order: Vec<usize> = (0..layout.menus.len()).collect();
     order.sort_by_key(|&i| match nav.placement[i] {
@@ -1242,10 +1667,12 @@ pub fn build_custom_menus(
                 let spec = MenuSpec {
                     vob: files.vob.clone(),
                     buttons,
-                    entry: (n == 1).then(|| "title".to_string()),
+                    entry: (n == vmgm_base).then(|| "title".to_string()),
                     motion,
                     pre: None,
-                    intro_secs: None,
+                    intro_secs: files.intro.as_ref().map(|i| i.secs),
+                    pause_secs: None,
+                    post: None,
                 };
                 vmgm_menus.push(spec.clone());
                 pages.push((spec, files));
@@ -1258,9 +1685,71 @@ pub fn build_custom_menus(
                     entry: list.is_empty().then(|| "root".to_string()),
                     motion,
                     pre: Some(RESET_DISPATCH.to_string()),
-                    intro_secs: None,
+                    intro_secs: files.intro.as_ref().map(|i| i.secs),
+                    pause_secs: None,
+                    post: None,
                 };
                 list.push(spec.clone());
+                pages.push((spec, files));
+            }
+        }
+    }
+    for bridge in &nav.bridges {
+        let spec = MenuSpec {
+            vob: bridge.vob.clone(),
+            buttons: vec![],
+            entry: None,
+            motion: true,
+            pre: None,
+            intro_secs: None,
+            pause_secs: Some(0),
+            post: Some(bridge.post_cmd.clone()),
+        };
+        let bg = match &bridge.transition.video {
+            VideoAssetSource::File { path, in_point_secs } => MenuBackground::Video {
+                clip: ClipSource {
+                    path: path.clone(),
+                    start_secs: in_point_secs.unwrap_or(0.0),
+                    has_audio: false,
+                },
+                blur: 0.0,
+            },
+            VideoAssetSource::Title { title, start_secs } => {
+                let path = titles.get((*title as usize).saturating_sub(1)).map(|t| t.clip.path.clone()).unwrap_or_default();
+                MenuBackground::Video {
+                    clip: ClipSource {
+                        path,
+                        start_secs: start_secs.unwrap_or(0.0),
+                        has_audio: false,
+                    },
+                    blur: 0.0,
+                }
+            }
+        };
+        let prefix = bridge.vob.trim_end_matches(".mpg");
+        let hl_name = format!("{prefix}_hl.png");
+        let sel_name = format!("{prefix}_sel.png");
+        let files = MenuPageFiles {
+            background: out_dir.join(&hl_name),
+            highlight: out_dir.join(&hl_name),
+            select: out_dir.join(&sel_name),
+            spumux_xml: PathBuf::new(),
+            vob: bridge.vob.clone(),
+            foreground: None,
+            video_slots: vec![],
+            motion_secs: Some(bridge.transition.duration_secs),
+            audio: None,
+            custom: Some(CustomMenuMedia { background: bg, overlay: BackgroundOverlay::None, layers: vec![] }),
+            intro: None,
+            intro_fill: [0; 3],
+        };
+        match bridge.placement {
+            Placement::Vmgm(_) => {
+                vmgm_menus.push(spec.clone());
+                pages.push((spec, files));
+            }
+            Placement::Vtsm { title, .. } => {
+                titleset_menus[title as usize - 1].push(spec.clone());
                 pages.push((spec, files));
             }
         }
@@ -1327,6 +1816,7 @@ mod tests {
             highlight: None,
             group: None,
             intro: Vec::new(),
+            easter_egg: false,
         }
     }
 
@@ -1345,7 +1835,21 @@ mod tests {
     }
 
     fn layout(menus: Vec<CustomMenu>) -> CustomLayout {
-        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, menus }
+        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, menus }
+    }
+
+    #[test]
+    fn external_video_path_is_optional_and_wins_over_title() {
+        // Saved layouts without `path` load unchanged and serialize without it.
+        let old: Content = serde_json::from_str(r#"{"type":"video","title":2,"startSecs":5}"#).unwrap();
+        assert_eq!(old, Content::Video { title: 2, start_secs: Some(5.0), fit: Fit::Cover, path: None });
+        assert!(!serde_json::to_string(&old).unwrap().contains("path"));
+        let ext: Content = serde_json::from_str(r#"{"type":"video","path":"C:/clip.mp4","fit":"contain"}"#).unwrap();
+        assert!(matches!(&ext, Content::Video { title: 0, path: Some(p), .. } if p == Path::new("C:/clip.mp4")));
+        // A file needs no title: `video_clip` must not index `titles` (it is empty here).
+        let bg: VideoRef = serde_json::from_str(r#"{"path":"C:/bg.mp4","startSecs":2}"#).unwrap();
+        let clip = video_clip(&[], bg.title, bg.start_secs, bg.path.as_ref());
+        assert_eq!((clip.path, clip.start_secs, clip.has_audio), (PathBuf::from("C:/bg.mp4"), 2.0, false));
     }
 
     #[test]
@@ -1374,7 +1878,7 @@ mod tests {
         assert_eq!(l.menus.len(), 2);
         assert_eq!(l.menus[0].audio, MenuSound::Title { title: 1, start_secs: Some(5.0) });
         assert!(matches!(&l.menus[0].elements[0].content, Content::Text { bold: true, size, .. } if *size == 30.0));
-        assert!(matches!(&l.menus[0].elements[1].content, Content::Video { title: 1, start_secs: Some(s), fit: Fit::Cover } if *s == 30.0));
+        assert!(matches!(&l.menus[0].elements[1].content, Content::Video { title: 1, start_secs: Some(s), fit: Fit::Cover, path: None } if *s == 30.0));
         assert_eq!(l.menus[1].elements[0].action, Some(Action::PlayChapter { title: 1, chapter: 2 }));
         let again = CustomLayout::from_json(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(again, l);
@@ -1393,7 +1897,7 @@ mod tests {
                 rotated,
                 odd,
                 text(10.0, 100.0, "C", Some(Action::PlayChapter { title: 1, chapter: 9 })),
-                text(10.0, 120.0, "D", Some(Action::Menu { menu: "nope".into() })),
+                text(10.0, 120.0, "D", Some(Action::menu("nope"))),
                 text(500.0, 500.0, "E", Some(Action::PlayTitle { title: 3 })),
             ]),
             menu("r", MenuRole::Root, None, vec![]),
@@ -1424,17 +1928,17 @@ mod tests {
             menu("main", MenuRole::Title, None, vec![
                 text(10.0, 10.0, "play 2", Some(Action::PlayTitle { title: 2 })),
                 text(10.0, 70.0, "ch 3 of 1", Some(Action::PlayChapter { title: 1, chapter: 3 })),
-                text(10.0, 130.0, "extras of 1", Some(Action::Menu { menu: "extra1".into() })),
+                text(10.0, 130.0, "extras of 1", Some(Action::menu("extra1"))),
                 text(10.0, 190.0, "all", Some(Action::PlayAll)),
-                text(10.0, 250.0, "page 2", Some(Action::Menu { menu: "main2".into() })),
+                text(10.0, 250.0, "page 2", Some(Action::menu("main2"))),
             ]),
             menu("main2", MenuRole::Title, None, vec![text(10.0, 10.0, "play 1", Some(Action::PlayTitle { title: 1 }))]),
             menu("root1", MenuRole::Root, Some(1), vec![
                 text(10.0, 10.0, "play", Some(Action::PlayTitle { title: 1 })),
                 text(10.0, 70.0, "ch 2", Some(Action::PlayChapter { title: 1, chapter: 2 })),
                 text(10.0, 130.0, "other film", Some(Action::PlayTitle { title: 2 })),
-                text(10.0, 190.0, "back", Some(Action::Menu { menu: "main".into() })),
-                text(10.0, 250.0, "extras", Some(Action::Menu { menu: "extra1".into() })),
+                text(10.0, 190.0, "back", Some(Action::menu("main"))),
+                text(10.0, 250.0, "extras", Some(Action::menu("extra1"))),
                 text(10.0, 310.0, "ch 1 of 2", Some(Action::PlayChapter { title: 2, chapter: 1 })),
             ]),
             menu("extra1", MenuRole::Root, Some(1), vec![]),
@@ -1470,6 +1974,16 @@ mod tests {
         for cmd in nav.commands.iter().flatten().flatten() {
             assert!(command_count(cmd) <= MAX_PGC_COMMANDS);
         }
+
+        // When a First Play menu occupies VMGM PGC 1 (vmgm_base = 2):
+        let nav2 = plan_navigation_with_offset(&l, &titles(2), 2).unwrap();
+        assert_eq!(nav2.placement[0], Placement::Vmgm(2));
+        assert_eq!(nav2.placement[1], Placement::Vmgm(3));
+        assert_eq!(nav2.main_menu_pages, vec![2, 2]);
+        assert_eq!(nav2.router, Some((4, "if (g3 eq 1002) jump title 2; if (g3 eq 2002) jump titleset 2 menu; jump menu 2;".into())));
+        let c2 = |m: usize, e: usize| nav2.commands[m][e].clone().unwrap();
+        assert_eq!(c2(0, 4), "jump menu 3;");
+        assert_eq!(c2(2, 3), "jump vmgm menu 2;");
     }
 
     #[test]
@@ -1491,7 +2005,7 @@ mod tests {
             l.menus[0].elements.push(Element {
                 w: 8.0,
                 h: 4.0,
-                ..text((j % 30) as f64 * 20.0, 100.0 + (j / 30) as f64 * 10.0, "m", Some(Action::Menu { menu: format!("r{j}") }))
+                ..text((j % 30) as f64 * 20.0, 100.0 + (j / 30) as f64 * 10.0, "m", Some(Action::menu(format!("r{j}"))))
             });
         }
         let err = plan_navigation(&l, &ts).unwrap_err();
@@ -1501,14 +2015,14 @@ mod tests {
     #[test]
     fn settings_menus_and_stream_selection() {
         let l = layout(vec![
-            menu("main", MenuRole::Title, None, vec![text(10.0, 10.0, "Einstellungen", Some(Action::Menu { menu: "set1".into() }))]),
-            menu("root1", MenuRole::Root, Some(1), vec![text(10.0, 10.0, "Einstellungen", Some(Action::Menu { menu: "set1".into() }))]),
+            menu("main", MenuRole::Title, None, vec![text(10.0, 10.0, "Einstellungen", Some(Action::menu("set1")))]),
+            menu("root1", MenuRole::Root, Some(1), vec![text(10.0, 10.0, "Einstellungen", Some(Action::menu("set1")))]),
             menu("set1", MenuRole::Settings, Some(1), vec![
                 text(10.0, 10.0, "Englisch", Some(Action::SetAudio { source: 2 })),
                 text(10.0, 70.0, "Deutsch", Some(Action::SetAudio { source: 1 })),
                 text(10.0, 130.0, "UT an", Some(Action::SetSubtitle { source: Some(3) })),
                 text(10.0, 190.0, "UT aus", Some(Action::SetSubtitle { source: None })),
-                text(10.0, 250.0, "Zurück", Some(Action::Menu { menu: "root1".into() })),
+                text(10.0, 250.0, "Zurück", Some(Action::menu("root1"))),
             ]),
         ]);
         validate(&l, &titles(1), TvStandard::Pal).unwrap();
@@ -1580,7 +2094,7 @@ mod tests {
         assert_eq!(long[..long.len() - 1].concat(), "Donaudampfschifffahrtsgesellschaft");
         assert_eq!(element_text_lines(&text(0.0, 0.0, "x", None), canvas, TvStandard::Pal), Some(vec!["x".to_string()]));
         let mut img = text(0.0, 0.0, "", None);
-        img.content = Content::Video { title: 1, start_secs: None, fit: Fit::Cover };
+        img.content = Content::Video { title: 1, start_secs: None, fit: Fit::Cover, path: None };
         assert_eq!(element_text_lines(&img, canvas, TvStandard::Pal), None);
     }
 
@@ -1654,17 +2168,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("pic.png");
         RgbaImage::from_pixel(40, 20, image::Rgba([0, 200, 0, 255])).save(&png).unwrap();
-        let mut picture = text(400.0, 40.0, "", Some(Action::Menu { menu: "root".into() }));
+        let mut picture = text(400.0, 40.0, "", Some(Action::menu("root")));
         picture.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch };
         picture.w = 200.0;
         picture.h = 100.0;
         let mut video = text(60.0, 200.0, "", None);
-        video.content = Content::Video { title: 1, start_secs: Some(42.0), fit: Fit::Cover };
+        video.content = Content::Video { title: 1, start_secs: Some(42.0), fit: Fit::Cover, path: None };
         video.rotation = 90;
         let caption = text(60.0, 470.0, "Film abspielen", Some(Action::PlayTitle { title: 1 }));
         let l = layout(vec![
             menu("main", MenuRole::Title, None, vec![picture, video, caption]),
-            menu("root", MenuRole::Root, Some(1), vec![text(60.0, 60.0, "Zurück", Some(Action::Menu { menu: "main".into() }))]),
+            menu("root", MenuRole::Root, Some(1), vec![text(60.0, 60.0, "Zurück", Some(Action::menu("main")))]),
         ]);
         let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
         assert_eq!(out.pages.len(), 2);

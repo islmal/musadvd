@@ -277,6 +277,34 @@ function frameName(): string {
 /** The setting "only one video per Blu-ray" is on and violated. */
 const singleVideoViolated = () => isBluray() && !!state.settings?.bd_single_video && state.titles.length > 1;
 
+interface MenuVideoCount {
+  videos: number;
+  menus: number;
+  total: number;
+  overLimit: boolean;
+}
+
+function getMenuAndVideoCounts(): MenuVideoCount {
+  const videos = state.titles.length;
+  let menus = 0;
+  if (state.menuMode === "custom") {
+    menus = state.customLayout ? state.customLayout.menus.filter((m) => m.role === "title").length : 0;
+  } else {
+    if (videos === 0) {
+      menus = 0;
+    } else if (videos === 1 && state.settings?.no_title_menu_for_single_title) {
+      menus = 0;
+    } else {
+      const info = state.templates.find((t) => t.path === state.template);
+      const perPage = info?.titlesPerPage && info.titlesPerPage > 0 ? info.titlesPerPage : 0;
+      menus = perPage > 0 ? Math.max(1, Math.ceil(videos / perPage)) : 1;
+    }
+  }
+  const total = videos + menus;
+  const overLimit = !isBluray() && total > 99;
+  return { videos, menus, total, overLimit };
+}
+
 function updateCustomDiscLabel() {
   const mb = state.settings?.target_size_mb ?? 4300;
   $("disc-custom").textContent = tr("main.benutzerdefiniertMb", { fmtNum: fmtNum(mb) });
@@ -348,13 +376,13 @@ function removeSelected() {
   state.splitUndo = null;
   const i = state.titles.findIndex((t) => t.id === state.selected);
   if (i < 0) return;
-  const oldPaths = state.titles.map((t) => t.meta.path);
+  const oldGroupPaths = editorTitles().map((t) => t.path);
   state.titles.splice(i, 1);
   normalizeMerge();
   state.selected = state.titles[Math.min(i, state.titles.length - 1)]?.id ?? null;
   if (state.customLayout) {
-    const newPaths = state.titles.map((t) => t.meta.path);
-    remapLayoutByPaths(state.customLayout, oldPaths, newPaths);
+    const newGroupPaths = editorTitles().map((t) => t.path);
+    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
     state.customLayoutKey = titlesKey(editorTitles());
     void refreshLayoutCheck();
   }
@@ -379,7 +407,14 @@ function titleGroups(): Title[][] {
 
 function toggleMerge(t: Title) {
   state.splitUndo = null;
+  const oldGroupPaths = editorTitles().map((t) => t.path);
   t.mergeWithPrevious = !t.mergeWithPrevious;
+  if (state.customLayout) {
+    const newGroupPaths = editorTitles().map((t) => t.path);
+    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
+    state.customLayoutKey = titlesKey(editorTitles());
+    void refreshLayoutCheck();
+  }
   renderAll();
   scheduleCalc();
 }
@@ -389,8 +424,15 @@ function moveSelected(delta: number) {
   const i = state.titles.findIndex((t) => t.id === state.selected);
   const j = i + delta;
   if (i < 0 || j < 0 || j >= state.titles.length) return;
+  const oldGroupPaths = editorTitles().map((t) => t.path);
   [state.titles[i], state.titles[j]] = [state.titles[j], state.titles[i]];
   normalizeMerge();
+  if (state.customLayout) {
+    const newGroupPaths = editorTitles().map((t) => t.path);
+    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
+    state.customLayoutKey = titlesKey(editorTitles());
+    void refreshLayoutCheck();
+  }
   renderAll();
   scheduleCalc();
 }
@@ -399,13 +441,13 @@ function moveSelected(delta: number) {
 function moveTitle(from: number, to: number) {
   if (from === to || !state.titles[from]) return;
   state.splitUndo = null;
-  const oldPaths = state.titles.map((t) => t.meta.path);
+  const oldGroupPaths = editorTitles().map((t) => t.path);
   moveItem(state.titles, from, to);
   state.titles[to].mergeWithPrevious = false;
   normalizeMerge();
   if (state.customLayout) {
-    const newPaths = state.titles.map((t) => t.meta.path);
-    remapLayoutByPaths(state.customLayout, oldPaths, newPaths);
+    const newGroupPaths = editorTitles().map((t) => t.path);
+    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
     state.customLayoutKey = titlesKey(editorTitles());
     void refreshLayoutCheck();
   }
@@ -700,22 +742,31 @@ function renderFooter() {
           : state.disc === "avchd5"
             ? tr("main.avchdDvd9Waehlen")
             : tr("main.dvd9WaehlenOder");
+    const counts = getMenuAndVideoCounts();
     text.textContent = singleVideoViolated()
       ? tr("main.nurEinVideoPro")
-      : calc.fits
-        ? tr("main.videoKbps", { base, fmtNum: fmtNum(calc.videoKbps), calc: calc.clamp === "max" ? tr("main.maximum") : "" })
-        : tr("main.doesNotFit", { base, hint });
+      : counts.overLimit
+        ? tr("main.dvdMenuLimitFooter", {
+            videos: counts.videos,
+            menus: counts.menus,
+            total: counts.total,
+          })
+        : calc.fits
+          ? tr("main.videoKbps", { base, fmtNum: fmtNum(calc.videoKbps), calc: calc.clamp === "max" ? tr("main.maximum") : "" })
+          : tr("main.doesNotFit", { base, hint });
   }
   const menusReady =
     state.menuMode === "template"
       ? !!state.template
       : !!state.customLayout && state.layoutErrors.length === 0 && !layoutIsStale();
+  const counts = getMenuAndVideoCounts();
   const canConvert =
     state.titles.length > 0 &&
     state.probing === 0 &&
     !state.converting &&
     menusReady &&
     !singleVideoViolated() &&
+    !counts.overLimit &&
     mergeMismatches().size === 0 &&
     !!state.output.trim() &&
     !!calc?.fits;
@@ -1154,6 +1205,7 @@ function renderCustomMenuTab(): HTMLElement {
     const rootMenus = l.menus.length - titleMenus;
     const buttons = l.menus.reduce((n, m) => n + m.elements.filter(isButton).length, 0);
     const moving = l.menus.filter(isMoving).length;
+    const counts = getMenuAndVideoCounts();
     wrap.append(
       h(
         "div",
@@ -1164,6 +1216,12 @@ function renderCustomMenuTab(): HTMLElement {
           h("h3", {}, tr("main.eigenesMenue")),
           h("p", {}, tr("main.titelmenueSRootMenue", { titleMenus, rootMenus, buttons, moving })),
           h("p", {}, h("strong", {}, tr("main.startmenue")), l.menus.find((m) => m.role === "title")?.name ?? "–"),
+          h(
+            "p",
+            { class: `menu-limit-info${counts.overLimit ? " warn" : ""}` },
+            h("strong", {}, tr("main.dvdNavigation")),
+            tr("main.dvdNavigationCounts", { videos: counts.videos, menus: counts.menus, total: counts.total }),
+          ),
           layoutIsStale()
             ? h(
                 "p",
@@ -1176,6 +1234,24 @@ function renderCustomMenuTab(): HTMLElement {
         ),
       ),
     );
+    if (counts.overLimit) {
+      wrap.append(
+        h(
+          "div",
+          { class: "menu-limit-warn" },
+          h("strong", {}, "\u26A0 " + tr("main.dvdMenuLimitTitle")),
+          h(
+            "p",
+            {},
+            tr("main.dvdMenuLimitDesc", {
+              videos: counts.videos,
+              menus: counts.menus,
+              total: counts.total,
+            }),
+          ),
+        ),
+      );
+    }
   }
   wrap.append(
     h(
@@ -1302,6 +1378,7 @@ function renderTemplateChoice() {
     ),
     h("p", { class: "hint" }, tr("main.auchNameDesDvd")),
   );
+  const counts = getMenuAndVideoCounts();
   if (info) {
     const pages = info.pageStyles.map((s) => styles[s] ?? s).join(", ");
     const hasSub = ["MNUS_ROOT", "MNUS_CHAPTER", "MNUS_SETTINGS"].every((s) => info.pageStyles.includes(s));
@@ -1318,7 +1395,31 @@ function renderTemplateChoice() {
           h("p", {}, h("strong", {}, tr("main.seiten")), pages),
           info.titlesPerPage ? h("p", {}, h("strong", {}, tr("main.titelProSeite")), String(info.titlesPerPage)) : null,
           h("p", {}, h("strong", {}, tr("main.videoSlots")), info.hasVideoSlots ? tr("main.jaMotionMenuAnimiert") : "nein"),
+          h(
+            "p",
+            { class: `menu-limit-info${counts.overLimit ? " warn" : ""}` },
+            h("strong", {}, tr("main.dvdNavigation")),
+            tr("main.dvdNavigationCounts", { videos: counts.videos, menus: counts.menus, total: counts.total }),
+          ),
           hasSub ? null : h("p", { class: "hint" }, tr("main.fehlendeUntermenuesRootKapitel")),
+        ),
+      ),
+    );
+  }
+  if (counts.overLimit) {
+    wrap.append(
+      h(
+        "div",
+        { class: "menu-limit-warn" },
+        h("strong", {}, "\u26A0 " + tr("main.dvdMenuLimitTitle")),
+        h(
+          "p",
+          {},
+          tr("main.dvdMenuLimitDesc", {
+            videos: counts.videos,
+            menus: counts.menus,
+            total: counts.total,
+          }),
         ),
       ),
     );

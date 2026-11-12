@@ -140,7 +140,7 @@ impl Nav<'_> {
         let lt = t.checked_sub(1).and_then(|i| self.titles.get(i as usize));
         let item = |per: usize| (n as usize - 1) * per + b.param.max(0) as usize;
         let go = |action: Action| Some(Mapped { action: Some(action), ..Mapped::default() });
-        let menu = |id: String| go(Action::Menu { menu: id });
+        let menu = |id: String| go(Action::menu(id));
         let home = || menu(self.title_page_id(t.max(1)));
         match (ctx.kind, loc.as_str()) {
             (Kind::Titles | Kind::Episodes | Kind::Bonus, l) if TITLE_ITEMS.contains(&l) && (ctx.kind != Kind::Bonus || l == "ML_PLAY_BONUS") => {
@@ -153,7 +153,7 @@ impl Nav<'_> {
                 let label = self.titles.get(i)?.label.clone();
                 let title = i as u32 + 1;
                 let action = if self.has_root[i] {
-                    Action::Menu { menu: menu_id(Kind::Root, title, 1) }
+                    Action::menu(menu_id(Kind::Root, title, 1))
                 } else {
                     Action::PlayTitle { title }
                 };
@@ -257,7 +257,7 @@ fn text_rect(g: &Graphic, style: Option<&TextStyle>) -> (f64, f64, f64, f64) {
 }
 
 fn element(id: String, content: Content, (x, y, w, h): (f64, f64, f64, f64), opacity: f32) -> Element {
-    Element { id, content, x, y, w, h, rotation: 0, opacity, action: None, highlight: None, group: None, intro: Vec::new() }
+    Element { id, content, x, y, w, h, rotation: 0, opacity, action: None, highlight: None, group: None, intro: Vec::new(), easter_egg: false }
 }
 
 /// Whether `clip` left the box alone. Not `==`: it recomputes the size as `(x + w) - x`, which is
@@ -331,7 +331,7 @@ impl Nav<'_> {
                 "GT_VIDEO" => match mapped.and_then(|m| m.video.map(|v| (v, m.start))) {
                     Some((title, start)) => match thumbnails.get(title as usize - 1).cloned().flatten().filter(|_| start.is_none()) {
                         Some(src) => Content::Image { src, fit: fit_of(&g.padding) },
-                        None => Content::Video { title, start_secs: start, fit: fit_of(&g.padding) },
+                        None => Content::Video { title, start_secs: start, fit: fit_of(&g.padding), path: None },
                     },
                     // A background video is only usable when the template names a picture.
                     None if g.location.eq_ignore_ascii_case("ML_PAGE_BACKGROUND") && image::ImageFormat::from_path(&g.value).is_ok() => {
@@ -341,7 +341,7 @@ impl Nav<'_> {
                     // The menus of a title play that title's clip in the page's video window; the main
                     // menu shows the first title.
                     None if g.location.eq_ignore_ascii_case("ML_PAGE_BACKGROUND") => {
-                        Content::Video { title: ctx.title.max(1), start_secs: None, fit: fit_of(&g.padding) }
+                        Content::Video { title: ctx.title.max(1), start_secs: None, fit: fit_of(&g.padding), path: None }
                     }
                     None => continue,
                 },
@@ -550,6 +550,7 @@ pub fn layout_from_template(
         canvas: Canvas { width: CANVAS_W as u32, height: CANVAS_H as u32 },
         highlight: Highlight::default(),
         animations: true,
+        fast_play: None,
         menus,
     };
     Ok((layout, warnings))
@@ -640,7 +641,7 @@ mod tests {
     }
 
     fn menu_to(id: &str) -> Action {
-        Action::Menu { menu: id.into() }
+        Action::menu(id)
     }
 
     #[test]
