@@ -181,7 +181,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   const H = () => L.canvas.height;
   const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? tr("menuEditor.missing")}`;
   const snap = (v: number) => Math.round(v / SNAP) * SNAP;
-  const clampBox = (e: LayoutElement) => {
+  const clampBox = (e: { x: number; y: number; w: number; h: number }) => {
     e.w = Math.max(8, Math.min(Math.round(e.w), W()));
     e.h = Math.max(8, Math.min(Math.round(e.h), H()));
     e.x = Math.max(0, Math.min(Math.round(e.x), W() - e.w));
@@ -1378,15 +1378,45 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   }
 
+  /**
+   * Intro key the stage edits instead of `e`'s base box: the selected key of `e`, or, while another
+   * element's key is selected, `e`'s key at the playhead. Anything else clears the key selection.
+   */
+  function stageKey(e: LayoutElement): ElementKey | null {
+    if (viewMode === "timeline" && selKey) {
+      const own = selKey.id === e.id ? e.intro?.[selKey.i] : undefined;
+      if (own) {
+        // the stage must show the key's state, or the drag would jump from the interpolated box
+        if (Math.abs(own.t - playheadTime) >= 0.005) setPlayhead(own.t);
+        return own;
+      }
+      const i = e.intro?.findIndex((k) => Math.abs(k.t - playheadTime) < 0.005) ?? -1;
+      if (i >= 0) {
+        selKey = { id: e.id, i };
+        requestTimelineDraw();
+        return e.intro![i];
+      }
+    }
+    if (selKey) requestTimelineDraw();
+    selKey = null;
+    return null;
+  }
+
   function startDrag(ev: PointerEvent, e: LayoutElement) {
     if (ev.button !== 0) return;
-    selKey = null;
+    const key = stageKey(e);
     ev.stopPropagation();
     ev.preventDefault();
     const handle = (ev.target as HTMLElement).dataset.handle;
     // Plain click on an already-selected element: collapse the selection if it was not a drag.
     let collapseTo: string[] | null = null;
-    if (!handle) {
+    if (key) {
+      // A key moves alone (no group/multi-select drag).
+      if (selIds.length !== 1 || selIds[0] !== e.id) {
+        selIds = [e.id];
+        refreshSelection();
+      }
+    } else if (!handle) {
       const ids = (ev.altKey ? [e] : groupMembers(e)).map((x) => x.id);
       if (ev.shiftKey) {
         if (isSel(e.id)) {
@@ -1404,7 +1434,15 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
     }
     // The stage may have been re-rendered: continue on the fresh nodes.
-    const targets = selection().map((t) => ({ t, node: stage.querySelector<HTMLElement>(`[data-id="${t.id}"]`), x: t.x, y: t.y, w: t.w, h: t.h }));
+    const boxes: { id: string; box: { x: number; y: number; w: number; h: number } }[] = key ? [{ id: e.id, box: key }] : selection().map((t) => ({ id: t.id, box: t }));
+    const targets = boxes.map(({ id, box: t }) => ({ t, node: stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`), x: t.x, y: t.y, w: t.w, h: t.h }));
+    // Keys may start off-canvas (slide-ins), so only base boxes are clamped to the frame.
+    const clamp = (b: { x: number; y: number; w: number; h: number }) => (key ? undefined : clampBox(b));
+    const show = (node: HTMLElement | null, b: { x: number; y: number; w: number; h: number }) => {
+      if (!node) return;
+      applyBox(node, key ? { ...e, x: b.x, y: b.y, w: b.w, h: b.h } : (b as LayoutElement));
+      if (key) renderProps();
+    };
     const union = unionBox(targets.map((s0) => ({ x: s0.x, y: s0.y, w: s0.w, h: s0.h })));
     const startX = ev.clientX;
     const startY = ev.clientY;
@@ -1417,13 +1455,13 @@ export function mountMenuEditor(opts: EditorOptions) {
       moved = true;
       if (!handle) {
         // Snap the selection's top-left corner, clamp the union box inside the canvas.
-        const ddx = Math.max(-union.x, Math.min(snap(union.x + dx) - union.x, W() - union.w - union.x));
-        const ddy = Math.max(-union.y, Math.min(snap(union.y + dy) - union.y, H() - union.h - union.y));
+        const ddx = key ? snap(union.x + dx) - union.x : Math.max(-union.x, Math.min(snap(union.x + dx) - union.x, W() - union.w - union.x));
+        const ddy = key ? snap(union.y + dy) - union.y : Math.max(-union.y, Math.min(snap(union.y + dy) - union.y, H() - union.h - union.y));
         for (const s0 of targets) {
           s0.t.x = Math.round(s0.x + ddx);
           s0.t.y = Math.round(s0.y + ddy);
-          clampBox(s0.t);
-          if (s0.node) applyBox(s0.node, s0.t);
+          clamp(s0.t);
+          show(s0.node, s0.t);
         }
         return;
       }
@@ -1449,8 +1487,8 @@ export function mountMenuEditor(opts: EditorOptions) {
         s0.t.y = snap(y);
         s0.t.w = snap(Math.max(8, w));
         s0.t.h = snap(Math.max(8, h));
-        clampBox(s0.t);
-        if (s0.node) applyBox(s0.node, s0.t);
+        clamp(s0.t);
+        show(s0.node, s0.t);
       }
     };
     const onUp = () => {
@@ -1459,6 +1497,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       if (moved) {
         pushHistory(before);
         renderProps();
+        if (key) renderStage();
         renderHeader();
         scheduleCheck();
       } else if (collapseTo) {
