@@ -397,6 +397,9 @@ export const onBurnDone = (cb: (d: BurnDone) => void): Promise<UnlistenFn> =>
 export const checkLayout = (layout: CustomLayout, titles: EditorTitle[], tv: string) =>
   invoke<string[]>("check_layout", { layout, titles, tv });
 export const loadLayout = (path: string) => invoke<CustomLayout>("load_layout", { path });
+/** A ConvertX template (.ini) converted into an editor layout, plus the converter's notes. */
+export const importConvertxTemplate = (path: string, titles: EditorTitle[], lang: string) =>
+  invoke<{ layout: CustomLayout; warnings: string[] }>("import_convertx_template", { path, titles, lang });
 /** Lines of a text element exactly as the build draws them (word wrap, "…"). */
 export const textLines = (element: LayoutElement, canvas: { width: number; height: number }, tv: string) =>
   invoke<string[]>("text_lines", { element, canvas, tv });

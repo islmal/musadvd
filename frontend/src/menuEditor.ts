@@ -4,8 +4,8 @@
 // The stage is the TV frame in storage pixels (720x576 PAL / 720x480 NTSC) shown at 4:3, so
 // texts and pictures look as they will on the TV. Buttons are axis-aligned rectangles (no
 // rotation, at most 36 per menu, no overlaps) – the DVD subpicture only knows `x0 y0 x1 y1`.
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { audioWaveform, checkLayout, imagePreview, loadLayout, saveLayout, textLines, titleFrame } from "./api";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
+import { audioWaveform, checkLayout, imagePreview, importConvertxTemplate, loadLayout, saveLayout, textLines, titleFrame } from "./api";
 import {
   FONTS,
   maxButtons,
@@ -32,7 +32,7 @@ import {
   type LayoutElement,
   type TextElement,
 } from "./layout";
-import { t as tr } from "./i18n";
+import { currentLanguage, t as tr } from "./i18n";
 
 type Child = Node | string | null | undefined | false;
 /** A field-level undo step; `execute` re-applies it (for a future redo), `undo` reverts and re-renders. */
@@ -82,6 +82,7 @@ const IMAGE_FILTER = [{ name: tr("menuEditor.bilder"), extensions: ["png", "jpg"
 const AUDIO_FILTER = [{ name: tr("menuEditor.audio"), extensions: ["mp3", "wav", "flac", "m4a", "aac", "ac3", "ogg", "opus"] }];
 const VIDEO_FILTER = [{ name: "Videos", extensions: ["mp4", "mkv", "avi", "mov", "mpg", "mpeg", "ts", "m2ts"] }];
 const LAYOUT_FILTER = [{ name: tr("menuEditor.menueLayout"), extensions: ["json"] }];
+const TEMPLATE_FILTER = [{ name: tr("menuEditor.convertxVorlage"), extensions: ["ini"] }];
 const FIT_LABELS: [Fit, string][] = [
   ["contain", tr("menuEditor.einpassen")],
   ["cover", tr("menuEditor.fuellenZuschneiden")],
@@ -411,6 +412,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     headerButtons.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
       el("button", { class: "btn", type: "button", onclick: () => void loadFile() }, tr("menuEditor.laden")),
+      el("button", { class: "btn", type: "button", onclick: () => void importTemplate() }, tr("menuEditor.ausVorlage")),
       el("button", { class: "btn", type: "button", onclick: () => void saveFile() }, tr("menuEditor.speichern")),
       el("button", { class: "btn", type: "button", disabled: history.length === 0, onclick: undo, title: tr("menuEditor.strgZ") }, tr("menuEditor.rueckgaengig")),
       el("span", { class: "ed-spacer" }),
@@ -2669,6 +2671,30 @@ export function mountMenuEditor(opts: EditorOptions) {
     menuIdx = 0;
     selIds = [];
     renderAll();
+  }
+  /** Replaces the layout with a converted ConvertX template (undoable like loading a file). */
+  async function importTemplate() {
+    let go = false;
+    try {
+      go = await ask(tr("menuEditor.vorlageUeberschreibt"), { title: tr("menuEditor.ausVorlage"), kind: "warning" });
+    } catch (e) {
+      flash(tr("menuEditor.dateiauswahlFehlgeschlagen", { e }), "error");
+    }
+    if (!go) return;
+    const p = await chooseFile(TEMPLATE_FILTER);
+    if (!p) return;
+    try {
+      const { layout, warnings } = await importConvertxTemplate(p, titles, currentLanguage());
+      remember();
+      L = layout;
+      menuIdx = 0;
+      selIds = [];
+      selKey = null;
+      renderAll();
+      flash(warnings.length ? tr("menuEditor.vorlageImportiertHinweise", { n: warnings.length, first: warnings[0] }) : tr("menuEditor.vorlageImportiert"), "ok");
+    } catch (e) {
+      flash(tr("menuEditor.vorlageFehlgeschlagen", { e }), "error");
+    }
   }
   async function loadFile() {
     const p = await chooseFile(LAYOUT_FILTER);

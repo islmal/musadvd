@@ -860,6 +860,7 @@ fn main() {
             menu_editor::check_layout,
             menu_editor::text_lines,
             menu_editor::load_layout,
+            menu_editor::import_convertx_template,
             menu_editor::save_layout,
             menu_editor::image_preview,
             burn_studio::studio_cancel,

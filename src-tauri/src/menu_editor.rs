@@ -8,8 +8,13 @@ use std::path::Path;
 
 use base64::Engine as _;
 use convertx_rust::author::{ClipSource, MenuFrame, TvStandard};
+use convertx_rust::bd_template::layout_from_template;
+use convertx_rust::dvd::ChapterSettings;
+use convertx_rust::encoder::Aspect;
 use convertx_rust::layout::{self, Canvas, CustomLayout, Element, LayoutTitle};
-use serde::Deserialize;
+use convertx_rust::menu::UiLang;
+use convertx_rust::template::Template;
+use serde::{Deserialize, Serialize};
 
 /// A selected audio track or subtitle of a title (source stream index; label for the UI).
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +93,44 @@ pub fn text_lines(element: Element, canvas: Canvas, tv: String) -> Vec<String> {
         Frame::Bd(frame) => layout::element_text_lines(&element, canvas, frame),
     };
     lines.unwrap_or_default()
+}
+
+/// A ConvertX template turned into an editable layout, with the converter's (German) notes.
+#[derive(Debug, Serialize)]
+pub struct ImportedTemplate {
+    pub layout: CustomLayout,
+    pub warnings: Vec<String>,
+}
+
+/// Converts a ConvertX template (`.ini`) into an editor layout for these titles, the same way a
+/// Blu-ray build does (`bd_template::layout_from_template`). Template images are read from disk,
+/// so it runs off the async runtime.
+#[tauri::command]
+pub async fn import_convertx_template(path: String, titles: Vec<EditorTitle>, lang: String) -> Result<ImportedTemplate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let template = Template::load(&path).map_err(|e| format!("Vorlage konnte nicht gelesen werden: {e}"))?;
+        if template.pages.is_empty() {
+            return Err("Die Vorlage enthält keine Menüseiten.".to_string());
+        }
+        let layout_titles = layout_titles(&titles);
+        // shortcut: chapter sample frames are spread evenly; the editor has no chapter times. Pass them in if the stills matter.
+        let chapter_starts: Vec<Vec<f64>> =
+            titles.iter().map(|t| (0..t.chapters.max(1)).map(|c| t.duration_secs * c as f64 / t.chapters.max(1) as f64).collect()).collect();
+        let (layout, warnings) = layout_from_template(
+            &template,
+            Path::new(&path),
+            &layout_titles,
+            &vec![None; titles.len()],
+            &chapter_starts,
+            Aspect::Wide,
+            &ChapterSettings::default(),
+            UiLang::from_setting(&lang),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(ImportedTemplate { layout, warnings })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
