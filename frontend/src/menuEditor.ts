@@ -89,6 +89,19 @@ const FIT_LABELS: [Fit, string][] = [
 ];
 const SNAP = 2;
 
+/** Intro key state at `t` like `menu_anim::lerp`: held before the first and after the last key, linear between. */
+export function interpolateKeyframes(keys: ElementKey[], t: number): ElementKey {
+  const first = keys[0];
+  const last = keys[keys.length - 1];
+  if (t <= first.t) return { ...first, t };
+  if (t >= last.t) return { ...last, t };
+  const i = keys.findIndex((k) => k.t > t);
+  const [a, b] = [keys[i - 1], keys[i]];
+  const f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1;
+  const mix = (p: number, q: number) => p + (q - p) * f;
+  return { t, x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h), opacity: mix(a.opacity, b.opacity) };
+}
+
 let closeHook: ((force: boolean) => boolean) | null = null;
 
 /** For the window's close button: true = fine to close now, false = the discard confirm is showing. */
@@ -121,6 +134,8 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   let viewMode: "basic" | "timeline" = "basic";
   let playheadTime = 0.0;
+  /** Intro key selected on the timeline (panel shows its values while its element is the only selection). */
+  let selKey: { id: string; i: number } | null = null;
   let isPlaying = false;
   let playTimer: number | null = null;
   let timelineZoom = 1;
@@ -557,9 +572,26 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   }
 
+  /** Box and opacity of `e` at the playhead: its intro keys while the timeline playhead is in the intro. */
+  function boxAt(e: LayoutElement): LayoutElement {
+    if (viewMode !== "timeline" || !e.intro?.length || playheadTime >= (menu().introSecs ?? 0)) return e;
+    const k = interpolateKeyframes(e.intro, playheadTime);
+    return { ...e, x: k.x, y: k.y, w: k.w, h: k.h, opacity: k.opacity };
+  }
+  /** Moves keyed elements to the playhead without rebuilding the stage (playback, scrubbing). */
+  function animateStage() {
+    for (const e of menu()?.elements ?? []) {
+      if (!e.intro?.length) continue;
+      const node = stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(e.id)}"]`);
+      if (!node) continue;
+      const b = boxAt(e);
+      applyBox(node, b);
+      (node.firstElementChild as HTMLElement).style.opacity = String(b.opacity);
+    }
+  }
   function renderElement(e: LayoutElement): HTMLElement {
     const inner = el("div", { class: "ed-inner" });
-    inner.style.opacity = String(e.opacity);
+    inner.style.opacity = String(boxAt(e).opacity);
     if (e.type === "text") {
       inner.classList.add("ed-text");
       inner.textContent = e.text;
@@ -623,7 +655,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (e.easterEgg) {
       node.append(el("span", { class: "ed-easter-egg-badge" }, "🥚 Easter Egg"));
     }
-    applyBox(node, e);
+    applyBox(node, boxAt(e));
     // Cell 1 buttons are only dimmed: they stay editable, otherwise a playhead at 0 locks the whole menu.
     if (isSel(e.id)) {
       for (const corner of ["nw", "ne", "sw", "se"]) {
@@ -690,6 +722,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (tc) tc.textContent = formatTimecode(playheadTime);
     requestTimelineDraw();
     if (playheadTime < (menu().introSecs ?? 0) !== lastCell1) renderStage();
+    else animateStage();
   }
 
   function togglePlay() {
@@ -969,7 +1002,8 @@ export function mountMenuEditor(opts: EditorOptions) {
         }
         // intro keyframes: NLE diamonds at their time
         const d = r.h / 2 - 2;
-        r.keys?.forEach((k) => {
+        r.keys?.forEach((k, i) => {
+          const picked = selKey?.id === r.id && selKey?.i === i;
           const cx = X(k.t);
           const cy = y + r.h / 2;
           ctx.beginPath();
@@ -978,7 +1012,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           ctx.lineTo(cx, cy + d);
           ctx.lineTo(cx - d, cy);
           ctx.closePath();
-          ctx.fillStyle = "#ffffff";
+          ctx.fillStyle = picked ? accent : "#ffffff";
           ctx.fill();
           ctx.strokeStyle = "#0f172a";
           ctx.lineWidth = 1;
@@ -1088,6 +1122,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     const h = tlHitAt(ev);
     if (ev.button !== 0 || !h) return;
     const m = menu();
+    selKey = h.kind === "keyframe" ? { id: h.id!, i: h.key! } : null;
     if (h.kind === "element") {
       const b = m.elements.find((e) => e.id === h.id);
       if (!b) return;
@@ -1097,6 +1132,11 @@ export function mountMenuEditor(opts: EditorOptions) {
       requestTimelineDraw();
       if (ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W) dragRow(ev, b.id);
     } else if (h.kind === "keyframe") {
+      selIds = [h.id!];
+      const k = m.elements.find((e) => e.id === h.id)?.intro?.[h.key!];
+      if (k) setPlayhead(k.t);
+      renderStage();
+      renderProps();
       dragKeyframe(ev, h.id!, h.key!);
     } else if (h.kind === "markerT") {
       dragOnRuler(ev, (secs) => {
@@ -1340,6 +1380,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   function startDrag(ev: PointerEvent, e: LayoutElement) {
     if (ev.button !== 0) return;
+    selKey = null;
     ev.stopPropagation();
     ev.preventDefault();
     const handle = (ev.target as HTMLElement).dataset.handle;
@@ -1730,7 +1771,50 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     const sel = selection();
     const e = selected();
-    props.replaceChildren(...(sel.length > 1 ? multiProps(sel) : e ? elementProps(m, e) : menuProps(m)));
+    const key = e && selKey?.id === e.id && sel.length === 1 ? e.intro?.[selKey.i] : undefined;
+    props.replaceChildren(...(key ? keyProps(m, e!, key) : sel.length > 1 ? multiProps(sel) : e ? elementProps(m, e) : menuProps(m)));
+  }
+
+  /** Values of one intro key; `t` stays between its neighbours and inside the intro. */
+  function keyProps(m: CustomMenu, e: LayoutElement, k: ElementKey): HTMLElement[] {
+    const keys = e.intro!;
+    const i = keys.indexOf(k);
+    const lo = keys[i - 1]?.t ?? 0;
+    const hi = keys[i + 1]?.t ?? (m.introSecs ?? 0);
+    const field = (key: "x" | "y" | "w" | "h", min = 0) =>
+      row(key.toUpperCase(), num(Math.round(k[key]), (v) => (k[key] = Math.max(min, v)), { step: "1" }));
+    return [
+      el("h3", {}, tr("menuEditor.keyframe", { n: i + 1, total: keys.length })),
+      group(
+        tr("menuEditor.keyframeWerte"),
+        row(tr("menuEditor.keyframeZeit"), num(k.t, (v) => (k.t = Math.round(Math.min(hi, Math.max(lo, v)) * 100) / 100), { step: "0.1", min: String(lo), max: String(hi) })),
+        field("x", -10000),
+        field("y", -10000),
+        field("w", 1),
+        field("h", 1),
+        row(tr("menuEditor.deckkraft"), num(k.opacity, (v) => (k.opacity = Math.min(1, Math.max(0, v))), { step: "0.05", min: "0", max: "1" })),
+      ),
+      el(
+        "div",
+        { class: "ed-row-buttons" },
+        el("button", { class: "btn", type: "button", onclick: () => ((selKey = null), renderProps(), requestTimelineDraw()) }, tr("menuEditor.zumElement")),
+        el(
+          "button",
+          {
+            class: "btn danger",
+            type: "button",
+            onclick: () => {
+              remember();
+              keys.splice(i, 1);
+              if (!keys.length) delete e.intro;
+              selKey = null;
+              renderAll();
+            },
+          },
+          tr("menuEditor.keyframeLoeschen"),
+        ),
+      ),
+    ];
   }
 
   function multiProps(sel: LayoutElement[]): HTMLElement[] {
