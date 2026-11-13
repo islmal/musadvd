@@ -1,50 +1,60 @@
 # Menu editor – technical reference (for AI agents)
 
-Scope: the custom menu editor (`frontend/src/menuEditor.ts`), its timeline view, the layout JSON model shared with Rust, and the Rust pipeline that turns a layout into DVD menu VOBs. Refer to functions by name – line numbers drift. Project rules: [CLAUDE.md](../CLAUDE.md); architecture overview: [STATUS.md](../STATUS.md). Design plan of the timeline: [2026-11-10-disney-fastplay-and-custom-motion-menus.md](plans/2026-11-10-disney-fastplay-and-custom-motion-menus.md).
+Scope: the custom menu editor (`frontend/src/menuEditor.ts`), its Canvas timeline, the layout JSON model shared with Rust, and the Rust pipeline that turns a layout into DVD/Blu-ray menus. Refer to functions by name – line numbers drift. Project rules: [CLAUDE.md](../CLAUDE.md); architecture overview: [STATUS.md](../STATUS.md). Design plan of the timeline: [2026-11-10-disney-fastplay-and-custom-motion-menus.md](plans/2026-11-10-disney-fastplay-and-custom-motion-menus.md).
+
+State of this document: 13.11.2026, after the timeline overhaul (command undo, Canvas timeline, waveform, external media, layer tracks, intro keyframes, template import).
 
 ## 1. File map
 
 | File | Role |
 |---|---|
-| `frontend/src/layout.ts` | TS model (`CustomLayout`, `CustomMenu`, `LayoutElement`, `Action`, …), `draftLayout`, `isButton`, `isMoving`, `madeForOtherTitles`, `pixelAspectOf`, `newId`. Mirrors `src/layout.rs` 1:1 (camelCase JSON). |
-| `frontend/src/menuEditor.ts` | The whole editor, one closure: `mountMenuEditor(opts)`. ~2200 lines, no framework, DOM built with the `el()` helper. |
+| `frontend/src/layout.ts` | TS model (`CustomLayout`, `CustomMenu`, `LayoutElement`, `ElementKey`, `Action`, …), `draftLayout`, `isButton`, `isMoving`, `referencedTitles`, `remapLayoutTitles`, `newId`. Mirrors `src/layout.rs` 1:1 (camelCase JSON). |
+| `frontend/src/menuEditor.ts` | The whole editor, one closure: `mountMenuEditor(opts)`. ~2850 lines, no framework, DOM built with the `el()` helper; the timeline is one `<canvas>`. Exports `interpolateKeyframes`. |
 | `frontend/src/editorWindow.ts` | Entry of `editor.html`: waits for `editor-init`, mounts the editor, forwards `editor-apply` to the main window, closes via `requestClose()`. |
-| `frontend/src/api.ts` | Tauri wrappers: `checkLayout`, `loadLayout`, `saveLayout`, `textLines`, `imagePreview`, `titleFrame`. |
-| `src-tauri/src/menu_editor.rs` | Tauri commands `check_layout`, `text_lines`, `load_layout`, `save_layout`, `image_preview` (`title_frame` lives in `main.rs`). |
-| `src/layout.rs` | Rust model, `validate`, `plan_navigation`, `render_custom_page`, `build_custom_menus`. |
-| `src/menu_anim.rs` | Intro keyframe interpolation + per-frame compositing; `dvd_intro_frames`, `dvd_gop`, `dvd_rate`. |
-| `src/encoder.rs` | `custom_menu_args` (ffmpeg graph for a moving menu; `-force_key_frames expr:gte(t,T)`, `+cgop` when an intro exists). |
-| `src/author.rs` | `MenuSpec`, `spumux_xml`, dvdauthor-style XML + native PGC construction (`intro_secs` → 2 cells). |
-| `src/dvdvm.rs` | VM command parser (used to validate `customVm` scripts). |
-| `frontend/src/styles.css` | `.ed-*` classes; timeline block starts at `/* Multi-Track Studio Timeline */`. |
+| `frontend/src/api.ts` | Tauri wrappers: `checkLayout`, `loadLayout`, `saveLayout`, `importConvertxTemplate`, `textLines`, `imagePreview`, `titleFrame`, `audioWaveform`. |
+| `src-tauri/src/menu_editor.rs` | Commands `check_layout`, `text_lines`, `load_layout`, `save_layout`, `import_convertx_template`, `image_preview`. |
+| `src-tauri/src/main.rs` | Commands `title_frame` and `audio_waveform` (they need the toolchain). |
+| `src/layout.rs` | Rust model, `validate`, `plan_navigation`, `render_custom_page`, `build_custom_menus`, `video_clip`. |
+| `src/bd_menu.rs` / `src/bd_template.rs` | Blu-ray menu build; `layout_from_template` (ConvertX template → `CustomLayout`, also used by the editor import). |
+| `src/menu_anim.rs` | Intro keyframe interpolation (`lerp`) and per-frame compositing; `dvd_intro_frames`, `dvd_gop`, `dvd_rate`. |
+| `src/encoder.rs` | `custom_menu_args` (ffmpeg graph of a moving menu), `waveform_args` / `waveform_peaks`. |
+| `src/tools.rs` | `Toolchain::ffmpeg_output` (ffmpeg with stdout piped, used by the waveform). |
+| `src/author.rs` | `MenuSpec`, `spumux_xml`, dvdauthor-style XML and native PGC construction (`intro_secs` → 2 cells). |
+| `src/dvdvm.rs` | VM command parser (validates `customVm` scripts). |
+| `frontend/src/styles.css` | `.ed-*` classes; timeline: `.ed-tl-scroll`, `.ed-tl-sizer`, `.ed-tl-canvas`. |
 | `scripts/check-i18n.mjs` | Build gate: locale key parity, literal `t("…")` keys exist, **no umlauts/ß in .ts code**. |
-| Tests | `tests/custom_menu_intro.rs`, `tests/menu_transitions.rs`, `tests/fastplay_vm.rs`, `tests/dvdvm_sprm.rs`, `tests/dvdauthor_native.rs`, `tests/bluray.rs`. There is **no frontend test suite**. |
+| Tests | `tests/custom_menu_intro.rs` (intro cells, Easter egg mask, external video args), `tests/menu_transitions.rs`, `tests/fastplay_vm.rs`, `tests/dvdvm_sprm.rs`, `tests/dvdauthor_native.rs`, `tests/bluray.rs`; unit tests in `layout.rs` and `encoder.rs`. There is **no frontend test suite**. |
 
 ## 2. Data model
 
-JSON is camelCase on both sides. Rust uses `#[serde(tag="type", rename_all="camelCase")]`.
+JSON is camelCase on both sides. Rust uses `#[serde(tag="type", rename_all="camelCase")]` for unions.
 
 ```ts
 CustomLayout { version, canvas:{width,height}, highlight:{color,selectColor,opacity},
                animations:boolean, fastPlay?:FastPlayConfig, menus: CustomMenu[] }
 CustomMenu   { id, name, role:"title"|"root"|"settings", title?:number|null,   // title is 1-based
-               background:{color,image?,video?:{title,startSecs?},blur,gradientOverlay?},
+               background:{color, image?, video?:{title, startSecs?, path?}, blur, gradientOverlay?},
                durationSecs?:number|null,   // LOOP length (Cell 2), default 20, clamp 1..600 in Rust
                audio: MenuSound,            // none | title{title,startSecs?} | file{path}
                introSecs?:number|null,      // intro length (Cell 1); None/0 = no intro
-               elements: LayoutElement[] }  // bottom → top
-LayoutElement = TextElement | ImageElement | VideoElement   // common: id,x,y,w,h,rotation,opacity,
-               // action?, highlight?, group? (editor only), intro?: ElementKey[], easterEgg?
+               elements: LayoutElement[] }  // index 0 = bottom, last = top
+LayoutElement = TextElement | ImageElement | VideoElement
+               // common: id,x,y,w,h,rotation,opacity, action?, highlight?, group? (editor only),
+               //         intro?: ElementKey[], easterEgg?
+VideoElement  { type:"video", title, startSecs?, fit, path? }   // path set → external file, title ignored (0)
+ElementKey    { t, x, y, w, h, opacity }                         // seconds into the intro, canvas pixels
 Action = playTitle | playChapter | menu{menu,transition?} | playAll | setAudio{source} | setSubtitle{source|null} | customVm{script}
 ```
 
 Rules that matter when editing the model:
 
 - **A button is any element with `action`** (`isButton(e) = !!e.action`). No separate button type.
-- Coordinates are in **canvas pixels** (default 720×576 PAL, 720×480 NTSC; BD 16:9). The stage is scaled with `scale(scaleX, scaleY)` to 4:3 (`layoutStage`), so DVD non-square pixels are handled by CSS, not by the model.
-- **Total motion time of a menu = `introSecs + durationSecs`** (if `introSecs>0` the loop is `durationSecs`, intro is added in front; Rust: `total_motion_secs = intro.secs + loop_secs`). Never store "end time" in the model.
-- `introSecs` is GOP-aligned in Rust: `dvd_intro_frames(secs, tv)` rounds to whole GOPs (PAL 15 frames, NTSC 18). The editor pre-snaps with `snapToClosedGop`; Rust has the final say (`files.intro.secs` can differ slightly from `introSecs`).
-- Buttons: max 36 on DVD (`MAX_BUTTONS`; 255 on BD), no overlaps, rotation must be 0, max 3 distinct colour pairs per menu (`MAX_COLOR_PAIRS`), 2-px grid for DVD hitboxes (the AABB tool snaps x0/y0 even, x1/y1 odd).
+- **External video:** `path` is an optional field, not a tagged enum, so every saved layout (`{title, startSecs}`) keeps loading; a tag would also collide with the element's own `"type":"video"`. Rust resolves both sources in `video_clip(titles, title, start, path)`: a file starts at `startSecs ?? 0` and has `has_audio: false`; a title uses `clip_of` (default start 10 % of the runtime, max 5 min). `referencedTitles` / `remapLayoutTitles` skip entries with a `path`.
+- Coordinates are in **canvas pixels** (default 720×576 PAL, 720×480 NTSC; Blu-ray layouts must be 16:9, e.g. 1280×720 or the 1920×1080 of an imported template). The stage is scaled to the TV aspect by CSS (`layoutStage`), the model never stores display pixels.
+- **Total motion time of a menu = `introSecs + durationSecs`**. Never store an end time.
+- `introSecs` is GOP-aligned in Rust: `dvd_intro_frames(secs, tv)` rounds to whole GOPs (PAL 15 frames, NTSC 18). The editor pre-snaps with `snapToClosedGop`; Rust has the final say.
+- **Intro keys** (`intro`): interpolated linearly, value held before the first and after the last key (`menu_anim::lerp`, mirrored by `interpolateKeyframes`). Two keys with the same `t` are a hard cut (no division by zero). Keys carry no rotation. Rust runs the intro for `max(introSecs, last key t)`.
+- Buttons: max 36 on DVD (`MAX_BUTTONS`; 255 on BD), no overlaps, rotation 0, max 3 distinct colour pairs per menu (`MAX_COLOR_PAIRS`), 2-px grid for DVD hitboxes (the AABB tool snaps x0/y0 even, x1/y1 odd).
 
 ## 3. Editor architecture (frontend)
 
@@ -54,137 +64,116 @@ Rules that matter when editing the model:
 |---|---|
 | `L: CustomLayout` | the working layout (deep-cloned from `opts.layout` or `draftLayout`) |
 | `menuIdx`, `selIds` | current menu index; selected element ids (ids, never indexes) |
-| `history: string[]` | undo stack of `JSON.stringify(L)` snapshots, max 60 |
+| `history: (string \| Command)[]` | undo stack, max 60: JSON snapshots or `Command { execute, undo }` |
 | `dirty`, `confirmClose`, `errors` | unsaved-changes flag, 2-click close confirm, last `checkLayout` result |
-| `viewMode: "basic"\|"timeline"` | timeline visibility |
+| `viewMode: "basic" \| "timeline"` | timeline visibility |
 | `playheadTime`, `isPlaying`, `playTimer`, `timelineZoom`, `lastCell1`, `isDrawingAabb` | timeline / draw-tool state |
+| `selKey: {id, i} \| null` | selected intro key (element id + key index) |
+| `tlHits`, `tlDropY`, `tlWaves` | timeline hit boxes of the last draw, drop indicator, waveform cache |
 
-**Render model.** `renderAll()` = `renderHeader, renderMenus, renderToolbar, renderStage, renderTimelinePane, renderProps, renderStatus, scheduleCheck`. Every render fully rebuilds its DOM subtree (`replaceChildren`). Partial renders exist for hot paths: `refreshSelection()` (= stage+props), `setPlayhead()` (patches playhead/timecode in place).
+**Render model.** `renderAll()` = `renderHeader, renderMenus, renderToolbar, renderStage, renderTimelinePane, renderProps, renderStatus, scheduleCheck`. DOM renders rebuild their subtree (`replaceChildren`). The timeline is a canvas redrawn on demand: `requestTimelineDraw()` sets a dirty flag and draws once per `requestAnimationFrame`. Hot paths: `refreshSelection()` (stage+props), `setPlayhead()` (timecode + canvas; the stage re-renders only when the Cell-1/Cell-2 side flips, otherwise `animateStage()` moves keyed elements in place).
 
-**Undo contract (important).** `remember()` pushes the *current* state and sets `dirty`; call it **before** mutating `L`. For continuous gestures (drag) snapshot `JSON.stringify(L)` at pointer-down and push it on pointer-up only if the JSON changed (see `startDrag`, `dragOnRuler`). `undo()` pops and `renderAll()`s. Calling `remember()` after the mutation makes undo a no-op – this was a bug in the first timeline.
+**Undo contract (hybrid).**
+- Structural changes (add/delete/reorder elements, menus, imports, stage drags): `remember()` pushes `JSON.stringify(L)` **before** the mutation; continuous gestures snapshot at pointer-down and call `pushHistory(before)` on pointer-up only if something changed (`startDrag`, `dragRow`, `moveElement`).
+- Field edits of a known object: `beginEdit(resolve, keys, render)` records `keys` at pointer-down and returns `commit()`, which pushes one `Command` holding only those values (or nothing if unchanged). `resolve` is re-run on undo because a snapshot undo replaces `L` with fresh objects – never capture object references in a command. `beginMenuEdit(keys)` is the same for the current menu and switches back to it on undo. Used by marker drags (`introSecs`, `durationSecs`) and keyframe drags/inserts (`intro`).
+- Properties panel inputs (`num`/`bind`) call `remember()` once per focus session.
+- `undo()` runs `Command.undo()` or restores a snapshot + `renderAll()`.
 
 **Validation loop.** `scheduleCheck()` debounces `checkLayout(L, titles, tv)` → Rust `layout::validate` (same code as the build) → `errors: string[]` (German) → `renderStatus`. `apply()` re-runs it and only calls `opts.onApply(structuredClone(L))` when empty. The editor stays open after apply.
 
-**Previews.** `frameOf(title,start)` (cached ffmpeg frame via `titleFrame`), `imageOf(path)`, `linesOf(textElement)` (line breaks from Rust so preview == build). All go through `preview()` cache keyed by kind+key.
+**Previews.** `frameOf(title,start)` / `frameOfVideo(v)` (cached ffmpeg frame via `titleFrame`; files use their own path), `imageOf(path)`, `linesOf(textElement)` (line breaks from Rust so preview == build). All go through `preview()` keyed by kind+key. `videoLabel(v)` names a title or file; `defaultStart(v)` is the start shown when `startSecs` is empty (title: 10 % / max 300 s, file: 0).
 
-**Input.** `startDrag` (element move/resize incl. group & multi-select), stage `pointerdown` handler (marquee, or AABB draw when `isDrawingAabb`), global `onKey` (capture phase; ignores inputs/selects). Timeline keys are handled in `onKey` *before* the `sel.length===0` early return.
+**Input.** `startDrag` (element move/resize incl. group & multi-select; routes to a selected intro key, see §5), stage `pointerdown` (marquee, or AABB draw when `isDrawingAabb`), global `onKey` (capture phase; ignores inputs/selects; timeline keys are handled before the `sel.length===0` early return).
 
-**Gotcha – i18n gate.** `scripts/check-i18n.mjs` fails `npm run build` on any literal `ä ö ü Ä Ö Ü ß` in `.ts` code (comments excluded). The timeline strings are hard-coded German and written with `ä`-style escapes. Proper fix: move them to `locales/{de,en,ru}.json` and use `tr("menuEditor.…")` (all three files must have the same keys/placeholders).
+**Toolbar.** `+ Text`, `+ Externes Bild`, `+ Projekt-Titel` (video element of a title), `+ Externes Video` (`addExternalVideo` → `addVideo(path)`, title 0, no action), `+ Button-Bereich`, safe-area toggle, button counter. Header: `Entwurf aus Titeln`, `Laden …`, `Aus Vorlage …`, `Speichern …`, `Rückgängig`, view switch, `Schließen`, `Übernehmen`.
 
-## 4. Timeline subsystem
+**i18n gate.** `scripts/check-i18n.mjs` fails `npm run build` on any literal `ä ö ü Ä Ö Ü ß` in `.ts` code (comments excluded) and on key mismatches between `locales/{de,en,ru}.json` (flat keys). All editor and timeline strings go through `tr("menuEditor.…")`.
 
-All code is inside `mountMenuEditor`, between `renderStage` and `// ---- selection, drag & resize`.
+## 4. Canvas timeline
 
-```
-timelineTotal()    = max(1, introSecs + durationSecs)
-pxPerSec()         = 45 * timelineZoom
-fitZoom()          = (centerSection.clientWidth - 190) / (timelineTotal()*45), clamped 0.25..10
-snapToClosedGop(s) = round(round(s*fps)/gop)*gop / fps      (fps 25|30000/1001, gop 15|18)
-formatTimecode(s)  = HH:MM:SS:FF
-stopPlay()/togglePlay()   playback: setInterval 40 ms, real dt via performance.now();
-                          at timelineTotal() wraps to introSecs (intro plays once, loop repeats)
-setPlayhead(t)     clamps, patches .ed-timeline-timecode and .ed-timeline-playhead,
-                   re-renders the stage ONLY when the Cell-1/Cell-2 side flips (lastCell1)
-dragOnRuler(ev,onMove)   window-level pointermove/up (element capture breaks because the pane is
-                   rebuilt during a drag); records undo on release; renderAll() on release
-renderTimelinePane()     builds header, hint, ruler (+ markers), two-column grid of rows
-```
-
-DOM produced by `renderTimelinePane`:
+All code is inside `mountMenuEditor`, after `renderStage`.
 
 ```
-.ed-timeline-pane (flex column, height 280px)
- ├ .ed-timeline-header   play, timecode, "Intro endet hier", "Kein Intro" (only if T>0), GOP pill, Einpassen, zoom slider
- ├ .ed-timeline-hint     plain-language explanation (changes with T>0)
- └ .ed-tl-body           overflow-y:auto (vertical scroll for many buttons)
-    └ .ed-tl-grid (flex)
-       ├ .ed-tl-names    fixed 150 px column; one .ed-tl-name per row (+ .ed-tl-ruler-spacer 28 px)
-       └ .ed-tl-scroll   overflow-x:auto
-          └ .ed-timeline-tracks (width = totalSecs*px+40)
-             ├ .ed-timeline-ruler  .ed-tick, .ed-marker-t (blue, introSecs), .ed-marker-l (green, T+L)
-             ├ .ed-track.main  Video  (.ed-track-thumb*, .ed-track-intro, .ed-track-loop)
-             ├ .ed-track.main  Ton    (.ed-track-audio)
-             ├ .ed-track.main  Buttons(.ed-track-buttons-locked 0..T, .ed-track-buttons-active T..T+L)
-             ├ .ed-track.btn-row  one per button (click/pointerdown selects the button)
-             └ .ed-timeline-playhead (absolute, full height)
+DOM:  timelinePane > tlBar (display:contents: header + hint)
+                   > tlScroll (overflow:auto) > tlSizer (sized to the content) + tlCanvas (position:sticky)
+Constants: TL_NAME_W 150, TL_RULER_H 28, TL_GAP 4, TL_ROW_H 32 (main rows), TL_BTN_H 18 (element rows)
+timelineTotal() = max(1, introSecs + durationSecs)      pxPerSec() = 45 * timelineZoom
+fitZoom()       = (centerSection.clientWidth - 190) / (timelineTotal()*45), clamped 0.25..10
+snapToClosedGop(s) = round(round(s*fps)/gop)*gop / fps  (fps 25|30000/1001, gop 15|18)
 ```
 
-Row alignment between names and bars relies on identical heights (`.main` 32 px, `.btn-row` 18 px) and identical flex `gap: 4px`. If you change a row height, change it in both `.ed-tl-name.*` and `.ed-track.*`.
+- The canvas has the viewport size (× `devicePixelRatio`) and sticks inside a sizer as large as the content, so native scrollbars and the mouse wheel work; `drawTimeline()` subtracts `scrollLeft/scrollTop`. A `ResizeObserver` and the scroll listener request redraws.
+- **Rows** (top to bottom): Video (thumbnails of the background or first video, intro/loop regions), Ton (waveform or "kein Ton"), the "Ebenen (n)" header (locked 0..T / active T..T+L), then **one row per element in reverse array order – the top row is the frontmost layer**. Buttons draw the yellow active bar with their action label; static elements a grey bar over the whole runtime.
+- **Hit-testing:** every draw rebuilds `tlHits: TlHit[]` (`kind: ruler | markerT | markerL | element | keyframe`, `id`, `key`, `tip`); `tlHitAt(ev)` searches it last-to-first, so keyframes (pushed after their row) win.
+- **Pointer handlers on the canvas** (all with `setPointerCapture`; the canvas is never rebuilt):
+  - ruler: `dragOnRuler` scrubs the playhead (no undo);
+  - T/L markers: `dragOnRuler(ev, onMove, ["introSecs"|"durationSecs"])` → one `beginMenuEdit` command; T snaps to closed GOPs (0..60 s), L = `clamp(snap(max(T+1, secs)) - T, 1, 600)`;
+  - element row in the name column: select + `dragRow` (4-px threshold, drop line `tlDropY`); drop calls `moveElement(id, target, !after)` – visually below means *before* in the array; one snapshot undo;
+  - element row in the track area: select;
+  - keyframe diamond: select key (`selKey`), playhead jumps to `k.t`, `dragKeyframe` shifts `t` (0.01 s steps) between the neighbouring keys and inside `0..introSecs`;
+  - double-click on a track inside `0..introSecs`: inserts a key at `t` (copy of the nearest key, else of the element), sorted by `t`; one command.
+- **Waveform:** `tlWave(audio)` fetches 660 s of peaks once per source (`audioWaveform(path, start, 660)` → `u8[]`, 40 peaks/s) into `tlWaves`, outside the layout; `drawTimeline` draws one bar per screen column (max peak in that column). Titles use their default start; a file starts at 0.
+- **Stage coupling:** in timeline mode buttons with `playheadTime < introSecs` get `hli-inactive` (dimmed, still editable). `boxAt(e)` returns the interpolated key state while the playhead is in the intro; `renderElement` uses it and `animateStage()` updates keyed nodes during playback/scrub.
 
-Scroll position (`.ed-tl-scroll` scrollLeft, `.ed-tl-body` scrollTop) is saved/restored around every rebuild; any new rebuild path must keep that.
+## 5. Intro keyframes in the editor
 
-Semantics wired to the stage: in timeline mode a button with `playheadTime < introSecs` gets class `hli-inactive` (dimmed, badge "Subpicture Inaktiv"); it stays editable (an earlier version disabled pointer events, which locked the whole menu at playhead 0).
+- Data: `element.intro: ElementKey[]`, kept sorted by `t`.
+- Selection: `selKey` is set by clicking a diamond and cleared by any other timeline click or a stage click on another element; the selected diamond is filled with the accent colour.
+- Properties: when `selKey` matches the only selected element, `renderProps` shows `keyProps`: Zeit (clamped between neighbours), X, Y, W, H, Deckkraft, plus "Zum Element" and "Keyframe löschen".
+- Stage: `stageKey(e)` decides at pointer-down whether a stage drag edits a key. Selected key of `e` → that key (the playhead first jumps to `k.t`, so the drag starts from the key's box). Another element's key selected and `e` has a key at the playhead (±5 ms) → selection switches to it. Otherwise `selKey` is cleared and the base box is edited. Key drags move one element (no group/multi-select), keep the snap grid, are **not** clamped to the canvas (slide-ins from outside are allowed), update the panel live and push one snapshot undo.
+- Limits: image/video previews are fitted to the base size when they load, so an animated size only stretches them in the preview (the build is correct); static element rows do not show keys' visibility.
 
-Markers: T drag sets `m.introSecs = snapToClosedGop(clamp(secs,0,60))`; L drag sets `m.durationSecs = clamp(snap(max(T+1, secs)) - T, 1, 600)`. Both call `renderTimelinePane()+renderStage()` during the drag and `renderAll()` on release.
-
-## 5. Tauri API used by the editor
+## 6. Tauri API used by the editor
 
 | Command | Input → output | Notes |
 |---|---|---|
-| `check_layout` | `(layout, titles: EditorTitle[], tv)` → `string[]` | runs `layout::validate` / `validate_bd`; empty = valid |
+| `check_layout` | `(layout, titles: EditorTitle[], tv)` → `string[]` | `layout::validate` / `validate_bd`; empty = valid |
 | `text_lines` | `(element, canvas, tv)` → `string[]` | `layout::element_text_lines`, same wrapping as the build |
-| `load_layout` / `save_layout` | path ↔ `CustomLayout` | plain JSON file |
+| `load_layout` / `save_layout` | path ↔ `CustomLayout` | plain JSON |
+| `import_convertx_template` | `(path, titles, lang)` → `{layout, warnings}` | async + `spawn_blocking`; `bd_template::layout_from_template` with `Aspect::Wide`, default chapter settings, evenly spread chapter sample times; German errors |
 | `image_preview` | path → data URL | |
-| `title_frame` | `(path, atSecs)` → data URL | ffmpeg still; cached in the editor by 0.1 s key |
+| `title_frame` | `(path, atSecs)` → data URL | ffmpeg still; cached by 0.1 s |
+| `audio_waveform` | `(path, startSecs, secs)` → `u8[]` | ffmpeg `-ac 1 -ar 2000 -f u8 pipe:1` via `Toolchain::ffmpeg_output`, folded by `waveform_peaks` (50 samples → 1 peak) |
 
-The editor window is separate (`editor.html`). Events: main → `editor-init` (EditorInit: layout, titles, tv, heading, layoutTitlesKey); editor → `editor-ready`, `editor-apply` (validated layout).
+The editor window is separate (`editor.html`). Events: main → `editor-init` (layout, titles, tv, heading, layoutTitlesKey); editor → `editor-ready`, `editor-apply` (validated layout). Dialogs use `@tauri-apps/plugin-dialog` (`open`, `save`, `ask`; capabilities in `src-tauri/capabilities`).
 
-## 6. Rust pipeline (layout → disc)
+## 7. Rust pipeline (layout → disc)
 
-1. `validate_impl(layout, titles, frame, bd)` – list of rules: canvas 16:9 for BD, colours `#RRGGBB`, unique menu ids, targets exist, buttons ≤ max / non-overlapping / unrotated, colour pairs ≤ 3, `customVm` scripts must pass `dvdvm::parse`, PGC command budget (`MAX_PGC_COMMANDS`). Messages are German and shown verbatim in the status bar.
-2. `plan_navigation_with_offset` – assigns each menu a `Placement` (VMGM n / VTSM title,pgc) and builds the button command strings. Registers: `g1` play-all, `g2` titleset dispatch (`1..99` chapter, `100+j` j-th root menu), `g3` VMGM router (`1000+t` play title, `2000+t` enter titleset). Bridge PGCs exist for jumps a VTSM cannot do itself.
-3. `render_custom_page` (parallel per menu, rayon) – draws static elements into transparent frame-size PNG layers (text via `menu::text_coverage`, images fitted with the TV pixel aspect), keeps video elements as separate `MenuLayer::Video`, builds 4-colour palette highlight/select PNGs (value 0 transparent), `author::compute_navigation` for up/down/left/right, then:
-   - `has_intro = layout.animations && menu.intro_secs > 0`; if so builds `menu_anim::Intro` with `frames = dvd_intro_frames(max(introSecs, last key t))`, `secs`, `ticks`, `sprites`.
-   - `moving = intro || video background || video layer || audio`; `total_motion_secs = intro.secs + (moving ? loop : 1.0)`.
-   - writes `*_hl.png`, `*_sel.png`, `*_spumux.xml` (`author::spumux_xml(..., intro_secs)`).
-4. `encoder::custom_menu_args` – one continuous MPEG-2 encode; with an intro: forced keyframe at `T`, closed GOP, scene-cut detection off (so Cell 2 starts on a clean GOP).
-5. `author` – `MenuSpec{ intro_secs, motion, pause_secs, post }`. With `intro_secs = Some(t)` the menu VOB is **two cells**: Cell 1 `0..t` (program, **no SPU buttons**), Cell 2 `t..end` (`still` per `pause_secs`, loops via `post: jump cell 2;` when `motion`). Without intro: one cell, `jump cell 1;`. Both the XML writer and the native `dvd_mux` path implement this (`custom_menu_two_cell_intro_and_closed_gop_structure` test: PAL, 3.0 s → 75 frames).
-6. `build_custom_menus` orders menus (VMGM first, then VTSM per title), optional FastPlay page (VMGM menu 1) when `fastPlay.enabled`.
-
-## 7. What the intro really is (read this before extending the timeline)
-
-On DVD, `introSecs` is a **pre-roll animation** whose content is generated by `menu_anim` from each element's `intro: ElementKey[]` keyframes (box + opacity over time, linear interpolation, first/last key hold). It is *not* a separate clip.
-
-Consequences:
-- Setting only `introSecs` (what the timeline does today) with no element keyframes yields a static copy of the page for T seconds with the buttons disabled, then the loop. This is valid output but the "intro" does nothing visible by itself.
-- **The editor has no UI to create or edit `ElementKey`s** (`intro` exists in the TS type; nothing in `menuEditor.ts` writes it). This is the natural next feature: per-element keyframe tracks in the timeline (drag a key diamond → `{t,x,y,w,h,opacity}`; `t` must be `≤ introSecs`, Rust uses `max(introSecs, last key t)`).
-- `bd_menu.rs` (Blu-ray) only plays an intro when `introSecs>0` **and** some element has keys (`menu_has_intro`). DVD does not require keys.
-- `CustomLayout.animations=false` disables intros everywhere (build option on BD: `opts.menu_animations`).
-- `layout.rs` doc comments say editor layouts' intro is "Blu-ray only"; the DVD code path above does honour it (covered by `tests/custom_menu_intro.rs`). Treat the comment as stale; verify with a real build before relying on it.
+1. `validate_impl(layout, titles, frame, bd)` – canvas 16:9 for BD, colours `#RRGGBB`, unique menu ids, targets exist, external files exist ("Video nicht gefunden: …", "Hintergrundvideo nicht gefunden: …"), buttons ≤ max / non-overlapping / unrotated, colour pairs ≤ 3, `customVm` scripts parse, PGC command budget. Messages are German and shown verbatim.
+2. `plan_navigation_with_offset` – assigns each menu a placement (VMGM n / VTSM title,pgc) and builds button commands. Registers: `g1` play-all, `g2` titleset dispatch, `g3` VMGM router. Bridge PGCs cover jumps a VTSM cannot do itself.
+3. `render_custom_page` (rayon, per menu) – static elements into transparent PNG layers, video elements as `MenuLayer::Video { clip: video_clip(..) }`, background video as `MenuBackground::Video`, 4-colour highlight/select PNGs, navigation; with `layout.animations && introSecs > 0` a `menu_anim::Intro` (frames = `dvd_intro_frames(max(introSecs, last key t))`). `total_motion_secs = intro.secs + (moving ? loop : 1.0)`.
+4. `encoder::custom_menu_args` – one MPEG-2 encode; every clip is an input `-stream_loop -1 -ss <start> -t <d> -i <path>`; with an intro: forced keyframe at `T`, closed GOP, scene cut off.
+5. `author` – with `intro_secs = Some(t)` the menu VOB has **two cells**: Cell 1 `0..t` (no SPU buttons), Cell 2 `t..end` (loops via `jump cell 2;`). Without intro one cell.
+6. `build_custom_menus` orders menus (VMGM first, then VTSM per title) and adds the FastPlay page when `fastPlay.enabled`.
+7. Blu-ray: `bd_menu.rs` builds IG menus from the same layout; it plays an intro only when `introSecs > 0` **and** some element has keys. `CustomLayout.animations=false` disables intros everywhere.
 
 ## 8. Known gaps / backlog
 
-1. Element intro keyframe editing (see §7). Data model, Rust and encoder already support it.
-2. Per-button visibility windows – not representable (DVD buttons exist per cell; all buttons share Cell 2). Would need multiple SPU cells.
-3. Audio waveform and the 500 ms crossfade shown in the original plan are **not implemented** (no host-side waveform extraction; the crossfade label was removed).
-4. Timeline strings are not localized (§3 gotcha). `en.json`/`ru.json` have no timeline keys.
-5. Thumbnails assume the clip starts at `startSecs` for Cell 2 and `startSecs + t` for Cell 1; verify against the encoder's actual clip offsets.
-6. No frontend tests; the only automated coverage of the intro path is Rust (`tests/custom_menu_intro.rs`).
-7. `menuProps` "Intro-Dauer (T)" input calls `renderAll()` from a *live* `input` handler (via `num`), which rebuilds the props panel on every keystroke and drops input focus; use `{rerender}`-style deferral (render on `change`) when fixing.
-8. Never run a real burn to test (see CLAUDE.md); validate via `cargo test --test custom_menu_intro` and ISO/VOB inspection.
+1. Per-button visibility windows are not representable (DVD buttons exist per cell; all buttons share Cell 2).
+2. Audio crossfade between intro and loop is not implemented.
+3. Keys have no rotation; the editor offers no easing (Rust is linear too).
+4. Template import is Blu-ray flavoured: the converter's notes mention Blu-ray even in DVD projects, and chapter sample frames are spread evenly (`shortcut:` in `import_convertx_template`).
+5. Animated sizes stretch image/video previews (see §5).
+6. No frontend tests; `interpolateKeyframes` was checked with ad-hoc Node asserts. Rust coverage: `tests/custom_menu_intro.rs`, `layout.rs`/`encoder.rs` unit tests.
+7. Never run a real burn to test (CLAUDE.md); verify with `cargo test` and VOB/m2ts inspection (`build-dvd --layout <json> --keep-work`).
 
 ## 9. Recipes
 
-**Add a numeric menu property (end to end).**
-1. `src/layout.rs` `CustomMenu`: add field with `#[serde(default)]` (+ `skip_serializing_if` if optional); use it in `render_custom_page`/`validate_impl`.
-2. `frontend/src/layout.ts` `CustomMenu`: add the optional field; default in `emptyMenu`/`draftLayout` if needed.
-3. `menuEditor.ts` `menuProps`: add a `row(label, num(value, v => m.x = v, {min,max,step}))`. `num`/`bind` call `remember()` for you; if the change affects the timeline call `renderAll()` in the callback.
-4. i18n: add key to all three locale files (or use the escape-sequence workaround for hard-coded German).
-5. Test in Rust; a JSON round-trip test in `layout.rs` unit tests.
+**Add a numeric menu property.** `src/layout.rs` field with `#[serde(default)]`; `frontend/src/layout.ts` optional field; `menuProps`: `row(tr(…), num(value, v => (m.x = v), {min,max,step}))` (`num` records undo); i18n keys in all three locale files; a Rust round-trip test.
 
-**Add a timeline track.** In `renderTimelinePane` use `addRow(label, "main", row => { row.append(region(cls, fromSecs, lenSecs, text)); })`. The helper creates the matching name cell, so alignment is automatic. Use `region()` for time-aligned bars (it multiplies by `px`). Add CSS next to `.ed-track-audio`.
+**Add a timeline row.** Push to `rows` in `drawTimeline` (`{label, h, sel, id?, keys?, draw(y,h)}`), draw bars with `region(fromSecs, lenSecs, y, h, fill, edge, label, color)`. Add `TL_*_H` to the sizer height. Interactive rows push a `TlHit` and get a branch in the canvas `pointerdown`.
 
-**Add a draggable marker.** Create the element in the ruler, `addEventListener("pointerdown", ev => dragOnRuler(ev, secs => { mutate model; renderTimelinePane(); renderStage(); }))`. Do not use `setPointerCapture`.
+**Add a draggable canvas handle.** Push a `TlHit` with a new `kind` in `drawTimeline`, handle it in the canvas `pointerdown`, drag with pointer capture and record undo with `beginEdit`/`beginMenuEdit` (or a snapshot via `pushHistory(before)`).
 
-**Add an element action type.** `Action` union in `layout.ts` + Rust enum `Action`; `actionLabel` and `actionControls` in the editor; command generation in `plan_navigation_with_offset`; validation in `validate_impl`.
+**Add an element action type.** `Action` union in `layout.ts` + Rust enum; `actionLabel` and `actionControls` in the editor; command generation in `plan_navigation_with_offset`; validation in `validate_impl`.
 
-## 10. Verification commands
+## 10. Verification
 
 ```powershell
-npm run build                                   # i18n gate + tsc + vite (must pass)
-npx tsc --noEmit
+npm run build                                   # i18n + order gates + tsc + vite (must pass)
 cargo test --test custom_menu_intro --test menu_transitions --test fastplay_vm --test dvdvm_sprm
-cargo build --release -p convertx-gui --features tauri/custom-protocol   # or scripts\build_all.ps1
+npx tauri build --no-bundle                     # release GUI with embedded frontend (or scripts\build_all.ps1)
+target\release\convertx-rust.exe build-dvd --input <video> --layout <layout.json> --output <dir> --keep-work --fast
 ```
 
-Prefix PowerShell sessions with the PATH fix from CLAUDE.md. There is no automated UI test; the timeline was type-checked and built, **not** exercised in the running GUI by the author of this document.
+Prefix PowerShell sessions with the PATH fix from CLAUDE.md. Steps 1–11 of the overhaul were each exercised in the running release GUI; external video files were verified with full DVD and Blu-ray CLI builds (start offsets matched by PSNR).

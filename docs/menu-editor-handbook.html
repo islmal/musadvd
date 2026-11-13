@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de"><head><meta charset="utf-8"><title>Men&uuml;-Editor Handbuch</title>
+<html lang="de"><head><meta charset="utf-8"><title>Menü-Editor Handbuch</title>
 <style>
 @page { size: A4; margin: 17mm 16mm; }
 body { font: 10.5pt/1.5 "Segoe UI", Arial, sans-serif; color: #1e293b; }
@@ -16,234 +16,264 @@ svg { width: 100%; margin: 6pt 0; break-inside: avoid; } li { margin-bottom: 2.5
 </style></head><body>
 
 <div class="cover">
-<h1>Men&uuml;-Editor</h1>
-<div class="sub">Handbuch f&uuml;r ConvertX Rust &ndash; DVD-Men&uuml;s gestalten, inklusive Timeline</div>
+<h1>Menü-Editor</h1>
+<div class="sub">Handbuch für ConvertX Rust – DVD- und Blu-ray-Menüs gestalten, mit Timeline, Ebenen und Keyframes</div>
 </div>
 
 <h2>Inhalt</h2>
 <ol class="toc">
-<li>&Uuml;berblick und Aufbau des Fensters</li>
-<li>Grundlagen: Men&uuml;arten und DVD-Navigation</li>
-<li>Schnellstart: Das erste Men&uuml;</li>
-<li>Men&uuml;liste (links)</li>
-<li>B&uuml;hne und Werkzeugleiste</li>
+<li>Überblick und Aufbau des Fensters</li>
+<li>Grundlagen: Menüarten und Navigation</li>
+<li>Schnellstart: Das erste Menü</li>
+<li>Menüliste (links)</li>
+<li>Bühne und Werkzeugleiste</li>
 <li>Elemente: Text, Bild, Video, Buttons</li>
 <li>Auswahl, Gruppen, Ebenen</li>
 <li>Eigenschaften-Panel (rechts)</li>
-<li>Button-Aktionen, &Uuml;berg&auml;nge, VM-Skripte</li>
-<li>Die Timeline (Intro und Schleife)</li>
-<li>Speichern, Laden, &Uuml;bernehmen</li>
-<li>Tastenk&uuml;rzel</li>
-<li>DVD-Grenzen und Fehlersuche</li>
+<li>Button-Aktionen, Übergänge, VM-Skripte</li>
+<li>Die Timeline (Intro, Schleife, Ton, Ebenen)</li>
+<li>Keyframes: Elemente im Intro animieren</li>
+<li>Speichern, Laden, Vorlagen, Übernehmen</li>
+<li>Tastenkürzel</li>
+<li>Grenzen und Fehlersuche</li>
 </ol>
 
-<h2 class="pb">1. &Uuml;berblick und Aufbau des Fensters</h2>
-<p>Der Men&uuml;-Editor ist ein Vollbild-Fenster, in dem du das komplette Men&uuml;-Layout einer DVD zeichnest. Was du auf der B&uuml;hne siehst, wird beim Erstellen der DVD genauso gerendert (gleiche Schriften, gleiche Zeilenumbr&uuml;che, gleiche Positionen).</p>
+<h2 class="pb">1. Überblick und Aufbau des Fensters</h2>
+<p>Der Menü-Editor ist ein eigenes Fenster, in dem du das komplette Menü-Layout einer DVD oder Blu-ray gestaltest. Was du auf der Bühne siehst, wird beim Erstellen genauso gerendert: gleiche Schriften, gleiche Zeilenumbrüche, gleiche Positionen.</p>
 <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial" font-size="11">
  <rect width="700" height="330" rx="6" fill="#0f172a"/>
- <rect x="0" y="0" width="700" height="30" fill="#1e293b"/><text x="10" y="20" fill="#e2e8f0" font-weight="bold">Men&#252;-Editor</text>
- <text x="100" y="20" fill="#94a3b8" font-size="10">Entwurf | Laden | Speichern | R&#252;ckg&#228;ngig</text>
- <rect x="330" y="6" width="90" height="18" rx="3" fill="#3b82f6"/><text x="338" y="19" fill="#fff" font-size="10">Einfach | Timeline</text>
- <text x="600" y="20" fill="#94a3b8" font-size="10">Schlie&#223;en | &#220;bernehmen</text>
- <rect x="0" y="30" width="130" height="270" fill="#172033"/><text x="8" y="48" fill="#93c5fd" font-weight="bold">&#8203;A  Men&#252;s</text>
- <rect x="8" y="56" width="114" height="30" rx="3" fill="#1e3a8a"/><text x="14" y="75" fill="#fff" font-size="10">Hauptmen&#252; (Start)</text>
+ <rect x="0" y="0" width="700" height="30" fill="#1e293b"/><text x="10" y="20" fill="#e2e8f0" font-weight="bold">Menü-Editor</text>
+ <text x="100" y="20" fill="#94a3b8" font-size="10">Entwurf | Laden | Aus Vorlage | Speichern | Rückgängig</text>
+ <rect x="390" y="6" width="90" height="18" rx="3" fill="#3b82f6"/><text x="398" y="19" fill="#fff" font-size="10">Einfach | Timeline</text>
+ <text x="575" y="20" fill="#94a3b8" font-size="10">Schließen | Übernehmen</text>
+ <rect x="0" y="30" width="130" height="270" fill="#172033"/><text x="8" y="48" fill="#93c5fd" font-weight="bold">A  Menüs</text>
+ <rect x="8" y="56" width="114" height="30" rx="3" fill="#1e3a8a"/><text x="14" y="75" fill="#fff" font-size="10">Hauptmenü (Start)</text>
  <rect x="8" y="90" width="114" height="22" rx="3" fill="#243049"/><rect x="8" y="116" width="114" height="22" rx="3" fill="#243049"/>
- <text x="8" y="160" fill="#93c5fd" font-weight="bold">&#8203;  Elemente (Ebenen)</text>
- <rect x="135" y="34" width="405" height="20" fill="#1e293b"/><text x="142" y="48" fill="#94a3b8" font-size="10">B  + Text  + Bild  + Video  + Button-Bereich</text>
- <rect x="170" y="60" width="330" height="170" fill="#111b3a" stroke="#475569"/><text x="300" y="148" fill="#64748b">C  B&#252;hne</text>
- <rect x="190" y="80" width="90" height="50" fill="#334155" stroke="#3b82f6"/><text x="196" y="108" fill="#cbd5e1" font-size="10">Button</text>
- <rect x="135" y="236" width="405" height="64" fill="#1e293b"/><text x="142" y="252" fill="#94a3b8" font-size="10">D  Timeline (nur im Modus &#8222;Erweitert&#8220;)</text>
- <rect x="142" y="258" width="388" height="10" fill="#1d4ed8" opacity=".6"/><rect x="142" y="272" width="388" height="10" fill="#16a34a" opacity=".6"/>
+ <text x="8" y="160" fill="#93c5fd" font-weight="bold">   Elemente (Ebenen)</text>
+ <rect x="135" y="34" width="405" height="20" fill="#1e293b"/><text x="142" y="48" fill="#94a3b8" font-size="10">B  + Text  + Ext. Bild  + Projekt-Titel  + Ext. Video  + Button-Bereich</text>
+ <rect x="170" y="60" width="330" height="150" fill="#111b3a" stroke="#475569"/><text x="300" y="140" fill="#64748b">C  Bühne</text>
+ <rect x="190" y="80" width="90" height="40" fill="#334155" stroke="#3b82f6"/><text x="196" y="104" fill="#cbd5e1" font-size="10">Button</text>
+ <rect x="135" y="216" width="405" height="84" fill="#1e293b"/><text x="142" y="230" fill="#94a3b8" font-size="10">D  Timeline (nur im Modus „Erweitert“)</text>
+ <rect x="142" y="236" width="388" height="10" fill="#1d4ed8" opacity=".6"/><rect x="142" y="250" width="388" height="10" fill="#7e22ce" opacity=".5"/>
+ <rect x="142" y="264" width="388" height="8" fill="#ca8a04" opacity=".6"/><rect x="142" y="276" width="388" height="8" fill="#64748b" opacity=".7"/>
+ <polygon points="200,280 204,276 208,280 204,284" fill="#fff"/><polygon points="260,280 264,276 268,280 264,284" fill="#fff"/>
  <rect x="545" y="30" width="155" height="270" fill="#172033"/><text x="553" y="48" fill="#93c5fd" font-weight="bold">E  Eigenschaften</text>
- <text x="553" y="68" fill="#94a3b8" font-size="10">Men&#252; / Hintergrund / Ton</text><text x="553" y="84" fill="#94a3b8" font-size="10">oder Element-Einstellungen</text>
- <rect x="0" y="300" width="700" height="30" fill="#1e293b"/><text x="8" y="319" fill="#4ade80" font-size="10">F  Statuszeile: &#10003; Layout ist g&#252;ltig / Fehlermeldungen / Tastenhinweise</text>
+ <text x="553" y="68" fill="#94a3b8" font-size="10">Menü / Element / Keyframe</text>
+ <rect x="0" y="300" width="700" height="30" fill="#1e293b"/><text x="8" y="319" fill="#4ade80" font-size="10">F  Statuszeile: ✓ Layout ist gültig / Fehlermeldungen / Tastenhinweise</text>
 </svg>
 <table>
 <tr><th style="width:5%">&nbsp;</th><th style="width:25%">Bereich</th><th>Zweck</th></tr>
-<tr><td>A</td><td>Men&uuml;liste &amp; Elemente</td><td>Alle Men&uuml;s der DVD; darunter die Ebenenliste des gew&auml;hlten Men&uuml;s.</td></tr>
-<tr><td>B</td><td>Werkzeugleiste</td><td>Texte, Bilder, Videos und Button-Bereiche hinzuf&uuml;gen; Anzeige der Button-Anzahl (z.&nbsp;B. 2/36) und &bdquo;Sicherer Bereich&ldquo;.</td></tr>
-<tr><td>C</td><td>B&uuml;hne</td><td>Das Men&uuml; im TV-Seitenverh&auml;ltnis (4:3 bei DVD). Hier verschiebst und skalierst du alles direkt mit der Maus.</td></tr>
-<tr><td>D</td><td>Timeline</td><td>Intro/Schleife, Ton und Button-Aktivzeit (Kapitel 10).</td></tr>
-<tr><td>E</td><td>Eigenschaften</td><td>Einstellungen des Men&uuml;s (nichts ausgew&auml;hlt) oder des gew&auml;hlten Elements.</td></tr>
-<tr><td>F</td><td>Statuszeile</td><td>Zeigt laufend, ob das Layout g&uuml;ltig ist, sonst die konkreten Fehler.</td></tr>
+<tr><td>A</td><td>Menüliste &amp; Elemente</td><td>Alle Menüs; darunter die Ebenenliste des gewählten Menüs.</td></tr>
+<tr><td>B</td><td>Werkzeugleiste</td><td>Texte, Bilder, Videos und Button-Bereiche hinzufügen; Button-Zähler (z. B. 2/36) und „Sicherer Bereich“.</td></tr>
+<tr><td>C</td><td>Bühne</td><td>Das Menü im TV-Seitenverhältnis. Hier verschiebst und skalierst du alles mit der Maus.</td></tr>
+<tr><td>D</td><td>Timeline</td><td>Intro, Schleife, Ton mit Wellenform, eine Spur je Element, Keyframes (Kapitel 10 und 11).</td></tr>
+<tr><td>E</td><td>Eigenschaften</td><td>Einstellungen des Menüs (nichts ausgewählt), des gewählten Elements oder des gewählten Keyframes.</td></tr>
+<tr><td>F</td><td>Statuszeile</td><td>Zeigt laufend, ob das Layout gültig ist, sonst die konkreten Fehler, sowie Meldungen wie „Vorlage importiert“.</td></tr>
 </table>
-<p>In der Kopfzeile: <b>Entwurf aus Titeln</b>, <b>Laden&nbsp;&hellip;</b>, <b>Speichern&nbsp;&hellip;</b>, <b>R&uuml;ckg&auml;ngig</b>, der Umschalter <b>Einfach / Erweitert (Timeline)</b>, <b>Schlie&szlig;en</b> und <b>&Uuml;bernehmen</b>.</p>
 
-<h2>2. Grundlagen: Men&uuml;arten und DVD-Navigation</h2>
+<h2>2. Grundlagen: Menüarten und Navigation</h2>
 <table>
-<tr><th style="width:24%">Men&uuml;art</th><th>Bedeutung auf der DVD</th></tr>
-<tr><td><b>Titelmen&uuml; (Hauptmen&uuml;)</b></td><td>Das Men&uuml; der ganzen DVD (Taste &bdquo;Title&ldquo;). Das <b>erste</b> Titelmen&uuml; (Markierung &bdquo;Start&ldquo;) erscheint beim Einlegen der DVD.</td></tr>
-<tr><td><b>Root-Men&uuml; eines Titels</b></td><td>Geh&ouml;rt zu einem Titel (Film). Erscheint mit der Taste &bdquo;Menu&ldquo; w&auml;hrend der Wiedergabe &ndash; typisch: Kapitelauswahl.</td></tr>
-<tr><td><b>Einstellungen eines Titels</b></td><td>Wie ein Root-Men&uuml;, aber f&uuml;r Ton und Untertitel dieses Titels.</td></tr>
+<tr><th style="width:24%">Menüart</th><th>Bedeutung auf der Disc</th></tr>
+<tr><td><b>Titelmenü (Hauptmenü)</b></td><td>Das Menü der ganzen Disc (Taste „Title“). Das <b>erste</b> Titelmenü (Markierung „Start“) erscheint beim Einlegen.</td></tr>
+<tr><td><b>Root-Menü eines Titels</b></td><td>Gehört zu einem Titel. Erscheint mit der Taste „Menu“ während der Wiedergabe – typisch: Kapitelauswahl.</td></tr>
+<tr><td><b>Einstellungen eines Titels</b></td><td>Wie ein Root-Menü, aber für Ton und Untertitel dieses Titels.</td></tr>
 </table>
-<p>Ein <b>Button</b> ist jedes Element, dem du eine <b>Aktion</b> gibst (Titel abspielen, Kapitel, anderes Men&uuml; &hellip;). Elemente ohne Aktion sind reine Dekoration. Die Fernbedienung springt mit den Pfeiltasten zwischen den Buttons; die Richtungsverkn&uuml;pfungen werden automatisch nach der n&auml;chsten Nachbarschaft berechnet.</p>
-<p>Ein Men&uuml;, das <b>Video, Videohintergrund oder Ton</b> enth&auml;lt, ist ein <b>bewegtes Men&uuml;</b> und wird als Schleife kodiert. Ohne diese Elemente ist es ein <b>Standbild</b> (kein Video, kein Ton).</p>
+<p>Ein <b>Button</b> ist jedes Element mit einer <b>Aktion</b> (Titel abspielen, Kapitel, anderes Menü …). Elemente ohne Aktion sind Dekoration. Die Pfeiltasten der Fernbedienung springen zwischen den Buttons; die Richtungen berechnet der Editor automatisch aus der Nachbarschaft.</p>
+<p>Ein Menü mit <b>Video, Videohintergrund, Ton oder Intro</b> ist ein <b>bewegtes Menü</b> und wird als Schleife kodiert. Ohne diese Elemente ist es ein <b>Standbild</b>.</p>
 
-<h2>3. Schnellstart: Das erste Men&uuml;</h2>
+<h2>3. Schnellstart: Das erste Menü</h2>
 <ol>
-<li>Klicke <b>Entwurf aus Titeln</b>. Der Editor erzeugt automatisch ein Hauptmen&uuml;, Kapitel- und Einstellungsmen&uuml;s mit allen Titeln deiner DVD. Das ist der schnellste Start; alles bleibt anpassbar.</li>
-<li>W&auml;hle links ein Men&uuml; und ziehe auf der B&uuml;hne Texte und Bilder an die gew&uuml;nschte Stelle.</li>
-<li>Stelle rechts bei &bdquo;Hintergrund&ldquo; ein Bild oder ein Video eines Titels ein.</li>
-<li>Pr&uuml;fe unten in der Statuszeile: <i>&#10003; Layout ist g&uuml;ltig</i>.</li>
-<li>Optional: <b>Erweitert (Timeline)</b> f&uuml;r Intro und Schleife (Kapitel 10).</li>
-<li><b>&Uuml;bernehmen</b> klicken, dann <b>Schlie&szlig;en</b>. Das Layout wird f&uuml;r die DVD/Blu-ray verwendet.</li>
+<li>Klicke <b>Entwurf aus Titeln</b> – der Editor erzeugt Hauptmenü, Kapitel- und Einstellungsmenüs mit allen Titeln. Oder klicke <b>Aus Vorlage …</b> und wähle eine ConvertX-Vorlage (Kapitel 12).</li>
+<li>Wähle links ein Menü und ziehe auf der Bühne Texte und Bilder an die gewünschte Stelle.</li>
+<li>Stelle rechts bei „Hintergrund“ eine Farbe, ein Bild, ein Video eines Titels oder eine eigene Videodatei ein.</li>
+<li>Prüfe die Statuszeile: <i>✓ Layout ist gültig</i>.</li>
+<li>Optional: <b>Erweitert (Timeline)</b> für Intro, Schleife und Animationen (Kapitel 10 und 11).</li>
+<li><b>Übernehmen</b>, dann <b>Schließen</b>. Das Layout wird für den nächsten Build verwendet.</li>
 </ol>
-<div class="box">Hat sich die Titelliste ge&auml;ndert, seit das Layout gespeichert wurde, erstellt der Editor automatisch einen neuen Entwurf und weist darauf hin. <b>R&uuml;ckg&auml;ngig</b> holt das alte Layout zur&uuml;ck.</div>
+<div class="box">Hat sich die Titelliste seit dem Speichern geändert, erstellt der Editor automatisch einen neuen Entwurf und weist darauf hin. <b>Rückgängig</b> holt das alte Layout zurück.</div>
 
-<h2 class="pb">4. Men&uuml;liste (links)</h2>
-<p>Jeder Eintrag zeigt Name, Art, Button-Anzahl, wie oft das Men&uuml; von anderen verlinkt wird und ob es bewegt ist. Das Start-Men&uuml; tr&auml;gt die Markierung <b>Start</b>.</p>
+<h2 class="pb">4. Menüliste (links)</h2>
+<p>Jeder Eintrag zeigt Name, Art, Button-Anzahl, wie oft das Menü verlinkt ist und ob es bewegt ist. Das Startmenü trägt die Markierung <b>Start</b>.</p>
 <table>
-<tr><td><b>+ Titelmen&uuml; / + Root-Men&uuml; / + Einstellungen</b></td><td>Neues Men&uuml; anlegen (Root und Einstellungen brauchen mindestens einen Titel).</td></tr>
-<tr><td><b>&uarr; &darr;</b></td><td>Reihenfolge &auml;ndern. Das erste Titelmen&uuml; ist das Startmen&uuml;.</td></tr>
-<tr><td><b>Duplizieren</b></td><td>Men&uuml; samt Elementen kopieren.</td></tr>
-<tr><td><b>L&ouml;schen</b></td><td>Men&uuml; entfernen (mindestens eines muss bleiben).</td></tr>
+<tr><td><b>+ Titelmenü / + Root-Menü / + Einstellungen</b></td><td>Neues Menü anlegen (Root und Einstellungen brauchen mindestens einen Titel).</td></tr>
+<tr><td><b>↑ ↓</b></td><td>Reihenfolge ändern. Das erste Titelmenü ist das Startmenü.</td></tr>
+<tr><td><b>Duplizieren</b></td><td>Menü samt Elementen kopieren.</td></tr>
+<tr><td><b>Löschen</b></td><td>Menü entfernen (mindestens eines muss bleiben).</td></tr>
 </table>
 
-<h2>5. B&uuml;hne und Werkzeugleiste</h2>
+<h2>5. Bühne und Werkzeugleiste</h2>
 <table>
-<tr><td><b>+ Text</b></td><td>F&uuml;gt einen Textblock hinzu.</td></tr>
-<tr><td><b>+ Bild</b></td><td>F&uuml;gt ein Bild aus einer Datei hinzu.</td></tr>
-<tr><td><b>+ Video</b></td><td>F&uuml;gt ein Video-Fenster hinzu, das einen Titel der DVD abspielt (nur wenn Titel vorhanden sind).</td></tr>
-<tr><td><b>+ Button-Bereich</b></td><td>Schaltet auf Zeichnen: Rechteck auf der B&uuml;hne aufziehen. Es rastet an einem 2-Pixel-Raster ein (DVD-Pflicht), ist mindestens 16&times;16&nbsp;px gro&szlig;, darf keinen anderen Button &uuml;berlappen und z&auml;hlt gegen das Limit von 36. Neue Buttons starten mit der Aktion &bdquo;Titel 1 abspielen&ldquo;.</td></tr>
-<tr><td><b>Sicherer Bereich</b></td><td>Blendet den Titelsicherheitsrahmen ein (gestrichelt). Alles Wichtige sollte darin liegen, weil manche Fernseher R&auml;nder abschneiden.</td></tr>
-<tr><td><b>2/36 Buttons</b></td><td>Anzahl der Buttons im Men&uuml; gegen das DVD-Maximum.</td></tr>
+<tr><td style="width:26%"><b>+ Text</b></td><td>Fügt einen Textblock hinzu.</td></tr>
+<tr><td><b>+ Externes Bild</b></td><td>Fügt ein Bild aus einer Datei hinzu (PNG, JPG, BMP, GIF, WebP).</td></tr>
+<tr><td><b>+ Projekt-Titel</b></td><td>Video-Fenster, das einen Titel des Projekts abspielt; startet als Button „Titel abspielen“ (nur wenn Titel vorhanden sind).</td></tr>
+<tr><td><b>+ Externes Video</b></td><td>Video-Fenster mit einer eigenen Videodatei (MP4, MKV, MOV, MPG, TS …), ohne Aktion. Bildgröße und Bildrate der Datei sind egal, sie wird beim Build passend umgerechnet.</td></tr>
+<tr><td><b>+ Button-Bereich</b></td><td>Zeichenmodus: Rechteck aufziehen. Rastet am 2-Pixel-Raster ein, mindestens 16×16 px, keine Überlappung, zählt gegen das Button-Limit. Startet mit „Titel 1 abspielen“.</td></tr>
+<tr><td><b>Sicherer Bereich</b></td><td>Blendet den Titelsicherheitsrahmen ein. Wichtiges gehört hinein, weil manche Fernseher Ränder abschneiden.</td></tr>
+<tr><td><b>2/36 Buttons</b></td><td>Buttons im Menü gegen das Maximum (DVD 36).</td></tr>
 </table>
-<p>Die B&uuml;hne zeigt das Bild so, wie es auf einem 4:3-Fernseher aussieht (DVD-Pixel sind nicht quadratisch; der Editor rechnet das f&uuml;r dich um).</p>
+<p>Die Bühne zeigt das Bild wie auf dem Fernseher (DVD-Pixel sind nicht quadratisch; der Editor rechnet um). In der Timeline-Ansicht zeigt sie das Menü zum Zeitpunkt des Playheads – im Intro also schon mit den Keyframe-Positionen.</p>
 
 <h2>6. Elemente</h2>
 <h3>Text</h3>
-<p>Schrift, Gr&ouml;&szlig;e (px), Farbe, Ausrichtung (links/Mitte/rechts), fett, kursiv, Schatten, Zeilenumbruch an der Boxbreite. Zeilenumbr&uuml;che berechnet die Engine mit denselben Schriften wie beim Erstellen, die Vorschau stimmt also &uuml;berein.</p>
+<p>Schrift, Größe (px), Farbe, Ausrichtung, fett, kursiv, Schatten, Zeilenumbruch an der Boxbreite. Zeilenumbrüche berechnet die Engine mit denselben Schriften wie beim Build.</p>
 <h3>Bild</h3>
-<p>Anpassung: <b>Einpassen</b> (ganz sichtbar), <b>F&uuml;llen (zuschneiden)</b> oder <b>Strecken</b>. &bdquo;Anderes Bild &hellip;&ldquo; tauscht die Datei.</p>
+<p>Anpassung: <b>Einpassen</b>, <b>Füllen (zuschneiden)</b> oder <b>Strecken</b>. „Anderes Bild …“ tauscht die Datei.</p>
 <h3>Video</h3>
-<p>Ein Fenster, das einen Titel als Schleife abspielt. Start (s) bestimmt die Position; ohne Angabe nimmt die Engine 10&nbsp;% der Laufzeit (max. 5&nbsp;Min.). Im Editor siehst du ein Standbild dieser Stelle.</p>
+<p>Ein Fenster, das als Schleife läuft. Unter <b>Quelle</b> wählst du <b>Projekt-Titel</b> oder <b>Videodatei …</b>; beim Wechsel auf „Videodatei“ öffnet sich die Dateiauswahl. <b>Start (s)</b> bestimmt die Startstelle: ohne Angabe nimmt ein Titel 10 % seiner Laufzeit (max. 5 Min.), eine Datei ihren Anfang. Im Editor siehst du ein Standbild dieser Stelle. Ton spielt das Video-Fenster nicht ab – der Menüton wird unter „Ton“ eingestellt.</p>
 <h3>Button</h3>
-<p>Jedes Element mit Aktion ist ein Button. Beim Markieren leuchten <b>Text-Buttons in Schriftform</b>, <b>Bild- und Video-Buttons mit einem Rahmen</b>. Buttons k&ouml;nnen nicht gedreht werden (DVD-Hitboxen sind achsenparallele Rechtecke).</p>
+<p>Jedes Element mit Aktion ist ein Button. Beim Markieren leuchten <b>Text-Buttons in Schriftform</b>, <b>Bild- und Video-Buttons mit einem Rahmen</b>. Buttons können nicht gedreht werden.</p>
 
 <h2>7. Auswahl, Gruppen, Ebenen</h2>
 <table>
-<tr><td><b>Klick</b></td><td>Element w&auml;hlen (ganze Gruppe).</td></tr>
-<tr><td><b>Umschalt+Klick</b></td><td>Auswahl erweitern / Element abw&auml;hlen.</td></tr>
+<tr><td style="width:34%"><b>Klick</b></td><td>Element wählen (ganze Gruppe).</td></tr>
+<tr><td><b>Umschalt+Klick</b></td><td>Auswahl erweitern / Element abwählen.</td></tr>
 <tr><td><b>Alt+Klick</b></td><td>Nur ein Element, auch innerhalb einer Gruppe.</td></tr>
-<tr><td><b>Auf leere Fl&auml;che ziehen</b></td><td>Auswahlrahmen; Klick ohne Ziehen hebt die Auswahl auf.</td></tr>
-<tr><td><b>Ziehen / Eck-Griffe</b></td><td>Verschieben / Gr&ouml;&szlig;e &auml;ndern (Umschalt h&auml;lt das Seitenverh&auml;ltnis). Bei Mehrfachauswahl bewegt und skaliert alles gemeinsam.</td></tr>
-<tr><td><b>Gruppieren (Strg+G) / aufl&ouml;sen (Strg+Umschalt+G)</b></td><td>Gruppen bewegen sich zusammen; sie gelten nur im Editor.</td></tr>
-<tr><td><b>Nach vorne / Nach hinten</b></td><td>Stapelreihenfolge (z-Ordnung).</td></tr>
+<tr><td><b>Auf leere Fläche ziehen</b></td><td>Auswahlrahmen; Klick ohne Ziehen hebt die Auswahl auf.</td></tr>
+<tr><td><b>Ziehen / Eck-Griffe</b></td><td>Verschieben / Größe ändern (Umschalt hält das Seitenverhältnis). Mehrfachauswahl bewegt sich gemeinsam.</td></tr>
+<tr><td><b>Gruppieren (Strg+G) / auflösen (Strg+Umschalt+G)</b></td><td>Gruppen bewegen sich zusammen; sie gelten nur im Editor.</td></tr>
+<tr><td><b>Nach vorne / Nach hinten</b></td><td>Stapelreihenfolge um einen Schritt ändern.</td></tr>
+<tr><td><b>Zeile in der Timeline ziehen</b></td><td>Ebene an eine beliebige Stelle der Stapelreihenfolge ziehen (Kapitel 10).</td></tr>
 </table>
-<p>Die Liste <b>Elemente</b> links unten zeigt alle Ebenen des Men&uuml;s von oben nach unten mit Typsymbol (T = Text, Bild, &#9654; Video), Gruppen lassen sich auf- und zuklappen. Ein Klick w&auml;hlt das Element, auch wenn es verdeckt ist.</p>
+<p>Die Liste <b>Elemente</b> links zeigt alle Ebenen von vorne nach hinten mit Typsymbol (T = Text, Bild, ▶ Video); Gruppen lassen sich auf- und zuklappen. Ein Klick wählt das Element, auch wenn es verdeckt ist.</p>
 
 <h2 class="pb">8. Eigenschaften-Panel (rechts)</h2>
-<h3>Wenn nichts ausgew&auml;hlt ist: Men&uuml;-Einstellungen</h3>
+<h3>Nichts ausgewählt: Menü-Einstellungen</h3>
 <table>
 <tr><th style="width:26%">Gruppe</th><th>Einstellung</th></tr>
-<tr><td><b>Allgemein</b></td><td>Name; Art (Titelmen&uuml; / Root / Einstellungen); bei Root/Einstellungen der zugeh&ouml;rige Titel; <b>Dauer (s)</b> = L&auml;nge der Schleife (1&ndash;600&nbsp;s); <b>Intro-Dauer (T)</b> = L&auml;nge des Intros in 0,6-s-Schritten (0&ndash;60&nbsp;s).</td></tr>
-<tr><td><b>Hintergrund</b></td><td>Art: Farbe, Bild oder Video eines Titels; Farbe; <b>Abdunkeln</b> (kein, unten dunkel, Vignette, ged&auml;mpft &ndash; damit Texte lesbar bleiben); bei Video: Titel und Start (s); <b>Weichzeichner</b> 0&ndash;50.</td></tr>
-<tr><td><b>Ton</b></td><td>Quelle: Stumm, Ton von einem Titel oder eigene Audiodatei.</td></tr>
-<tr><td><b>Button-Markierung (alle Men&uuml;s)</b></td><td>Farbe f&uuml;r &bdquo;Ausgew&auml;hlt&ldquo; und &bdquo;Aktiviert&ldquo; plus Deckkraft. Gilt f&uuml;r alle Men&uuml;s der DVD.</td></tr>
+<tr><td><b>Allgemein</b></td><td>Name; Art; bei Root/Einstellungen der Titel; <b>Dauer (s)</b> = Länge der Schleife (1–600 s); <b>Intro-Dauer (T)</b> in 0,6-s-Schritten (0–60 s).</td></tr>
+<tr><td><b>Hintergrund</b></td><td>Art: Farbe, Bild, <b>Video eines Titels</b> oder <b>Videodatei …</b>; Farbe; <b>Abdunkeln</b> (kein, unten dunkel, Vignette, gedämpft); bei Video Titel bzw. Datei und Start (s); <b>Weichzeichner</b> 0–50.</td></tr>
+<tr><td><b>Ton</b></td><td>Stumm, Ton eines Titels oder eigene Audiodatei. In der Timeline erscheint die Wellenform.</td></tr>
+<tr><td><b>Button-Markierung (alle Menüs)</b></td><td>Farbe für „Ausgewählt“ und „Aktiviert“ plus Deckkraft.</td></tr>
 </table>
-<h3>Wenn ein Element ausgew&auml;hlt ist</h3>
+<h3>Ein Element ausgewählt</h3>
 <table>
-<tr><td><b>Typ-Block</b></td><td>Text: Inhalt, Schrift, Gr&ouml;&szlig;e, Farbe, Ausrichtung, Stil. Bild/Video: Datei bzw. Titel, Start, Anpassung.</td></tr>
-<tr><td><b>Button</b></td><td>Aktion und deren Ziel (Kapitel 9); optional <b>Eigene Farben</b> f&uuml;r diesen Button.</td></tr>
-<tr><td><b>Easter Egg (Versteckter Button)</b></td><td>&bdquo;Als Easter Egg markieren&ldquo;: Der Button ist per Fernbedienung voll aktiv, die Markierung ist aber zu 100&nbsp;% unsichtbar. Im Editor erscheint er mit lila gestricheltem Rahmen und Ei-Symbol.</td></tr>
-<tr><td><b>Position &amp; Gr&ouml;&szlig;e</b></td><td>X, Y, Breite, H&ouml;he, Drehung (0/90/180/270; nicht bei Buttons), Deckkraft.</td></tr>
-<tr><td><b>Nach vorne / hinten, Duplizieren, L&ouml;schen</b></td><td>Ebenen und Kopien.</td></tr>
+<tr><td style="width:26%"><b>Typ-Block</b></td><td>Text: Inhalt, Schrift, Stil. Bild: Datei, Anpassung. Video: Quelle, Datei bzw. Titel, Start, Anpassung.</td></tr>
+<tr><td><b>Button</b></td><td>Aktion und Ziel (Kapitel 9); optional eigene Farben.</td></tr>
+<tr><td><b>Easter Egg</b></td><td>Button ist per Fernbedienung aktiv, die Markierung aber unsichtbar. Im Editor lila gestrichelt mit Ei-Symbol.</td></tr>
+<tr><td><b>Position &amp; Größe</b></td><td>X, Y, Breite, Höhe, Drehung (nicht bei Buttons), Deckkraft.</td></tr>
+<tr><td><b>Nach vorne / hinten, Duplizieren, Löschen</b></td><td>Ebenen und Kopien.</td></tr>
 </table>
-<div class="warn box"><b>Farbgrenze:</b> Eine DVD-Men&uuml;seite darf h&ouml;chstens 3 verschiedene Farbpaare zeigen. Buttons mit derselben Markierungsfarbe brauchen dieselbe Aktivierungsfarbe. Der Editor meldet Verst&ouml;&szlig;e in der Statuszeile.</div>
-<p>Bei <b>Mehrfachauswahl</b> zeigt das Panel nur die gemeinsamen Werte (Ausrichten, Gruppieren, Ebenen).</p>
+<h3>Ein Keyframe ausgewählt</h3>
+<p>Nach einem Klick auf eine Raute in der Timeline zeigt das Panel <b>Keyframe n von m</b> mit Zeit, X, Y, W, H und Deckkraft sowie <b>Zum Element</b> und <b>Keyframe löschen</b> (Kapitel 11).</p>
+<div class="warn box"><b>Farbgrenze:</b> Eine DVD-Menüseite darf höchstens 3 verschiedene Farbpaare zeigen. Buttons mit derselben Markierungsfarbe brauchen dieselbe Aktivierungsfarbe.</div>
 
-<h2>9. Button-Aktionen, &Uuml;berg&auml;nge, VM-Skripte</h2>
+<h2>9. Button-Aktionen, Übergänge, VM-Skripte</h2>
 <table>
 <tr><th style="width:28%">Aktion</th><th>Wirkung</th></tr>
 <tr><td><b>Keine (kein Button)</b></td><td>Dekoration.</td></tr>
-<tr><td><b>Titel abspielen</b></td><td>Startet den gew&auml;hlten Titel.</td></tr>
+<tr><td><b>Titel abspielen</b></td><td>Startet den gewählten Titel.</td></tr>
 <tr><td><b>Kapitel abspielen</b></td><td>Startet einen Titel ab einem Kapitel.</td></tr>
-<tr><td><b>Men&uuml; &ouml;ffnen</b></td><td>Springt in ein anderes Men&uuml; des Layouts. Optional mit <b>&Uuml;bergang</b>: Kein (Direktsprung) oder <i>Aus Videodatei</i> &ndash; ein kurzes Video (Dauer einstellbar) wird zwischen beiden Men&uuml;s abgespielt.</td></tr>
+<tr><td><b>Menü öffnen</b></td><td>Springt in ein anderes Menü. Optional mit <b>Übergang</b> aus einer Videodatei, die zwischen beiden Menüs abgespielt wird.</td></tr>
 <tr><td><b>Alle Titel abspielen</b></td><td>Spielt alle Titel nacheinander.</td></tr>
-<tr><td><b>Tonspur w&auml;hlen</b></td><td>Nur in Root- und Einstellungsmen&uuml;s: stellt die Tonspur des Titels ein.</td></tr>
-<tr><td><b>Untertitel w&auml;hlen</b></td><td>Nur dort: Untertitelspur oder &bdquo;Aus&ldquo;.</td></tr>
-<tr><td><b>Eigenes VM-Skript</b></td><td>Fortgeschritten: ein Skript f&uuml;r die DVD-Befehlsmaschine, z.&nbsp;B. <code>if (g4 == 1) link button 2; else jump menu 3;</code>. Die Pr&uuml;fung des Layouts (Statuszeile) meldet ung&uuml;ltige Skripte.</td></tr>
+<tr><td><b>Tonspur / Untertitel wählen</b></td><td>Nur in Root- und Einstellungsmenüs.</td></tr>
+<tr><td><b>Eigenes VM-Skript</b></td><td>Für Fortgeschrittene, z. B. <code>if (g4 == 1) link button 2; else jump menu 3;</code>. Ungültige Skripte meldet die Statuszeile.</td></tr>
 </table>
 
-<h2 class="pb">10. Die Timeline (Intro und Schleife)</h2>
-<p>Umschalter oben: <b>Einfach</b> blendet die Timeline aus, <b>Erweitert (Timeline)</b> zeigt sie unter der B&uuml;hne. Sie ist nur f&uuml;r bewegte Men&uuml;s sinnvoll.</p>
-<div class="box"><b>Die Idee:</b> Ein bewegtes Men&uuml; hat ein <b>Intro</b>, das nur <b>einmal</b> l&auml;uft, danach eine <b>Schleife</b>, die sich wiederholt, bis jemand einen Button dr&uuml;ckt. Buttons sind <b>erst nach dem Intro</b> anklickbar &ndash; wie bei Kauf-DVDs.</div>
-<svg viewBox="0 0 700 175" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial" font-size="11">
-  <rect x="0" y="0" width="700" height="175" fill="#0f172a" rx="6"/>
-  <rect x="10" y="12" width="680" height="22" fill="#1e293b"/>
-  <text x="14" y="27" fill="#94a3b8">0:00</text><text x="250" y="27" fill="#94a3b8">0:06</text>
-  <rect x="160" y="14" width="78" height="14" rx="7" fill="#3b82f6"/><text x="165" y="25" fill="#fff" font-size="9" font-weight="bold">Intro-Ende</text>
-  <rect x="590" y="14" width="96" height="14" rx="7" fill="#22c55e"/><text x="597" y="25" fill="#fff" font-size="9" font-weight="bold">Schleifenende</text>
-  <rect x="10" y="40" width="150" height="32" fill="#1d4ed8" opacity=".6"/><text x="18" y="60" fill="#bfdbfe">Intro &#183; spielt einmal</text>
-  <rect x="160" y="40" width="530" height="32" fill="#16a34a" opacity=".6"/><text x="168" y="60" fill="#bbf7d0">Schleife &#183; wiederholt sich</text>
-  <rect x="10" y="78" width="680" height="32" fill="#7e22ce" opacity=".45"/><text x="18" y="98" fill="#e9d5ff">Ton</text>
-  <rect x="10" y="116" width="150" height="32" fill="#475569"/><text x="18" y="136" fill="#cbd5e1">noch nicht anklickbar</text>
-  <rect x="160" y="116" width="530" height="32" fill="#ca8a04" opacity=".6"/><text x="168" y="136" fill="#fef9c3">anklickbar</text>
-  <line x1="95" y1="12" x2="95" y2="165" stroke="#ef4444" stroke-width="2"/><text x="100" y="168" fill="#fca5a5" font-size="10">Playhead</text>
+<h2 class="pb">10. Die Timeline (Intro, Schleife, Ton, Ebenen)</h2>
+<p><b>Einfach</b> blendet die Timeline aus, <b>Erweitert (Timeline)</b> zeigt sie unter der Bühne und passt den Zoom an.</p>
+<div class="box"><b>Die Idee:</b> Ein bewegtes Menü hat ein <b>Intro</b>, das <b>einmal</b> läuft, danach eine <b>Schleife</b>, die sich wiederholt, bis jemand einen Button drückt. Buttons sind <b>erst nach dem Intro</b> anklickbar – wie bei Kauf-DVDs.</div>
+<svg viewBox="0 0 700 235" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial" font-size="11">
+  <rect x="0" y="0" width="700" height="235" fill="#0f172a" rx="6"/>
+  <rect x="120" y="12" width="570" height="22" fill="#1e293b"/>
+  <text x="124" y="27" fill="#94a3b8">0:00</text><text x="320" y="27" fill="#94a3b8">0:05</text>
+  <rect x="270" y="14" width="70" height="14" rx="7" fill="#3b82f6"/><text x="275" y="25" fill="#fff" font-size="9" font-weight="bold">Intro-Ende</text>
+  <rect x="594" y="14" width="92" height="14" rx="7" fill="#22c55e"/><text x="600" y="25" fill="#fff" font-size="9" font-weight="bold">Schleifenende</text>
+  <text x="10" y="58" fill="#cbd5e1">🎬 Video</text><rect x="120" y="40" width="150" height="30" fill="#1d4ed8" opacity=".6"/><rect x="270" y="40" width="420" height="30" fill="#16a34a" opacity=".6"/>
+  <text x="10" y="94" fill="#cbd5e1">🎵 Ton</text><rect x="120" y="76" width="570" height="30" fill="#7e22ce" opacity=".35"/>
+  <path d="M120 91 l6 -8 l6 14 l6 -10 l6 6 l6 -9 l6 12 l6 -7 l6 4 l6 -11 l6 9 l6 -5 l6 8 l6 -12 l6 10 l6 -6 l6 3 l6 -9 l6 11 l6 -7 l6 5 l6 -8 l6 14 l6 -10 l6 6 l6 -9 l6 12 l6 -7 l6 4 l6 -11 l6 9 l6 -5 l6 8 l6 -12 l6 10 l6 -6 l6 3 l6 -9 l6 11 l6 -7 l6 5 l6 -8 l6 14 l6 -10 l6 6 l6 -9 l6 12 l6 -7 l6 4 l6 -11 l6 9 l6 -5 l6 8 l6 -12 l6 10 l6 -6 l6 3 l6 -9 l6 11 l6 -7 l6 5 l6 -8 l6 14 l6 -10 l6 6 l6 -9 l6 12 l6 -7 l6 4 l6 -11 l6 9 l6 -5 l6 8 l6 -12 l6 10 l6 -6 l6 3 l6 -9 l6 11 l6 -7 l6 5 l6 -8 l6 14 l6 -10 l6 6 l6 -9 l6 12 l6 -7 l6 4 l6 -11 l6 9 l6 -5 l6 8 l6 -12 l6 10 l6 -6" stroke="#cbd5e1" fill="none"/>
+  <text x="10" y="130" fill="#cbd5e1">🔲 Ebenen (3)</text><rect x="120" y="112" width="150" height="30" fill="#475569"/><rect x="270" y="112" width="420" height="30" fill="#ca8a04" opacity=".6"/>
+  <text x="140" y="131" fill="#cbd5e1" font-size="10">noch nicht anklickbar</text><text x="280" y="131" fill="#fef9c3" font-size="10">anklickbar</text>
+  <text x="10" y="161" fill="#94a3b8">⋮⋮ Bild</text><rect x="120" y="148" width="570" height="20" fill="#64748b" opacity=".6"/>
+  <text x="10" y="187" fill="#94a3b8">⋮⋮ Film starten</text><rect x="120" y="174" width="150" height="20" fill="#334155"/><rect x="270" y="174" width="420" height="20" fill="#ca8a04" opacity=".6"/>
+  <polygon points="150,184 157,177 164,184 157,191" fill="#fff"/><polygon points="240,184 247,177 254,184 247,191" fill="#3b82f6"/>
+  <text x="10" y="213" fill="#94a3b8">⋮⋮ Hintergrundtext</text><rect x="120" y="200" width="570" height="20" fill="#64748b" opacity=".6"/>
+  <line x1="200" y1="12" x2="200" y2="225" stroke="#ef4444" stroke-width="2"/>
 </svg>
 <table>
 <tr><th style="width:30%">Element</th><th>Bedeutung</th></tr>
-<tr><td><b>Roter Playhead</b></td><td>Die aktuelle Zeit. Die B&uuml;hne zeigt das Men&uuml; zu diesem Zeitpunkt; im Intro sind Buttons abgedunkelt (&bdquo;Subpicture inaktiv&ldquo;), bleiben aber bearbeitbar. Setzen: ins Lineal klicken oder ziehen.</td></tr>
-<tr><td><b>Blauer Marker &bdquo;Intro-Ende&ldquo;</b></td><td>Ziehen &auml;ndert die Intro-L&auml;nge. Ganz links = kein Intro. Rastet auf 0,6-s-Schritte ein (GOP-Grenze: 15 Frames PAL / 18 Frames NTSC), weil die Schleife an einer Bildgruppe beginnen muss.</td></tr>
-<tr><td><b>Gr&uuml;ner Marker &bdquo;Schleifenende&ldquo;</b></td><td>Ziehen &auml;ndert die Schleifenl&auml;nge (= &bdquo;Dauer&ldquo; im Eigenschaften-Panel).</td></tr>
-<tr><td><b>Spur Video</b></td><td>Blau = Intro, gr&uuml;n = Schleife. Vorschaubilder erscheinen, wenn das Men&uuml; einen Videohintergrund oder ein Video-Element hat.</td></tr>
-<tr><td><b>Spur Ton</b></td><td>Zeigt, ob das Men&uuml; Ton hat. Der Ton l&auml;uft in der Schleife.</td></tr>
-<tr><td><b>Spur Buttons</b></td><td>Schraffiert = noch nicht anklickbar, gold = anklickbar. Darunter eine Zeile je Button; Klick darauf w&auml;hlt den Button auf der B&uuml;hne.</td></tr>
+<tr><td><b>Roter Playhead</b></td><td>Die aktuelle Zeit; die Bühne zeigt das Menü zu diesem Zeitpunkt. Im Lineal klicken oder ziehen setzt ihn. Im Intro sind Buttons abgedunkelt („Subpicture inaktiv“), bleiben aber bearbeitbar.</td></tr>
+<tr><td><b>Blauer Marker „Intro-Ende“</b></td><td>Ziehen ändert die Intro-Länge; ganz links = kein Intro. Rastet auf 0,6 s ein (GOP-Grenze: 15 Frames PAL / 18 NTSC).</td></tr>
+<tr><td><b>Grüner Marker „Schleifenende“</b></td><td>Ziehen ändert die Schleifenlänge (= „Dauer“).</td></tr>
+<tr><td><b>Spur Video</b></td><td>Blau = Intro, grün = Schleife; Vorschaubilder aus Videohintergrund oder erstem Video-Element.</td></tr>
+<tr><td><b>Spur Ton</b></td><td>Wellenform des Menütons (Titel oder Audiodatei); sie erscheint nach kurzer Berechnung. Ohne Ton: „kein Ton“.</td></tr>
+<tr><td><b>Ebenen (n)</b></td><td>Schraffiert = noch nicht anklickbar, gold = anklickbar.</td></tr>
+<tr><td><b>Eine Zeile je Element</b></td><td>Die <b>oberste Zeile ist die vorderste Ebene</b>. Buttons haben einen goldenen Balken mit ihrer Aktion, Dekoration einen grauen. Klick wählt das Element. Weiße Rauten sind Keyframes (Kapitel 11).</td></tr>
 </table>
+<h3>Ebenen per Ziehen sortieren</h3>
+<p>Fasse eine Elementzeile am Griff <b>⋮⋮</b> in der Namensspalte und ziehe sie nach oben (nach vorne) oder unten (nach hinten). Eine blaue Linie zeigt, wo sie landet. Ein Schritt <b>Rückgängig</b> macht das Verschieben rückgängig.</p>
 <h3>Kopfleiste der Timeline</h3>
 <table>
-<tr><td><b>&#9654; Vorschau / &#10074;&#10074; Pause</b></td><td>Spielt die Zeit ab: einmal Intro, dann Schleife (<kbd>Leertaste</kbd>).</td></tr>
-<tr><td><b>Timecode</b></td><td>Playhead-Position als Std:Min:Sek:Frame.</td></tr>
+<tr><td style="width:30%"><b>▶ Vorschau / ❚❚ Pause</b></td><td>Spielt ab: einmal Intro, dann Schleife (<kbd>Leertaste</kbd>). Animierte Elemente bewegen sich auf der Bühne mit.</td></tr>
+<tr><td><b>Timecode</b></td><td>Playhead als Std:Min:Sek:Frame.</td></tr>
 <tr><td><b>Intro endet hier</b></td><td>Setzt das Intro-Ende auf den Playhead (GOP-gerastet).</td></tr>
 <tr><td><b>Kein Intro</b></td><td>Entfernt das Intro (nur sichtbar, wenn eines existiert).</td></tr>
-<tr><td><b>Einpassen / Zoom</b></td><td>Zeitachse so skalieren, dass alles sichtbar ist, oder von Hand zoomen (0,25&times; bis 10&times;).</td></tr>
+<tr><td><b>Einpassen / Zoom</b></td><td>Alles sichtbar machen oder von Hand zoomen (0,25× bis 10×). Lange Menüs scrollst du mit dem Mausrad bzw. den Scrollleisten.</td></tr>
 </table>
-<h3>Intro bauen &ndash; Schritt f&uuml;r Schritt</h3>
+
+<h2 class="pb">11. Keyframes: Elemente im Intro animieren</h2>
+<p>Im Intro kann jedes Element von einer Position, Größe und Deckkraft zur nächsten wandern – zum Beispiel ein Titel, der von links einfliegt, oder Buttons, die einblenden. Dazu setzt du <b>Keyframes</b> (Rauten) auf der Elementzeile. Zwischen zwei Keyframes wird gleichmäßig (linear) übergeblendet, vor dem ersten und nach dem letzten bleibt der Wert stehen. Nach dem Intro steht jedes Element wieder an seiner normalen Position.</p>
+<table>
+<tr><th style="width:30%">Aktion</th><th>So geht's</th></tr>
+<tr><td><b>Keyframe setzen</b></td><td>Doppelklick auf die Elementzeile innerhalb des Intros (vor dem blauen Marker). Der neue Keyframe übernimmt die Werte des nächstgelegenen Keyframes bzw. des Elements.</td></tr>
+<tr><td><b>Keyframe auswählen</b></td><td>Klick auf die Raute: Sie wird blau, der Playhead springt auf ihre Zeit, das Eigenschaften-Panel zeigt ihre Werte.</td></tr>
+<tr><td><b>Zeitpunkt verschieben</b></td><td>Raute waagerecht ziehen. Sie bleibt zwischen ihren Nachbarn und innerhalb des Intros.</td></tr>
+<tr><td><b>Position und Größe festlegen</b></td><td>Bei ausgewählter Raute das Element <b>auf der Bühne</b> ziehen oder an den Ecken skalieren – das ändert nur den Keyframe, nicht die normale Position. Keyframe-Positionen dürfen außerhalb des Bildes liegen (Einflug von außen). Oder Werte im Panel eintippen.</td></tr>
+<tr><td><b>Deckkraft</b></td><td>Im Panel (0 = unsichtbar, 1 = voll sichtbar), z. B. für Einblendungen.</td></tr>
+<tr><td><b>Keyframe löschen</b></td><td>Raute wählen, im Panel <b>Keyframe löschen</b>.</td></tr>
+<tr><td><b>Zurück zum Element</b></td><td><b>Zum Element</b> im Panel oder ein Klick woanders in der Timeline.</td></tr>
+</table>
+<h3>Beispiel: Titel fliegt von links ein</h3>
 <ol>
-<li>Men&uuml; w&auml;hlen, <b>Erweitert (Timeline)</b> klicken.</li>
-<li>Hintergrund und Buttons einrichten.</li>
-<li>Playhead auf das gew&uuml;nschte Intro-Ende (z.&nbsp;B. 3&nbsp;s) ziehen, <b>Intro endet hier</b> klicken &ndash; oder den blauen Marker ziehen.</li>
-<li>Gr&uuml;nen Marker auf das Schleifenende ziehen.</li>
-<li>Mit <b>Vorschau</b> pr&uuml;fen, dann <b>&Uuml;bernehmen</b>.</li>
+<li>Intro-Dauer auf 3 s stellen (blauen Marker ziehen).</li>
+<li>Auf der Zeile des Titels bei 0 s und bei 2,4 s doppelklicken.</li>
+<li>Die Raute bei 0 s anklicken und den Titel auf der Bühne links aus dem Bild ziehen; Deckkraft im Panel auf 0 setzen.</li>
+<li>Die Raute bei 2,4 s anklicken – sie hat die normale Position, so lassen.</li>
+<li>Mit <b>Vorschau</b> prüfen.</li>
 </ol>
-<div class="warn box"><b>Grenzen:</b> Alle Buttons teilen sich dieselbe Aktivzeit (ab Intro-Ende); einzelne Ein-/Ausblendzeiten pro Button, Audio-Wellenform und Ton-&Uuml;berblendung sind noch nicht umgesetzt. Ob das Intro auf DVD-Men&uuml;s im Build ausgewertet wird, h&auml;ngt vom Rust-Teil ab (im Datenmodell ist &bdquo;introSecs&ldquo; als Blu-ray-Intro dokumentiert) &ndash; bitte mit einem Testbrand/ISO pr&uuml;fen.</div>
+<div class="box">Mit einer Raute ausgewählt bewegt das Ziehen auf der Bühne immer nur dieses eine Element. Hat ein anderes Element an derselben Stelle der Zeitleiste ebenfalls einen Keyframe, wechselt die Auswahl beim Anklicken automatisch dorthin; sonst bearbeitest du wieder die normale Position.</div>
 
-<h2>11. Speichern, Laden, &Uuml;bernehmen</h2>
+<h2>12. Speichern, Laden, Vorlagen, Übernehmen</h2>
 <table>
-<tr><td><b>Speichern &hellip;</b></td><td>Schreibt das gesamte Layout (alle Men&uuml;s) in eine JSON-Datei.</td></tr>
-<tr><td><b>Laden &hellip;</b></td><td>Liest eine solche Datei; Erfolg oder Fehler erscheint als Meldung.</td></tr>
-<tr><td><b>Entwurf aus Titeln</b></td><td>Erzeugt ein komplettes Standardlayout neu (ersetzt das aktuelle; mit R&uuml;ckg&auml;ngig umkehrbar).</td></tr>
-<tr><td><b>R&uuml;ckg&auml;ngig</b></td><td>Bis zu 60 Schritte (auch Marker-Verschiebungen).</td></tr>
-<tr><td><b>&Uuml;bernehmen</b></td><td>Pr&uuml;ft das Layout und &uuml;bernimmt es ins Projekt (Meldung &bdquo;&Uuml;bernommen.&ldquo;). Bei Fehlern wird nichts &uuml;bernommen und die Statuszeile nennt sie. Der Editor bleibt offen; danach mit <b>Schlie&szlig;en</b> verlassen.</td></tr>
-<tr><td><b>Schlie&szlig;en</b></td><td>Bei ungespeicherten &Auml;nderungen erst &bdquo;&Auml;nderungen verwerfen?&ldquo; (4&nbsp;Sekunden Zeit zum Best&auml;tigen).</td></tr>
+<tr><td style="width:26%"><b>Speichern …</b></td><td>Schreibt das gesamte Layout (alle Menüs) in eine JSON-Datei.</td></tr>
+<tr><td><b>Laden …</b></td><td>Liest eine solche Datei.</td></tr>
+<tr><td><b>Aus Vorlage …</b></td><td>Nach einer Rückfrage wählst du eine <b>ConvertX-Vorlage (.ini)</b>, z. B. aus <code>C:\ProgramData\VSO\ConvertXToDVD\7\Templates</code>. Sie wird mit Hintergrund, Buttons und Menüs in ein bearbeitbares Layout umgewandelt und ersetzt das aktuelle. Hinweise des Umwandlers erscheinen in der Statuszeile.</td></tr>
+<tr><td><b>Entwurf aus Titeln</b></td><td>Erzeugt ein komplettes Standardlayout neu.</td></tr>
+<tr><td><b>Rückgängig</b></td><td>Bis zu 60 Schritte – auch Marker, Ebenen-Ziehen, Keyframes, Laden, Vorlagen-Import und Entwurf.</td></tr>
+<tr><td><b>Übernehmen</b></td><td>Prüft das Layout und übernimmt es ins Projekt. Bei Fehlern wird nichts übernommen. Der Editor bleibt offen.</td></tr>
+<tr><td><b>Schließen</b></td><td>Bei ungespeicherten Änderungen erst „Änderungen verwerfen?“ bestätigen.</td></tr>
 </table>
 
-<h2>12. Tastenk&uuml;rzel</h2>
+<h2>13. Tastenkürzel</h2>
 <table>
-<tr><td><kbd>Strg</kbd>+<kbd>Z</kbd></td><td>R&uuml;ckg&auml;ngig</td></tr>
-<tr><td><kbd>Strg</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd></td><td>Kopieren / Ausschneiden / Einf&uuml;gen</td></tr>
+<tr><td style="width:40%"><kbd>Strg</kbd>+<kbd>Z</kbd></td><td>Rückgängig</td></tr>
+<tr><td><kbd>Strg</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd></td><td>Kopieren / Ausschneiden / Einfügen</td></tr>
 <tr><td><kbd>Strg</kbd>+<kbd>D</kbd></td><td>Duplizieren</td></tr>
-<tr><td><kbd>Strg</kbd>+<kbd>G</kbd> / <kbd>Strg</kbd>+<kbd>Umschalt</kbd>+<kbd>G</kbd></td><td>Gruppieren / Gruppe aufl&ouml;sen</td></tr>
-<tr><td><kbd>Entf</kbd></td><td>Auswahl l&ouml;schen</td></tr>
-<tr><td>Pfeile (<kbd>Umschalt</kbd> = 10)</td><td>Auswahl um 1&nbsp;px verschieben</td></tr>
+<tr><td><kbd>Strg</kbd>+<kbd>G</kbd> / <kbd>Strg</kbd>+<kbd>Umschalt</kbd>+<kbd>G</kbd></td><td>Gruppieren / Gruppe auflösen</td></tr>
+<tr><td><kbd>Entf</kbd></td><td>Auswahl löschen</td></tr>
+<tr><td>Pfeile (<kbd>Umschalt</kbd> = 10)</td><td>Auswahl um 1 px verschieben</td></tr>
 <tr><td><kbd>Esc</kbd></td><td>Auswahl aufheben</td></tr>
 <tr><td><kbd>Leertaste</kbd> (Timeline)</td><td>Vorschau starten/pausieren</td></tr>
-<tr><td><kbd>&larr;</kbd>/<kbd>&rarr;</kbd> ohne Auswahl (Timeline)</td><td>Playhead 1 Frame (<kbd>Umschalt</kbd> = 1 GOP)</td></tr>
+<tr><td><kbd>←</kbd>/<kbd>→</kbd> ohne Auswahl (Timeline)</td><td>Playhead 1 Frame (<kbd>Umschalt</kbd> = 1 GOP)</td></tr>
 <tr><td><kbd>Pos1</kbd> (Timeline)</td><td>Playhead an den Anfang</td></tr>
+<tr><td>Doppelklick auf Elementzeile (Timeline)</td><td>Keyframe setzen</td></tr>
 </table>
 
-<h2>13. DVD-Grenzen und Fehlersuche</h2>
+<h2>14. Grenzen und Fehlersuche</h2>
 <table>
-<tr><th style="width:34%">Grenze / Problem</th><th>Erkl&auml;rung und L&ouml;sung</th></tr>
-<tr><td>Max. 36 Buttons pro Men&uuml;</td><td>DVD-Standard. Zus&auml;tzliche Buttons werden abgelehnt.</td></tr>
-<tr><td>Buttons d&uuml;rfen sich nicht &uuml;berlappen</td><td>Beim Zeichnen wird &uuml;berlappendes abgelehnt; sonst die Statuszeile beachten.</td></tr>
-<tr><td>Button-Bereiche im 2-Pixel-Raster</td><td>Das Zeichenwerkzeug rastet automatisch ein.</td></tr>
-<tr><td>Max. 3 Farbpaare je Men&uuml;seite</td><td>Eigene Button-Farben sparsam einsetzen; gleiche Markierungsfarbe &rArr; gleiche Aktivierungsfarbe.</td></tr>
+<tr><th style="width:34%">Grenze / Problem</th><th>Erklärung und Lösung</th></tr>
+<tr><td>Max. 36 Buttons pro DVD-Menü</td><td>DVD-Standard (Blu-ray: 255).</td></tr>
+<tr><td>Buttons dürfen sich nicht überlappen</td><td>Die Statuszeile nennt die betroffenen Buttons.</td></tr>
+<tr><td>Max. 3 Farbpaare je Menüseite</td><td>Eigene Button-Farben sparsam einsetzen.</td></tr>
 <tr><td>Buttons nicht drehbar</td><td>DVD-Hitboxen sind Rechtecke. Dekoration darf gedreht werden.</td></tr>
-<tr><td>Titelverweis &bdquo;(fehlt)&ldquo;</td><td>Ein Button zeigt auf einen Titel/ein Men&uuml;, das es nicht mehr gibt. Ziel neu w&auml;hlen.</td></tr>
-<tr><td>Text wirkt beschnitten</td><td>Box vergr&ouml;&szlig;ern oder Gr&ouml;&szlig;e verringern; Zeilenumbruch einschalten.</td></tr>
-<tr><td>Wichtiges wird auf dem TV abgeschnitten</td><td>Inhalte in den &bdquo;Sicheren Bereich&ldquo; legen.</td></tr>
-<tr><td>Timeline-Marker springen</td><td>Gewollt: Raster von 0,6&nbsp;s (GOP-Grenze).</td></tr>
+<tr><td>„Video nicht gefunden“ / „Hintergrundvideo nicht gefunden“</td><td>Eine Videodatei wurde verschoben oder gelöscht. Unter „Quelle“ eine neue Datei wählen.</td></tr>
+<tr><td>Blu-ray: „Arbeitsfläche ist nicht 16:9“</td><td>Blu-ray-Menüs brauchen ein 16:9-Layout (z. B. aus „Aus Vorlage …“ oder einem Blu-ray-Entwurf).</td></tr>
+<tr><td>Titelverweis „(fehlt)“</td><td>Ziel existiert nicht mehr. Neu wählen.</td></tr>
+<tr><td>Text wirkt beschnitten</td><td>Box vergrößern, Schrift verkleinern oder Zeilenumbruch einschalten.</td></tr>
+<tr><td>Timeline-Marker springen</td><td>Gewollt: Raster von 0,6 s (GOP-Grenze).</td></tr>
+<tr><td>Wellenform fehlt</td><td>Erscheint nach der Berechnung; bei Dateien ohne Tonspur bleibt die Spur leer.</td></tr>
+<tr><td>Bild wirkt im Intro verzerrt</td><td>Nur in der Vorschau, wenn ein Keyframe die Größe ändert; der Build skaliert richtig.</td></tr>
+<tr><td>Vorlagen-Hinweis erwähnt Blu-ray</td><td>Der Vorlagen-Umwandler stammt aus dem Blu-ray-Build; bei DVD-Projekten ist der Hinweis meist ohne Bedeutung.</td></tr>
 </table>
-<p style="color:#64748b;margin-top:14pt">Stand: Editor-Version vom 12.11.2026. Beschrieben ist, was im Code vorhanden ist; die Timeline wurde nicht mit einem Testbrand verifiziert.</p>
+<div class="warn box"><b>Noch nicht möglich:</b> eigene Ein-/Ausblendzeiten pro Button (alle Buttons sind ab Intro-Ende aktiv), Ton-Überblendung zwischen Intro und Schleife, Drehung in Keyframes.</div>
+<p style="color:#64748b;margin-top:14pt">Stand: 13.11.2026. Alle beschriebenen Funktionen wurden in der laufenden Anwendung geprüft; externe Videodateien zusätzlich mit vollständigen DVD- und Blu-ray-Builds.</p>
 </body></html>
