@@ -1,0 +1,32 @@
+# Maintainer: islmal <https://github.com/islmal/musadvd>
+pkgname=musadvd-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="DVD, Blu-ray and AVCHD authoring engine, desktop GUI, and Burn Studio"
+arch=('x86_64')
+url="https://github.com/islmal/musadvd"
+license=('GPL-3.0-or-later')
+depends=('ffmpeg' 'libisoburn' 'dvd+rw-tools' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator')
+provides=('musadvd')
+conflicts=('musadvd')
+source=("https://github.com/islmal/musadvd/releases/download/v${pkgver}/MusaDVD-v${pkgver}-linux-x86_64-portable.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "${srcdir}/MusaDVD"
+  install -Dm755 musadvd "${pkgdir}/usr/bin/musadvd"
+  install -Dm755 musadvd-gui "${pkgdir}/usr/bin/musadvd-gui"
+  install -dm755 "${pkgdir}/usr/share/musadvd/locales"
+  install -m644 locales/*.json "${pkgdir}/usr/share/musadvd/locales/"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 THIRD_PARTY_NOTICES.md "${pkgdir}/usr/share/doc/${pkgname}/THIRD_PARTY_NOTICES.md"
+
+  install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/musadvd.desktop" <<'EOF'
+[Desktop Entry]
+Name=MusaDVD
+Comment=DVD, Blu-ray and AVCHD Authoring
+Exec=musadvd-gui
+Type=Application
+Categories=AudioVideo;Video;DiscBurning;
+EOF
+}

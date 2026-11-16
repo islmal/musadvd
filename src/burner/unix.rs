@@ -174,40 +174,44 @@ impl OpticalBurner for CliBurner {
         };
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
-        // Both tools report progress on stderr; lines end in \r or \n.
-        let stderr = child.stderr.take().unwrap();
-        let tx = progress_tx.clone();
-        let reader = std::thread::spawn(move || {
-            let mut r = BufReader::new(stderr);
-            let mut buf = Vec::new();
-            let mut tail = String::new();
-            loop {
-                buf.clear();
-                let mut byte = [0u8; 1];
-                while r.read(&mut byte).map(|n| n == 1).unwrap_or(false) {
-                    if byte[0] == b'\r' || byte[0] == b'\n' {
+        // growisofs writes progress to stdout/stderr depending on version; xorriso uses stderr.
+        // Drain both streams so neither pipe can stall and live % updates always reach the UI.
+        let spawn_reader = |stream: Box<dyn Read + Send>, tx: Sender<BurnProgress>| {
+            std::thread::spawn(move || {
+                let mut r = BufReader::new(stream);
+                let mut buf = Vec::new();
+                let mut tail = String::new();
+                loop {
+                    buf.clear();
+                    let mut byte = [0u8; 1];
+                    while r.read(&mut byte).map(|n| n == 1).unwrap_or(false) {
+                        if byte[0] == b'\r' || byte[0] == b'\n' {
+                            break;
+                        }
+                        buf.push(byte[0]);
+                    }
+                    if buf.is_empty() && r.fill_buf().map(|b| b.is_empty()).unwrap_or(true) {
                         break;
                     }
-                    buf.push(byte[0]);
+                    let line = String::from_utf8_lossy(&buf).into_owned();
+                    if let Some(f) = parse_percent(&line) {
+                        let phase = if f >= 0.999 { BurnPhase::Finalizing } else { BurnPhase::Writing };
+                        let _ = tx.send(BurnProgress::new(phase, if phase == BurnPhase::Finalizing { 0.0 } else { f }, "Daten werden geschrieben …"));
+                    } else if !line.trim().is_empty() {
+                        tail = line;
+                    }
                 }
-                if buf.is_empty() && r.fill_buf().map(|b| b.is_empty()).unwrap_or(true) {
-                    break;
-                }
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                if let Some(f) = parse_percent(&line) {
-                    let phase = if f >= 0.999 { BurnPhase::Finalizing } else { BurnPhase::Writing };
-                    let _ = tx.send(BurnProgress::new(phase, if phase == BurnPhase::Finalizing { 0.0 } else { f }, "Daten werden geschrieben …"));
-                } else if !line.trim().is_empty() {
-                    tail = line;
-                }
-            }
-            tail
-        });
+                tail
+            })
+        };
+        let out_reader = spawn_reader(Box::new(child.stdout.take().unwrap()), progress_tx.clone());
+        let err_reader = spawn_reader(Box::new(child.stderr.take().unwrap()), progress_tx.clone());
         let status = loop {
             if cancel.load(Ordering::Relaxed) {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
                 return Err(BurnError::Cancelled);
             }
             if let Some(st) = child.try_wait()? {
@@ -215,13 +219,15 @@ impl OpticalBurner for CliBurner {
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         };
-        let tail = reader.join().unwrap_or_default();
+        let out_tail = out_reader.join().unwrap_or_default();
+        let err_tail = err_reader.join().unwrap_or_default();
+        let tail = if err_tail.is_empty() { out_tail } else { err_tail };
         if !status.success() {
             return Err(BurnError::Backend(format!("Brennen fehlgeschlagen: {tail}")));
         }
         if options.verify {
             let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Disc wird überprüft …"));
-            let mut device = std::fs::File::open(drive_id)?;
+            let mut device = open_for_verify(drive_id)?;
             let tx = progress_tx.clone();
             verify_against_image(&mut device, iso_path, cancel, &mut |f| {
                 let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Disc wird überprüft …"));
@@ -233,6 +239,26 @@ impl OpticalBurner for CliBurner {
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Fertig"));
         Ok(())
     }
+}
+
+/// Opens `drive_id` for read-back verification, retrying briefly if the drive is still
+/// reloading/settling its TOC right after `growisofs` finishes (`ENOMEDIUM` = 123 on Linux).
+fn open_for_verify(drive_id: &str) -> std::io::Result<std::fs::File> {
+    let mut tried_close = false;
+    for attempt in 0..16 {
+        match std::fs::File::open(drive_id) {
+            Ok(f) => return Ok(f),
+            Err(e) if attempt < 15 && matches!(e.raw_os_error(), Some(123 | 16 | 11)) => {
+                if !tried_close && e.raw_os_error() == Some(123) {
+                    tried_close = true;
+                    let _ = blocking_tool_command("eject").args(["-t", drive_id]).status();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    std::fs::File::open(drive_id)
 }
 
 #[cfg(test)]
