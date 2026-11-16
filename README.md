@@ -8,47 +8,90 @@ user's own ConvertXToDVD installation.
 
 ## Features
 
-- DVD-Video, Blu-ray and AVCHD output, native muxing and IFO/BDMV writers (no dvdauthor/tsMuxeR needed)
-- Menus from ConvertX templates or custom layouts
-- Burn Studio: read, build, verify and burn images (UDF 1.02 + ISO 9660), layer-break tools
-- ffmpeg-based encoding, optional NVENC / GPU vendor selection
+- DVD-Video, Blu-ray and AVCHD output, native muxing and IFO/BDMV writers (no `dvdauthor`/`tsMuxeR` needed)
+- Menus from ConvertX templates or custom layouts (built-in WYSIWYG menu editor)
+- **Burn Studio**: read, build, verify and burn images (UDF 1.02 + ISO 9660), Discovery media tests, layer-break tools
+- `ffmpeg`-based encoding with automatic GPU decoding (`d3d11va`/`cuda`/`qsv` on Windows, `vaapi`/`cuda`/`qsv` on Linux) and optional GPU encoding
 
-## Status and limits
+## Installation
 
-Windows first; output has only been checked in VLC. Authoring is limited to what the engine
-emits; see [STATUS.md](STATUS.md) for the out-of-scope list and known issues.
+Prebuilt packages are published automatically on [GitHub Releases](https://github.com/islmal/musadvd/releases) (tagged releases and rolling `nightly` builds).
 
-## Download
+### Windows
 
-Prebuilt Windows binaries are published on [GitHub Releases](https://github.com/islmal/musadvd/releases):
+- **Installer (recommended):** Download `MusaDVD_<version>_x64-setup.exe` and run it (includes `ffmpeg`/`ffprobe` and auto-updater).
+- **Portable:** Download `MusaDVD-<tag>-windows-x64-portable.zip`, extract it, and run `musadvd-gui.exe` or `musadvd.exe`.
 
-- **Installer (`.exe`)** — standard Windows setup with auto-updater
-- **Portable (`.zip`)** — extract and run `musadvd-gui.exe` or `musadvd.exe` (includes `ffmpeg`/`ffprobe`)
+### Linux (Ubuntu / Debian / Linux Mint)
 
-## Build
+1. Download `MusaDVD_<version>_amd64.deb` from Releases and install it:
+   ```bash
+   sudo apt update
+   sudo apt install ./MusaDVD_*_amd64.deb
+   ```
+2. Allow your user to access optical drives (`/dev/sr0`), then log out and back in:
+   ```bash
+   sudo usermod -aG cdrom "$USER"
+   ```
+
+### Linux (Any Distro — AppImage or Portable)
+
+1. Install runtime dependencies:
+   - **Debian/Ubuntu/Mint:** `sudo apt install ffmpeg xorriso dvd+rw-tools`
+   - **Fedora:** `sudo dnf install ffmpeg xorriso dvd+rw-tools` *(with RPM Fusion enabled for `ffmpeg`)*
+   - **Arch Linux:** `sudo pacman -S ffmpeg libisoburn dvd+rw-tools`
+2. Add your user to the optical drive group (`cdrom` on Debian/Ubuntu/Fedora, `optical` on Arch) and re-login.
+3. Download either:
+   - **`MusaDVD_<version>_amd64.AppImage`:** `chmod +x MusaDVD_*.AppImage && ./MusaDVD_*.AppImage`
+   - **`MusaDVD-<tag>-linux-x86_64-portable.tar.gz`:** extract and run `./musadvd-gui` or `./musadvd`.
+
+### Arch Linux (AUR / PKGBUILD)
+
+A ready-to-use PKGBUILD is included at [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD):
+
+```bash
+cd packaging/aur
+makepkg -si
+```
+
+## Build from Source
+
+### Windows
 
 Copy `ffmpeg.exe` and `ffprobe.exe` (gyan.dev full build) into `bin/`, then:
 
+```powershell
+npm install
+npm run build
+cargo build --release --bin musadvd
+cargo build --release -p musadvd-gui --features tauri/custom-protocol
 ```
-cargo build --release                                                    # CLI
-npm run build                                                            # frontend
-cargo build --release -p musadvd-gui --features tauri/custom-protocol   # GUI
-cargo test --workspace
+
+### Linux (Ubuntu 24.04 / Linux Mint 22)
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential curl wget file git patchelf \
+  libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+  libayatana-appindicator3-dev libssl-dev libxdo-dev \
+  ffmpeg xorriso dvd+rw-tools
+sudo usermod -aG cdrom "$USER"
+
+npm install
+npm run build
+cargo build --release --bin musadvd
+cargo build --release -p musadvd-gui --features tauri/custom-protocol
 ```
 
 ## CLI
 
-```
+```bash
 musadvd drives
 musadvd --help
 ```
 
-## Documentation
-
-All handbooks and module documentation are in [handbook/](handbook/README.md): architecture, engine,
-burner and GUI modules, CLI, settings and testing.
-
 ## Licence & credits
 
-GPL-3.0-or-later, see [LICENSE](LICENSE). Derived and bundled components (dvdauthor, tsMuxer,
+GPL-3.0-or-later, see [LICENSE](LICENSE). Derived and bundled components (`dvdauthor`, `tsMuxer`,
 DejaVu, FFmpeg): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

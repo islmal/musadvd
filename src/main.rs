@@ -138,10 +138,12 @@ enum Command {
         /// Titles encoded at the same time (default: half the logical CPUs).
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
         jobs: Option<u16>,
-        /// Decode the sources on the GPU when a working hardware decoder exists (CUDA, D3D11VA,
-        /// QSV; falls back to the CPU).
-        #[arg(long)]
+        /// Decode the sources on the GPU when a working hardware decoder exists (default: on).
+        #[arg(long, hide = true)]
         hw_decode: bool,
+        /// Disable GPU source decoding and force CPU decoding.
+        #[arg(long)]
+        no_hw_decode: bool,
         /// GPU vendor for Blu-ray H.264 encoding and the GPU decoder order (falls back to
         /// x264/CPU when the GPU does not work).
         #[arg(long, value_enum, default_value = "nvidia")]
@@ -832,7 +834,8 @@ fn main() -> ExitCode {
             motion_duration,
             motion_silent,
             jobs,
-            hw_decode,
+            hw_decode: _hw_decode,
+            no_hw_decode,
             hw_accel,
             no_hw_encode,
             no_menu_animations,
@@ -910,7 +913,7 @@ fn main() -> ExitCode {
                 project_name,
                 selections,
                 parallel_jobs: jobs.map(usize::from),
-                hw_decode,
+                hw_decode: !no_hw_decode,
                 hw_accel: if no_hw_encode { HwAccelArg::None } else { hw_accel }.into(),
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),

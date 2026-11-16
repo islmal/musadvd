@@ -176,7 +176,7 @@ impl Default for AppSettings {
             target_size_mb: DiscType::Dvd5.target_mb() as u64,
             max_concurrent_encodes: default_jobs(),
             process_priority: PROCESS_PRIORITIES[0].into(),
-            hw_decode: false,
+            hw_decode: true,
             hw_accel_mode: HwAccelMode::default(),
             menu_animations: true,
             fast_encode: false,
@@ -690,12 +690,19 @@ impl AppSettings {
         self
     }
 
-    /// `%APPDATA%\musadvd\settings.json` (or `./musadvd-settings.json` without APPDATA).
+    /// `%APPDATA%\musadvd\settings.json` on Windows, `$XDG_CONFIG_HOME/musadvd/settings.json`
+    /// (`$HOME/.config/musadvd/settings.json`) on Unix, or `./musadvd-settings.json` as fallback.
     pub fn default_path() -> PathBuf {
-        match std::env::var_os("APPDATA") {
-            Some(dir) => PathBuf::from(dir).join("musadvd").join("settings.json"),
-            None => PathBuf::from("musadvd-settings.json"),
+        if let Some(dir) = std::env::var_os("APPDATA") {
+            return PathBuf::from(dir).join("musadvd").join("settings.json");
         }
+        if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+            return PathBuf::from(dir).join("musadvd").join("settings.json");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(".config").join("musadvd").join("settings.json");
+        }
+        PathBuf::from("musadvd-settings.json")
     }
 
     /// Loads the settings; a missing file yields the defaults.
@@ -1058,6 +1065,7 @@ mod burn_settings_tests {
         let mut opts = BuildOptions::default();
         s.apply_to(&mut opts);
         assert!(opts.hw_decode && opts.fast_encode && opts.hw_accel == HwAccelMode::Nvidia);
+        assert!(AppSettings::default().hw_decode, "GPU decoding is on by default");
         assert_eq!(AppSettings::default().hw_accel_mode, HwAccelMode::Nvidia, "NVENC is on by default");
         let old: AppSettings = serde_json::from_str(r#"{"hw_decode":true}"#).unwrap();
         assert_eq!(old.hw_accel_mode, HwAccelMode::Nvidia, "settings files without the field keep the default");

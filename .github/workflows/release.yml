@@ -1,13 +1,19 @@
 name: Release
 
-# Push a tag like v0.1.0 (must match "version" in src-tauri/tauri.conf.json, the updater compares it) (or run manually) to build the NSIS installer and attach it to a GitHub release.
+# Builds Windows (NSIS .exe + portable .zip) and Linux (.deb, .AppImage, portable .tar.gz)
+# on every push to main/master (rolling `nightly` pre-release) and on `v*` tags (versioned release + latest.json).
 on:
   push:
+    branches: [main, master]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
@@ -21,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # ffmpeg/ffprobe are git-ignored (~220 MB each); gyan.dev only keeps the latest release (9.0.x) under a stable URL.
+      # ffmpeg/ffprobe are git-ignored (~220 MB each); gyan.dev keeps the latest release under a stable URL.
       - name: Fetch ffmpeg full build
         shell: pwsh
         run: |
@@ -32,16 +38,17 @@ jobs:
           Copy-Item ffmpeg-extract\*\bin\ffprobe.exe bin\
 
       - run: npm ci
-      # Signs the installer for the in-app updater (secrets below) and uploads latest.json next to it.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: MusaDVD ${{ github.ref_name }}
-          releaseBody: Download the installer or portable ZIP below; installed copies update themselves.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}
+          releaseName: MusaDVD ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'Nightly' }}
+          releaseBody: Automated Windows & Linux builds (installer, AppImage, .deb, and portable archives).
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          releaseDraft: false
 
       - name: Build CLI binary
         run: cargo build --release --bin musadvd
@@ -51,7 +58,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}"
           $stage = "portable/MusaDVD"
           New-Item -ItemType Directory -Force -Path "$stage/bin", "$stage/locales" | Out-Null
           Copy-Item "target/release/musadvd-gui.exe" "$stage/"
@@ -62,3 +69,51 @@ jobs:
           $zip = "MusaDVD-$tag-windows-x64-portable.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
           gh release upload $tag $zip --clobber
+
+  linux:
+    needs: windows
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux Tauri & AppImage dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev libxdo-dev patchelf
+
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}
+          releaseName: MusaDVD ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'Nightly' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          releaseDraft: false
+
+      - name: Build CLI binary
+        run: cargo build --release --bin musadvd
+
+      - name: Package and upload portable tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}"
+          STAGE="portable/MusaDVD"
+          mkdir -p "$STAGE/locales"
+          cp target/release/musadvd-gui target/release/musadvd "$STAGE/"
+          cp frontend/src/locales/*.json "$STAGE/locales/"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$STAGE/"
+          TAR="MusaDVD-$TAG-linux-x86_64-portable.tar.gz"
+          tar -czf "$TAR" -C portable MusaDVD
+          gh release upload "$TAG" "$TAR" --clobber

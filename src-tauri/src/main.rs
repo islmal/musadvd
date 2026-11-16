@@ -498,7 +498,9 @@ fn settings_info(state: State<'_, AppState>) -> SettingsInfo {
 
 #[tauri::command]
 fn default_output_dir() -> String {
-    let base = std::env::var_os("USERPROFILE").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let base = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     base.join("Videos").join("MusaDVD").to_string_lossy().into_owned()
 }
 

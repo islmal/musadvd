@@ -652,21 +652,22 @@ impl IntoOwnedFile for std::io::PipeReader {
     }
 }
 
-/// Hardware decoders tried for a GPU vendor, in order; without a vendor all of them.
+/// Hardware decoders tried for a GPU vendor, in order, falling back to any other available
+/// platform decoder so auto-detection still finds a working GPU decoder on mixed/other hardware.
 pub fn hwaccel_candidates(mode: HwAccelMode) -> &'static [&'static str] {
     if cfg!(windows) {
         match mode {
-            HwAccelMode::Nvidia => &["d3d11va", "cuda"],
-            HwAccelMode::Amd => &["d3d11va"],
-            HwAccelMode::Intel => &["qsv", "d3d11va"],
-            HwAccelMode::None => &["cuda", "d3d11va", "qsv"],
+            HwAccelMode::Nvidia => &["d3d11va", "cuda", "qsv"],
+            HwAccelMode::Amd => &["d3d11va", "qsv", "cuda"],
+            HwAccelMode::Intel => &["qsv", "d3d11va", "cuda"],
+            HwAccelMode::None => &["d3d11va", "cuda", "qsv"],
         }
     } else {
         match mode {
-            HwAccelMode::Nvidia => &["vaapi", "cuda"],
-            HwAccelMode::Amd => &["vaapi"],
-            HwAccelMode::Intel => &["qsv", "vaapi"],
-            HwAccelMode::None => &["cuda", "vaapi", "qsv"],
+            HwAccelMode::Nvidia => &["cuda", "vaapi", "qsv"],
+            HwAccelMode::Amd => &["vaapi", "qsv", "cuda"],
+            HwAccelMode::Intel => &["qsv", "vaapi", "cuda"],
+            HwAccelMode::None => &["vaapi", "qsv", "cuda"],
         }
     }
 }
@@ -700,12 +701,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn hwaccel_lists() {
-        assert_eq!(hwaccel_candidates(HwAccelMode::Nvidia), ["d3d11va", "cuda"]);
-        assert_eq!(hwaccel_candidates(HwAccelMode::Amd), ["d3d11va"]);
-        assert_eq!(hwaccel_candidates(HwAccelMode::Intel), ["qsv", "d3d11va"]);
-        assert_eq!(hwaccel_candidates(HwAccelMode::None), ["cuda", "d3d11va", "qsv"]);
+        if cfg!(windows) {
+            assert_eq!(hwaccel_candidates(HwAccelMode::Nvidia), ["d3d11va", "cuda", "qsv"]);
+            assert_eq!(hwaccel_candidates(HwAccelMode::Amd), ["d3d11va", "qsv", "cuda"]);
+            assert_eq!(hwaccel_candidates(HwAccelMode::Intel), ["qsv", "d3d11va", "cuda"]);
+            assert_eq!(hwaccel_candidates(HwAccelMode::None), ["d3d11va", "cuda", "qsv"]);
+        } else {
+            assert_eq!(hwaccel_candidates(HwAccelMode::Nvidia), ["cuda", "vaapi", "qsv"]);
+            assert_eq!(hwaccel_candidates(HwAccelMode::Amd), ["vaapi", "qsv", "cuda"]);
+            assert_eq!(hwaccel_candidates(HwAccelMode::Intel), ["qsv", "vaapi", "cuda"]);
+            assert_eq!(hwaccel_candidates(HwAccelMode::None), ["vaapi", "qsv", "cuda"]);
+        }
     }
 
     #[test]
