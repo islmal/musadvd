@@ -62,9 +62,21 @@ fn system_times() -> Option<(u64, u64)> {
     Some((v(idle), v(kernel) + v(user)))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn system_times() -> Option<(u64, u64)> {
+    proc_stat_times(&std::fs::read_to_string("/proc/stat").ok()?)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn system_times() -> Option<(u64, u64)> {
     None
+}
+
+/// (idle + iowait, all) jiffies from the aggregate `cpu` line of `/proc/stat`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_stat_times(stat: &str) -> Option<(u64, u64)> {
+    let ticks: Vec<u64> = stat.lines().next()?.strip_prefix("cpu ")?.split_whitespace().take(8).map(|v| v.parse().ok()).collect::<Option<_>>()?;
+    Some((ticks.get(3)? + ticks.get(4).unwrap_or(&0), ticks.iter().sum()))
 }
 
 /// Collects a sample every `interval` seconds from the progress it is fed.

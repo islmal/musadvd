@@ -493,6 +493,125 @@ mod win {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub use linux::SgIoTransport;
+
+/// Maps a finished `SG_IO` header to a result. A failed delivery (host adapter error, driver
+/// timeout) is `Err`, like a failed `DeviceIoControl`; a check condition is `Ok` with sense data.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn sg_result(status: u8, host_status: u16, driver_status: u16, sense: &[u8], dxfer_len: u32, resid: i32) -> Result<ScsiResult, BurnError> {
+    const DID_TIME_OUT: u16 = 0x03;
+    const DRIVER_TIMEOUT: u16 = 0x06;
+    if host_status == DID_TIME_OUT || driver_status & 0x0F == DRIVER_TIMEOUT {
+        return Err(BurnError::Backend("SG_IO: the drive did not answer in time".into()));
+    }
+    if host_status != 0 {
+        return Err(BurnError::Backend(format!("SG_IO: host adapter error {host_status:#04X}")));
+    }
+    let sense = Sense::parse(sense).filter(|s| s.key != 0);
+    let transferred = (dxfer_len as i64 - resid.max(0) as i64).max(0) as usize;
+    Ok(ScsiResult { status, sense, transferred })
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::fs::{File, OpenOptions};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    use super::{sg_result, BurnError, DataDir, ScsiResult, ScsiTransport};
+
+    /// `struct sg_io_hdr` from `<scsi/sg.h>`.
+    #[repr(C)]
+    struct SgIoHdr {
+        interface_id: libc::c_int,
+        dxfer_direction: libc::c_int,
+        cmd_len: u8,
+        mx_sb_len: u8,
+        iovec_count: u16,
+        dxfer_len: u32,
+        dxferp: *mut libc::c_void,
+        cmdp: *const u8,
+        sbp: *mut u8,
+        timeout: u32,
+        flags: u32,
+        pack_id: libc::c_int,
+        usr_ptr: *mut libc::c_void,
+        status: u8,
+        masked_status: u8,
+        msg_status: u8,
+        sb_len_wr: u8,
+        host_status: u16,
+        driver_status: u16,
+        resid: libc::c_int,
+        duration: u32,
+        info: u32,
+    }
+
+    const SG_IO: libc::c_ulong = 0x2285;
+
+    /// `SG_IO` on `/dev/srN` (or `/dev/sgN`). Needs read/write access to the node, which the
+    /// `cdrom` / `optical` group grants on most distributions.
+    pub struct SgIoTransport {
+        file: File,
+    }
+
+    impl SgIoTransport {
+        pub fn open(device: &str) -> Result<Self, BurnError> {
+            // O_NONBLOCK: the sr driver refuses a plain open while the tray is empty or open.
+            let file = OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(device).map_err(|e| {
+                BurnError::Backend(if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!("{device}: permission denied (add the user to the 'cdrom' or 'optical' group)")
+                } else {
+                    format!("{device} could not be opened: {e}")
+                })
+            })?;
+            Ok(SgIoTransport { file })
+        }
+    }
+
+    impl ScsiTransport for SgIoTransport {
+        fn exec(&self, cdb: &[u8], dir: DataDir, buf: &mut [u8], timeout_s: u32) -> Result<ScsiResult, BurnError> {
+            assert!(cdb.len() <= 16);
+            let mut sense = [0u8; 32];
+            let mut h = SgIoHdr {
+                interface_id: b'S' as libc::c_int,
+                dxfer_direction: match dir {
+                    DataDir::None => -1,       // SG_DXFER_NONE
+                    DataDir::ToDevice => -2,   // SG_DXFER_TO_DEV
+                    DataDir::FromDevice => -3, // SG_DXFER_FROM_DEV
+                },
+                cmd_len: cdb.len() as u8,
+                mx_sb_len: sense.len() as u8,
+                iovec_count: 0,
+                dxfer_len: if dir == DataDir::None { 0 } else { buf.len() as u32 },
+                dxferp: if dir == DataDir::None || buf.is_empty() { std::ptr::null_mut() } else { buf.as_mut_ptr().cast() },
+                cmdp: cdb.as_ptr(),
+                sbp: sense.as_mut_ptr(),
+                timeout: timeout_s.saturating_mul(1000),
+                flags: 0,
+                pack_id: 0,
+                usr_ptr: std::ptr::null_mut(),
+                status: 0,
+                masked_status: 0,
+                msg_status: 0,
+                sb_len_wr: 0,
+                host_status: 0,
+                driver_status: 0,
+                resid: 0,
+                duration: 0,
+                info: 0,
+            };
+            // SAFETY: every pointer in `h` refers to a live buffer of the stated length for the
+            // duration of the (synchronous) call.
+            if unsafe { libc::ioctl(self.file.as_raw_fd(), SG_IO as _, &mut h as *mut SgIoHdr) } < 0 {
+                return Err(BurnError::Backend(format!("SG_IO: {}", std::io::Error::last_os_error())));
+            }
+            sg_result(h.status, h.host_status, h.driver_status, &sense[..h.sb_len_wr as usize], h.dxfer_len, h.resid)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Response parsers.
 

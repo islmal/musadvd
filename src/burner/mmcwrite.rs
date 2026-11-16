@@ -117,6 +117,14 @@ impl DirectOptions {
             ..Self::default()
         }
     }
+
+    /// A specific burn speed becomes the SET STREAMING rate unless one is set already.
+    pub fn with_speed(mut self, speed: super::WriteSpeed) -> Self {
+        if let (None, super::WriteSpeed::Specific(s)) = (self.speed_kbps, speed) {
+            self.speed_kbps = Some(s * 2048 / 1000); // sectors/s → kB/s
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -544,10 +552,7 @@ pub fn burn_direct(
     use super::windows::{recorder, volume_paths, Com};
 
     let _standby = options.prevent_standby.then(StandbyGuard::new);
-    let mut direct = direct.clone();
-    if let (None, super::WriteSpeed::Specific(s)) = (direct.speed_kbps, speed) {
-        direct.speed_kbps = Some(s * 2048 / 1000); // sectors/s → kB/s
-    }
+    let direct = direct.clone().with_speed(speed);
     let letter = {
         let _com = Com::init()?;
         volume_paths(&recorder(drive_id)?).into_iter().next().and_then(|p| super::power::drive_letter(&p))

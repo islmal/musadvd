@@ -2402,6 +2402,7 @@ dependencies = [
  "ab_glyph",
  "clap",
  "image",
+ "libc",
  "md-5",
  "png 0.18.1",
  "rayon",

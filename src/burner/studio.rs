@@ -153,9 +153,15 @@ pub fn transport(drive: &DriveInfo, io: &StudioIo) -> Result<Box<dyn ScsiTranspo
     }
 }
 
-#[cfg(not(windows))]
+/// `SG_IO` on the drive's device node (`/dev/srN`); `io.backend`/`io.transport` are Windows choices.
+#[cfg(target_os = "linux")]
+pub fn transport(drive: &DriveInfo, _io: &StudioIo) -> Result<Box<dyn ScsiTransport>, BurnError> {
+    Ok(Box::new(super::spti::SgIoTransport::open(&drive.id)?))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn transport(_drive: &DriveInfo, _io: &StudioIo) -> Result<Box<dyn ScsiTransport>, BurnError> {
-    Err(BurnError::Unsupported("MMC access is only available on Windows".into()))
+    Err(BurnError::Unsupported("MMC access is only available on Windows and Linux".into()))
 }
 
 /// Read-only drive and media details (INQUIRY, profiles, media ID, book type, speeds).
@@ -175,35 +181,28 @@ pub fn tray(drive: &DriveInfo, action: &str) -> Result<(), BurnError> {
 }
 
 /// The disc in `drive` as a sector source (raw volume, size from READ CAPACITY).
-#[cfg(windows)]
 pub fn open_disc(drive: &DriveInfo, io: &StudioIo) -> Result<Box<dyn SectorSource>, BurnError> {
-    let letter = letter_of(drive)?;
+    #[cfg(windows)]
+    let device = format!(r"\\.\{}:", letter_of(drive)?);
+    #[cfg(not(windows))]
+    let device = drive.id.clone();
     let t = transport(drive, &StudioIo { backend: "auto".into(), ..io.clone() })?;
-    let cap = super::spti::query(&*t, "READ CAPACITY", &super::spti::read_capacity(), 8)?;
-    let (last, _) = super::spti::parse_read_capacity(&cap).ok_or_else(|| BurnError::Backend("READ CAPACITY: unlesbare Antwort".into()))?;
-    let file = File::open(format!(r"\\.\{letter}:"))?;
-    Ok(Box::new(FileSource::with_sectors(file, last as u64 + 1)))
+    open_disc_with(&*t, &device)
 }
 
-#[cfg(not(windows))]
-pub fn open_disc(_drive: &DriveInfo, _io: &StudioIo) -> Result<Box<dyn SectorSource>, BurnError> {
-    Err(BurnError::Unsupported("Reading discs is only available on Windows".into()))
+/// Opens `device` (raw volume / block device) with the sector count READ CAPACITY reports.
+fn open_disc_with(t: &dyn ScsiTransport, device: &str) -> Result<Box<dyn SectorSource>, BurnError> {
+    let cap = super::spti::query(t, "READ CAPACITY", &super::spti::read_capacity(), 8)?;
+    let (last, _) = super::spti::parse_read_capacity(&cap).ok_or_else(|| BurnError::Backend("READ CAPACITY: unreadable answer".into()))?;
+    Ok(Box::new(FileSource::with_sectors(File::open(device)?, last as u64 + 1)))
 }
 
 /// Queries the drive via MMC READ DISC STRUCTURE (format 0x01) whether the current disc is CSS/CPPM protected.
 pub fn disc_css(drive: &DriveInfo, io: &StudioIo) -> Option<bool> {
-    #[cfg(windows)]
-    {
-        let t = transport(drive, &StudioIo { backend: "auto".into(), ..io.clone() }).ok()?;
-        let cmd = super::spti::read_disc_structure(false, 0, 0, 0x01, 8);
-        let resp = super::spti::query(&*t, "READ DISC STRUCTURE (Copyright)", &cmd, 8).ok()?;
-        super::spti::parse_copyright_info(&resp)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (drive, io);
-        None
-    }
+    let t = transport(drive, &StudioIo { backend: "auto".into(), ..io.clone() }).ok()?;
+    let cmd = super::spti::read_disc_structure(false, 0, 0, 0x01, 8);
+    let resp = super::spti::query(&*t, "READ DISC STRUCTURE (Copyright)", &cmd, 8).ok()?;
+    super::spti::parse_copyright_info(&resp)
 }
 
 /// An image to burn or compare with: `.iso`, a `.cue` (single data track, 2048 or 2352 bytes
@@ -478,7 +477,17 @@ fn burn_dispatch(
             return super::mmcwrite::burn_direct(&drive.id, ctx.settings.io.transport == "spti", source, speed, options, &direct, &ctx.cancel, &tx);
         }
     }
-    system_burner().burn_source(&drive.id, source, speed, options, &ctx.cancel, tx)
+    // CliBurner only burns files; sources (Discovery zeros, streamed builds) go straight through
+    // MMC over SG_IO.
+    #[cfg(target_os = "linux")]
+    let r = {
+        let t = super::spti::SgIoTransport::open(&drive.id)?;
+        let direct = super::mmcwrite::DirectOptions::from_settings(&ctx.settings.write, &ctx.settings.io).with_speed(speed);
+        super::mmcwrite::burn_direct_with(&t, source, options, &direct, &ctx.cancel, &tx)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let r = system_burner().burn_source(&drive.id, source, speed, options, &ctx.cancel, tx);
+    r
 }
 
 /// Waits (cancellable) until a blank disc is in the drive.
