@@ -329,7 +329,7 @@ async fn encode_bd_title(
     let mkv = work.join(job.mkv());
     let real = probe::probe(&tools.ffprobe, &mkv).await?.duration_secs;
     if real <= 0.0 {
-        return Err(BuildError::Internal(format!("{}: ffprobe meldet keine Laufzeit", mkv.display())));
+        return Err(BuildError::Internal(format!("{}: ffprobe reports no duration", mkv.display())));
     }
     let mut labels = t.audio_labels(layout).into_iter();
     let audio = (0..layout.audio_langs.len()).map(|k| if k < t.audio.len() { labels.next().unwrap_or_default() } else { "Stille (Platzhalter)".to_string() }).collect();
@@ -538,13 +538,13 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }
     if !opts.resolution.is_hd() {
         return Err(BuildError::Template(format!(
-            "Für Blu-ray ist die Auflösung {} nicht möglich – bitte 1080p oder 720p wählen",
+            "Resolution {} is not possible for Blu-ray – please choose 1080p or 720p",
             opts.resolution.label()
         )));
     }
     if opts.bd_single_video && opts.inputs.len() > 1 {
         return Err(BuildError::Template(format!(
-            "„Nur ein Video pro Blu-ray“ ist eingestellt, es sind aber {} Videos ausgewählt",
+            "'Only one video per Blu-ray' is set, but {} videos are selected",
             opts.inputs.len()
         )));
     }
@@ -562,7 +562,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         remove_old_output(&work).await?;
     } else if work.exists() {
         return Err(BuildError::Template(format!(
-            "{} existiert, stammt aber nicht von diesem Programm – bitte umbenennen oder ein anderes Ausgabeverzeichnis wählen",
+            "{} exists but was not created by this program – rename it or choose another output folder",
             work.display()
         )));
     }
@@ -576,11 +576,11 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         log(Event::Step(tf!(opts.ui_lang, "analyzing", path = input.display())));
         let mut info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
         if info.video.is_none() {
-            return Err(BuildError::Internal(format!("{}: enthält keine Videospur", input.display())));
+            return Err(BuildError::Internal(format!("{}: contains no video stream", input.display())));
         }
         let sel = opts.selections.get(i).cloned().unwrap_or_default();
         let label = sel.label.clone().filter(|l| !l.trim().is_empty()).unwrap_or_else(|| {
-            input.file_stem().map_or_else(|| format!("Titel {}", i + 1), |s| s.to_string_lossy().into_owned())
+            input.file_stem().map_or_else(|| format!("Title {}", i + 1), |s| s.to_string_lossy().into_owned())
         });
         let (audio, mut subs, notes) = select_streams(&info, &sel, opts, &label);
         for note in notes {
@@ -684,7 +684,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         }
         (None, false) => {
             let tpl = crate::template::Template::load(&opts.template)
-                .map_err(|e| BuildError::Template(format!("Menü-Vorlage {}: {e}", opts.template.display())))?;
+                .map_err(|e| BuildError::Template(format!("Menu template {}: {e}", opts.template.display())))?;
             if tpl.pages.is_empty() {
                 log(Event::Step(tr(opts.ui_lang, "bd_template_no_pages").into()));
                 None

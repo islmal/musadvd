@@ -14,7 +14,7 @@ pub struct UiLang(pub &'static str);
 
 impl Default for UiLang {
     fn default() -> Self {
-        Self::DE
+        Self::EN
     }
 }
 
@@ -34,13 +34,13 @@ impl UiLang {
         UiLang(leaked)
     }
 
-    /// The language of a setting value; anything without a loadable locale file is the default (`de`).
+    /// The language of a setting value; anything without a loadable locale file is the default (`en`).
     pub fn from_setting(s: &str) -> Self {
         let code = s.trim().to_ascii_lowercase();
         if valid_code(&code) && catalog(&code).is_some() {
             Self::new(&code)
         } else {
-            Self::DE
+            Self::EN
         }
     }
 }
@@ -73,16 +73,16 @@ fn valid_code(code: &str) -> bool {
 /// Reads `<dir>/<code>.json` as a flat map of strings.
 pub fn load_from(dir: &Path, code: &str) -> Result<Catalog, String> {
     if !valid_code(code) {
-        return Err(format!("Ungültiger Sprachcode: {code:?}"));
+        return Err(format!("Invalid language code: {code:?}"));
     }
     let path = dir.join(format!("{code}.json"));
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{} nicht lesbar: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{} ist keine gültige Sprachdatei: {e}", path.display()))
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{} unreadable: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{} is not a valid language file: {e}", path.display()))
 }
 
 /// [`load_from`] in the first existing locales directory, fresh from disk.
 pub fn load(code: &str) -> Result<Catalog, String> {
-    load_from(&locales_dir().ok_or("Kein locales-Verzeichnis gefunden")?, code)
+    load_from(&locales_dir().ok_or("No locales folder found")?, code)
 }
 
 /// `(code, display name)` of every locale file in `dir` (`_meta.name`, else the code), sorted by code.
@@ -96,7 +96,7 @@ pub fn languages_in(dir: &Path) -> Vec<(String, String)> {
         let Some(code) = path.file_stem().and_then(|s| s.to_str()).filter(|c| valid_code(c)) else { continue };
         match load_from(dir, code) {
             Ok(cat) => out.push((code.to_string(), cat.get("_meta.name").cloned().unwrap_or_else(|| code.to_string()))),
-            Err(e) => eprintln!("Sprachdatei übersprungen: {e}"),
+            Err(e) => eprintln!("Language file skipped: {e}"),
         }
     }
     out.sort();
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn setting_maps_to_language() {
         assert_eq!(UiLang::from_setting("EN"), UiLang::EN);
-        assert_eq!(UiLang::from_setting("xx"), UiLang::DE);
+        assert_eq!(UiLang::from_setting("xx"), UiLang::EN);
     }
 
     #[test]

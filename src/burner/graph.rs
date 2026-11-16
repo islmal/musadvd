@@ -153,9 +153,9 @@ pub struct DateTime {
     pub second: u32,
 }
 
-const WEEKDAYS: [&str; 7] = ["MONTAG", "DIENSTAG", "MITTWOCH", "DONNERSTAG", "FREITAG", "SAMSTAG", "SONNTAG"];
+const WEEKDAYS: [&str; 7] = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
 const MONTHS: [&str; 12] =
-    ["JANUAR", "FEBRUAR", "MÄRZ", "APRIL", "MAI", "JUNI", "JULI", "AUGUST", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DEZEMBER"];
+    ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"];
 
 /// Days since 1970-01-01 (proleptic Gregorian).
 fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
@@ -357,7 +357,7 @@ pub fn write_ibg(f: &IbgFile) -> String {
 pub fn parse_ibg(text: &str) -> Result<IbgFile, String> {
     let mut lines = text.lines().map(str::trim);
     if lines.next() != Some("IBGD") {
-        return Err("keine Graph-Datei (IBGD fehlt)".into());
+        return Err("not a graph file (IBGD missing)".into());
     }
     let (mut config, mut sample_ms, mut kind, mut samples) = (Vec::new(), 100u32, None, Vec::new());
     let mut section = "";
@@ -370,30 +370,30 @@ pub fn parse_ibg(text: &str) -> Result<IbgFile, String> {
                     Some("WRITE") => GraphKind::Write,
                     Some("READ") => GraphKind::Read,
                     Some("VERIFY") => GraphKind::Verify,
-                    _ => return Err(format!("unbekannter Abschnitt: {name}")),
+                    _ => return Err(format!("unknown section: {name}")),
                 });
                 "values"
             };
         } else if line.starts_with("[END_") {
             section = "";
         } else if section == "config" {
-            let (k, v) = line.split_once('=').ok_or_else(|| format!("ungültige Zeile: {line}"))?;
+            let (k, v) = line.split_once('=').ok_or_else(|| format!("invalid line: {line}"))?;
             match k {
                 "IBGD_VERSION" => {}
-                "SAMPLE_RATE" => sample_ms = v.trim().parse().map_err(|_| format!("ungültige Abtastrate: {v}"))?,
+                "SAMPLE_RATE" => sample_ms = v.trim().parse().map_err(|_| format!("invalid sample rate: {v}"))?,
                 _ => config.push((k.to_string(), v.to_string())),
             }
         } else if section == "values" {
             let f: Vec<&str> = line.split(',').collect();
             let num = |i: usize| f.get(i).and_then(|s| s.trim().parse::<f64>().ok());
             let (Some(speed), Some(lba), Some(main)) = (num(0), num(1), num(2)) else {
-                return Err(format!("ungültiger Messwert: {line}"));
+                return Err(format!("invalid sample: {line}"));
             };
             samples.push(Sample { speed, lba: lba as u64, main, device: num(3).unwrap_or(0.0), cpu: num(4).unwrap_or(-1.0) });
         }
         // anything else (HRPC=…, the checksum line) is ignored
     }
-    Ok(IbgFile { kind: kind.ok_or("keine Messwerte in der Datei")?, config, sample_ms, samples })
+    Ok(IbgFile { kind: kind.ok_or("no samples in the file")?, config, sample_ms, samples })
 }
 
 #[cfg(test)]
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn template_matches_the_known_file_name() {
         let name = file_name("%M_%F_%D_%T_%I_%S", &ctx());
-        assert_eq!(name, "PIONEER_BD-RW_BDR-209M_1.33_DIENSTAG-13-OKTOBER-2026_15-42_CMC_MAG-M01-00_MAX.ibg");
+        assert_eq!(name, "PIONEER_BD-RW_BDR-209M_1.33_TUESDAY-13-OCTOBER-2026_15-42_CMC_MAG-M01-00_MAX.ibg");
     }
 
     #[test]
@@ -441,7 +441,7 @@ mod tests {
         let d = DateTime::from_unix(1_781_000_000);
         assert_eq!(days_from_civil(d.year, d.month, d.day) * 86_400 + (d.hour * 3600 + d.minute * 60 + d.second) as i64, 1_781_000_000);
         assert_eq!(DateTime::from_unix(951_782_400).day, 29, "2000-02-29 exists");
-        assert_eq!(MONTHS[2], "MÄRZ");
+        assert_eq!(MONTHS[2], "MARCH");
         let now = DateTime::now();
         assert!((2024..2200).contains(&now.year) && (1..=12).contains(&now.month));
     }
@@ -526,8 +526,8 @@ DATA_IMAGEFILE=-==/\\/[BUILD IMAGE]\\/\\==-\r\n\r\nWRITE_TEST_MODE=False\r\nWRIT
         assert_eq!((r.samples[0].device, r.samples[0].cpu), (0.0, -1.0), "missing columns default");
         assert_eq!(r.get("DEVICE"), Some("x"));
         assert!(parse_ibg("nope").is_err());
-        assert!(parse_ibg("IBGD\n[START_CONFIGURATION]\nIBGD_VERSION=2\n[END_CONFIGURATION]\n").unwrap_err().contains("Messwerte"));
-        assert!(parse_ibg("IBGD\n[START_WRITE_GRAPH_VALUES]\nabc\n[END_WRITE_GRAPH_VALUES]\n").unwrap_err().contains("Messwert"));
+        assert!(parse_ibg("IBGD\n[START_CONFIGURATION]\nIBGD_VERSION=2\n[END_CONFIGURATION]\n").unwrap_err().contains("samples"));
+        assert!(parse_ibg("IBGD\n[START_WRITE_GRAPH_VALUES]\nabc\n[END_WRITE_GRAPH_VALUES]\n").unwrap_err().contains("sample"));
     }
 
     #[test]

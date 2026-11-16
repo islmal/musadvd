@@ -92,7 +92,7 @@ enum Command {
         #[arg(long)]
         menu_title: Option<String>,
         /// Language of fixed menu texts.
-        #[arg(long, default_value = "de")]
+        #[arg(long, default_value = "en")]
         ui_lang: String,
         /// Keep the work directory (<output>/<project>.musadvd-work: intermediate MPEGs, menu PNGs, logs).
         #[arg(long)]
@@ -379,7 +379,7 @@ fn merge_selections(inputs: usize, merge: &[usize]) -> Result<Vec<dvd::StreamSel
     let mut sel = vec![dvd::StreamSelection::default(); inputs];
     for &n in merge {
         if n < 2 || n > inputs {
-            return Err(format!("--merge {n}: nur Eingaben 2 bis {inputs} lassen sich mit der vorherigen zusammenführen"));
+            return Err(format!("--merge {n}: only inputs 2 to {inputs} can be merged with the previous one"));
         }
         sel[n - 1].merge_with_previous = true;
     }
@@ -454,7 +454,7 @@ fn burn(
         .into_iter()
         .find(|d| d.join("VIDEO_TS.IFO").is_file() || is_bdmv_folder(d))
     else {
-        return fail(format!("{}: kein fertiger VIDEO_TS- oder BDMV-Ordner (VIDEO_TS.IFO bzw. index.bdmv fehlt)", video_ts.display()));
+        return fail(format!("{}: not a finished VIDEO_TS or BDMV folder (VIDEO_TS.IFO or index.bdmv missing)", video_ts.display()));
     };
     let project = video_ts.parent().unwrap_or(&video_ts);
     let label =
@@ -501,27 +501,27 @@ fn burn(
     };
     let d = match candidates[..] {
         [d] => d,
-        _ if drives.is_empty() => return fail("Kein DVD-/Blu-ray-Brenner gefunden.".into()),
-        [] => return fail(format!("Laufwerk '{}' nicht gefunden. Vorhanden:\n{}", drive.unwrap_or_default(), list())),
-        _ => return fail(format!("Mehrere Brenner – bitte mit --drive wählen:\n{}", list())),
+        _ if drives.is_empty() => return fail("No DVD/Blu-ray burner found.".into()),
+        [] => return fail(format!("Drive '{}' not found. Available:\n{}", drive.unwrap_or_default(), list())),
+        _ => return fail(format!("Several burners – choose one with --drive:\n{}", list())),
     };
     let media = match burner.probe_media(&d.id) {
         Ok(m) => m,
-        Err(e) => return fail(format!("{}: Disc nicht lesbar: {e}", d.name)),
+        Err(e) => return fail(format!("{}: disc unreadable: {e}", d.name)),
     };
     if let Some(problem) = media_problem(&media, &content) {
         return fail(problem);
     }
     if !media.blank && !erase {
-        return fail(format!("Die {} enthält Daten – zum Löschen/Überschreiben --erase angeben.", media.physical));
+        return fail(format!("The {} contains data – pass --erase to erase/overwrite it.", media.physical));
     }
     if dual_layer && !content.bluray && !media.layer_break_supported {
-        eprintln!("warning: {}: Der Layerwechsel wird vom Laufwerk festgelegt.", media.physical);
+        eprintln!("warning: {}: the drive decides the layer break.", media.physical);
     }
     let speed = preferred_speed(media.media_type, &media.speeds, &speed);
     let x = speed_x(speed, &media.speeds, media.media_type);
     println!(
-        "{}: {} – {} ({:.2} GB) bei {}{}{}",
+        "{}: {} – {} ({:.2} GB) at {}{}{}",
         d.name,
         media.physical,
         disc_name,
@@ -530,8 +530,8 @@ fn burn(
             WriteSpeed::Max => format!("max. {}", speed_label((x * media.media_type.sectors_per_sec_1x()).round() as u32, media.media_type)),
             WriteSpeed::Specific(s) => speed_label(s, media.media_type),
         },
-        if verify { ", mit Überprüfung" } else { "" },
-        if media.blank { "" } else { ", alte Daten werden gelöscht" }
+        if verify { ", with verification" } else { "" },
+        if media.blank { "" } else { ", old data will be erased" }
     );
 
     // Ctrl+C sets the cancel flag; the image writer and the burner stop as soon as they can.
@@ -542,7 +542,7 @@ fn burn(
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             if rt.block_on(tokio::signal::ctrl_c()).is_ok() {
                 cancel.store(true, Ordering::SeqCst);
-                eprintln!("\nAbbruch angefordert – warte auf das Laufwerk …");
+                eprintln!("\nCancel requested – waiting for the drive …");
             }
         });
     }
@@ -572,7 +572,7 @@ fn burn(
             }
             self.printed = Some((pct, Instant::now()));
             let left = musadvd::eta::format_remaining(u.remaining_secs);
-            eprint!("\r  {}: {pct:>3}% – noch {left}    ", self.message.trim_end_matches(['…', ' ']));
+            eprint!("\r  {}: {pct:>3}% – {left} left    ", self.message.trim_end_matches(['…', ' ']));
         }
     }
     let mut log = Log { message: String::new(), printed: None };
@@ -598,17 +598,17 @@ fn burn(
         Ok(outcome) => {
             let kind = match (content.bluray, media.media_type.is_bd()) {
                 (true, true) => "Blu-ray",
-                (true, false) => "AVCHD-Disc",
+                (true, false) => "AVCHD disc",
                 _ => "DVD",
             };
-            println!("Die {kind} wurde gebrannt{}.", if verify { " und überprüft" } else { "" });
+            println!("The {kind} was burned{}.", if verify { " and verified" } else { "" });
             if let Some(iso) = outcome.iso {
-                println!("  Disc-Image: {}", iso.display());
+                println!("  Disc image: {}", iso.display());
             }
             ExitCode::SUCCESS
         }
         Err(BurnError::Cancelled) => {
-            eprintln!("Brennvorgang abgebrochen.");
+            eprintln!("Burn cancelled.");
             ExitCode::from(130)
         }
         Err(e) => fail(e.to_string()),
@@ -631,27 +631,27 @@ fn main() -> ExitCode {
             let burner = system_burner();
             match burner.list_drives() {
                 Ok(drives) if drives.is_empty() => {
-                    println!("Kein DVD-Brenner gefunden.");
+                    println!("No DVD burner found.");
                     ExitCode::SUCCESS
                 }
                 Ok(drives) => {
                     for d in drives {
                         println!("{}", d.name);
                         match burner.probe_media(&d.id) {
-                            Ok(m) if !m.present => println!("  keine Disc eingelegt"),
+                            Ok(m) if !m.present => println!("  no disc inserted"),
                             Ok(m) => {
                                 let speeds: Vec<String> = m.speeds.iter().map(|&s| speed_label(s, m.media_type)).collect();
                                 println!(
                                     "  {} ({:?}), {}{}, frei {:.2} GB, Geschwindigkeiten: {}",
                                     m.physical,
                                     m.media_type,
-                                    if m.blank { "leer" } else { "beschrieben" },
-                                    if m.writable { "" } else { ", nicht beschreibbar" },
+                                    if m.blank { "blank" } else { "written" },
+                                    if m.writable { "" } else { ", not writable" },
                                     m.free_sectors as f64 * 2048.0 / 1e9,
                                     if speeds.is_empty() { "-".into() } else { speeds.join(", ") }
                                 );
                             }
-                            Err(e) => println!("  Disc nicht lesbar: {e}"),
+                            Err(e) => println!("  Disc unreadable: {e}"),
                         }
                     }
                     ExitCode::SUCCESS
@@ -699,8 +699,8 @@ fn main() -> ExitCode {
                         plan.image.label
                     );
                     if let Some(lb) = plan.layer_break {
-                        println!("  Layerwechsel bei Sektor {}{}", lb.l0_sectors, match lb.padding {
-                            Some((vts, p)) => format!(" ({p} Füllsektoren vor VTS {vts})"),
+                        println!("  Layer break at sector {}{}", lb.l0_sectors, match lb.padding {
+                            Some((vts, p)) => format!(" ({p} padding sectors before VTS {vts})"),
                             None => String::new(),
                         });
                     }
@@ -856,14 +856,14 @@ fn main() -> ExitCode {
         } => {
             let disc = DiscType::from(disc);
             if !disc.is_bluray() && template.is_none() && layout.is_none() {
-                eprintln!("error: --template oder --layout angeben (nur Blu-rays kommen ohne Menü aus)");
+                eprintln!("error: pass --template or --layout (only Blu-rays work without a menu)");
                 return ExitCode::FAILURE;
             }
             let ui_lang = ui_lang.trim().to_ascii_lowercase();
             let languages = musadvd::i18n::available_languages();
             if !languages.iter().any(|(code, _)| *code == ui_lang) {
                 let codes: Vec<&str> = languages.iter().map(|(code, _)| code.as_str()).collect();
-                eprintln!("error: unbekannte Sprache '{ui_lang}' (verfügbar: {})", codes.join(", "));
+                eprintln!("error: unknown language '{ui_lang}' (available: {})", codes.join(", "));
                 return ExitCode::FAILURE;
             }
             let custom_layout = match layout.as_deref().map(musadvd::layout::CustomLayout::load) {
@@ -953,7 +953,7 @@ fn main() -> ExitCode {
                     eprintln!("\nAbbruch angefordert (Ctrl+C) …");
                     cancel.cancel();
                     if tokio::signal::ctrl_c().await.is_ok() {
-                        eprintln!("\nSofortiger Abbruch.");
+                        eprintln!("\nImmediate abort.");
                         std::process::exit(130);
                     }
                 }
@@ -963,7 +963,7 @@ fn main() -> ExitCode {
             let mut on_event = move |ev: Event| match ev {
                 Event::Eta(e) => {
                     eta_text = match e.remaining_secs {
-                        Some(s) => format!(" – noch {} ([{}/{}] {})", musadvd::eta::format_remaining(s), e.phase_number, e.phase_count, e.phase_label),
+                        Some(s) => format!(" – {} left ([{}/{}] {})", musadvd::eta::format_remaining(s), e.phase_number, e.phase_count, e.phase_label),
                         None => String::new(),
                     };
                 }
@@ -995,13 +995,13 @@ fn main() -> ExitCode {
                 Ok(r) => {
                     eprintln!();
                     if opts.disc.is_bluray() {
-                        println!("{} fertig: {}", if opts.disc.is_avchd() { "AVCHD" } else { "Blu-ray" }, r.video_ts.display());
-                        let menus = if r.menu_pages == 0 { "ohne Menü (Autoplay)".to_string() } else { format!("{} Menü(s)", r.menu_pages) };
-                        println!("  Größe {:.0} MB von {} MB ({:.1}%), {menus}", r.size_mb, r.target_mb, r.size_mb / r.target_mb as f64 * 100.0);
+                        println!("{} finished: {}", if opts.disc.is_avchd() { "AVCHD" } else { "Blu-ray" }, r.video_ts.display());
+                        let menus = if r.menu_pages == 0 { "no menu (autoplay)".to_string() } else { format!("{} menu(s)", r.menu_pages) };
+                        println!("  Size {:.0} MB of {} MB ({:.1}%), {menus}", r.size_mb, r.target_mb, r.size_mb / r.target_mb as f64 * 100.0);
                     } else {
-                        println!("DVD fertig: {}", r.video_ts.display());
+                        println!("DVD finished: {}", r.video_ts.display());
                         println!(
-                            "  Größe {:.0} MB von {} MB ({:.1}%), {} Menüseite(n)",
+                            "  Size {:.0} MB of {} MB ({:.1}%), {} menu page(s)",
                             r.size_mb,
                             r.target_mb,
                             r.size_mb / r.target_mb as f64 * 100.0,
@@ -1009,15 +1009,15 @@ fn main() -> ExitCode {
                         );
                     }
                     if r.motion_pages > 0 {
-                        println!("  davon {} Motion-Menü(s)", r.motion_pages);
+                        println!("  of which {} motion menu(s)", r.motion_pages);
                     }
                     if r.resolution != Resolution::FullD1 {
                         let (w, h) = r.resolution.frame_size(opts.tv_standard);
-                        println!("  Titel in {} ({w}×{h})", r.resolution.label());
+                        println!("  Titles in {} ({w}×{h})", r.resolution.label());
                     }
                     for t in &r.titles {
                         println!(
-                            "  {} ({:.1} min, {}, {} kbps): Ton {:?}, Untertitel {:?}, {} Kapitel",
+                            "  {} ({:.1} min, {}, {} kbps): audio {:?}, subtitles {:?}, {} chapters",
                             t.label,
                             t.duration_secs / 60.0,
                             t.aspect.as_str(),
@@ -1028,8 +1028,8 @@ fn main() -> ExitCode {
                         );
                     }
                     match &r.work_dir {
-                        Some(w) => println!("  Arbeitsdateien (Menü-PNGs, XMLs, Logs): {}", w.display()),
-                        None => println!("  Arbeitsordner wurde entfernt (mit --keep-work behalten)"),
+                        Some(w) => println!("  Work files (menu PNGs, XMLs, logs): {}", w.display()),
+                        None => println!("  Work folder was removed (keep it with --keep-work)"),
                     }
                     ExitCode::SUCCESS
                 }

@@ -336,7 +336,7 @@ impl<R: Read> TsReader<R> {
     }
 
     fn complete(&mut self, pid: u16, data: Vec<u8>) -> io::Result<()> {
-        let pes = parse_pes(&data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ffmpeg: ungültiges PES-Paket"))?;
+        let pes = parse_pes(&data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ffmpeg: invalid PES packet"))?;
         self.ready.push_back(((pid - 0x100) as usize, pes));
         Ok(())
     }
@@ -361,7 +361,7 @@ impl<R: Read> TsReader<R> {
                 Err(e) => return Err(e),
             }
             if p[0] != 0x47 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "ffmpeg: Transportstrom nicht synchron"));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "ffmpeg: transport stream out of sync"));
             }
             let pid = (p[1] as u16 & 0x1F) << 8 | p[2] as u16;
             if !(0x100..0x1000).contains(&pid) || p[3] & 0x10 == 0 {
@@ -395,7 +395,7 @@ struct VideoClock {
 
 impl VideoClock {
     fn au(&mut self, pes: Pes, pid: u16) -> io::Result<Au> {
-        let pts = pes.pts.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Videobild ohne PTS"))?;
+        let pts = pes.pts.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Video picture without PTS"))?;
         let first = self.n == 0;
         let pts0 = *self.pts0.get_or_insert(pts);
         if first {
@@ -629,7 +629,7 @@ fn audio_stream(pid: u16, codec: Codec, lang: [u8; 3], info: AudioInfo) -> Strea
 
 /// Segments of a `.sup` stream as PES payloads (segment type, length, data) with their stamps.
 fn sup_aus(sup: &[u8], pid: u16) -> io::Result<Vec<Au>> {
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "Untertitel-Datei: ungültiges .sup-Format");
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "Subtitle file: invalid .sup format");
     let mut aus = Vec::new();
     let mut i = 0;
     while i < sup.len() {
@@ -754,7 +754,7 @@ impl MuxJob {
                             queues[idx].extend(audio[idx - 1].au(pes, bd_clip::AUDIO_PID + idx as u16 - 1)?);
                         }
                     }
-                    Some((idx, _)) => return Err(bad(format!("ffmpeg lieferte unerwarteten Datenstrom {idx}"))),
+                    Some((idx, _)) => return Err(bad(format!("ffmpeg delivered an unexpected data stream {idx}"))),
                     None => ended = true,
                 }
             }
@@ -762,12 +762,12 @@ impl MuxJob {
             while (ended || queues.iter().all(|q| !q.is_empty())) && (!queues.iter().all(VecDeque::is_empty) || !sub_queue.is_empty()) {
                 if packetizer.is_none() {
                     if queues[0].is_empty() {
-                        return Err(bad("ffmpeg lieferte kein Video".into()));
+                        return Err(bad("ffmpeg delivered no video".into()));
                     }
                     // Stream list (and with it the PMT) is complete once all first frames are in.
                     let mut all = vec![video_stream(&self.video)];
                     for (k, a) in audio.iter().enumerate() {
-                        let info = a.info.ok_or_else(|| bad(format!("Audiospur {} ist leer", k + 1)))?;
+                        let info = a.info.ok_or_else(|| bad(format!("Audio track {} is empty", k + 1)))?;
                         all.push(audio_stream(bd_clip::AUDIO_PID + k as u16, a.codec, self.audio[k].1, info));
                     }
                     all.extend(streams.iter().cloned());
@@ -796,7 +796,7 @@ impl MuxJob {
             (packets, ep) = p.finish()?;
         }
         if packets == 0 {
-            return Err(bad("ffmpeg lieferte keine Daten".into()));
+            return Err(bad("ffmpeg delivered no data".into()));
         }
 
         // Clip and playlist: the clip ends one frame after the last picture's PTS.
@@ -835,7 +835,7 @@ pub async fn mux_title(tools: &Toolchain, job: &MuxJob) -> Result<String, ToolEr
     let summary = tools
         .ffmpeg_sink(&job.ffmpeg_args(), job.duration_secs, |_| {}, move |pipe| owned.mux(std::io::BufReader::with_capacity(1 << 20, pipe)))
         .await?;
-    Ok(format!("{:05}.m2ts: {} Pakete, {} Bilder, {} Einstiegspunkte\n", job.number, summary.packets, summary.pictures, summary.idr))
+    Ok(format!("{:05}.m2ts: {} packets, {} pictures, {} entry points\n", job.number, summary.packets, summary.pictures, summary.idr))
 }
 
 #[cfg(test)]

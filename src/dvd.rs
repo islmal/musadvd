@@ -83,7 +83,7 @@ impl fmt::Display for BuildError {
             BuildError::Calc(e) => write!(f, "{e}"),
             BuildError::Template(e) => write!(f, "{e}"),
             BuildError::Internal(e) => write!(f, "{e}"),
-            BuildError::Cancelled => write!(f, "Konvertierung abgebrochen"),
+            BuildError::Cancelled => write!(f, "Conversion cancelled"),
             BuildError::DoesNotFit { disc, plan } => write!(
                 f,
                 "content does not fit on {disc:?}: even at the minimum of {} kbps it needs {:.0} MB of {} MB \
@@ -480,12 +480,12 @@ pub(crate) fn check_group_shapes(members: &[MemberShape]) -> Result<(), BuildErr
     for &(label, a, s) in &members[1..] {
         if a != audio {
             return Err(BuildError::Template(format!(
-                "{label} lässt sich nicht mit {first} zusammenführen: {a} statt {audio} Tonspuren (Spuren in den Titeleinstellungen angleichen)"
+                "{label} cannot be merged with {first}: {a} instead of {audio} audio tracks (align the tracks in the title settings)"
             )));
         }
         if s != subs {
             return Err(BuildError::Template(format!(
-                "{label} lässt sich nicht mit {first} zusammenführen: {s} statt {subs} Untertitelspuren (Spuren in den Titeleinstellungen angleichen)"
+                "{label} cannot be merged with {first}: {s} instead of {subs} subtitle tracks (align the tracks in the title settings)"
             )));
         }
     }
@@ -923,7 +923,7 @@ pub(crate) async fn run_limited<T: Send + 'static>(
             Some((index, fraction, telemetry)) = rx.recv() => on_event(JobEvent::Progress { index, fraction, telemetry }),
             joined = set.join_next() => match joined {
                 None => break,
-                Some(Err(e)) => return Err(BuildError::Internal(format!("Hintergrund-Job abgebrochen: {e}"))),
+                Some(Err(e)) => return Err(BuildError::Internal(format!("Background job cancelled: {e}"))),
                 // Returning drops `set`, which aborts the remaining jobs.
                 Some(Ok((_, Err(e)))) => return Err(e),
                 Some(Ok((index, Ok(value)))) => {
@@ -1126,7 +1126,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     }
     if opts.resolution.is_hd() {
         return Err(BuildError::Template(format!(
-            "Die Auflösung {} gibt es nur für Blu-ray – für eine DVD bitte Full D1, Half D1 oder SIF wählen",
+            "Resolution {} only exists for Blu-ray – for a DVD choose Full D1, Half D1 or SIF",
             opts.resolution.label()
         )));
     }
@@ -1147,7 +1147,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         remove_old_output(&work).await?;
     } else if work.exists() {
         return Err(BuildError::Template(format!(
-            "{} existiert, stammt aber nicht von diesem Programm – bitte umbenennen oder ein anderes Ausgabeverzeichnis wählen",
+            "{} exists but was not created by this program – rename it or choose another output folder",
             work.display()
         )));
     }
@@ -1169,7 +1169,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         let mut info = cancellable(cancel, probe::probe(&tools.ffprobe, input)).await?;
         let sel = opts.selections.get(i).cloned().unwrap_or_default();
         let label = sel.label.clone().filter(|l| !l.trim().is_empty()).unwrap_or_else(|| {
-            input.file_stem().map_or_else(|| format!("Titel {}", i + 1), |s| s.to_string_lossy().into_owned())
+            input.file_stem().map_or_else(|| format!("Title {}", i + 1), |s| s.to_string_lossy().into_owned())
         });
 
         let (audio, subtitles, notes) = select_streams(&info, &sel, opts, &label);
@@ -1212,7 +1212,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         let chapters: usize = titles[g.clone()].iter().map(|t| t.chapters.len()).sum();
         if chapters > MAX_CHAPTERS {
             return Err(BuildError::Template(format!(
-                "{}: {chapters} Kapitel nach dem Zusammenführen, eine DVD erlaubt {MAX_CHAPTERS} pro Titel",
+                "{}: {chapters} chapters after merging, a DVD allows {MAX_CHAPTERS} per title",
                 titles[g.start].label
             )));
         }
@@ -1363,7 +1363,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         let main_menu_audio: Option<ClipSource> = match &opts.motion_audio {
             MenuAudio::File(path) if motion => {
                 if !path.is_file() {
-                    return Err(BuildError::Template(format!("Menü-Audiodatei nicht gefunden: {}", path.display())));
+                    return Err(BuildError::Template(format!("Menu audio file not found: {}", path.display())));
                 }
                 Some(ClipSource { path: path.clone(), start_secs: 0.0, has_audio: true })
             }
@@ -1671,7 +1671,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     let menu_sizes = run_limited(menu_jobs, jobs, cancel, |e| {
         if let JobEvent::Finished { finished, total, .. } = e {
             log(Event::Progress {
-                label: format!("Menüs kodieren ({finished}/{total})"),
+                label: format!("Building menus ({finished}/{total})"),
                 fraction: finished as f64 / total as f64,
             });
         }
@@ -1736,7 +1736,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     };
     let encode_jobs = heavy_jobs.min(count);
     log(Event::Step(format!(
-        "Kodiere {count} Titel ({passes}, {encode_jobs} parallel, {} kbps Video, {} {}×{})",
+        "Encoding {count} titles ({passes}, {encode_jobs} in parallel, {} kbps video, {} {}×{})",
         plan.video_kbps,
         resolution.label(),
         resolution.frame_size(tv).0,
@@ -2009,8 +2009,8 @@ mod tests {
     fn merged_members_need_equal_tracks() {
         assert!(check_group_shapes(&[("a", 2, 1), ("b", 2, 1)]).is_ok());
         let e = check_group_shapes(&[("a", 2, 1), ("b", 1, 1)]).unwrap_err().to_string();
-        assert!(e.contains("b lässt sich nicht mit a zusammenführen") && e.contains("Tonspuren"), "{e}");
-        assert!(check_group_shapes(&[("a", 1, 0), ("b", 1, 2)]).unwrap_err().to_string().contains("Untertitel"));
+        assert!(e.contains("b cannot be merged with a") && e.contains("audio tracks"), "{e}");
+        assert!(check_group_shapes(&[("a", 1, 0), ("b", 1, 2)]).unwrap_err().to_string().contains("subtitle tracks"));
     }
 
     #[test]
@@ -2284,7 +2284,7 @@ mod tests {
         let jp = BuildOptions { audio_langs: vec!["ja".into()], ..BuildOptions::default() };
         let (audio, _, notes) = select_streams(&src, &none, &jp, "Film");
         assert_eq!(audio, vec![0]);
-        assert!(notes.iter().any(|n| n.contains("keine Tonspur passt")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("no audio track matches")), "{notes:?}");
 
         // The user's choice wins over the filter.
         let chosen = StreamSelection { audio: Some(vec![3]), subtitles: Some(vec![]), ..StreamSelection::default() };

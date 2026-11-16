@@ -44,13 +44,13 @@ pub fn dvd_text(l: &DvdLayout) -> String {
 /// Tolerant: LF or CRLF, any case and spacing around the key.
 pub fn parse_dvd(text: &str) -> Result<DvdLayout, SidecarError> {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-    let first = lines.next().ok_or_else(|| bad("leere .dvd-Datei"))?;
-    let (key, value) = first.split_once('=').ok_or_else(|| bad(".dvd-Datei: „LayerBreak=…“ fehlt"))?;
+    let first = lines.next().ok_or_else(|| bad("empty .dvd file"))?;
+    let (key, value) = first.split_once('=').ok_or_else(|| bad(".dvd file: 'LayerBreak=…' missing"))?;
     if !key.trim().eq_ignore_ascii_case("LayerBreak") {
-        return Err(bad(".dvd-Datei: „LayerBreak=…“ fehlt"));
+        return Err(bad(".dvd file: 'LayerBreak=…' missing"));
     }
-    let layer_break = value.trim().parse().map_err(|_| bad(".dvd-Datei: ungültiger LayerBreak-Wert"))?;
-    let image = lines.next().ok_or_else(|| bad(".dvd-Datei: Image-Name fehlt"))?.to_string();
+    let layer_break = value.trim().parse().map_err(|_| bad(".dvd file: invalid LayerBreak value"))?;
+    let image = lines.next().ok_or_else(|| bad(".dvd file: image name missing"))?.to_string();
     Ok(DvdLayout { layer_break, image })
 }
 
@@ -107,32 +107,32 @@ pub fn parse_cue(text: &str) -> Result<Cue, SidecarError> {
         match cmd.to_ascii_uppercase().as_str() {
             "FILE" => {
                 if file.is_some() {
-                    return Err(bad("Cue-Sheet mit mehreren Dateien wird nicht unterstützt"));
+                    return Err(bad("Cue sheets with several files are not supported"));
                 }
                 let (name, kind) = match rest.strip_prefix('"') {
-                    Some(r) => r.split_once('"').ok_or_else(|| bad("Cue-Sheet: Dateiname ohne schließendes Anführungszeichen"))?,
-                    None => rest.rsplit_once(char::is_whitespace).ok_or_else(|| bad("Cue-Sheet: FILE ohne Typ"))?,
+                    Some(r) => r.split_once('"').ok_or_else(|| bad("Cue sheet: file name without closing quote"))?,
+                    None => rest.rsplit_once(char::is_whitespace).ok_or_else(|| bad("Cue sheet: FILE without type"))?,
                 };
                 if !kind.trim().eq_ignore_ascii_case("BINARY") {
-                    return Err(bad("Cue-Sheet: nur BINARY-Dateien werden unterstützt"));
+                    return Err(bad("Cue sheet: only BINARY files are supported"));
                 }
                 file = Some(name.trim().to_string());
             }
             "TRACK" => {
                 tracks += 1;
                 if tracks > 1 {
-                    return Err(bad("Cue-Sheet mit mehreren Tracks wird nicht unterstützt"));
+                    return Err(bad("Cue sheets with several tracks are not supported"));
                 }
                 mode = Some(match rest.split_whitespace().nth(1).map(str::to_ascii_uppercase).as_deref() {
                     Some("MODE1/2048") => CueMode::Mode1_2048,
                     Some("MODE1/2352") => CueMode::Mode1_2352,
-                    _ => return Err(bad("Cue-Sheet: nur Daten-Tracks (MODE1/2048, MODE1/2352) werden unterstützt")),
+                    _ => return Err(bad("Cue sheet: only data tracks (MODE1/2048, MODE1/2352) are supported")),
                 });
             }
             "INDEX" => {
                 let mut p = rest.split_whitespace();
                 if p.next() == Some("01") {
-                    index01 = Some(p.next().and_then(parse_msf).ok_or_else(|| bad("Cue-Sheet: ungültige Zeitangabe"))?);
+                    index01 = Some(p.next().and_then(parse_msf).ok_or_else(|| bad("Cue sheet: invalid time value"))?);
                 }
             }
             _ => {}
@@ -140,7 +140,7 @@ pub fn parse_cue(text: &str) -> Result<Cue, SidecarError> {
     }
     match (file, mode, index01) {
         (Some(file), Some(mode), Some(index01)) => Ok(Cue { file, mode, index01 }),
-        _ => Err(bad("Cue-Sheet: FILE, TRACK und INDEX 01 erforderlich")),
+        _ => Err(bad("Cue sheet: FILE, TRACK and INDEX 01 required")),
     }
 }
 
@@ -227,12 +227,12 @@ pub fn mds_bytes(m: &Mds) -> Vec<u8> {
 
 pub fn parse_mds(b: &[u8]) -> Result<Mds, SidecarError> {
     let u32_at = |at: usize| b.get(at..at + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()));
-    let bad = || bad("ungültige .mds-Datei");
+    let bad = || bad("invalid .mds file");
     if b.len() < MDS_HEADER || &b[..16] != MDS_SIGNATURE {
         return Err(bad());
     }
     if u16::from_le_bytes([b[18], b[19]]) != MDS_MEDIUM_DVD || u16::from_le_bytes([b[20], b[21]]) != 1 {
-        return Err(SidecarError("nur .mds-Dateien mit einer DVD-Sitzung werden unterstützt".into()));
+        return Err(SidecarError("only .mds files with one DVD session are supported".into()));
     }
     let session = u32_at(80).ok_or_else(bad)? as usize;
     let sectors = (u32_at(session + 4).ok_or_else(bad)? as i32 + 1) as u32;
@@ -283,9 +283,9 @@ mod tests {
         let audio = "FILE \"a.wav\" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00";
         assert!(parse_cue(audio).unwrap_err().0.contains("BINARY"));
         let audio = "FILE \"a.bin\" BINARY\n TRACK 01 AUDIO\n  INDEX 01 00:00:00";
-        assert!(parse_cue(audio).unwrap_err().0.contains("Daten-Tracks"));
+        assert!(parse_cue(audio).unwrap_err().0.contains("data tracks"));
         let two = format!("{}  TRACK 02 MODE1/2048\r\n", cue_text("a.bin", CueMode::Mode1_2048));
-        assert!(parse_cue(&two).unwrap_err().0.contains("mehreren Tracks"));
+        assert!(parse_cue(&two).unwrap_err().0.contains("several tracks"));
         assert!(parse_cue("FILE \"a.bin\" BINARY\n").is_err());
         assert_eq!(CueMode::Mode1_2352.sector_size(), 2352);
     }

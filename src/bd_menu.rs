@@ -80,7 +80,7 @@ fn menu_audio(menu: &CustomMenu, titles: &[LayoutTitle]) -> (Option<ClipSource>,
             if clip.has_audio {
                 (Some(clip), None)
             } else {
-                (None, Some(format!("Titel {title} hat keinen Ton – Menü bleibt stumm")))
+                (None, Some(format!("Title {title} has no audio – the menu stays silent")))
             }
         }
     }
@@ -514,7 +514,7 @@ fn ig_set(pending: &[Pending], steps: u32, crop: bool, menu_name: &str) -> Resul
             let mut px = Vec::with_capacity((w * h) as usize);
             for q in img.pixels() {
                 let Some(idx) = pal.index(q.0) else {
-                    return Err(LayoutError(vec![format!("Menü „{menu_name}“: zu viele verschiedene Button-Farben für die Blu-ray-Palette (255)")]));
+                    return Err(LayoutError(vec![format!("Menu '{menu_name}': too many different button colours for the Blu-ray palette (255)")]));
                 };
                 px.push(idx);
             }
@@ -525,7 +525,7 @@ fn ig_set(pending: &[Pending], steps: u32, crop: bool, menu_name: &str) -> Resul
     }
     if budget > IG_OBJECT_BUDGET {
         return Err(LayoutError(vec![format!(
-            "Menü „{menu_name}“: die Button-Grafiken sind zu groß für den Blu-ray-Speicher ({} MiB, max. 16) – kleinere Buttons verwenden",
+            "Menu '{menu_name}': the button graphics are too large for Blu-ray memory ({} MiB, max. 16) – use smaller buttons",
             budget / 1024 / 1024
         )]));
     }
@@ -651,7 +651,7 @@ fn render_page(
             continue;
         }
         let Some(rect) = bd_button_rect(e, canvas, frame) else {
-            warnings.push(format!("{}: Button liegt außerhalb des Bildes und wurde ausgelassen", element_name(e, n)));
+            warnings.push(format!("{}: button lies outside the picture and was skipped", element_name(e, n)));
             continue;
         };
         let (hl, sel) = button_colors(layout, e);
@@ -738,7 +738,7 @@ fn render_page(
     } else if intro.is_some() {
         let (ig, fits) = fit_budget(make_ig, IG_BUDGET)?;
         if !fits {
-            warnings.push("Button-Grafiken sehr groß – Buttons erscheinen auf manchen Playern verzögert".into());
+            warnings.push("Button graphics are very large – buttons appear with a delay on some players".into());
         }
         Some(ig)
     } else {
@@ -793,7 +793,7 @@ pub fn render_pages(
                     ig.default_selected = Some(1);
                 }
             }
-            page.warnings = page.warnings.into_iter().map(|w| format!("Menü „{}“: {w}", menu.name)).collect();
+            page.warnings = page.warnings.into_iter().map(|w| format!("Menu '{}': {w}", menu.name)).collect();
             Ok(page)
         })
         .collect()

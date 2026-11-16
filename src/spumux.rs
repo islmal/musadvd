@@ -45,11 +45,11 @@ pub enum SpumuxError {
 impl fmt::Display for SpumuxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SpumuxError::Io(e) => write!(f, "Ein-/Ausgabefehler: {e}"),
-            SpumuxError::Xml(m) => write!(f, "Untertitel-XML ungültig: {m}"),
-            SpumuxError::Image { path, reason } => write!(f, "Untertitelbild {}: {reason}", path.display()),
-            SpumuxError::DuplicateStream(id) => write!(f, "Substream 0x{id:02x} ist im Video bereits vorhanden"),
-            SpumuxError::Unsupported(m) => write!(f, "nicht unterstützt: {m}"),
+            SpumuxError::Io(e) => write!(f, "I/O error: {e}"),
+            SpumuxError::Xml(m) => write!(f, "Invalid subtitle XML: {m}"),
+            SpumuxError::Image { path, reason } => write!(f, "Subtitle image {}: {reason}", path.display()),
+            SpumuxError::DuplicateStream(id) => write!(f, "Substream 0x{id:02x} already exists in the video"),
+            SpumuxError::Unsupported(m) => write!(f, "not supported: {m}"),
             SpumuxError::TooComplex(n) => write!(f, "button group search exceeded its limit ({n} buttons)"),
         }
     }
@@ -149,20 +149,20 @@ pub fn parse_xml(xml: &str, dir: &Path) -> Result<Vec<SpuDef>, SpumuxError> {
     let bad = |m: &str| SpumuxError::Xml(m.to_string());
     let mut out = Vec::new();
     for segment in xml.split("<spu ").skip(1) {
-        let close = segment.find('>').ok_or_else(|| bad("<spu> nicht geschlossen"))?;
+        let close = segment.find('>').ok_or_else(|| bad("<spu> not closed"))?;
         let tag = &segment[..close];
         // `<spu .../>` has no body; otherwise the buttons run up to `</spu>`.
         let body = if tag.ends_with('/') { "" } else { segment[close..].split("</spu>").next().unwrap_or("") };
-        let time = |name: &str| attr(tag, name).map(|v| parse_time(&v).ok_or_else(|| bad("Zeitangabe"))).transpose();
+        let time = |name: &str| attr(tag, name).map(|v| parse_time(&v).ok_or_else(|| bad("time value"))).transpose();
         let num = |name: &str| attr(tag, name).map(|v| v.parse::<u32>().map_err(|_| bad("Zahl"))).transpose();
         let menu = match (attr(tag, "highlight"), attr(tag, "select")) {
             (Some(h), Some(s)) => {
                 let mut buttons = Vec::new();
                 for b in body.split("<button ").skip(1) {
-                    let b = &b[..b.find('>').ok_or_else(|| bad("<button> nicht geschlossen"))?];
+                    let b = &b[..b.find('>').ok_or_else(|| bad("<button> not closed"))?];
                     let coord = |n: &str| attr(b, n).and_then(|v| v.parse::<i32>().ok()).ok_or_else(|| bad("Button-Koordinate"));
                     buttons.push(ButtonDef {
-                        name: attr(b, "name").ok_or_else(|| bad("Button ohne Namen"))?,
+                        name: attr(b, "name").ok_or_else(|| bad("button without a name"))?,
                         rect: [coord("x0")?, coord("y0")?, coord("x1")?, coord("y1")?],
                         nav: ["up", "down", "left", "right"].map(|n| attr(b, n)),
                         autoaction: attr(b, "autoaction").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("autoaction")),
@@ -174,10 +174,10 @@ pub fn parse_xml(xml: &str, dir: &Path) -> Result<Vec<SpuDef>, SpumuxError> {
         };
         let image = match (&menu, attr(tag, "image")) {
             (Some(_), _) => PathBuf::new(),
-            (None, i) => dir.join(i.ok_or_else(|| bad("image fehlt"))?),
+            (None, i) => dir.join(i.ok_or_else(|| bad("image missing"))?),
         };
         out.push(SpuDef {
-            start: time("start")?.ok_or_else(|| bad("start fehlt"))?,
+            start: time("start")?.ok_or_else(|| bad("start missing"))?,
             end: time("end")?,
             image,
             x: num("xoffset")?.unwrap_or(0),
@@ -210,14 +210,14 @@ fn load_png(path: &Path) -> Result<Pic, SpumuxError> {
     let mut reader = decoder.read_info().map_err(|e| bad(e.to_string()))?;
     let info = reader.info();
     if info.color_type != png::ColorType::Indexed || info.bit_depth != png::BitDepth::Eight {
-        return Err(SpumuxError::Unsupported(format!("{}: kein 8-Bit-Palettenbild", path.display())));
+        return Err(SpumuxError::Unsupported(format!("{}: not an 8-bit palette image", path.display())));
     }
     let (plte, trns) = (info.palette.clone().unwrap_or_default(), info.trns.clone().unwrap_or_default());
-    let mut buf = vec![0; reader.output_buffer_size().ok_or_else(|| bad("Bild zu groß".into()))?];
+    let mut buf = vec![0; reader.output_buffer_size().ok_or_else(|| bad("Image too large".into()))?];
     let frame = reader.next_frame(&mut buf).map_err(|e| bad(e.to_string()))?;
     let (width, height) = (frame.width, frame.height);
     if width > 720 || height > 576 {
-        return Err(SpumuxError::Unsupported(format!("{}: größer als 720x576", path.display())));
+        return Err(SpumuxError::Unsupported(format!("{}: larger than 720x576", path.display())));
     }
     let color_of = |i: u8| {
         let i = i as usize;
@@ -645,7 +645,7 @@ fn pick_groups(
 fn prepare_menu(menu: &MenuDef, x: u32, y: u32) -> Result<Option<(Prepared, u32, u32, Vec<[u8; 3]>, MenuData)>, SpumuxError> {
     let (hl, sel) = (load_png(&menu.highlight)?, load_png(&menu.select)?);
     if (hl.width, hl.height) != (sel.width, sel.height) || hl.width % 2 != 0 || hl.height % 2 != 0 {
-        return Err(SpumuxError::Unsupported("Masken ungleich groß oder ungerade".into()));
+        return Err(SpumuxError::Unsupported("Masks differ in size or are odd-sized".into()));
     }
     let (w, h) = (hl.width as usize, hl.height as usize);
     let img_palette = [[0u8; 4]];
@@ -657,7 +657,7 @@ fn prepare_menu(menu: &MenuDef, x: u32, y: u32) -> Result<Option<(Prepared, u32,
     for b in &menu.buttons {
         let r = b.rect;
         if r[0] != r[2] && r[1] != r[3] && (r[0] < 0 || r[2] < r[0] || r[2] > w as i32 || r[1] < 0 || r[3] < r[1] || r[3] > h as i32) {
-            return Err(SpumuxError::Unsupported(format!("Button {} außerhalb des Bildes", b.name)));
+            return Err(SpumuxError::Unsupported(format!("Button {} outside the picture", b.name)));
         }
     }
     let rects: Vec<[i32; 4]> = menu.buttons.iter().map(|b| b.rect).collect();
@@ -710,7 +710,7 @@ fn prepare_menu(menu: &MenuDef, x: u32, y: u32) -> Result<Option<(Prepared, u32,
     let mut clut = Vec::new();
     for c in hl.palette.iter().chain(&sel.palette).filter(|c| c[3] != 0) {
         if clut_slot(&mut clut, [c[0], c[1], c[2]]).is_none() {
-            return Err(SpumuxError::Unsupported("mehr als 16 Farben".into()));
+            return Err(SpumuxError::Unsupported("more than 16 colours".into()));
         }
     }
     let buttons = menu
@@ -806,7 +806,7 @@ impl<W: Write> Mux<W> {
                     let mut clut = Vec::new();
                     for c in pic.palette.iter().filter(|c| c[3] != 0) {
                         if clut_slot(&mut clut, [c[0], c[1], c[2]]).is_none() {
-                            return Err(SpumuxError::Unsupported("mehr als 16 Farben".into()));
+                            return Err(SpumuxError::Unsupported("more than 16 colours".into()));
                         }
                     }
                     (prep, x, y, clut, None)

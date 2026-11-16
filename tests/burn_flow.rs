@@ -144,7 +144,7 @@ impl OpticalBurner for FakeBurner {
             let f = (step as f64 / 10.0).min(1.0);
             send(BurnPhase::Writing, f);
             match self.mode {
-                Mode::Fail if step == 5 => return Err(BurnError::Backend("Schreibfehler".into())),
+                Mode::Fail if step == 5 => return Err(BurnError::Backend("Write error".into())),
                 Mode::UntilCancelled => {
                     assert!(step < 500, "cancel never arrived");
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -215,7 +215,7 @@ fn burns_and_removes_the_image() {
     // Image progress first, then the burner's phases in order; remaining time sane, 0 at the end.
     let updates = updates.into_inner().unwrap();
     assert_eq!(updates[0].progress.phase, BurnPhase::Preparing);
-    assert_eq!(updates[0].progress.message, "Disc-Image wird erstellt …");
+    assert_eq!(updates[0].progress.message, "Building disc image …");
     assert!(updates.iter().any(|u| u.progress.phase == BurnPhase::Preparing && u.progress.fraction >= 1.0));
     let order = |p: BurnPhase| {
         [BurnPhase::Preparing, BurnPhase::Formatting, BurnPhase::Writing, BurnPhase::Finalizing, BurnPhase::Verifying, BurnPhase::Done]
@@ -273,7 +273,7 @@ fn backend_error_removes_the_image() {
     let mut j = job(video_ts, iso.clone());
     j.keep_iso = true; // only kept after success
     let err = burn_video_ts(&FakeBurner::new(Mode::Fail), &j, &AtomicBool::new(false), |_| {}).unwrap_err();
-    assert!(matches!(&err, BurnError::Backend(m) if m == "Schreibfehler"), "{err}");
+    assert!(matches!(&err, BurnError::Backend(m) if m == "Write error"), "{err}");
     no_image_left(&iso);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -379,7 +379,7 @@ fn blu_ray_image_reaches_the_burner_without_layer_break() {
     assert_eq!((seen.layer_break, seen.speed), (None, WriteSpeed::Specific(13_170)));
     assert!(seen.verify && seen.eject && !seen.erase, "options passed through");
     let updates = updates.into_inner().unwrap();
-    assert_eq!(updates[0].progress.message, "Disc-Image wird erstellt …");
+    assert_eq!(updates[0].progress.message, "Building disc image …");
     assert!(updates[0].remaining_secs > 0.0 && updates.iter().all(|u| u.remaining_secs.is_finite()));
     assert_eq!(updates.last().unwrap().remaining_secs, 0.0);
     std::fs::remove_dir_all(&dir).ok();
@@ -433,7 +433,7 @@ fn blu_ray_failure_and_cancel_leave_no_image() {
     let mut j = bd_job(iso.clone());
     j.keep_iso = true;
     let err = burn_video_ts(&FakeBurner::new(Mode::Fail), &j, &AtomicBool::new(false), |_| {}).unwrap_err();
-    assert!(matches!(&err, BurnError::Backend(m) if m == "Schreibfehler"), "{err}");
+    assert!(matches!(&err, BurnError::Backend(m) if m == "Write error"), "{err}");
     no_image_left(&iso);
 
     let cancel = AtomicBool::new(false);
@@ -490,7 +490,7 @@ fn cli_rejects_bad_arguments() {
     let missing = std::env::temp_dir().join("cx_burnflow_does_not_exist");
     let (code, err) = cli(&[missing.to_str().unwrap()]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("kein fertiger VIDEO_TS- oder BDMV-Ordner"), "{err}");
+    assert!(err.contains("not a finished VIDEO_TS or BDMV folder"), "{err}");
 }
 
 /// Lists the real drives (read-only); a drive name that matches nothing stops before probing
@@ -505,7 +505,7 @@ fn cli_unknown_drive_stops_before_writing() {
     let project = video_ts.parent().unwrap();
     let (code, err) = cli(&[project.to_str().unwrap(), "--drive", "KEIN_LAUFWERK_XYZ", "--keep-iso"]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("nicht gefunden") || err.contains("Brenner gefunden"), "{err}");
+    assert!(err.contains("not found") || err.contains("burner found"), "{err}");
     let iso_dir = project.parent().unwrap();
     let images: Vec<_> = std::fs::read_dir(iso_dir)
         .unwrap()

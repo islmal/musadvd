@@ -51,7 +51,7 @@ fn layout_json(dir: &Path, canvas_h: u32) -> String {
   "canvas": {{"width": 720, "height": {canvas_h}}},
   "highlight": {{"color": "#00E0FF", "selectColor": "#FFFFFF", "opacity": 0.9}},
   "menus": [
-    {{"id": "main", "name": "Hauptmenü", "role": "title", "durationSecs": 3,
+    {{"id": "main", "name": "Main menu", "role": "title", "durationSecs": 3,
       "background": {{"image": "{bg}", "blur": 6}},
       "audio": {{"type": "title", "title": 1}},
       "elements": [
@@ -82,7 +82,7 @@ fn layout_json(dir: &Path, canvas_h: u32) -> String {
         {{"type": "text", "text": "Kapitel 2", "x": 40, "y": 100, "w": 300, "h": 44, "action": {{"type": "playChapter", "title": 1, "chapter": 2}}}},
         {{"type": "text", "text": "Film 2 abspielen", "x": 40, "y": 160, "w": 300, "h": 44, "action": {{"type": "playTitle", "title": 2}}}},
         {{"type": "text", "text": "Extras", "x": 40, "y": 220, "w": 300, "h": 44, "action": {{"type": "menu", "menu": "extras1"}}}},
-        {{"type": "text", "text": "Hauptmenü", "x": 40, "y": 280, "w": 300, "h": 44, "action": {{"type": "menu", "menu": "main"}}}}
+        {{"type": "text", "text": "Main menu", "x": 40, "y": 280, "w": 300, "h": 44, "action": {{"type": "menu", "menu": "main"}}}}
       ]}},
     {{"id": "extras1", "name": "Film 1 – Extras", "role": "root", "title": 1,
       "elements": [
@@ -201,7 +201,7 @@ fn invalid_layout_fails_before_encoding() {
         ..BuildOptions::default()
     };
     let err = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_err().to_string();
-    assert!(err.contains("Kapitel 42"), "{err}");
+    assert!(err.contains("Chapter 42"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -243,7 +243,7 @@ fn settings_menu_chapter_thumbnails_and_shading() {
     let json = r##"{
       "version": 1,
       "menus": [
-        {"id": "main", "name": "Hauptmenü", "role": "title",
+        {"id": "main", "name": "Main menu", "role": "title",
          "background": {"color": "#102030", "gradientOverlay": "vignette"},
          "elements": [
            {"type": "video", "title": 1, "x": 60, "y": 120, "w": 180, "h": 112, "action": {"type": "playTitle", "title": 1}},
@@ -260,7 +260,7 @@ fn settings_menu_chapter_thumbnails_and_shading() {
            {"type": "video", "title": 1, "startSecs": 8, "x": 480, "y": 110, "w": 180, "h": 101, "action": {"type": "playChapter", "title": 1, "chapter": 3}},
            {"type": "text", "text": "Ende", "x": 480, "y": 215, "w": 180, "h": 30, "action": {"type": "playChapter", "title": 1, "chapter": 3}},
            {"type": "text", "text": "Einstellungen", "x": 240, "y": 490, "w": 160, "h": 36, "action": {"type": "menu", "menu": "set"}},
-           {"type": "text", "text": "Hauptmenü", "x": 410, "y": 490, "w": 130, "h": 36, "action": {"type": "menu", "menu": "main"}}
+           {"type": "text", "text": "Main menu", "x": 410, "y": 490, "w": 130, "h": 36, "action": {"type": "menu", "menu": "main"}}
          ]},
         {"id": "set", "name": "Einstellungen", "role": "settings", "title": 1, "durationSecs": 2,
          "background": {"video": {"title": 1}, "blur": 14, "gradientOverlay": "dim"},
@@ -346,7 +346,7 @@ fn button_colours_and_word_wrap_reach_the_disc() {
     let Some((rt, tools, dir, inputs)) = setup("colours") else { return };
     let layout = CustomLayout::from_json(
         r##"{"version": 1, "highlight": {"color": "#FFD200", "selectColor": "#FF6A00", "opacity": 1.0},
-          "menus": [{"id": "main", "name": "Hauptmenü", "role": "title", "background": {"color": "#203040"},
+          "menus": [{"id": "main", "name": "Main menu", "role": "title", "background": {"color": "#203040"},
             "elements": [
               {"type": "text", "text": "Ein ziemlich langer Untertitel, der im Kasten umbrochen wird", "size": 30, "wrap": true, "x": 160, "y": 40, "w": 400, "h": 130},
               {"type": "text", "text": "Gelb", "size": 34, "x": 160, "y": 220, "w": 400, "h": 50, "action": {"type": "playTitle", "title": 1}},

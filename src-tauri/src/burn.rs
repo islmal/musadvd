@@ -135,16 +135,16 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
     let mut warning = None;
     if needs_erase {
         warning = Some(if auto_erase {
-            format!("Die {} enthält Daten und wird automatisch gelöscht.", media.physical)
+            format!("The {} contains data and is erased automatically.", media.physical)
         } else {
-            format!("Die {} enthält Daten – sie wird beim Brennen gelöscht.", media.physical)
+            format!("The {} contains data and will be erased when burning.", media.physical)
         });
     } else if problem.is_none()
         && needs.content().needs_dual_layer_on(media.media_type)
         && !media.media_type.is_bd()
         && !media.layer_break_supported
     {
-        warning = Some(format!("{}: Der Layerwechsel wird vom Laufwerk festgelegt.", media.physical));
+        warning = Some(format!("{}: the drive decides the layer break.", media.physical));
     }
     let room = capacity >= needs.sectors;
     let auto_ok = problem.is_none() && room && (media.blank || auto_erase);
@@ -183,7 +183,7 @@ fn is_disc_folder(d: &Path) -> bool {
 pub fn open_folder(path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
     if !path.is_dir() {
-        return Err(format!("{} existiert nicht", path.display()));
+        return Err(format!("{} does not exist", path.display()));
     }
     let program = if cfg!(windows) { "explorer" } else { "xdg-open" };
     musadvd::tools::blocking_tool_command(program).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
@@ -236,7 +236,7 @@ pub struct BurnStatus {
 /// nothing but `VIDEO_TS`/`AUDIO_TS` or `BDMV`/`CERTIFICATE` – and a left-over work directory
 /// next to it.
 fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
-    let project = video_ts.parent().ok_or("kein Projektordner")?;
+    let project = video_ts.parent().ok_or("no project folder")?;
     let foreign: Vec<String> = std::fs::read_dir(project)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
@@ -244,7 +244,7 @@ fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
         .filter(|n| !["VIDEO_TS", "AUDIO_TS", "BDMV", "CERTIFICATE"].iter().any(|k| n.eq_ignore_ascii_case(k)))
         .collect();
     if !foreign.is_empty() {
-        return Err(format!("{} enthält weitere Dateien ({}) und wurde nicht gelöscht", project.display(), foreign.join(", ")));
+        return Err(format!("{} contains other files ({}) and was not deleted", project.display(), foreign.join(", ")));
     }
     std::fs::remove_dir_all(project).map_err(|e| format!("{}: {e}", project.display()))?;
     if let Some(output) = project.parent() {
@@ -267,13 +267,13 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<B
     let media_speeds = media.map(|m| m.speeds).unwrap_or_default();
     let x = speed_x(req.speed, &media_speeds, media_type);
     let detail = format!(
-        "{} bei {}{}",
+        "{} at {}{}",
         needs.disc_name(media_type),
         match req.speed {
             WriteSpeed::Max => format!("max. {}", speed_label((x * media_type.sectors_per_sec_1x()).round() as u32, media_type)),
             WriteSpeed::Specific(s) => speed_label(s, media_type),
         },
-        if req.verify { ", mit Überprüfung" } else { "" }
+        if req.verify { ", with verification" } else { "" }
     );
     let job = BurnJob {
         iso: iso_path(&video_ts),
@@ -298,10 +298,10 @@ fn run_burn(app: &AppHandle, req: &BurnRequest, cancel: &AtomicBool) -> Result<B
 #[tauri::command]
 pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequest) -> Result<(), String> {
     if !is_disc_folder(Path::new(&request.video_ts)) {
-        return Err("Kein fertiger VIDEO_TS- oder BDMV-Ordner gefunden.".into());
+        return Err("No finished VIDEO_TS or BDMV folder found.".into());
     }
     if state.busy.swap(true, Ordering::SeqCst) {
-        return Err("Es wird bereits gebrannt.".into());
+        return Err("A burn is already running.".into());
     }
     state.cancel.store(false, Ordering::SeqCst);
     let busy = state.busy.clone();
@@ -311,25 +311,25 @@ pub fn start_burn(app: AppHandle, state: State<'_, BurnState>, request: BurnRequ
         let on_bd = system_burner().probe_media(&request.drive_id).map_or(true, |m| m.media_type.is_bd());
         let kind = match (bdmv, on_bd) {
             (true, true) => "Blu-ray",
-            (true, false) => "AVCHD-Disc",
+            (true, false) => "AVCHD disc",
             _ => "DVD",
         };
         let mut done = match run_burn(&app, &request, &cancel) {
             Ok(outcome) => BurnDone {
                 ok: true,
                 cancelled: false,
-                message: format!("Die {kind} wurde gebrannt{}.", if request.verify { " und überprüft" } else { "" }),
+                message: format!("The {kind} was burned{}.", if request.verify { " and verified" } else { "" }),
                 iso: outcome.iso.map(|p| p.to_string_lossy().into_owned()),
             },
             Err(BurnError::Cancelled) => {
-                BurnDone { ok: false, cancelled: true, message: "Brennvorgang abgebrochen.".into(), iso: None }
+                BurnDone { ok: false, cancelled: true, message: "Burn cancelled.".into(), iso: None }
             }
             Err(e) => BurnDone { ok: false, cancelled: false, message: e.to_string(), iso: None },
         };
         if done.ok && request.delete_after {
             done.message.push_str(&match delete_dvd_output(Path::new(&request.video_ts)) {
-                Ok(()) => format!(" {kind}-Ordner und Arbeitsdateien wurden gelöscht."),
-                Err(e) => format!(" Hinweis: {e}."),
+                Ok(()) => format!(" {kind} folder and work files were deleted."),
+                Err(e) => format!(" Note: {e}."),
             });
         }
         busy.store(false, Ordering::SeqCst);
@@ -388,7 +388,7 @@ mod tests {
         let v = media_view(media(false, true, MediaType::Dvd5, 2_295_104), &small, "auto", false);
         assert!(v.problem.is_none() && v.warning.is_some() && v.needs_erase && !v.auto_ok);
         let v = media_view(media(false, true, MediaType::Dvd5, 2_295_104), &small, "auto", true);
-        assert!(v.auto_ok && v.warning.as_deref().unwrap().contains("automatisch"));
+        assert!(v.auto_ok && v.warning.as_deref().unwrap().contains("automatically"));
         // Written DVD-R: impossible, even with auto-erase.
         assert!(media_view(media(false, false, MediaType::Dvd5, 2_295_104), &small, "auto", true).problem.is_some());
         // Too small.

@@ -444,12 +444,12 @@ fn wrong_options_fail_before_any_work() {
     };
     // --single-video with two inputs.
     let err = build(&rt, &BuildOptions { bd_single_video: true, ..base.clone() }).unwrap_err().to_string();
-    assert!(err.contains("Nur ein Video pro Blu-ray") && err.contains('2'), "{err}");
+    assert!(err.contains("Only one video per Blu-ray") && err.contains('2'), "{err}");
     // DVD resolutions on a BD and HD resolutions on a DVD.
     let err = build(&rt, &BuildOptions { resolution: Resolution::FullD1, ..base.clone() }).unwrap_err().to_string();
     assert!(err.contains("Full D1") && err.contains("1080p"), "{err}");
     let err = build(&rt, &BuildOptions { disc: DiscType::Dvd5, ..base.clone() }).unwrap_err().to_string();
-    assert!(err.contains("1080p") && err.contains("nur für Blu-ray"), "{err}");
+    assert!(err.contains("1080p") && err.contains("only exists for Blu-ray"), "{err}");
     let err = build(&rt, &BuildOptions { disc: DiscType::Dvd9, resolution: Resolution::Hd720, ..base }).unwrap_err().to_string();
     assert!(err.contains("720p"), "{err}");
     assert!(!dir.exists(), "nothing was created");

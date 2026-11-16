@@ -13,7 +13,7 @@ and three windows, all started through `frontend/src/boot.ts` (which awaits `ini
 
 | File | Purpose |
 |---|---|
-| `main.rs` | App setup and the main commands: `probe_file`, `list_templates`, `template_preview`, `calculate_project`, `source_frame`, `detect_crop`, `title_frame`, `start_conversion` (progress as `convert-event`, result as one `convert-done`), `default_output_dir`, settings (`get_settings`, `save_settings`, which also calls `i18n::reload()`), `get_locale_data`. |
+| `main.rs` | App setup and the main commands: `probe_file`, `list_templates` (empty list when no ConvertX templates are installed), `template_preview`, `calculate_project`, `source_frame`, `detect_crop`, `title_frame`, `start_conversion` (progress as `convert-event`, result as one `convert-done`), `default_output_dir`, settings (`get_settings`, `save_settings`, which also calls `i18n::reload()`), `get_locale_data`. |
 | `burn.rs` | Burn after a conversion: `list_drives`, `disc_needs`, `probe_media`, `start_burn`, `cancel_burn`, `startup_burn`, `open_folder`. Events `burn-progress`, `burn-done`. Goes through `burner::burn_video_ts`. |
 | `burn_studio.rs` | Burn Studio commands. One operation at a time (`StudioState`) on its own thread; events `studio-progress`, `studio-graph` (at most 4/s), `studio-log`, `studio-done`. |
 | `menu_editor.rs` | `check_layout` (layout vs project titles), `text_lines`, `load_layout`, `save_layout`, `image_preview`. |

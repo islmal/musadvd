@@ -59,10 +59,10 @@ impl fmt::Display for ImageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ImageError::Io { path, error } => write!(f, "{}: {error}", path.display()),
-            ImageError::NotDvdVideo(m) => write!(f, "keine gültige VIDEO_TS-Struktur: {m}"),
-            ImageError::NotBluray(m) => write!(f, "keine gültige BDMV-Struktur: {m}"),
-            ImageError::Invalid(m) => write!(f, "ungültige Dateistruktur: {m}"),
-            ImageError::Cancelled => write!(f, "abgebrochen"),
+            ImageError::NotDvdVideo(m) => write!(f, "not a valid VIDEO_TS structure: {m}"),
+            ImageError::NotBluray(m) => write!(f, "not a valid BDMV structure: {m}"),
+            ImageError::Invalid(m) => write!(f, "invalid file structure: {m}"),
+            ImageError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -270,12 +270,12 @@ pub fn dvd_file_order(video_ts: &Path) -> Result<Vec<(String, PathBuf, u64)>, Im
     for (name, required) in wanted {
         match present.remove(&name) {
             Some((p, size)) => order.push((name, p, size)),
-            None if required => return Err(ImageError::NotDvdVideo(format!("{name} fehlt"))),
+            None if required => return Err(ImageError::NotDvdVideo(format!("{name} missing"))),
             None => {}
         }
     }
     if let Some(extra) = present.keys().next() {
-        return Err(ImageError::NotDvdVideo(format!("unerwartete Datei {extra}")));
+        return Err(ImageError::NotDvdVideo(format!("unexpected file {extra}")));
     }
     Ok(order)
 }
@@ -348,7 +348,7 @@ fn build_nodes(entries: &[TreeEntry]) -> Result<(Vec<Node>, Vec<ImageFile>, Vec<
     for e in entries {
         let parts: Vec<&str> = e.path.split('/').filter(|p| !p.is_empty()).collect();
         if parts.is_empty() {
-            return Err(invalid("leerer Pfad".into()));
+            return Err(invalid("empty path".into()));
         }
         let (mut cur, mut prefix) = (0usize, String::new());
         for (i, part) in parts.iter().enumerate() {
@@ -363,7 +363,7 @@ fn build_nodes(entries: &[TreeEntry]) -> Result<(Vec<Node>, Vec<ImageFile>, Vec<
             let want_dir = !last || e.dir;
             match index.get(&prefix) {
                 Some(&n) if nodes[n].dir == want_dir && !(last && !e.dir) => cur = n,
-                Some(_) => return Err(invalid(format!("doppelter oder widersprüchlicher Pfad {prefix}"))),
+                Some(_) => return Err(invalid(format!("duplicate or conflicting path {prefix}"))),
                 None => {
                     nodes.push(new_node(part, cur, want_dir));
                     let n = nodes.len() - 1;
@@ -548,7 +548,7 @@ fn make_side(nodes: &[Node], joliet: bool, warnings: &mut Vec<String>) -> IsoSid
         for &c in &nodes[d].children {
             if nodes[c].dir && depth[d] + 1 > ISO_MAX_DEPTH {
                 warnings.push(format!(
-                    "{}: Ordner „{}“ liegt tiefer als {ISO_MAX_DEPTH} Ebenen und fehlt in der ISO-9660-Sicht (UDF hat ihn)",
+                    "{}: folder '{}' is deeper than {ISO_MAX_DEPTH} levels and is missing in the ISO 9660 view (UDF has it)",
                     if joliet { "Joliet" } else { "ISO 9660" },
                     nodes[c].name
                 ));
@@ -1321,7 +1321,7 @@ pub fn write_to<W: Write>(
                     if got == 0 {
                         return Err(ImageError::Io {
                             path: f.source.clone(),
-                            error: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Datei wurde während des Schreibens kürzer"),
+                            error: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "File became shorter while writing"),
                         });
                     }
                     if let Some(transform) = f.transform {
@@ -1458,7 +1458,7 @@ mod tree_tests {
         assert_eq!(plain.total_sectors - plan.total_sectors, 3, "5000 bytes = 3 sectors saved");
 
         // `h` is the 9th level: left out of both ISO trees, with one warning each.
-        assert_eq!(plan.warnings.iter().filter(|w| w.contains("tiefer")).count(), 2, "{:?}", plan.warnings);
+        assert_eq!(plan.warnings.iter().filter(|w| w.contains("deeper")).count(), 2, "{:?}", plan.warnings);
 
         let mut iso = IsoImage::open(Cursor::new(image(&plan))).unwrap();
         assert_eq!(iso.label, "DATENTEST");

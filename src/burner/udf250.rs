@@ -165,7 +165,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
     for e in entries {
         let parts: Vec<&str> = e.path.split('/').filter(|p| !p.is_empty()).collect();
         if parts.is_empty() {
-            return Err(bad("leerer Pfad".into()));
+            return Err(bad("empty path".into()));
         }
         let (mut cur, mut prefix) = (0usize, String::new());
         for (i, part) in parts.iter().enumerate() {
@@ -180,7 +180,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
             let want_dir = !last || e.dir;
             match index.get(&prefix) {
                 Some(&n) if nodes[n].dir == want_dir && !(last && !e.dir) => cur = n,
-                Some(_) => return Err(bad(format!("doppelter oder widersprüchlicher Pfad {prefix}"))),
+                Some(_) => return Err(bad(format!("duplicate or conflicting path {prefix}"))),
                 None => {
                     nodes.push(Node {
                         name: part.to_string(),
@@ -207,7 +207,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
             nodes[cur].size = e.size;
             nodes[cur].transform = e.transform;
             if extents(0, e.size).len() > MAX_EXTENTS {
-                return Err(bad(format!("{} ist zu groß", e.path)));
+                return Err(bad(format!("{} is too large", e.path)));
             }
         }
     }
@@ -268,7 +268,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
 pub fn plan_bd_image(root: &Path, label: &str) -> Result<BdImagePlan, ImageError> {
     let bdmv = root.join("BDMV");
     if !bdmv.join("index.bdmv").is_file() {
-        return Err(ImageError::NotBluray("BDMV/index.bdmv fehlt".into()));
+        return Err(ImageError::NotBluray("BDMV/index.bdmv missing".into()));
     }
     let mut entries = Vec::new();
     scan(&bdmv, "BDMV", &mut entries)?;
@@ -587,7 +587,7 @@ pub fn write_bd_to<W: Write>(
             if got == 0 {
                 return Err(ImageError::Io {
                     path: f.source.clone(),
-                    error: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Datei wurde während des Schreibens kürzer"),
+                    error: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "File became shorter while writing"),
                 });
             }
             if let Some(transform) = f.transform {

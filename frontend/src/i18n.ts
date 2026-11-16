@@ -8,7 +8,7 @@ let cat: Record<string, string> = {};
 // English is the master catalog (every key exists there); missing translations fall back to it.
 const MASTER = "en";
 // Language used until the saved one is loaded and when it is unknown.
-const DEFAULT = "de";
+const DEFAULT = "en";
 let current = DEFAULT;
 
 /** Translates `key` (current language, then German, then the key itself). */

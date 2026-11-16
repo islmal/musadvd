@@ -244,7 +244,7 @@ async fn locate(name: &str, version_check: bool, hint: &str, notes: &mut Vec<Str
         if tool_works(&candidate, version_check).await {
             return Ok(candidate);
         }
-        notes.push(format!("{} ignoriert: startet nicht korrekt", candidate.display()));
+        notes.push(format!("{} ignored: does not start correctly", candidate.display()));
     }
     Err(ToolError::NotFound(format!("{name} not found in bin/ or on PATH ({hint})")))
 }
@@ -611,7 +611,7 @@ impl Toolchain {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await else {
-            return Err(format!("{}-Test nicht ausführbar", enc.label()));
+            return Err(format!("{} test could not run", enc.label()));
         };
         if out.status.success() {
             return Ok(());
@@ -620,7 +620,7 @@ impl Toolchain {
         Err(if enc == BdEncoder::Nvenc {
             nvenc_failure_reason(&log)
         } else {
-            log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unbekannter Fehler").trim().into()
+            log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error").trim().into()
         })
     }
 }
@@ -676,11 +676,11 @@ pub fn hwaccel_candidates(mode: HwAccelMode) -> &'static [&'static str] {
 pub fn nvenc_failure_reason(log: &str) -> String {
     let l = log.to_ascii_lowercase();
     if l.contains("driver does not support") || l.contains("minimum required nvidia driver") {
-        "NVIDIA-Treiber zu alt (≥ 610 nötig)".into()
+        "NVIDIA driver too old (≥ 610 required)".into()
     } else if l.contains("no capable devices") || l.contains("cannot load") {
-        "keine NVIDIA-GPU mit NVENC".into()
+        "no NVIDIA GPU with NVENC".into()
     } else {
-        log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unbekannter Fehler").trim().into()
+        log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error").trim().into()
     }
 }
 
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn nvenc_reasons() {
-        assert!(nvenc_failure_reason("Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0").contains("Treiber"));
+        assert!(nvenc_failure_reason("Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0").contains("driver"));
         assert!(nvenc_failure_reason("OpenEncodeSessionEx failed: no capable devices found").contains("GPU"));
         assert_eq!(nvenc_failure_reason("a\nsomething odd\n\n"), "something odd");
     }

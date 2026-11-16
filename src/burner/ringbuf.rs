@@ -155,7 +155,7 @@ impl RingStats {
 }
 
 fn interrupted() -> io::Error {
-    io::Error::new(io::ErrorKind::ConnectionAborted, "abgebrochen")
+    io::Error::new(io::ErrorKind::ConnectionAborted, "cancelled")
 }
 
 impl Write for RingWriter {
@@ -169,7 +169,7 @@ impl Write for RingWriter {
                 return Err(interrupted());
             }
             if s.abandoned {
-                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "der Brenner hat aufgehört zu lesen"));
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the burner stopped reading"));
             }
             if s.free() > 0 {
                 let n = s.push(data);

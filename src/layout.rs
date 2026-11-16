@@ -387,7 +387,7 @@ pub enum VideoAssetSource {
 
 impl CustomLayout {
     pub fn from_json(json: &str) -> Result<Self, LayoutError> {
-        serde_json::from_str(json).map_err(|e| LayoutError(vec![format!("Menü-Layout ist kein gültiges JSON: {e}")]))
+        serde_json::from_str(json).map_err(|e| LayoutError(vec![format!("Menu layout is not valid JSON: {e}")]))
     }
 
     pub fn load(path: &Path) -> Result<Self, LayoutError> {
@@ -425,7 +425,7 @@ pub struct LayoutError(pub Vec<String>);
 
 impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Menü-Layout: {}", self.0.join("; "))
+        write!(f, "Menu layout: {}", self.0.join("; "))
     }
 }
 
@@ -473,8 +473,8 @@ pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
 
 pub(crate) fn element_name(e: &Element, n: usize) -> String {
     let kind = match &e.content {
-        Content::Text { text, .. } => format!("Text „{}“", text.lines().next().unwrap_or("").chars().take(24).collect::<String>()),
-        Content::Image { .. } => "Bild".into(),
+        Content::Text { text, .. } => format!("Text '{}'", text.lines().next().unwrap_or("").chars().take(24).collect::<String>()),
+        Content::Image { .. } => "Image".into(),
         Content::Video { .. } => "Video".into(),
     };
     format!("Element {} ({kind})", n + 1)
@@ -530,151 +530,151 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
     let mut errs = Vec::new();
     let c = layout.canvas;
     if c.width < 16 || c.height < 16 {
-        errs.push("Arbeitsfläche ist zu klein".to_string());
+        errs.push("Canvas is too small".to_string());
     }
     if bd && (c.width as u64 * 9 != c.height as u64 * 16) {
-        errs.push(format!("Arbeitsfläche {}×{} ist nicht 16:9 (Blu-ray-Menüs sind 16:9)", c.width, c.height));
+        errs.push(format!("Canvas {}×{} is not 16:9 (Blu-ray menus are 16:9)", c.width, c.height));
     }
     if layout.menus.is_empty() {
-        errs.push("keine Menüs".to_string());
+        errs.push("no menus".to_string());
     }
     if !layout.menus.iter().any(|m| m.role == MenuRole::Title) {
-        errs.push("mindestens ein Titelmenü ist nötig (es erscheint beim Einlegen der Disc)".to_string());
+        errs.push("at least one title menu is required (it appears when the disc is inserted)".to_string());
     }
     for (name, col) in [("Markierungsfarbe", &layout.highlight.color), ("Auswahlfarbe", &layout.highlight.select_color)] {
         if parse_color(col).is_none() {
-            errs.push(format!("{name} „{col}“ ist keine Farbe (#RRGGBB)"));
+            errs.push(format!("{name} '{col}' is not a colour (#RRGGBB)"));
         }
     }
     let mut ids = BTreeSet::new();
     for m in &layout.menus {
         if m.id.trim().is_empty() || !ids.insert(m.id.as_str()) {
-            errs.push(format!("Menü „{}“: Id „{}“ fehlt oder ist doppelt", m.name, m.id));
+            errs.push(format!("Menu '{}': id '{}' is missing or duplicated", m.name, m.id));
         }
     }
     let title_ok = |t: u32| t >= 1 && (t as usize) <= titles.len();
     for m in &layout.menus {
-        let menu = |msg: String| format!("Menü „{}“: {msg}", m.name);
+        let menu = |msg: String| format!("Menu '{}': {msg}", m.name);
         match (m.role, m.title) {
             (MenuRole::Root | MenuRole::Settings, Some(t)) if title_ok(t) => {}
-            (MenuRole::Root, t) => errs.push(menu(format!("Root-Menü braucht einen gültigen Titel (ist {t:?})"))),
-            (MenuRole::Settings, t) => errs.push(menu(format!("Einstellungsmenü braucht einen gültigen Titel (ist {t:?})"))),
+            (MenuRole::Root, t) => errs.push(menu(format!("A root menu needs a valid title (is {t:?})"))),
+            (MenuRole::Settings, t) => errs.push(menu(format!("A settings menu needs a valid title (is {t:?})"))),
             (MenuRole::Title, _) => {}
         }
         if parse_color(&m.background.color).is_none() {
-            errs.push(menu(format!("Hintergrundfarbe „{}“ ist keine Farbe", m.background.color)));
+            errs.push(menu(format!("Background colour '{}' is not a colour", m.background.color)));
         }
         if !(0.0..=50.0).contains(&m.background.blur) {
-            errs.push(menu("Weichzeichner muss zwischen 0 und 50 liegen".into()));
+            errs.push(menu("Blur must be between 0 and 50".into()));
         }
         if let Some(img) = &m.background.image {
             if !Path::new(img).is_file() {
-                errs.push(menu(format!("Hintergrundbild nicht gefunden: {img}")));
+                errs.push(menu(format!("Background image not found: {img}")));
             }
         }
         if let Some(v) = &m.background.video {
             match &v.path {
-                Some(p) if !p.is_file() => errs.push(menu(format!("Hintergrundvideo nicht gefunden: {}", p.display()))),
-                None if !title_ok(v.title) => errs.push(menu(format!("Hintergrundvideo: Titel {} existiert nicht", v.title))),
+                Some(p) if !p.is_file() => errs.push(menu(format!("Background video not found: {}", p.display()))),
+                None if !title_ok(v.title) => errs.push(menu(format!("Background video: title {} does not exist", v.title))),
                 _ => {}
             }
         }
         match &m.audio {
-            MenuSound::Title { title, .. } if !title_ok(*title) => errs.push(menu(format!("Ton: Titel {title} existiert nicht"))),
-            MenuSound::File { path } if !Path::new(path).is_file() => errs.push(menu(format!("Tondatei nicht gefunden: {path}"))),
+            MenuSound::Title { title, .. } if !title_ok(*title) => errs.push(menu(format!("Audio: title {title} does not exist"))),
+            MenuSound::File { path } if !Path::new(path).is_file() => errs.push(menu(format!("Audio file not found: {path}"))),
             _ => {}
         }
         if let Some(d) = m.duration_secs {
             if !(1.0..=600.0).contains(&d) {
-                errs.push(menu("Dauer muss zwischen 1 und 600 Sekunden liegen".into()));
+                errs.push(menu("Duration must be between 1 and 600 seconds".into()));
             }
         }
         let mut rects: Vec<(String, Rect)> = Vec::new();
         for (n, e) in m.elements.iter().enumerate() {
             let el = |msg: &str| menu(format!("{}: {msg}", element_name(e, n)));
             if e.w < 1.0 || e.h < 1.0 {
-                errs.push(el("Breite und Höhe müssen mindestens 1 sein"));
+                errs.push(el("Width and height must be at least 1"));
             }
             if e.x < -0.5 || e.y < -0.5 || e.x + e.w > c.width as f64 + 0.5 || e.y + e.h > c.height as f64 + 0.5 {
-                errs.push(el("liegt (teilweise) außerhalb der Arbeitsfläche"));
+                errs.push(el("lies (partly) outside the canvas"));
             }
             if e.rotation % 90 != 0 || e.rotation >= 360 {
-                errs.push(el("Drehung nur in 90°-Schritten (0, 90, 180, 270)"));
+                errs.push(el("Rotation only in 90° steps (0, 90, 180, 270)"));
             }
             if !(0.0..=1.0).contains(&e.opacity) {
-                errs.push(el("Deckkraft muss zwischen 0 und 1 liegen"));
+                errs.push(el("Opacity must be between 0 and 1"));
             }
             match &e.content {
                 Content::Text { color, size, .. } => {
                     if parse_color(color).is_none() {
-                        errs.push(el(&format!("Textfarbe „{color}“ ist keine Farbe")));
+                        errs.push(el(&format!("Text colour '{color}' is not a colour")));
                     }
                     if !(4.0..=300.0).contains(size) {
-                        errs.push(el("Schriftgröße muss zwischen 4 und 300 liegen"));
+                        errs.push(el("Font size must be between 4 and 300"));
                     }
                 }
                 Content::Image { src, .. } => {
                     if !Path::new(src).is_file() {
-                        errs.push(el(&format!("Bild nicht gefunden: {src}")));
+                        errs.push(el(&format!("Image not found: {src}")));
                     }
                 }
                 Content::Video { path: Some(p), .. } => {
                     if !p.is_file() {
-                        errs.push(el(&format!("Video nicht gefunden: {}", p.display())));
+                        errs.push(el(&format!("Video not found: {}", p.display())));
                     }
                 }
                 Content::Video { title, .. } => {
                     if !title_ok(*title) {
-                        errs.push(el(&format!("Titel {title} existiert nicht")));
+                        errs.push(el(&format!("Title {title} does not exist")));
                     }
                 }
             }
             if let Some(colors) = &e.highlight {
                 for (name, col) in [("Markierungsfarbe", &colors.color), ("Auswahlfarbe", &colors.select_color)] {
                     if parse_color(col).is_none() {
-                        errs.push(el(&format!("{name} „{col}“ ist keine Farbe (#RRGGBB)")));
+                        errs.push(el(&format!("{name} '{col}' is not a colour (#RRGGBB)")));
                     }
                 }
             }
             let Some(action) = &e.action else { continue };
             if e.rotation != 0 {
-                errs.push(el(&format!("Buttons können nicht gedreht werden ({medium}-Hitboxen sind achsenparallele Rechtecke)")));
+                errs.push(el(&format!("Buttons cannot be rotated ({medium} hitboxes are axis-aligned rectangles)")));
             }
             match action {
-                Action::PlayTitle { title } if !title_ok(*title) => errs.push(el(&format!("spielt Titel {title}, den es nicht gibt"))),
+                Action::PlayTitle { title } if !title_ok(*title) => errs.push(el(&format!("plays title {title}, which does not exist"))),
                 Action::PlayChapter { title, chapter } => {
                     if !title_ok(*title) {
-                        errs.push(el(&format!("spielt Titel {title}, den es nicht gibt")));
+                        errs.push(el(&format!("plays title {title}, which does not exist")));
                     } else if *chapter < 1
                         || *chapter as usize > titles[*title as usize - 1].chapters
                         || *chapter as usize > MAX_CHAPTERS
                     {
                         errs.push(el(&format!(
-                            "Kapitel {chapter} von Titel {title} existiert nicht ({} Kapitel)",
+                            "Chapter {chapter} of title {title} does not exist ({} chapters)",
                             titles[*title as usize - 1].chapters
                         )));
                     }
                 }
                 Action::Menu { menu: target, .. } if !layout.menus.iter().any(|x| &x.id == target) => {
-                    errs.push(el(&format!("verweist auf ein unbekanntes Menü „{target}“")))
+                    errs.push(el(&format!("refers to an unknown menu '{target}'")))
                 }
                 Action::CustomVm { script } => {
                     if crate::dvdvm::parse(script).is_err() {
-                        errs.push(el(&format!("ungültiges VM-Skript: „{script}“")));
+                        errs.push(el(&format!("invalid VM script: '{script}'")));
                     }
                 }
                 Action::SetAudio { .. } | Action::SetSubtitle { .. } => {
                     // Streams belong to a titleset: only its own root/settings menus can set them.
                     match m.title.filter(|&t| m.role != MenuRole::Title && title_ok(t)) {
-                        None => errs.push(el("Ton-/Untertitelwahl geht nur in Root- und Einstellungsmenüs eines Titels")),
+                        None => errs.push(el("Audio/subtitle selection only works in the root and settings menus of a title")),
                         Some(t) => {
                             let lt = &titles[t as usize - 1];
                             match action {
                                 Action::SetAudio { source } if !lt.audio_sources.contains(source) => errs.push(el(&format!(
-                                    "Tonspur (Stream #{source}) ist bei Titel {t} nicht ausgewählt"
+                                    "Audio track (stream #{source}) is not selected for title {t}"
                                 ))),
                                 Action::SetSubtitle { source: Some(source) } if !lt.subtitle_sources.contains(source) => {
-                                    errs.push(el(&format!("Untertitel (Stream #{source}) ist bei Titel {t} nicht ausgewählt")))
+                                    errs.push(el(&format!("Subtitle (stream #{source}) is not selected for title {t}")))
                                 }
                                 _ => {}
                             }
@@ -686,7 +686,7 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
             if let Some(r) = if bd { bd_button_rect(e, c, frame) } else { button_rect(e, c, frame) } {
                 for (other, o) in &rects {
                     if overlaps(r, *o) {
-                        errs.push(el(&format!("überlappt mit {other} ({medium}-Buttons dürfen sich nicht überdecken)")));
+                        errs.push(el(&format!("overlaps {other} ({medium} buttons must not overlap)")));
                     }
                 }
                 rects.push((element_name(e, n), r));
@@ -694,14 +694,14 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
         }
         let max_buttons = if bd { MAX_BD_BUTTONS } else { MAX_BUTTONS };
         if rects.len() > max_buttons {
-            errs.push(menu(format!("{} Buttons, eine {medium}-Menüseite erlaubt höchstens {max_buttons}", rects.len())));
+            errs.push(menu(format!("{} buttons, a {medium} menu page allows at most {max_buttons}", rects.len())));
         }
         let pairs = color_pairs(layout, m);
         if bd {
             // Real alpha in the IG palette: any number of colours, but one 256-entry palette.
         } else if pairs.len() > MAX_COLOR_PAIRS {
             errs.push(menu(format!(
-                "{} verschiedene Button-Farben – eine DVD-Menüseite kann höchstens {MAX_COLOR_PAIRS} Farbpaare (markiert/aktiviert) zeigen",
+                "{} different button colours – a DVD menu page can show at most {MAX_COLOR_PAIRS} colour pairs (highlighted/activated)",
                 pairs.len()
             )));
         }
@@ -709,7 +709,7 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
         let shared = !bd && pairs.iter().enumerate().any(|(i, a)| pairs[i + 1..].iter().any(|b| a.0 == b.0 || a.1 == b.1));
         if shared {
             errs.push(menu(
-                "Buttons mit gleicher Markierungsfarbe brauchen auch die gleiche Aktivierungsfarbe (und umgekehrt)".into(),
+                "Buttons with the same highlight colour also need the same activation colour (and vice versa)".into(),
             ));
         }
     }
@@ -1074,7 +1074,7 @@ pub fn plan_navigation_with_offset(
         if let Some(d) = d {
             if command_count(d) > MAX_PGC_COMMANDS {
                 errs.push(format!(
-                    "Titel {}: {} Sprungziele von außen (Kapitel/Menüs) – mehr als {MAX_PGC_COMMANDS} DVD-Befehle",
+                    "Title {}: {} jump targets from outside (chapters/menus) – more than {MAX_PGC_COMMANDS} DVD commands",
                     t + 1,
                     command_count(d)
                 ));
@@ -1083,7 +1083,7 @@ pub fn plan_navigation_with_offset(
     }
     if let Some((_, r)) = &router {
         if command_count(r) > MAX_PGC_COMMANDS {
-            errs.push(format!("zu viele titelübergreifende Sprünge aus Root-Menüs ({} DVD-Befehle, max. {MAX_PGC_COMMANDS})", command_count(r)));
+            errs.push(format!("too many cross-title jumps from root menus ({} DVD commands, max. {MAX_PGC_COMMANDS})", command_count(r)));
         }
     }
     if !errs.is_empty() {
@@ -1332,7 +1332,7 @@ fn render_custom_page(
 
         let Some(cmd) = commands.get(n).cloned().flatten() else { continue };
         let Some(rect) = button_rect(e, canvas, tv) else {
-            warnings.push(format!("{}: Button liegt außerhalb des Bildes und wurde ausgelassen", element_name(e, n)));
+            warnings.push(format!("{}: button lies outside the picture and was skipped", element_name(e, n)));
             continue;
         };
         // Pixel value of this button's colour pair.
@@ -1423,7 +1423,7 @@ fn render_custom_page(
             if clip.has_audio {
                 Some(clip)
             } else {
-                warnings.push(format!("Titel {title} hat keinen Ton – Menü bleibt stumm"));
+                warnings.push(format!("Title {title} has no audio – the menu stays silent"));
                 None
             }
         }
@@ -1501,13 +1501,13 @@ fn render_fastplay_page(
         let cov_title = menu::text_coverage("FastPlay", font, 40.0, true, false, false, "center", fw, 60);
         menu::blend_coverage(&mut img, &cov_title, [255, 255, 255, 255], 0, (fh * 20 / 100) as i64, 255);
 
-        let cov_sub = menu::text_coverage("Wiedergabe startet in Kürze...", font, 24.0, false, false, false, "center", fw, 40);
+        let cov_sub = menu::text_coverage("Playback starts shortly...", font, 24.0, false, false, false, "center", fw, 40);
         menu::blend_coverage(&mut img, &cov_sub, [200, 200, 200, 255], 0, (fh * 35 / 100) as i64, 255);
 
         let b1_cov = menu::text_coverage("FastPlay", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
         menu::blend_coverage(&mut img, &b1_cov, [255, 255, 255, 255], (fw * 12 / 100) as i64, (fh * 76 / 100) as i64, 255);
 
-        let b2_cov = menu::text_coverage("Hauptmenü", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
+        let b2_cov = menu::text_coverage("Main menu", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
         menu::blend_coverage(&mut img, &b2_cov, [255, 255, 255, 255], (fw * 54 / 100) as i64, (fh * 76 / 100) as i64, 255);
 
         let text_path = out_dir.join(format!("{prefix}_text.png"));
@@ -1573,7 +1573,7 @@ fn render_fastplay_page(
             location: "CUSTOM".into(),
             rect: b2_rect,
             action: ButtonAction::Commands(main_menu_cmd),
-            label: Some("Hauptmenü".into()),
+            label: Some("Main menu".into()),
             thumbnail: None,
             clip: None,
             nav: Navigation { left: Some("b1".into()), ..Default::default() },
@@ -1661,7 +1661,7 @@ pub fn build_custom_menus(
     });
     for i in order {
         let PageOutput { files, buttons, motion, warnings: w } = rendered[i].clone_parts();
-        warnings.extend(w.into_iter().map(|w| format!("Menü „{}“: {w}", layout.menus[i].name)));
+        warnings.extend(w.into_iter().map(|w| format!("Menu '{}': {w}", layout.menus[i].name)));
         match nav.placement[i] {
             Placement::Vmgm(n) => {
                 let spec = MenuSpec {
@@ -1858,7 +1858,7 @@ mod tests {
           "version": 1,
           "canvas": {"width": 720, "height": 576},
           "menus": [
-            {"id": "main", "name": "Hauptmenü", "role": "title",
+            {"id": "main", "name": "Main menu", "role": "title",
              "background": {"color": "#102030", "blur": 6},
              "audio": {"type": "title", "title": 1, "startSecs": 5},
              "elements": [
@@ -1903,23 +1903,23 @@ mod tests {
             menu("r", MenuRole::Root, None, vec![]),
         ]);
         let err = validate(&l, &titles(1), TvStandard::Pal).unwrap_err().0.join("\n");
-        assert!(err.contains("nicht gedreht"), "{err}");
-        assert!(err.contains("90°-Schritten"), "{err}");
-        assert!(err.contains("Kapitel 9"), "{err}");
-        assert!(err.contains("unbekanntes Menü"), "{err}");
-        assert!(err.contains("Titel 3"), "{err}");
-        assert!(err.contains("überlappt"), "C and D overlap: {err}");
-        assert!(err.contains("Root-Menü braucht"), "{err}");
-        assert!(err.contains("außerhalb"), "E reaches beyond 720x576: {err}");
+        assert!(err.contains("cannot be rotated"), "{err}");
+        assert!(err.contains("90° steps"), "{err}");
+        assert!(err.contains("Chapter 9"), "{err}");
+        assert!(err.contains("unknown menu"), "{err}");
+        assert!(err.contains("itle 3"), "{err}");
+        assert!(err.contains("overlaps"), "C and D overlap: {err}");
+        assert!(err.contains("A root menu needs"), "{err}");
+        assert!(err.contains("outside"), "E reaches beyond 720x576: {err}");
 
         // 37 buttons on one page.
         let many: Vec<Element> =
             (0..37).map(|i| Element { w: 15.0, h: 10.0, ..text((i % 9) as f64 * 70.0, (i / 9) as f64 * 40.0, "x", Some(Action::PlayTitle { title: 1 })) }).collect();
         let err = validate(&layout(vec![menu("m", MenuRole::Title, None, many)]), &titles(1), TvStandard::Pal).unwrap_err();
-        assert!(err.0.iter().any(|e| e.contains("höchstens 36")), "{err:?}");
+        assert!(err.0.iter().any(|e| e.contains("at most 36")), "{err:?}");
         // Root menus only: no disc start menu.
         let err = validate(&layout(vec![menu("r", MenuRole::Root, Some(1), vec![])]), &titles(1), TvStandard::Pal).unwrap_err();
-        assert!(err.0[0].contains("Titelmenü"));
+        assert!(err.0[0].contains("title menu"));
     }
 
     #[test]
@@ -2048,9 +2048,9 @@ mod tests {
             menu("set2", MenuRole::Settings, None, vec![]),
         ]);
         let err = validate(&bad, &titles(1), TvStandard::Pal).unwrap_err().0.join("\n");
-        assert!(err.contains("nur in Root- und Einstellungsmenüs"), "{err}");
-        assert!(err.contains("Stream #9"), "{err}");
-        assert!(err.contains("Einstellungsmenü braucht"), "{err}");
+        assert!(err.contains("only works in the root and settings menus"), "{err}");
+        assert!(err.contains("stream #9"), "{err}");
+        assert!(err.contains("A settings menu needs"), "{err}");
 
         // JSON names.
         let json = r#"{"type": "setSubtitle", "source": null}"#;
@@ -2108,11 +2108,11 @@ mod tests {
         let mut four = three.clone();
         four.push(with_colors(b(220.0, "d"), "#FF00FF", "#800080"));
         let err = validate(&layout(vec![menu("main", MenuRole::Title, None, four)]), &ts, TvStandard::Pal).unwrap_err();
-        assert!(err.0.iter().any(|m| m.contains("4 verschiedene Button-Farben")), "{err:?}");
+        assert!(err.0.iter().any(|m| m.contains("4 different button colours")), "{err:?}");
         // Same marked colour with another activated colour cannot be told apart.
         let shared = vec![b(10.0, "a"), with_colors(b(80.0, "b"), "#FFD200", "#00FF00")];
         let err = validate(&layout(vec![menu("main", MenuRole::Title, None, shared)]), &ts, TvStandard::Pal).unwrap_err();
-        assert!(err.0.iter().any(|m| m.contains("gleiche Aktivierungsfarbe")), "{err:?}");
+        assert!(err.0.iter().any(|m| m.contains("same activation colour")), "{err:?}");
         let bad = vec![with_colors(b(10.0, "a"), "gelb", "#000000")];
         assert!(validate(&layout(vec![menu("main", MenuRole::Title, None, bad)]), &ts, TvStandard::Pal).is_err());
         // Colours on a non-button are ignored by the pair count.

@@ -241,27 +241,27 @@ impl Sense {
     /// German description of the common conditions.
     pub fn describe(&self) -> String {
         let text = match (self.key, self.asc, self.ascq) {
-            (_, 0x3A, _) => "keine Disc im Laufwerk",
-            (2, 0x04, 0x01) => "Laufwerk wird bereit (Disc wird eingelesen)",
-            (2, 0x04, 0x04) => "Disc wird gerade formatiert",
-            (2, 0x04, _) => "Laufwerk nicht bereit",
-            (_, 0x30, 0x00..=0x07) => "inkompatible oder unbekannte Disc",
-            (_, 0x57, _) => "Inhaltsverzeichnis der Disc nicht lesbar",
-            (_, 0x20, 0x00) => "ungültiger Befehl",
-            (_, 0x21, 0x00) => "Adresse außerhalb der Disc",
-            (_, 0x24, 0x00) => "ungültiges Feld im Befehl",
-            (_, 0x26, 0x00) => "ungültiges Feld in der Parameterliste",
-            (_, 0x28, 0x00) => "Disc gewechselt",
-            (_, 0x29, _) => "Laufwerk wurde zurückgesetzt",
-            (3, 0x0C, _) => "Schreibfehler",
-            (3, 0x11, _) => "nicht korrigierbarer Lesefehler",
-            (_, 0x64, 0x00) => "unzulässiger Modus für diesen Track",
-            (_, 0x72, _) => "Session-Fehler (Disc voll oder nicht schreibbar)",
-            (_, 0x73, 0x03) => "Schreiblaser-Kalibrierung (OPC) fehlgeschlagen",
-            (_, 0x73, _) => "Fehler beim Schreibvorgang des Laufwerks",
-            (5, _, _) => "ungültige Anforderung",
-            (7, _, _) => "Disc ist schreibgeschützt",
-            _ => "Laufwerksfehler",
+            (_, 0x3A, _) => "no disc in the drive",
+            (2, 0x04, 0x01) => "Drive becoming ready (reading disc)",
+            (2, 0x04, 0x04) => "Disc is being formatted",
+            (2, 0x04, _) => "Drive not ready",
+            (_, 0x30, 0x00..=0x07) => "incompatible or unknown disc",
+            (_, 0x57, _) => "Disc table of contents unreadable",
+            (_, 0x20, 0x00) => "invalid command",
+            (_, 0x21, 0x00) => "address outside the disc",
+            (_, 0x24, 0x00) => "invalid field in command",
+            (_, 0x26, 0x00) => "invalid field in parameter list",
+            (_, 0x28, 0x00) => "Disc changed",
+            (_, 0x29, _) => "Drive was reset",
+            (3, 0x0C, _) => "Write error",
+            (3, 0x11, _) => "uncorrectable read error",
+            (_, 0x64, 0x00) => "illegal mode for this track",
+            (_, 0x72, _) => "Session error (disc full or not writable)",
+            (_, 0x73, 0x03) => "Write laser calibration (OPC) failed",
+            (_, 0x73, _) => "Drive write error",
+            (5, _, _) => "illegal request",
+            (7, _, _) => "Disc is write protected",
+            _ => "Drive error",
         };
         format!("{text} (Sense {:X}/{:02X}/{:02X})", self.key, self.asc, self.ascq)
     }
@@ -427,9 +427,9 @@ mod win {
             }
             .map_err(|e| {
                 BurnError::Backend(if e.code().0 as u32 == 0x80070005 {
-                    "SPTI benötigt Administratorrechte".to_string()
+                    "SPTI needs administrator rights".to_string()
                 } else {
-                    format!("Laufwerk {letter}: konnte nicht geöffnet werden: {e}")
+                    format!("Drive {letter}: could not be opened: {e}")
                 })
             })?;
             Ok(SptiTransport { handle })
@@ -528,9 +528,9 @@ pub struct Profile {
 /// MMC profile names (MMC-5 table "Profile List").
 pub fn profile_name(code: u16) -> &'static str {
     match code {
-        0x0000 => "keine Disc",
+        0x0000 => "no disc",
         0x0001 => "Festplatte",
-        0x0002 => "Wechseldatenträger",
+        0x0002 => "removable medium",
         0x0008 => "CD-ROM",
         0x0009 => "CD-R",
         0x000A => "CD-RW",
@@ -552,7 +552,7 @@ pub fn profile_name(code: u16) -> &'static str {
         0x0050 => "HD DVD-ROM",
         0x0051 => "HD DVD-R",
         0x0052 => "HD DVD-RAM",
-        _ => "unbekannt",
+        _ => "unknown",
     }
 }
 
@@ -588,10 +588,10 @@ pub struct DiscInformation {
 impl DiscInformation {
     pub fn status_text(&self) -> &'static str {
         match self.status {
-            0 => "leer",
-            1 => "unvollständig (erweiterbar)",
-            2 => "abgeschlossen",
-            _ => "sonstiger Zustand",
+            0 => "blank",
+            1 => "incomplete (appendable)",
+            2 => "finalized",
+            _ => "other state",
         }
     }
 }
@@ -612,7 +612,7 @@ pub fn book_type_name(nibble: u8) -> &'static str {
         0xA => "DVD+R",
         0xD => "DVD+RW DL",
         0xE => "DVD+R DL",
-        _ => "unbekannt",
+        _ => "unknown",
     }
 }
 
@@ -764,7 +764,7 @@ pub fn drive_info(t: &dyn ScsiTransport) -> DriveDetails {
             d.media_id = query(t, "ADIP", &read_disc_structure(false, 0, 0, 0x11, 256 + 4), 260).ok().and_then(|b| parse_adip_media_id(&b));
         }
     } else if bd {
-        d.media_id = query(t, "BD-Disc-Information", &read_disc_structure(true, 0, 0, 0x00, 4 + 112), 116).ok().and_then(|b| parse_bd_media_id(&b));
+        d.media_id = query(t, "BD disc information", &read_disc_structure(true, 0, 0, 0x00, 4 + 112), 116).ok().and_then(|b| parse_bd_media_id(&b));
     }
     if let Ok(b) = query(t, "GET PERFORMANCE", &get_performance_write_speeds(32), 8 + 32 * 16) {
         d.write_speeds_kbps = parse_write_speeds(&b);
@@ -831,7 +831,7 @@ mod tests {
         fixed[12] = 0x3A;
         let s = Sense::parse(&fixed).unwrap();
         assert_eq!(s, Sense { key: 2, asc: 0x3A, ascq: 0 });
-        assert!(s.describe().starts_with("keine Disc"), "{}", s.describe());
+        assert!(s.describe().starts_with("no disc"), "{}", s.describe());
         assert!(!s.recoverable(), "no medium is not worth a retry");
         let desc = [0x72, 0x05, 0x24, 0x00, 0, 0, 0, 0];
         let s = Sense::parse(&desc).unwrap();
@@ -842,7 +842,7 @@ mod tests {
         assert!(Sense { key: 2, asc: 4, ascq: 1 }.recoverable());
         assert!(Sense { key: 6, asc: 0x28, ascq: 0 }.recoverable());
         assert!(!Sense { key: 3, asc: 0x0C, ascq: 0 }.recoverable());
-        assert!(Sense { key: 3, asc: 0x0C, ascq: 0 }.describe().starts_with("Schreibfehler"));
+        assert!(Sense { key: 3, asc: 0x0C, ascq: 0 }.describe().starts_with("Write error"));
     }
 
     #[test]
@@ -851,7 +851,7 @@ mod tests {
         let bad = ScsiResult { status: 2, sense: Some(Sense { key: 5, asc: 0x20, ascq: 0 }), transferred: 0 };
         assert!(!bad.ok());
         let e = bad.into_result("TEST").unwrap_err().to_string();
-        assert!(e.starts_with("TEST: ungültiger Befehl"), "{e}");
+        assert!(e.starts_with("TEST: invalid command"), "{e}");
     }
 
     #[test]
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(names, [("DVD+R", false), ("DVD+R DL", true), ("BD-RE", false)]);
         assert!(parse_configuration(&[0; 4]).is_none());
         assert_eq!(profile_name(0x41), "BD-R (SRM)");
-        assert_eq!(profile_name(0x7777), "unbekannt");
+        assert_eq!(profile_name(0x7777), "unknown");
     }
 
     #[test]
@@ -896,8 +896,8 @@ mod tests {
         b[2] = 0b0001_0000 | 0b1100 | 0b01; // erasable, last session complete, incomplete disc
         let i = parse_disc_information(&b).unwrap();
         assert_eq!((i.status, i.last_session, i.erasable), (1, 3, true));
-        assert_eq!(i.status_text(), "unvollständig (erweiterbar)");
-        assert_eq!(parse_disc_information(&[0, 0, 0]).unwrap().status_text(), "leer");
+        assert_eq!(i.status_text(), "incomplete (appendable)");
+        assert_eq!(parse_disc_information(&[0, 0, 0]).unwrap().status_text(), "blank");
     }
 
     fn dvd_physical(book: u8, layers: u8, start: u32, end: u32, end_l0: u32) -> Vec<u8> {
@@ -1028,7 +1028,7 @@ mod tests {
         assert_eq!((d.current_profile, d.current_profile_name.as_str()), (Some(0x2B), "DVD+R DL"));
         assert_eq!(d.profiles.len(), 3);
         assert_eq!(d.capacity_sectors, Some(0x224000));
-        assert_eq!(d.disc_status.as_deref(), Some("unvollständig (erweiterbar)"));
+        assert_eq!(d.disc_status.as_deref(), Some("incomplete (appendable)"));
         assert_eq!(d.book_type.as_deref(), Some("DVD+R DL (Teil 1)"));
         assert_eq!(d.layer_break, Some(1_800_000));
         assert_eq!(d.media_id.as_deref(), Some("RITEK-S04-66"));
@@ -1044,7 +1044,7 @@ mod tests {
         let t = Fake { profile: 0, sent: RefCell::new(vec![]), ready: false };
         let d = drive_info(&t);
         assert!(!d.ready);
-        assert_eq!(d.current_profile_name, "keine Disc");
+        assert_eq!(d.current_profile_name, "no disc");
         assert!(d.capacity_sectors.is_none() && d.media_id.is_none());
         assert_eq!(t.sent.borrow().len(), 3, "INQUIRY, GET CONFIGURATION, TEST UNIT READY");
     }

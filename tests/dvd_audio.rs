@@ -109,7 +109,7 @@ fn compliant_audio_is_copied_into_the_vob() {
     assert_eq!(a.len(), 1);
     assert!(a[0].starts_with("ac3,2,256000"), "copied, not re-encoded at 192k: {a:?}");
     assert!(r.authoring_xml.contains(r#"<audio format="ac3" lang="de"/>"#), "{}", r.authoring_xml);
-    assert_eq!(r.titles[0].audio, vec!["Deutsch (Stereo)"]);
+    assert_eq!(r.titles[0].audio, vec!["German (Stereo)"]);
 
     // "Always AC-3" re-encodes (stereo -> 192 kbps).
     let (r, _) = build(&rt, &dir, "ac3b", ac3.clone(), AudioMode::Ac3, only_audio());
@@ -149,7 +149,7 @@ fn trim_cuts_the_title_to_the_section() {
         ..BuildOptions::default()
     };
     let err = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_err().to_string();
-    assert!(err.contains("Schnitt"), "{err}");
+    assert!(err.contains("Trim"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

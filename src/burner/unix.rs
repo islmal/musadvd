@@ -29,7 +29,7 @@ impl CliBurner {
     }
 
     fn xorriso(&self) -> Result<&Path, BurnError> {
-        self.xorriso.as_deref().ok_or_else(|| BurnError::Unsupported("xorriso ist nicht installiert".into()))
+        self.xorriso.as_deref().ok_or_else(|| BurnError::Unsupported("xorriso is not installed".into()))
     }
 }
 
@@ -129,20 +129,20 @@ impl OpticalBurner for CliBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …"));
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Preparing drive …"));
         let media = self.probe_media(drive_id).unwrap_or_else(|_| MediaInfo::none());
         let sectors = std::fs::metadata(iso_path)?.len().div_ceil(2048);
         if !media.present {
             return Err(BurnError::NoMedia);
         }
         if !media.blank && !options.erase {
-            return Err(BurnError::Unsupported(format!("die {} enthält Daten und darf nicht gelöscht werden", media.physical)));
+            return Err(BurnError::Unsupported(format!("the {} contains data and must not be erased", media.physical)));
         }
         if !media.blank && media.physical.starts_with("DVD-RW") {
-            let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "DVD-RW wird gelöscht …"));
+            let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Erasing DVD-RW …"));
             let st = blocking_tool_command(self.xorriso()?).args(["-outdev", drive_id, "-blank", "as_needed"]).status()?;
             if !st.success() {
-                return Err(BurnError::Backend("DVD-RW konnte nicht gelöscht werden".into()));
+                return Err(BurnError::Backend("The DVD-RW could not be erased".into()));
             }
         }
         if media.blank && media.free_sectors > 0 && media.free_sectors < sectors {
@@ -173,7 +173,7 @@ impl OpticalBurner for CliBurner {
             c
         };
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Preparing disc …"));
         // growisofs writes progress to stdout/stderr depending on version; xorriso uses stderr.
         // Drain both streams so neither pipe can stall and live % updates always reach the UI.
         let spawn_reader = |stream: Box<dyn Read + Send>, tx: Sender<BurnProgress>| {
@@ -196,7 +196,7 @@ impl OpticalBurner for CliBurner {
                     let line = String::from_utf8_lossy(&buf).into_owned();
                     if let Some(f) = parse_percent(&line) {
                         let phase = if f >= 0.999 { BurnPhase::Finalizing } else { BurnPhase::Writing };
-                        let _ = tx.send(BurnProgress::new(phase, if phase == BurnPhase::Finalizing { 0.0 } else { f }, "Daten werden geschrieben …"));
+                        let _ = tx.send(BurnProgress::new(phase, if phase == BurnPhase::Finalizing { 0.0 } else { f }, "Writing data …"));
                     } else if !line.trim().is_empty() {
                         tail = line;
                     }
@@ -223,20 +223,20 @@ impl OpticalBurner for CliBurner {
         let err_tail = err_reader.join().unwrap_or_default();
         let tail = if err_tail.is_empty() { out_tail } else { err_tail };
         if !status.success() {
-            return Err(BurnError::Backend(format!("Brennen fehlgeschlagen: {tail}")));
+            return Err(BurnError::Backend(format!("Burning failed: {tail}")));
         }
         if options.verify {
-            let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Disc wird überprüft …"));
+            let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Verifying disc …"));
             let mut device = open_for_verify(drive_id)?;
             let tx = progress_tx.clone();
             verify_against_image(&mut device, iso_path, cancel, &mut |f| {
-                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Disc wird überprüft …"));
+                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Verifying disc …"));
             })?;
         }
         if options.eject {
             let _ = blocking_tool_command("eject").arg(drive_id).status();
         }
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Fertig"));
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Done"));
         Ok(())
     }
 }

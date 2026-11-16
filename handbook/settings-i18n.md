@@ -14,6 +14,7 @@
   `frontend/src/studio/api.ts`.
 - The GUI reads and writes through the Tauri commands `get_settings` / `save_settings`; the CLI
   builds `BuildOptions` from its flags and ignores most stored settings.
+- `template_dir` points at ConvertXToDVD's template folder (or its install folder containing `Templates`); empty = the Windows default, and `CONVERTX_TEMPLATES` overrides both. With no templates found the GUI offers only the menu editor.
 - Settings that the engine does not act on stay visible in the UI but disabled, with the reason.
 
 ## Locale files
@@ -24,7 +25,7 @@ One set of files, `frontend/src/locales/<code>.json`, serves both the GUI and th
 - Keys prefixed `engine.` are used by the Rust side (`i18n::{tr, tf!}`), including fixed template
   texts (`engine.tpl.<English text>`) and language names (`lang.<iso639-1>`).
 - **English (`en.json`) is the master.** Fallback chain: language, then `en`, then the key itself.
-  The default UI language is `de`. Shipped: `de`, `en`, `ru`.
+  The default UI language is `en` (existing settings files keep their stored language). Shipped: `en`, `de`, `ru`.
 - Engine catalogs are read at runtime from `<exe-dir>/locales`, `<cwd>/locales` or the repository
   path. A release exe without `locales/` next to it shows only keys.
 - `save_settings` calls `i18n::reload()`; each reload leaks the old catalogs (known shortcut).
@@ -40,5 +41,4 @@ One set of files, `frontend/src/locales/<code>.json`, serves both the GUI and th
 
 - New UI text: add the key to `en.json` first, then the other locales.
 - Dialogs reopened in the main window must build their text lazily (after the catalog is loaded).
-- Still not localised: `BuildError`/probe error details from some modules, dvdauthor-style
-  messages, and the burn dialog texts in `src-tauri/src/burn.rs` (see STATUS.md known issues).
+- Engine errors, warnings and log lines that are not in the locale files (burn dialog, Burn Studio, CLI, authoring errors) are plain English literals; only text written onto discs and the main build log goes through `engine.*` keys.

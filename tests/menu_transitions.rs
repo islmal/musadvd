@@ -206,7 +206,7 @@ fn menu_transition_cross_domain_and_vtsm() {
     let btn_main = Element {
         id: "b_main".into(),
         content: layout::Content::Text {
-            text: "Hauptmenü".into(),
+            text: "Main menu".into(),
             font: "Arial".into(),
             size: 24.0,
             color: "#FFFFFF".into(),
@@ -234,7 +234,7 @@ fn menu_transition_cross_domain_and_vtsm() {
 
     let main_menu = CustomMenu {
         id: "main".into(),
-        name: "Hauptmenü".into(),
+        name: "Main menu".into(),
         role: MenuRole::Title,
         title: None,
         background: Background::default(),

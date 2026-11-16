@@ -225,7 +225,7 @@ pub fn media_problem(media: &MediaInfo, content: &DiscContent) -> Option<String>
     let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
     let avchd = content.bluray && content.fits_dvd && !media.media_type.is_bd();
     let kind = if avchd {
-        "AVCHD-Disc"
+        "AVCHD disc"
     } else if content.bluray {
         "Blu-ray"
     } else {
@@ -234,29 +234,29 @@ pub fn media_problem(media: &MediaInfo, content: &DiscContent) -> Option<String>
     // AVCHD (BDMV on DVD media) is allowed when the image fits the DVD.
     let wrong_medium = if content.bluray { !media.media_type.is_bd() && !content.fits_dvd } else { media.media_type.is_bd() };
     if !media.present {
-        Some("Keine Disc eingelegt.".to_string())
+        Some("No disc inserted.".to_string())
     } else if media.media_type == MediaType::Unknown {
-        Some(format!("{} ist keine beschreibbare {kind}.", if media.physical.is_empty() { "Die Disc" } else { &media.physical }))
+        Some(format!("{} is not a writable {kind}.", if media.physical.is_empty() { "The disc" } else { &media.physical }))
     } else if !media.writable {
-        Some(format!("Die {} kann in diesem Laufwerk nicht beschrieben werden.", media.physical))
+        Some(format!("The {} cannot be written in this drive.", media.physical))
     } else if !media.blank && !media.rewritable {
-        Some(format!("Die {} ist bereits beschrieben.", media.physical))
+        Some(format!("The {} has already been written.", media.physical))
     } else if wrong_medium {
         Some(if content.bluray {
-            format!("Die Blu-ray braucht einen BD-R/BD-RE-Rohling – die eingelegte {} ist keine Blu-ray.", media.physical)
+            format!("The Blu-ray needs a BD-R/BD-RE disc – the inserted {} is not a Blu-ray.", media.physical)
         } else {
-            format!("Die DVD braucht einen DVD-Rohling – die eingelegte {} ist eine Blu-ray.", media.physical)
+            format!("The DVD needs a DVD disc – the inserted {} is a Blu-ray.", media.physical)
         })
     } else if content.needs_dual_layer_on(media.media_type) && !media.media_type.is_dual_layer() {
         Some(if content.bluray && media.media_type.is_bd() {
-            format!("Die Blu-ray braucht {size_gb:.2} GB – bitte einen BD-50-Rohling (Dual Layer) einlegen.")
+            format!("The Blu-ray needs {size_gb:.2} GB – please insert a BD-50 disc (dual layer).")
         } else if content.bluray {
-            format!("Die AVCHD-Disc braucht {size_gb:.2} GB – bitte einen Double-Layer-Rohling (DVD-9) einlegen.")
+            format!("The AVCHD disc needs {size_gb:.2} GB – please insert a dual-layer disc (DVD-9).")
         } else {
-            format!("Die DVD braucht {size_gb:.2} GB – bitte einen Double-Layer-Rohling (DVD-9) einlegen.")
+            format!("The DVD needs {size_gb:.2} GB – please insert a dual-layer disc (DVD-9).")
         })
     } else if capacity < sectors {
-        Some(format!("Nicht genug Platz: {size_gb:.2} GB benötigt, {:.2} GB verfügbar.", capacity as f64 * 2048.0 / 1e9))
+        Some(format!("Not enough space: {size_gb:.2} GB needed, {:.2} GB available.", capacity as f64 * 2048.0 / 1e9))
     } else {
         None
     }
@@ -472,17 +472,17 @@ pub enum BurnError {
 impl fmt::Display for BurnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BurnError::NoMedia => write!(f, "keine Disc im Laufwerk"),
-            BurnError::Unsupported(m) => write!(f, "nicht unterstützt: {m}"),
+            BurnError::NoMedia => write!(f, "no disc in the drive"),
+            BurnError::Unsupported(m) => write!(f, "not supported: {m}"),
             BurnError::NotEnoughSpace { needed, free } => write!(
                 f,
-                "nicht genug Platz auf der Disc ({:.2} GB benötigt, {:.2} GB frei)",
+                "not enough space on the disc ({:.2} GB needed, {:.2} GB free)",
                 *needed as f64 * 2048.0 / 1e9,
                 *free as f64 * 2048.0 / 1e9
             ),
-            BurnError::Cancelled => write!(f, "abgebrochen"),
-            BurnError::VerifyFailed { sector } => write!(f, "Überprüfung fehlgeschlagen: Sektor {sector} weicht vom Image ab"),
-            BurnError::Image(m) => write!(f, "Disc-Image: {m}"),
+            BurnError::Cancelled => write!(f, "cancelled"),
+            BurnError::VerifyFailed { sector } => write!(f, "Verification failed: sector {sector} differs from the image"),
+            BurnError::Image(m) => write!(f, "Disc image: {m}"),
             BurnError::Io(e) => write!(f, "{e}"),
             BurnError::Backend(m) => write!(f, "{m}"),
         }
@@ -525,7 +525,7 @@ pub trait OpticalBurner: Send + Sync {
         _cancel: &AtomicBool,
         _progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
-        Err(BurnError::Unsupported("Brennen aus Quellen (nur unter Windows)".into()))
+        Err(BurnError::Unsupported("Burning from sources (Windows only)".into()))
     }
 }
 
@@ -631,7 +631,7 @@ pub fn burn_video_ts(
         let remaining_secs = eta.update(progress.phase, progress.fraction, start.elapsed().as_secs_f64());
         on_update(BurnUpdate { progress, remaining_secs });
     };
-    const IMAGE: &str = "Disc-Image wird erstellt …";
+    const IMAGE: &str = "Building disc image …";
     emit(BurnProgress::new(BurnPhase::Preparing, 0.0, IMAGE));
     let mut last = -1.0;
     let mut on_progress = |f: f64| {
@@ -824,16 +824,16 @@ mod tests {
         // BD-25 content on BD-50 is fine, BD-50 content on BD-25 is rejected.
         assert!(media_problem(&bd_r_dl, &bd25).is_none());
         let p = media_problem(&bd_r, &bd50).unwrap();
-        assert!(p.contains("BD-50-Rohling"), "{p}");
+        assert!(p.contains("BD-50 disc"), "{p}");
         assert!(media_problem(&bd_r_dl, &bd50).is_none());
         // Not a writable Blu-ray.
-        assert!(media_problem(&media(MediaType::Unknown, "CD-R", true, false, 1), &bd25).unwrap().contains("keine beschreibbare Blu-ray"));
-        assert!(media_problem(&media(MediaType::Unknown, "CD-R", true, false, 1), &dvd).unwrap().contains("keine beschreibbare DVD"));
+        assert!(media_problem(&media(MediaType::Unknown, "CD-R", true, false, 1), &bd25).unwrap().contains("not a writable Blu-ray"));
+        assert!(media_problem(&media(MediaType::Unknown, "CD-R", true, false, 1), &dvd).unwrap().contains("not a writable DVD"));
         // Rewritable BD-RE with content is allowed (it gets overwritten); a written BD-R is not.
         assert!(media_problem(&media(MediaType::Bd25, "BD-RE", false, true, BD25), &bd25).is_none());
-        assert!(media_problem(&media(MediaType::Bd25, "BD-R", false, false, BD25), &bd25).unwrap().contains("bereits beschrieben"));
+        assert!(media_problem(&media(MediaType::Bd25, "BD-R", false, false, BD25), &bd25).unwrap().contains("already been written"));
         // Too little room.
-        assert!(media_problem(&media(MediaType::Bd25, "BD-R", true, false, 5_000_000), &bd25).unwrap().contains("Nicht genug Platz"));
+        assert!(media_problem(&media(MediaType::Bd25, "BD-R", true, false, 5_000_000), &bd25).unwrap().contains("Not enough space"));
     }
 
     #[test]

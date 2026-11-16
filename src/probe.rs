@@ -366,11 +366,11 @@ pub fn apply_trim(info: &mut MediaInfo, start: Option<f64>, end: Option<f64>) ->
     let full = info.duration_secs;
     let (s, e) = (start.unwrap_or(0.0), end.unwrap_or(full));
     if !s.is_finite() || !e.is_finite() || s < 0.0 || e > full + 0.5 || s >= e {
-        return Err(format!("Schnitt: Start ({s:.1} s) und Ende ({e:.1} s) müssen innerhalb der Laufzeit ({full:.1} s) liegen, Start vor Ende"));
+        return Err(format!("Trim: start ({s:.1} s) and end ({e:.1} s) must lie within the runtime ({full:.1} s), start before end"));
     }
     let e = e.min(full);
     if e - s < MIN_TRIM_SECS {
-        return Err(format!("Schnitt: der Ausschnitt ist {:.1} s lang, mindestens {MIN_TRIM_SECS:.0} s sind nötig", e - s));
+        return Err(format!("Trim: the section is {:.1} s long, at least {MIN_TRIM_SECS:.0} s are required", e - s));
     }
     if s < 0.001 && e > full - 0.001 {
         return Ok(());
@@ -395,7 +395,7 @@ pub fn apply_crop(info: &mut MediaInfo, crop: Crop) -> Result<(), String> {
     if crop == Crop::default() {
         return Ok(());
     }
-    let Some(v) = info.video.as_mut() else { return Err("Zuschnitt: die Datei hat keine Videospur".into()) };
+    let Some(v) = info.video.as_mut() else { return Err("Crop: the file has no video stream".into()) };
     let step_y = if v.is_interlaced() { 4 } else { 2 };
     let down = |x: u32, step: u32| x / step * step;
     let (left, right) = (down(crop.left, 2), down(crop.right, 2));
@@ -404,7 +404,7 @@ pub fn apply_crop(info: &mut MediaInfo, crop: Crop) -> Result<(), String> {
     let h = v.height.saturating_sub(top + bottom);
     if left + right >= v.width || top + bottom >= v.height || w < MIN_CROP_SIZE || h < MIN_CROP_SIZE {
         return Err(format!(
-            "Zuschnitt: von {}×{} Pixeln bleiben nur {w}×{h} übrig (mindestens {MIN_CROP_SIZE}×{MIN_CROP_SIZE})",
+            "Crop: of {}×{} pixels only {w}×{h} remain (at least {MIN_CROP_SIZE}×{MIN_CROP_SIZE})",
             v.width, v.height
         ));
     }
@@ -672,12 +672,12 @@ mod tests {
             let mut i = sample();
             apply_trim(&mut i, s, e).unwrap_err()
         };
-        assert!(bad(Some(-1.0), Some(10.0)).contains("Schnitt"));
-        assert!(bad(Some(10.0), Some(10.0)).contains("Schnitt"));
-        assert!(bad(Some(20.0), Some(10.0)).contains("Schnitt"));
-        assert!(bad(Some(0.0), Some(6000.0)).contains("Laufzeit"));
-        assert!(bad(Some(10.0), Some(10.5)).contains("mindestens 1 s"));
-        assert!(bad(Some(f64::NAN), None).contains("Schnitt"));
+        assert!(bad(Some(-1.0), Some(10.0)).contains("Trim"));
+        assert!(bad(Some(10.0), Some(10.0)).contains("Trim"));
+        assert!(bad(Some(20.0), Some(10.0)).contains("Trim"));
+        assert!(bad(Some(0.0), Some(6000.0)).contains("runtime"));
+        assert!(bad(Some(10.0), Some(10.5)).contains("at least 1 s"));
+        assert!(bad(Some(f64::NAN), None).contains("Trim"));
     }
 
     #[test]
@@ -698,7 +698,7 @@ mod tests {
 
         // Too little left / nothing to do.
         let mut i = sample();
-        assert!(apply_crop(&mut i, Crop { top: 500, bottom: 560, left: 0, right: 0 }).unwrap_err().contains("Zuschnitt"));
+        assert!(apply_crop(&mut i, Crop { top: 500, bottom: 560, left: 0, right: 0 }).unwrap_err().contains("Crop"));
         assert!(apply_crop(&mut i, Crop { top: 0, bottom: 0, left: 1900, right: 0 }).is_err());
         apply_crop(&mut i, Crop::default()).unwrap();
         assert!(i.video.unwrap().crop.is_none());

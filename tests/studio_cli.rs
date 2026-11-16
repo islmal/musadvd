@@ -48,15 +48,15 @@ fn missing_inputs_fail_before_any_drive_is_touched() {
     let none = dir.join("gibt_es_nicht");
     let (code, _, err) = cli(&["build-iso", s(&none), "--output", s(&dir.join("x.iso"))]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("nicht gefunden"), "{err}");
+    assert!(err.contains("not found"), "{err}");
     let (code, _, err) = cli(&["verify-disc", s(&none)]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("Image nicht gefunden"), "{err}");
+    assert!(err.contains("image not found"), "{err}");
     let (code, _, err) = cli(&["iso-label", s(&none)]);
     assert_eq!(code, 1, "{err}");
     let (code, _, err) = cli(&["ifo-layerbreak", s(&none)]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("nicht gefunden"), "{err}");
+    assert!(err.contains("not found"), "{err}");
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn build_label_and_inspect_an_image() {
     let iso = dir.join("daten.iso");
     let (code, out, err) = cli(&["build-iso", s(&src), "--output", s(&iso), "--label", "mein_test"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("Daten") && out.contains("MEIN_TEST"), "{out}");
+    assert!(out.contains("Data") && out.contains("MEIN_TEST"), "{out}");
     assert!(iso.is_file() && std::fs::metadata(&iso).unwrap().len() >= 600 * 2048, "min_sectors");
 
     let (code, out, err) = cli(&["iso-label", s(&iso)]);
@@ -104,5 +104,5 @@ fn dvd_folder_needs_an_answer_and_the_flags_give_it() {
     let data = dir.join("data.iso");
     let (code, out, err) = cli(&["build-iso", s(&src), "--output", s(&data), "--as-data"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("Daten"), "{out}");
+    assert!(out.contains("Data"), "{out}");
 }

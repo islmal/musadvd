@@ -27,9 +27,9 @@ impl fmt::Display for IsoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IsoError::Io(e) => e.fmt(f),
-            IsoError::NotIso => write!(f, "kein ISO-9660-Image (Primary Volume Descriptor fehlt)"),
-            IsoError::Corrupt(m) => write!(f, "beschädigtes ISO-Image: {m}"),
-            IsoError::NotFound(p) => write!(f, "{p} nicht im Image gefunden"),
+            IsoError::NotIso => write!(f, "not an ISO 9660 image (primary volume descriptor missing)"),
+            IsoError::Corrupt(m) => write!(f, "corrupt ISO image: {m}"),
+            IsoError::NotFound(p) => write!(f, "{p} not found in the image"),
         }
     }
 }
@@ -82,7 +82,7 @@ fn record(b: &[u8], ucs: bool) -> Result<Option<(IsoEntry, bool, usize)>, IsoErr
         return Ok(None);
     }
     if len < 34 || len > b.len() || 33 + b[32] as usize > len {
-        return Err(IsoError::Corrupt("ungültiger Verzeichniseintrag"));
+        return Err(IsoError::Corrupt("invalid directory entry"));
     }
     let raw = &b[33..33 + b[32] as usize];
     let mut name = if ucs && raw.len() > 1 { ucs2(raw) } else { String::from_utf8_lossy(raw).into_owned() };
@@ -128,7 +128,7 @@ impl<R: Read + Seek> IsoImage<R> {
             at += 1;
         }
         let label = if joliet { ucs2(&sector[40..72]) } else { String::from_utf8_lossy(&sector[40..72]).into_owned() };
-        let (root, _, _) = record(&sector[156..190], false)?.ok_or(IsoError::Corrupt("Wurzelverzeichnis fehlt"))?;
+        let (root, _, _) = record(&sector[156..190], false)?.ok_or(IsoError::Corrupt("root directory missing"))?;
         Ok(IsoImage { r, ucs: joliet, root, label: label.trim_end().to_string(), total_sectors: le32(&sector, 80) })
     }
 
@@ -141,7 +141,7 @@ impl<R: Read + Seek> IsoImage<R> {
 
     /// Entries of `dir` (without `.` and `..`); multi-extent files are merged.
     pub fn list_entry(&mut self, dir: &IsoEntry) -> Result<Vec<IsoEntry>, IsoError> {
-        let (lba, len) = *dir.extents.first().ok_or(IsoError::Corrupt("Verzeichnis ohne Extent"))?;
+        let (lba, len) = *dir.extents.first().ok_or(IsoError::Corrupt("directory without extent"))?;
         let data = self.read_bytes(lba, (len as u64).div_ceil(SECTOR) * SECTOR)?;
         let mut out: Vec<IsoEntry> = Vec::new();
         let (mut pos, mut continued) = (0usize, false);
@@ -213,7 +213,7 @@ impl<R: Read + Seek> IsoImage<R> {
 
     fn walk(&mut self, dir: &IsoEntry, prefix: &str, depth: usize, out: &mut Vec<(u64, u64, String)>) -> Result<(), IsoError> {
         if depth > MAX_DEPTH {
-            return Err(IsoError::Corrupt("Verzeichnisse zu tief verschachtelt"));
+            return Err(IsoError::Corrupt("directories nested too deeply"));
         }
         for e in self.list_entry(dir)? {
             let path = if prefix.is_empty() { e.name.clone() } else { format!("{prefix}/{}", e.name) };

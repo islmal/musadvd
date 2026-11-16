@@ -94,7 +94,7 @@ impl Outcome {
     }
 
     fn cancelled() -> Self {
-        Outcome { cancelled: true, message: "abgebrochen".into(), ..Default::default() }
+        Outcome { cancelled: true, message: "cancelled".into(), ..Default::default() }
     }
 }
 
@@ -109,13 +109,13 @@ fn path_text(p: &Path) -> String {
 pub fn find_drive(want: Option<&str>) -> Result<DriveInfo, String> {
     let drives = system_burner().list_drives().map_err(|e| e.to_string())?;
     if drives.is_empty() {
-        return Err("Kein DVD-/Blu-ray-Brenner gefunden.".into());
+        return Err("No DVD/Blu-ray burner found.".into());
     }
     let list = || drives.iter().map(|d| format!("  {} (--drive {})", d.name, drive_arg(d))).collect::<Vec<_>>().join("\n");
     let Some(want) = want else {
         return match &drives[..] {
             [d] => Ok(d.clone()),
-            _ => Err(format!("Mehrere Laufwerke – bitte eines wählen:\n{}", list())),
+            _ => Err(format!("Several drives – please choose one:\n{}", list())),
         };
     };
     let w = want.trim().trim_end_matches('\\').to_lowercase();
@@ -125,8 +125,8 @@ pub fn find_drive(want: Option<&str>) -> Result<DriveInfo, String> {
         .collect();
     match hits[..] {
         [d] => Ok(d.clone()),
-        [] => Err(format!("Laufwerk '{want}' nicht gefunden. Vorhanden:\n{}", list())),
-        _ => Err(format!("Mehrere Laufwerke passen zu '{want}':\n{}", list())),
+        [] => Err(format!("Drive '{want}' not found. Available:\n{}", list())),
+        _ => Err(format!("Several drives match '{want}':\n{}", list())),
     }
 }
 
@@ -136,7 +136,7 @@ fn drive_arg(d: &DriveInfo) -> String {
 }
 
 fn letter_of(drive: &DriveInfo) -> Result<char, BurnError> {
-    power::drive_letter(&drive.path).ok_or_else(|| BurnError::Backend("Das Laufwerk hat keinen Laufwerksbuchstaben".into()))
+    power::drive_letter(&drive.path).ok_or_else(|| BurnError::Backend("The drive has no drive letter".into()))
 }
 
 /// The MMC transport the settings ask for (`io.transport`).
@@ -144,7 +144,7 @@ fn letter_of(drive: &DriveInfo) -> Result<char, BurnError> {
 pub fn transport(drive: &DriveInfo, io: &StudioIo) -> Result<Box<dyn ScsiTransport>, BurnError> {
     use super::spti::{ImapiExTransport, SptiTransport};
     if io.backend == "imapi" {
-        return Err(BurnError::Unsupported("MMC-Abfragen sind mit dem Backend „IMAPI“ abgeschaltet".into()));
+        return Err(BurnError::Unsupported("MMC queries are disabled with the 'IMAPI' backend".into()));
     }
     if io.transport == "spti" {
         Ok(Box::new(SptiTransport::open(letter_of(drive)?)?))
@@ -155,7 +155,7 @@ pub fn transport(drive: &DriveInfo, io: &StudioIo) -> Result<Box<dyn ScsiTranspo
 
 #[cfg(not(windows))]
 pub fn transport(_drive: &DriveInfo, _io: &StudioIo) -> Result<Box<dyn ScsiTransport>, BurnError> {
-    Err(BurnError::Unsupported("MMC-Zugriff nur unter Windows".into()))
+    Err(BurnError::Unsupported("MMC access is only available on Windows".into()))
 }
 
 /// Read-only drive and media details (INQUIRY, profiles, media ID, book type, speeds).
@@ -187,7 +187,7 @@ pub fn open_disc(drive: &DriveInfo, io: &StudioIo) -> Result<Box<dyn SectorSourc
 
 #[cfg(not(windows))]
 pub fn open_disc(_drive: &DriveInfo, _io: &StudioIo) -> Result<Box<dyn SectorSource>, BurnError> {
-    Err(BurnError::Unsupported("Lesen von Disc nur unter Windows".into()))
+    Err(BurnError::Unsupported("Reading discs is only available on Windows".into()))
 }
 
 /// Queries the drive via MMC READ DISC STRUCTURE (format 0x01) whether the current disc is CSS/CPPM protected.
@@ -467,7 +467,7 @@ fn burn_dispatch(
             "auto" => {
                 let missing_write_feature = !super::windows::is_imapi_write_feature_current(&drive.id);
                 if missing_write_feature {
-                    ctx.log("Hinweis: Laufwerk meldet keine aktive IMAPI2-Schreibfeatureseite (USB-Bridge-Inkompatibilität). Schalte automatisch auf SPTI-Direkt um.");
+                    ctx.log("Note: the drive reports no current IMAPI2 write feature page (USB bridge incompatibility). Switching to SPTI Direct automatically.");
                 }
                 missing_write_feature
             }
@@ -483,7 +483,7 @@ fn burn_dispatch(
 
 /// Waits (cancellable) until a blank disc is in the drive.
 fn wait_for_blank(ctx: &Ctx, drive: &DriveInfo, copy: u32) -> bool {
-    ctx.log(format!("Bitte eine leere Disc für Kopie {copy} einlegen …"));
+    ctx.log(format!("Please insert a blank disc for copy {copy} …"));
     let burner = system_burner();
     while !ctx.cancelled() {
         if burner.probe_media(&drive.id).is_ok_and(|m| m.present && m.blank) {
@@ -535,7 +535,7 @@ pub fn write(ctx: &Ctx, job: &WriteJob, make_source: &(dyn Fn() -> Result<Box<dy
             telemetry: Some(rec.hook()),
         };
         ctx.log(format!(
-            "{}: {} bei {}{}",
+            "{}: {} at {}{}",
             job.drive.name,
             media.physical,
             match speed {
@@ -591,7 +591,7 @@ pub fn write(ctx: &Ctx, job: &WriteJob, make_source: &(dyn Fn() -> Result<Box<dy
             Err(e) => return Err(e.to_string()),
         }
     }
-    let mut o = Outcome::ok(format!("{} {} gebrannt{}.", copies, if copies == 1 { "Disc" } else { "Discs" }, if w.verify { " und überprüft" } else { "" }));
+    let mut o = Outcome::ok(format!("{} {} burned{}.", copies, if copies == 1 { "disc" } else { "discs" }, if w.verify { " and verified" } else { "" }));
     o.graph = graphs.last().map(|p| path_text(p));
     Ok(o)
 }
@@ -599,7 +599,7 @@ pub fn write(ctx: &Ctx, job: &WriteJob, make_source: &(dyn Fn() -> Result<Box<dy
 /// Burns an image file (`.iso`, `.cue`, `.dvd`, `.mds`).
 pub fn write_image(ctx: &Ctx, drive: &DriveInfo, image: &Path, speed: &str, erase: bool) -> Result<Outcome, String> {
     if super::css::image_scrambled(image) == Some(true) {
-        ctx.log("Warnung: Dieses Image enthält CSS-verschlüsselte Sektoren. Eine Kopie auf einem Rohling ist nicht abspielbar.");
+        ctx.log("Warning: this image contains CSS-encrypted sectors. A copy on a blank disc will not play.");
     }
     let (probe, layer_break) = open_image(image)?;
     let volume = isoread::IsoImage::open(File::open(image).map_err(|e| e.to_string())?).map(|i| i.label).unwrap_or_default();
@@ -630,10 +630,10 @@ pub fn write_files(ctx: &Ctx, drive: &DriveInfo, plan: &BuildPlan, speed: &str, 
         });
     }
     let tmp = std::env::temp_dir().join(format!("musadvd_studio_{}.iso", std::process::id()));
-    ctx.log("Image wird für die Überprüfung zuerst als temporäre Datei erstellt …");
+    ctx.log("Building the image as a temporary file first for verification …");
     let rec = Recorder::new(ctx, 1.0);
     let total = plan.total_sectors() as u64;
-    let built = builder::build_to_file(plan, &tmp, Split::None, false, "none", &ctx.cancel, |f| rec.progress("building", f, total, None, "Image wird erstellt …"));
+    let built = builder::build_to_file(plan, &tmp, Split::None, false, "none", &ctx.cancel, |f| rec.progress("building", f, total, None, "Building image …"));
     let result = match built {
         Ok(_) => write(ctx, &job, &|| FileSource::open(&tmp).map(|s| Box::new(s) as Box<dyn SectorSource>).map_err(|e| e.to_string())),
         Err(_) if ctx.cancelled() => Ok(Outcome::cancelled()),
@@ -649,7 +649,7 @@ pub fn write_files(ctx: &Ctx, drive: &DriveInfo, plan: &BuildPlan, speed: &str, 
 fn eject_if(ctx: &Ctx, drive: &DriveInfo, wanted: bool) {
     if wanted && !ctx.cancelled() {
         if let Err(e) = tray(drive, "eject") {
-            ctx.log(format!("Auswerfen fehlgeschlagen: {e}"));
+            ctx.log(format!("Eject failed: {e}"));
         }
     }
 }
@@ -658,7 +658,7 @@ fn eject_if(ctx: &Ctx, drive: &DriveInfo, wanted: bool) {
 pub fn read(ctx: &Ctx, drive: &DriveInfo, out: &Path) -> Result<Outcome, String> {
     let (s, r) = (&ctx.settings, &ctx.settings.read);
     if disc_css(drive, &s.io) == Some(true) {
-        ctx.log("Diese Disc ist CSS-geschützt. Eine Kopie als Image ist auf einem Rohling nicht abspielbar.");
+        ctx.log("This disc is CSS protected. A copy as an image will not play from a blank disc.");
     }
     let details = drive_details(drive, &s.io).ok();
     let mut disc = open_disc(drive, &s.io).map_err(|e| e.to_string())?;
@@ -679,7 +679,7 @@ pub fn read(ctx: &Ctx, drive: &DriveInfo, out: &Path) -> Result<Outcome, String>
     let result = reader::read_disc(&mut *disc, out, &opts, &ctx.cancel, &mut |p| {
         rec.feed(p.lba, 0, None);
         let f = p.lba as f64 / p.total.max(1) as f64;
-        rec.progress("reading", f, p.total, remaining(started, f), &format!("Disc wird gelesen … ({} defekte Sektoren)", p.bad));
+        rec.progress("reading", f, p.total, remaining(started, f), &format!("Reading disc … ({} bad sectors)", p.bad));
     });
     let samples = rec.finish();
     match result {
@@ -706,14 +706,14 @@ pub fn read(ctx: &Ctx, drive: &DriveInfo, out: &Path) -> Result<Outcome, String>
             drop(_lock);
             eject_if(ctx, drive, s.io.eject_after.read);
             let mut o = Outcome::ok(if report.bad.is_empty() {
-                format!("{} Sektoren gelesen.", report.sectors)
+                format!("{} sectors read.", report.sectors)
             } else {
-                format!("{} Sektoren gelesen, {} nicht lesbar (mit Nullen gefüllt).", report.sectors, report.bad.len())
+                format!("{} sectors read, {} unreadable (filled with zeros).", report.sectors, report.bad.len())
             });
             o.files = report.files.iter().map(|p| path_text(p)).collect();
             o.md5 = report.md5;
             o.bad_sectors = report.bad.len() as u64;
-            o.details = report.bad.iter().take(200).map(|l| format!("Sektor {l} nicht lesbar")).collect();
+            o.details = report.bad.iter().take(200).map(|l| format!("Sector {l} unreadable")).collect();
             o.graph = graph.map(|p| path_text(&p));
             o.layout_file = report.layout_file.map(|p| path_text(&p));
             Ok(o)
@@ -737,7 +737,7 @@ pub fn verify(ctx: &Ctx, drive: &DriveInfo, image: Option<&Path>) -> Result<Outc
     let started = Instant::now();
     let mut progress = |f: f64| {
         rec.feed((f * total as f64) as u64, 0, None);
-        rec.progress("verifying", f, total, remaining(started, f), "Disc wird überprüft …");
+        rec.progress("verifying", f, total, remaining(started, f), "Verifying disc …");
     };
     let result = match src.as_mut() {
         Some(i) => verifier::verify(&mut *disc, i.as_mut(), &opts, &ctx.cancel, &mut progress),
@@ -782,16 +782,16 @@ pub fn verify(ctx: &Ctx, drive: &DriveInfo, image: Option<&Path>) -> Result<Outc
         .iter()
         .take(200)
         .map(|l| match names.iter().find(|(n, _)| n == l).and_then(|(_, f)| f.as_ref()) {
-            Some(f) => format!("Sektor {l} weicht ab ({f})"),
-            None => format!("Sektor {l} weicht ab"),
+            Some(f) => format!("Sector {l} differs ({f})"),
+            None => format!("Sector {l} differs"),
         })
         .collect();
-    details_out.extend(report.unreadable.iter().take(200).map(|l| format!("Sektor {l} nicht lesbar")));
+    details_out.extend(report.unreadable.iter().take(200).map(|l| format!("Sector {l} unreadable")));
     let bad = report.miscompare_count + report.unreadable.len() as u64;
     let mut o = if report.passed {
-        Outcome::ok(if image.is_some() { "Die Disc stimmt mit dem Image überein." } else { "Die Disc ist vollständig lesbar." })
+        Outcome::ok(if image.is_some() { "The disc matches the image." } else { "The disc is fully readable." })
     } else {
-        Outcome { ok: false, message: format!("{} Sektoren weichen ab, {} nicht lesbar.", report.miscompare_count, report.unreadable.len()), ..Default::default() }
+        Outcome { ok: false, message: format!("{} sectors differ, {} unreadable.", report.miscompare_count, report.unreadable.len()), ..Default::default() }
     };
     o.bad_sectors = bad;
     o.details = details_out;
@@ -810,16 +810,16 @@ pub fn build(ctx: &Ctx, plan: &BuildPlan, out: &Path) -> Result<Outcome, String>
     let started = Instant::now();
     let rec = Recorder::new(ctx, 1.0);
     let built = builder::build_to_file(plan, out, Split::parse(&b.split), s.general.md5_calculate, &b.layout_file, &ctx.cancel, |f| {
-        rec.progress("building", f, total, remaining(started, f), "Image wird erstellt …");
+        rec.progress("building", f, total, remaining(started, f), "Building image …");
     });
     match built {
         Ok(r) => {
-            let mut o = Outcome::ok(format!("{} Sektoren ({:.2} GB) geschrieben.", r.sectors, r.sectors as f64 * 2048.0 / 1e9));
+            let mut o = Outcome::ok(format!("{} sectors ({:.2} GB) written.", r.sectors, r.sectors as f64 * 2048.0 / 1e9));
             o.files = r.files.iter().map(|p| path_text(p)).collect();
             o.md5 = r.md5;
             o.layout_file = r.layout_file.map(|p| path_text(&p));
             if b.log_skipped {
-                o.details = plan.skipped.iter().map(|k| format!("übersprungen: {} ({})", k.path.display(), k.reason)).collect();
+                o.details = plan.skipped.iter().map(|k| format!("skipped: {} ({})", k.path.display(), k.reason)).collect();
             }
             Ok(o)
         }

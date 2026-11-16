@@ -426,6 +426,43 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
             )
           : null,
       ),
+      group(
+        t("settings.template_dir_group"),
+        el(
+          "div",
+          { class: "opt-row" },
+          el("span", { class: "opt-label" }, t("settings.template_dir")),
+          el(
+            "span",
+            { class: "opt-input wide" },
+            el("input", {
+              type: "text",
+              value: draft.template_dir,
+              placeholder: t("settings.template_dir_auto"),
+              spellcheck: false,
+              oninput: (e: Event) => {
+                draft.template_dir = (e.target as HTMLInputElement).value;
+              },
+            }),
+            el(
+              "button",
+              {
+                class: "btn icon",
+                title: t("settings.template_dir_pick"),
+                onclick: async () => {
+                  const dir = await open({ title: t("settings.template_dir_pick"), directory: true });
+                  if (typeof dir === "string") {
+                    draft.template_dir = dir;
+                    render();
+                  }
+                },
+              },
+              "…",
+            ),
+          ),
+        ),
+        el("small", { class: "opt-hint" }, t("settings.template_dir_hint")),
+      ),
     ],
     chapters: () => {
       const off = !draft.auto_chapter_enabled;

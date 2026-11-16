@@ -89,8 +89,8 @@ impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ReadError::Io(p, e) => write!(f, "{}: {e}", p.display()),
-            ReadError::Unreadable { lba, message } => write!(f, "Sektor {lba} nicht lesbar ({message})"),
-            ReadError::Cancelled => write!(f, "abgebrochen"),
+            ReadError::Unreadable { lba, message } => write!(f, "Sector {lba} unreadable ({message})"),
+            ReadError::Cancelled => write!(f, "cancelled"),
         }
     }
 }

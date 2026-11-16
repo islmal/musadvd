@@ -194,12 +194,12 @@ pub async fn preview_stream(
 ) -> Result<String, String> {
     let path = PathBuf::from(path);
     if !path.is_file() {
-        return Err(format!("Datei nicht gefunden: {}", path.display()));
+        return Err(format!("File not found: {}", path.display()));
     }
     let tools = crate::toolchain(&state).await?;
     let mut info = probe::probe(&tools.ffprobe, &path).await.map_err(|e| e.to_string())?;
     probe::apply_crop(&mut info, crop.unwrap_or_default())?;
-    let video = info.video.ok_or("Die Datei hat keine Videospur")?;
+    let video = info.video.ok_or("The file has no video stream")?;
     let _ = server.ffmpeg.set(tools.ffmpeg.clone());
     let token = new_token();
     let entry = Entry { path, video, vp: state.settings().video_processing() };

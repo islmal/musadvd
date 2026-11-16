@@ -1,7 +1,6 @@
 # convertx-rust – working rules
 
-Answer the user in German; code, comments, identifiers and **every Markdown file** (STATUS.md, plans, handbook) are English. UI text and
-user-facing errors are German. Architecture and open issues: [STATUS.md](STATUS.md); module documentation, CLI and testing guides: [handbook/](handbook/README.md); file tree,
+Answer the user in the language they write in; code, comments, identifiers, **every Markdown file** (STATUS.md, plans, handbook), engine errors and log messages are English. GUI text comes from the locale files (English is the master and default language; German and Russian are translations). Architecture and open issues: [STATUS.md](STATUS.md); module documentation, CLI and testing guides: [handbook/](handbook/README.md); file tree,
 dependencies and git state: `SYSTEM_STATE.txt` (generated).
 
 ## Shell setup (every session)
@@ -33,7 +32,8 @@ cargo check --lib --tests --target x86_64-unknown-linux-gnu             # Unix b
   subpicture muxing) and `tsMuxeR` (BDAV muxing, `bd_mux`) are gone; `tools/oracle/` rebuilds
   the first two, and tsMuxeR 2.7.0 comes from its GitHub releases, only to re-record the test
   fixtures (`TSMUXER_RECORD=<exe> cargo test --test tsmuxer_native`). NVENC needs NVIDIA driver ≥ 610.
-- ConvertX templates are read from `C:\ProgramData\VSO\ConvertXToDVD\7\Templates` (read-only).
+- ConvertX templates are read from the `template_dir` setting, else `C:\ProgramData\VSO\ConvertXToDVD\7\Templates`
+  (read-only); the GUI shows the ConvertX tab only when templates exist.
 
 ## Conventions
 
