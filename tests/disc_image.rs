@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
-use convertx_rust::burner::layerbreak::{cell_starts, patch_tt_srpt, plan_disc, Capacities};
-use convertx_rust::burner::udf::{plan_image, write_image, ImagePlan, Timestamp, SECTOR};
-use convertx_rust::burner::{create_disc_image, sanitize_volume_label};
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::tools::Toolchain;
+use musadvd::burner::layerbreak::{cell_starts, patch_tt_srpt, plan_disc, Capacities};
+use musadvd::burner::udf::{plan_image, write_image, ImagePlan, Timestamp, SECTOR};
+use musadvd::burner::{create_disc_image, sanitize_volume_label};
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";
@@ -242,9 +242,9 @@ fn golden_video_ts_image_hash() {
 /// builder: Windows mounts the image and every file reads back with its content.
 #[test]
 fn data_tree_mounts_with_long_names() {
-    use convertx_rust::burner::builder::{build_to_file, plan_build, BuildInput, Source};
-    use convertx_rust::burner::reader::Split;
-    use convertx_rust::config::StudioBuild;
+    use musadvd::burner::builder::{build_to_file, plan_build, BuildInput, Source};
+    use musadvd::burner::reader::Split;
+    use musadvd::config::StudioBuild;
 
     let dir = std::env::temp_dir().join(format!("cx_data_tree_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use convertx_rust::menu::IndexedImage;
-use convertx_rust::spumux;
+use musadvd::menu::IndexedImage;
+use musadvd::spumux;
 use md5::{Digest, Md5};
 
 /// A subtitle-like bitmap: `w`×`h`, text-ish stripes in two opaque colours on transparency.

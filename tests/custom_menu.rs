@@ -6,10 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::author::TvStandard;
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::layout::CustomLayout;
-use convertx_rust::tools::Toolchain;
+use musadvd::author::TvStandard;
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::layout::CustomLayout;
+use musadvd::tools::Toolchain;
 
 fn setup(name: &str) -> Option<(tokio::runtime::Runtime, Toolchain, PathBuf, Vec<PathBuf>)> {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -356,7 +356,7 @@ fn button_colours_and_word_wrap_reach_the_disc() {
                "highlight": {"color": "#3060FF", "selectColor": "#FF00FF"}}]}]}"##,
     )
     .unwrap();
-    let wrapped = convertx_rust::layout::element_text_lines(&layout.menus[0].elements[0], layout.canvas, TvStandard::Pal).unwrap();
+    let wrapped = musadvd::layout::element_text_lines(&layout.menus[0].elements[0], layout.canvas, TvStandard::Pal).unwrap();
     assert_eq!(wrapped.len(), 3, "{wrapped:?}");
     let opts = BuildOptions { inputs, output: dir.join("out"), custom_layout: Some(layout), keep_work: true, ..BuildOptions::default() };
     let report = rt.block_on(dvd::build_dvd(&opts, &mut |_| {})).unwrap_or_else(|e| panic!("build failed: {e}"));

@@ -7,13 +7,13 @@
 use std::path::Path;
 
 use base64::Engine as _;
-use convertx_rust::author::{ClipSource, MenuFrame, TvStandard};
-use convertx_rust::bd_template::layout_from_template;
-use convertx_rust::dvd::ChapterSettings;
-use convertx_rust::encoder::Aspect;
-use convertx_rust::layout::{self, Canvas, CustomLayout, Element, LayoutTitle};
-use convertx_rust::menu::UiLang;
-use convertx_rust::template::Template;
+use musadvd::author::{ClipSource, MenuFrame, TvStandard};
+use musadvd::bd_template::layout_from_template;
+use musadvd::dvd::ChapterSettings;
+use musadvd::encoder::Aspect;
+use musadvd::layout::{self, Canvas, CustomLayout, Element, LayoutTitle};
+use musadvd::menu::UiLang;
+use musadvd::template::Template;
 use serde::{Deserialize, Serialize};
 
 /// A selected audio track or subtitle of a title (source stream index; label for the UI).

@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use convertx_rust::encoder::{preview_filter, VideoProcessing};
-use convertx_rust::probe::{self, Crop, VideoStream};
-use convertx_rust::tools::blocking_tool_command;
+use musadvd::encoder::{preview_filter, VideoProcessing};
+use musadvd::probe::{self, Crop, VideoStream};
+use musadvd::tools::blocking_tool_command;
 use tauri::State;
 
 use crate::AppState;

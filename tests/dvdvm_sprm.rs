@@ -1,4 +1,4 @@
-use convertx_rust::dvdvm::{compile_str, Context, Domain};
+use musadvd::dvdvm::{compile_str, Context, Domain};
 
 fn test_ctx() -> Context {
     Context {

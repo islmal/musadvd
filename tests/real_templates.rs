@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use convertx_rust::template::{IniDocument, Template};
+use musadvd::template::{IniDocument, Template};
 
 const TEMPLATE_DIR: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style";
 
@@ -97,12 +97,12 @@ fn all_open_style_templates_parse() {
 /// Every real template becomes a valid Blu-ray menu set that renders (PNG layers, IG object budget).
 #[test]
 fn all_templates_become_valid_blu_ray_menus() {
-    use convertx_rust::author::{ClipSource, MenuFrame, PlaybackOptions};
-    use convertx_rust::bd::BdRate;
-    use convertx_rust::bd_menu;
-    use convertx_rust::bd_template::layout_from_template;
-    use convertx_rust::encoder::{Aspect, MenuLayer};
-    use convertx_rust::layout::{validate_bd, LayoutTitle};
+    use musadvd::author::{ClipSource, MenuFrame, PlaybackOptions};
+    use musadvd::bd::BdRate;
+    use musadvd::bd_menu;
+    use musadvd::bd_template::layout_from_template;
+    use musadvd::encoder::{Aspect, MenuLayer};
+    use musadvd::layout::{validate_bd, LayoutTitle};
 
     let root = Path::new(r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates");
     if !root.is_dir() {
@@ -138,7 +138,7 @@ fn all_templates_become_valid_blu_ray_menus() {
             // Rendering 1080p layers is slow in debug builds: the pillarbox variant only runs once.
             let aspects: &[Aspect] = if count == 0 { &[Aspect::Standard] } else { &[Aspect::Wide] };
             for &aspect in aspects {
-                let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect, &convertx_rust::dvd::ChapterSettings::default(), convertx_rust::menu::UiLang::DE)
+                let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect, &musadvd::dvd::ChapterSettings::default(), musadvd::menu::UiLang::DE)
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
                 validate_bd(&layout, &titles, frame).unwrap_or_else(|e| panic!("{name}: {e}"));
                 let nav = bd_menu::plan(&layout, &titles, &bd_menu::traits(&layout, &titles, frame), PlaybackOptions::default(), &titles.iter().map(|t| vec![t.chapters]).collect::<Vec<_>>());
@@ -163,7 +163,7 @@ fn all_templates_become_valid_blu_ray_menus() {
 /// Intro keys of the real Open_Style page: the video stamp of block 2 zooms in from its centre.
 #[test]
 fn open_style_block_two_zooms_in_during_the_intro() {
-    use convertx_rust::template::AnimKey;
+    use musadvd::template::AnimKey;
     let Some(dir) = template_dir() else { return };
     let t = Template::load(dir.join("Open_Style.ini")).unwrap();
     let g = t.pages[0].graphics.iter().find(|g| g.block == 2).expect("block 2");

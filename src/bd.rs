@@ -4,7 +4,7 @@
 //! ```text
 //! <output>/<project>/BDMV/         playlist, clip info, m2ts streams
 //! <output>/<project>/CERTIFICATE/
-//! <output>/<project>.convertx-work/        title_NN.mkv, subtitle files, mux.log
+//! <output>/<project>.musadvd-work/        title_NN.mkv, subtitle files, mux.log
 //! ```
 //!
 //! Every title gets its own mux run (one playlist + clip each), so each keeps its own frame
@@ -567,7 +567,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         )));
     }
     std::fs::create_dir_all(&work).at(&work)?;
-    std::fs::write(work.join(WORK_DIR), "temporary files of convertx-rust, safe to delete\n").at(&work)?;
+    std::fs::write(work.join(WORK_DIR), "temporary files of musadvd, safe to delete\n").at(&work)?;
 
     // 1. Probe and select streams ------------------------------------------------------------
     log(Event::Phase(BuildPhase::Probe));

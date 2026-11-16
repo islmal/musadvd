@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use convertx_rust::author::TvStandard;
-use convertx_rust::textsub::render_cue;
+use musadvd::author::TvStandard;
+use musadvd::textsub::render_cue;
 
 fn golden(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textsub").join(format!("{name}.png"))

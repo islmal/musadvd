@@ -8,13 +8,13 @@
 
 use std::path::Path;
 
-use convertx_rust::author::MenuFrame;
-use convertx_rust::bd::BdRate;
-use convertx_rust::bd_author::menu_job;
-use convertx_rust::config::HwAccelMode;
-use convertx_rust::encoder::{bd_custom_menu_args, BackgroundOverlay, CustomMenuMedia, MenuBackground};
-use convertx_rust::igs::{self, IgButton, IgMenu, IgObject};
-use convertx_rust::tools::Toolchain;
+use musadvd::author::MenuFrame;
+use musadvd::bd::BdRate;
+use musadvd::bd_author::menu_job;
+use musadvd::config::HwAccelMode;
+use musadvd::encoder::{bd_custom_menu_args, BackgroundOverlay, CustomMenuMedia, MenuBackground};
+use musadvd::igs::{self, IgButton, IgMenu, IgObject};
+use musadvd::tools::Toolchain;
 
 const IG_PID: u16 = 0x1400;
 const VIDEO_PID: u16 = 0x1011;
@@ -181,9 +181,9 @@ fn ig_display_set_starts_behind_the_entry_point_of_the_intro_mark() {
 
         std::fs::write(dir.join("menu.sup"), igs::build_sup(&ig_menu(code, t90 as u32, sparse))).unwrap();
         let bdmv = dir.join("BD").join("BDMV");
-        convertx_rust::bd_mux::create_skeleton(&bdmv).unwrap();
+        musadvd::bd_mux::create_skeleton(&bdmv).unwrap();
         let job = menu_job(mkv, Some(dir.join("menu.sup")), 0, Some(t), false, rate, 1920, &bdmv, t + 2.0);
-        rt.block_on(convertx_rust::bd_mux::mux_title(&tools, &job)).expect("mux");
+        rt.block_on(musadvd::bd_mux::mux_title(&tools, &job)).expect("mux");
 
         let report = check_clip(&bdmv, IG_PID, t90);
         eprintln!("[{num}/{den} sparse={sparse}] {}", report.0);
@@ -270,11 +270,11 @@ const IG_BUDGET: usize = 256 * 1024;
 /// subtitle tracks).
 #[test]
 fn real_template_ig_display_sets_fit_the_budget() {
-    use convertx_rust::author::{ClipSource, PlaybackOptions};
-    use convertx_rust::bd_menu;
-    use convertx_rust::encoder::Aspect;
-    use convertx_rust::layout::LayoutTitle;
-    use convertx_rust::template::Template;
+    use musadvd::author::{ClipSource, PlaybackOptions};
+    use musadvd::bd_menu;
+    use musadvd::encoder::Aspect;
+    use musadvd::layout::LayoutTitle;
+    use musadvd::template::Template;
 
     let root = Path::new(r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates");
     if !root.is_dir() {
@@ -306,7 +306,7 @@ fn real_template_ig_display_sets_fit_the_budget() {
                 continue;
             }
             let samples: Vec<Vec<f64>> = titles.iter().map(|t| (0..t.chapters).map(|c| c as f64 * 20.0).collect()).collect();
-            let (layout, _) = convertx_rust::bd_template::layout_from_template(&tpl, &ini, &titles, &vec![None; titles.len()], &samples, Aspect::Wide, &convertx_rust::dvd::ChapterSettings::default(), convertx_rust::menu::UiLang::DE).unwrap();
+            let (layout, _) = musadvd::bd_template::layout_from_template(&tpl, &ini, &titles, &vec![None; titles.len()], &samples, Aspect::Wide, &musadvd::dvd::ChapterSettings::default(), musadvd::menu::UiLang::DE).unwrap();
             let traits = bd_menu::traits(&layout, &titles, frame);
             let nav = bd_menu::plan(&layout, &titles, &traits, PlaybackOptions::default(), &groups);
             let pages = bd_menu::render_pages(&layout, &titles, frame, rate, &nav, &out, 25.0).unwrap();
@@ -335,10 +335,10 @@ mod build {
     use std::path::PathBuf;
     use std::process::Command;
 
-    use convertx_rust::author::Resolution;
-    use convertx_rust::calculator::DiscType;
-    use convertx_rust::dvd::{self, BuildOptions, BuildReport, StreamSelection};
-    use convertx_rust::layout::{
+    use musadvd::author::Resolution;
+    use musadvd::calculator::DiscType;
+    use musadvd::dvd::{self, BuildOptions, BuildReport, StreamSelection};
+    use musadvd::layout::{
         Action, Background, Canvas, Content, CustomLayout, CustomMenu, Element, ElementKey, Highlight, MenuRole, MenuSound,
     };
 
@@ -386,7 +386,7 @@ mod build {
                 elements: vec![
                     element(text("Hallo Intro"), headline, None, keys(vec![key(0.0, headline, 0.0), key(INTRO, headline, 1.0)])),
                     element(
-                        Content::Video { title: 1, start_secs: Some(SOURCE_START), fit: convertx_rust::encoder::Fit::Cover, path: None },
+                        Content::Video { title: 1, start_secs: Some(SOURCE_START), fit: musadvd::encoder::Fit::Cover, path: None },
                         SLOT,
                         None,
                         keys(vec![key(0.0, (SLOT.0 + SLOT.2 / 2.0, SLOT.1 + SLOT.3 / 2.0, 0.0, 0.0), 1.0), key(INTRO, SLOT, 1.0)]),
@@ -573,8 +573,8 @@ mod build {
     /// or a moving clip, delivered frame by frame by the helper pass.
     #[test]
     fn intro_frames_start_from_the_picture_or_clip_background() {
-        use convertx_rust::encoder::BackgroundOverlay;
-        use convertx_rust::layout::VideoRef;
+        use musadvd::encoder::BackgroundOverlay;
+        use musadvd::layout::VideoRef;
         let Some((rt, tools)) = tools() else { return };
         let picture = std::env::temp_dir().join(format!("cx_intro_bgpic_{}.png", std::process::id()));
         let st = Command::new(&tools.ffmpeg)
@@ -662,7 +662,7 @@ mod build {
         let mobj = std::fs::read(bdmv.join("MovieObject.bdmv")).unwrap();
         assert_eq!(u16::from_be_bytes([mobj[0x30], mobj[0x31]]) as usize, 2 + pages + 1 + 1);
         // The dispatcher is the last object: it ends in the register-operand jumps.
-        use convertx_rust::hdmv::{jump_object_op, jump_title_op, Op};
+        use musadvd::hdmv::{jump_object_op, jump_title_op, Op};
         let at = |c: [u8; 12]| mobj.windows(12).any(|w| w == c);
         assert!(at(jump_object_op(Op::Gpr(5))) && at(jump_title_op(Op::Gpr(5))), "dispatcher jumps");
         let _ = std::fs::remove_dir_all(&dir);
@@ -695,11 +695,11 @@ mod dvd {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use convertx_rust::author::TvStandard;
-    use convertx_rust::calculator::DiscType;
-    use convertx_rust::dvd::{self, BuildOptions, ChapterSettings};
-    use convertx_rust::menu::UiLang;
-    use convertx_rust::tools::Toolchain;
+    use musadvd::author::TvStandard;
+    use musadvd::calculator::DiscType;
+    use musadvd::dvd::{self, BuildOptions, ChapterSettings};
+    use musadvd::menu::UiLang;
+    use musadvd::tools::Toolchain;
 
     const TEMPLATES: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style";
 

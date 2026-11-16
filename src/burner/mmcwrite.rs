@@ -561,7 +561,7 @@ pub fn burn_direct(
         }
     }
     let t = ImapiExTransport::open(drive_id)?;
-    t.acquire_exclusive("convertx-rust")?;
+    t.acquire_exclusive("MusaDVD")?;
     let r = burn_direct_with(&t, source, options, &direct, cancel, tx);
     t.release_exclusive();
     r

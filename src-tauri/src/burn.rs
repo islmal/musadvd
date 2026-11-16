@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use convertx_rust::burner::layerbreak::Capacities;
-use convertx_rust::burner::{
+use musadvd::burner::layerbreak::Capacities;
+use musadvd::burner::{
     burn_video_ts, default_iso_path as iso_path, is_bdmv_folder, media_problem, preferred_speed, speed_label, speed_x,
     system_burner, BurnError, BurnJob, BurnOptions, BurnOutcome, BurnPhase, BurnProgress, DiscContent, DriveInfo, MediaInfo,
     MediaType, WriteSpeed,
 };
-use convertx_rust::dvd::WORK_DIR;
-use convertx_rust::eta::{self, Eta, JobPhase};
+use musadvd::dvd::WORK_DIR;
+use musadvd::eta::{self, Eta, JobPhase};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -186,7 +186,7 @@ pub fn open_folder(path: String) -> Result<(), String> {
         return Err(format!("{} existiert nicht", path.display()));
     }
     let program = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    convertx_rust::tools::blocking_tool_command(program).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    musadvd::tools::blocking_tool_command(program).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -351,7 +351,7 @@ pub fn cancel_burn(state: State<'_, BurnState>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use convertx_rust::burner::MediaType;
+    use musadvd::burner::MediaType;
 
     fn media(blank: bool, rw: bool, t: MediaType, free: u64) -> MediaInfo {
         MediaInfo {

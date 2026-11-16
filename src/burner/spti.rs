@@ -1050,13 +1050,13 @@ mod tests {
     }
 
     /// Read-only probe of the real drives (skipped without drives or with
-    /// `CONVERTX_SKIP_DRIVE_TESTS`): INQUIRY / configuration / disc structures through IMAPI, and
+    /// `MUSADVD_SKIP_DRIVE_TESTS`): INQUIRY / configuration / disc structures through IMAPI, and
     /// whether SPTI opens without elevation. Never writes.
     #[cfg(windows)]
     #[test]
     fn host_probe_reads_only() {
         use crate::burner::{windows::ImapiBurner, OpticalBurner};
-        if std::env::var_os("CONVERTX_SKIP_DRIVE_TESTS").is_some() {
+        if std::env::var_os("MUSADVD_SKIP_DRIVE_TESTS").is_some() {
             return;
         }
         let drives = ImapiBurner.list_drives().unwrap_or_default();

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ConvertX Rust",
+  "productName": "MusaDVD",
   "version": "0.1.0",
-  "identifier": "de.convertx-rust.app",
+  "identifier": "de.musadvd.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "ConvertX Rust – DVD Authoring",
+        "title": "MusaDVD – DVD Authoring",
         "width": 1200,
         "height": 780,
         "minWidth": 960,
@@ -39,7 +39,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyQkU5NUEyN0E3NUY1QTcKUldTbjlYVjZvcFcrUXVTVmV2SEVwVUl0aitMNnBJQXZlN1hHb01Cd3h2aUJPZU5ISEVXaXUyK08K",
-      "endpoints": ["https://github.com/islmal/convertx-rust/releases/latest/download/latest.json"],
+      "endpoints": ["https://github.com/islmal/musadvd/releases/latest/download/latest.json"],
       "windows": { "installMode": "passive" }
     }
   }

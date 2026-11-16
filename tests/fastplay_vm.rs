@@ -1,7 +1,7 @@
-use convertx_rust::author::{
+use musadvd::author::{
     self, ButtonAction, DvdLayout, MenuButton, MenuSpec, Navigation, PlaybackOptions, Rect, TitleSpec, TitlesetSpec, TvStandard, VobSpec,
 };
-use convertx_rust::layout::{
+use musadvd::layout::{
     self, Action, Background, Canvas, CustomLayout, CustomMenu, Element, FastPlayConfig, FastPlayMenuTarget, Highlight, LayoutTitle,
     MenuRole, MenuSound,
 };
@@ -11,7 +11,7 @@ fn dummy_title() -> LayoutTitle {
         label: "Title 1".into(),
         chapters: 3,
         duration_secs: 120.0,
-        clip: convertx_rust::author::ClipSource { path: "t1.mpg".into(), start_secs: 0.0, has_audio: true },
+        clip: musadvd::author::ClipSource { path: "t1.mpg".into(), start_secs: 0.0, has_audio: true },
         audio_sources: vec![0],
         subtitle_sources: vec![0],
         audio_labels: vec!["Stereo".into()],

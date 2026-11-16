@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use convertx_rust::author::{
+use musadvd::author::{
     self, ButtonAction, DvdLayout, MenuButton, MenuSpec, Navigation, PlaybackOptions, Rect, TitleSpec, TitlesetSpec, TvStandard, VobSpec,
 };
-use convertx_rust::menu::IndexedImage;
-use convertx_rust::spumux;
+use musadvd::menu::IndexedImage;
+use musadvd::spumux;
 use md5::{Digest, Md5};
 
 fn root() -> PathBuf {

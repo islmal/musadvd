@@ -7,7 +7,7 @@ use std::process::Command;
 fn cli(args: &[&str]) -> (i32, String, String) {
     // An empty APPDATA: the default settings, never the developer's own settings file.
     let appdata = std::env::temp_dir().join(format!("cx_studio_cli_appdata_{}", std::process::id()));
-    let out = Command::new(env!("CARGO_BIN_EXE_convertx-rust")).args(args).env("APPDATA", appdata).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_musadvd")).args(args).env("APPDATA", appdata).output().unwrap();
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 

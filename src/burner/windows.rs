@@ -27,7 +27,7 @@ use super::{
     MediaType, OpticalBurner, Telemetry, TelemetryHook, WriteSpeed,
 };
 
-const CLIENT_NAME: &str = "convertx-rust";
+const CLIENT_NAME: &str = "MusaDVD";
 /// E_IMAPI_RECORDER_MEDIA_NO_MEDIA
 const NO_MEDIA: HRESULT = HRESULT(0xC0AA0202u32 as i32);
 /// RPC_E_CHANGED_MODE: COM already initialised as STA on this thread (fine for IMAPI2).

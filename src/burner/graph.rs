@@ -275,13 +275,13 @@ pub fn file_name(template: &str, c: &TemplateContext) -> String {
     format!("{}.ibg", format_template(template, c))
 }
 
-/// The configured graph folder, or `%APPDATA%\convertx-rust\graph` when empty.
+/// The configured graph folder, or `%APPDATA%\musadvd\graph` when empty.
 pub fn folder(configured: &str) -> PathBuf {
     if !configured.trim().is_empty() {
         return PathBuf::from(configured.trim());
     }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("convertx-rust").join("graph")
+    base.join("musadvd").join("graph")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -532,7 +532,7 @@ DATA_IMAGEFILE=-==/\\/[BUILD IMAGE]\\/\\==-\r\n\r\nWRITE_TEST_MODE=False\r\nWRIT
 
     #[test]
     fn default_folder_is_under_appdata() {
-        assert!(folder("").ends_with("convertx-rust/graph") || folder("").ends_with(r"convertx-rust\graph"));
+        assert!(folder("").ends_with("musadvd/graph") || folder("").ends_with(r"musadvd\graph"));
         assert_eq!(folder(" D:\\g "), PathBuf::from("D:\\g"));
     }
 }

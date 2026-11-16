@@ -9,13 +9,13 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
 
-use convertx_rust::author::{Resolution, TvStandard};
-use convertx_rust::burner::udf250;
-use convertx_rust::calculator::DiscType;
-use convertx_rust::config::HwAccelMode;
-use convertx_rust::encoder::BdEncoder;
-use convertx_rust::dvd::{self, BuildOptions, BuildReport, StreamSelection};
-use convertx_rust::tools::Toolchain;
+use musadvd::author::{Resolution, TvStandard};
+use musadvd::burner::udf250;
+use musadvd::calculator::DiscType;
+use musadvd::config::HwAccelMode;
+use musadvd::encoder::BdEncoder;
+use musadvd::dvd::{self, BuildOptions, BuildReport, StreamSelection};
+use musadvd::tools::Toolchain;
 
 fn tools_pair() -> (tokio::runtime::Runtime, Toolchain) {
     tools().expect("tools were available a moment ago")
@@ -137,9 +137,9 @@ fn two_clips_make_two_playlists_with_their_own_rates() {
 
     // Menu-less navigation: First Play + Top Menu + 2 title objects, title 1 chains into title 2.
     let index = std::fs::read(bd.join("BDMV/index.bdmv")).unwrap();
-    assert_eq!(index, convertx_rust::hdmv::index_bdmv(0, 1, &[2, 3]));
+    assert_eq!(index, musadvd::hdmv::index_bdmv(0, 1, &[2, 3]));
     let mobj = std::fs::read(bd.join("BDMV/MovieObject.bdmv")).unwrap();
-    assert_eq!(mobj, convertx_rust::hdmv::movie_object_bdmv(&convertx_rust::bd_menu::plan_without_menus(2).objects));
+    assert_eq!(mobj, musadvd::hdmv::movie_object_bdmv(&musadvd::bd_menu::plan_without_menus(2).objects));
 
     // Clip A keeps its 25 fps (1080i-flagged), clip B its 24 fps: H.264 High@4.1 1080 in both.
     let (ma, mb) = (bd.join("BDMV/STREAM/00000.m2ts"), bd.join("BDMV/STREAM/00001.m2ts"));
@@ -294,7 +294,7 @@ fn make_audio_clip(tools: &Toolchain, dir: &Path, name: &str, codec: &str) -> Pa
     clip
 }
 
-fn audio_options(inputs: Vec<PathBuf>, out: PathBuf, disc: DiscType, mode: convertx_rust::encoder::AudioMode) -> BuildOptions {
+fn audio_options(inputs: Vec<PathBuf>, out: PathBuf, disc: DiscType, mode: musadvd::encoder::AudioMode) -> BuildOptions {
     BuildOptions {
         inputs,
         disc,
@@ -310,7 +310,7 @@ fn audio_options(inputs: Vec<PathBuf>, out: PathBuf, disc: DiscType, mode: conve
 /// Compliant AC-3 is copied (Auto), DTS is copied on a Blu-ray but re-encoded for AVCHD.
 #[test]
 fn audio_is_copied_when_compliant() {
-    use convertx_rust::encoder::AudioMode;
+    use musadvd::encoder::AudioMode;
     let Some((rt, tools)) = tools() else { return };
     let dir = std::env::temp_dir().join(format!("cx_bluray_copy_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -338,7 +338,7 @@ fn audio_is_copied_when_compliant() {
 /// LPCM: written as `pcm_s24le` into the Matroska intermediate, ffmpeg makes BD LPCM of it.
 #[test]
 fn lpcm_ends_up_as_bluray_pcm() {
-    use convertx_rust::encoder::AudioMode;
+    use musadvd::encoder::AudioMode;
     let Some((rt, tools)) = tools() else { return };
     let dir = std::env::temp_dir().join(format!("cx_bluray_lpcm_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -357,7 +357,7 @@ fn lpcm_ends_up_as_bluray_pcm() {
 /// fits a single-layer DVD.
 #[test]
 fn avchd5_builds_a_dvd_sized_bdmv() {
-    use convertx_rust::burner::{DiscContent, DVD5_SECTORS};
+    use musadvd::burner::{DiscContent, DVD5_SECTORS};
     let Some((rt, tools)) = tools() else { return };
     let dir = std::env::temp_dir().join(format!("cx_bluray_avchd_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -400,11 +400,11 @@ fn trim_and_crop_on_bluray() {
     let dir = std::env::temp_dir().join(format!("cx_bluray_trim_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let clip = make_audio_clip(&tools, &dir.join("clips"), "ac3.mkv", "ac3");
-    let mut opts = audio_options(vec![clip], dir.join("out"), DiscType::Bd25, convertx_rust::encoder::AudioMode::Auto);
+    let mut opts = audio_options(vec![clip], dir.join("out"), DiscType::Bd25, musadvd::encoder::AudioMode::Auto);
     opts.selections[0].start_secs = Some(1.0);
     opts.selections[0].end_secs = Some(5.0);
     // 1280x720 minus 160 px left and right = 960x720 (4:3).
-    opts.selections[0].crop = Some(convertx_rust::probe::Crop { top: 0, bottom: 0, left: 160, right: 160 });
+    opts.selections[0].crop = Some(musadvd::probe::Crop { top: 0, bottom: 0, left: 160, right: 160 });
     let report = build(&rt, &opts).unwrap_or_else(|e| panic!("build failed: {e}"));
     let m2ts = report.project_dir.join("BDMV/STREAM/00000.m2ts");
     let dur: f64 = String::from_utf8_lossy(
@@ -565,7 +565,7 @@ fn udf_250_image_of_the_build() {
 
 mod menus {
     use super::*;
-    use convertx_rust::layout::{Action, Background, Canvas, Content, CustomLayout, CustomMenu, Element, Highlight, MenuRole, MenuSound};
+    use musadvd::layout::{Action, Background, Canvas, Content, CustomLayout, CustomMenu, Element, Highlight, MenuRole, MenuSound};
 
     fn button(y: f64, text: &str, action: Action) -> Element {
         Element {
@@ -765,7 +765,7 @@ mod menus {
         assert_eq!(u16::from_be_bytes([index[0x6A], index[0x6B]]), 2);
         let mobj = std::fs::read(bd.join("BDMV/MovieObject.bdmv")).unwrap();
         assert_eq!(u16::from_be_bytes([mobj[0x30], mobj[0x31]]), 5, "2 + 1 menu + 2 files");
-        let jump: Vec<u8> = convertx_rust::hdmv::jump_title(2).into_iter().collect();
+        let jump: Vec<u8> = musadvd::hdmv::jump_title(2).into_iter().collect();
         assert!(mobj.windows(jump.len()).any(|w| w == jump.as_slice()), "file 1 ends with JumpTitle 2");
         let _ = std::fs::remove_dir_all(&dir);
     }

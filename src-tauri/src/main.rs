@@ -25,14 +25,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use convertx_rust::calculator::{Clamp, DiscType, EncodingProfile, Quality};
-use convertx_rust::config::{AppSettings, UNSUPPORTED_CHOICES};
-use convertx_rust::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
-use convertx_rust::encoder::{ac3_settings, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget};
-use convertx_rust::menu::{UiLang, DEFAULT_MOTION_SECS};
-use convertx_rust::probe::{self, language_name, SubtitleKind, TrackLabelMode};
-use convertx_rust::template::Template;
-use convertx_rust::tools::Toolchain;
+use musadvd::calculator::{Clamp, DiscType, EncodingProfile, Quality};
+use musadvd::config::{AppSettings, UNSUPPORTED_CHOICES};
+use musadvd::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
+use musadvd::encoder::{ac3_settings, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget};
+use musadvd::menu::{UiLang, DEFAULT_MOTION_SECS};
+use musadvd::probe::{self, language_name, SubtitleKind, TrackLabelMode};
+use musadvd::template::Template;
+use musadvd::tools::Toolchain;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::OnceCell;
@@ -150,9 +150,9 @@ fn audio_choice(out: AudioOut, base: &str, mode: TrackLabelMode) -> AudioChoice 
         layout: out.layout_label().into(),
         copy: matches!(out, AudioOut::Copy { .. }),
         codec: match out.kind() {
-            convertx_rust::encoder::AudioKind::Ac3 => "ac3",
-            convertx_rust::encoder::AudioKind::Dts => "dts",
-            convertx_rust::encoder::AudioKind::Lpcm => "lpcm",
+            musadvd::encoder::AudioKind::Ac3 => "ac3",
+            musadvd::encoder::AudioKind::Dts => "dts",
+            musadvd::encoder::AudioKind::Lpcm => "lpcm",
         }
         .into(),
     }
@@ -269,7 +269,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                 language: s.language.clone(),
                 title: s.title.clone(),
                 forced: s.forced,
-                supported: s.kind == SubtitleKind::Text || convertx_rust::subpic::supported(&s.codec),
+                supported: s.kind == SubtitleKind::Text || musadvd::subpic::supported(&s.codec),
             })
             .collect(),
         has_source_chapters: !info.chapters.is_empty(),
@@ -358,11 +358,11 @@ fn template_preview(path: String) -> Result<String, String> {
 async fn title_frame(state: State<'_, AppState>, path: String, at_secs: f64) -> Result<String, String> {
     let tools = toolchain(&state).await?;
     let out = std::env::temp_dir().join(format!(
-        "convertx-frame-{}-{}.jpg",
+        "musadvd-frame-{}-{}.jpg",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
     ));
-    let args = convertx_rust::encoder::thumbnail_args(Path::new(&path), at_secs.max(0.0), &out);
+    let args = musadvd::encoder::thumbnail_args(Path::new(&path), at_secs.max(0.0), &out);
     let result = tools.ffmpeg(&args, 0.0, |_| {}).await.map_err(|e| e.to_string());
     let bytes = std::fs::read(&out);
     let _ = std::fs::remove_file(&out);
@@ -376,9 +376,9 @@ async fn title_frame(state: State<'_, AppState>, path: String, at_secs: f64) -> 
 #[tauri::command]
 async fn audio_waveform(state: State<'_, AppState>, path: String, start_secs: f64, secs: f64) -> Result<Vec<u8>, String> {
     let tools = toolchain(&state).await?;
-    let args = convertx_rust::encoder::waveform_args(Path::new(&path), start_secs.max(0.0), secs.clamp(1.0, 900.0));
+    let args = musadvd::encoder::waveform_args(Path::new(&path), start_secs.max(0.0), secs.clamp(1.0, 900.0));
     let pcm = tools.ffmpeg_output(&args).await.map_err(|e| e.to_string())?;
-    Ok(convertx_rust::encoder::waveform_peaks(&pcm))
+    Ok(musadvd::encoder::waveform_peaks(&pcm))
 }
 
 /// The whole picture of a video at `at_secs` as JPEG data URL, `width` pixels wide, in display
@@ -387,11 +387,11 @@ async fn audio_waveform(state: State<'_, AppState>, path: String, start_secs: f6
 async fn source_frame(state: State<'_, AppState>, path: String, at_secs: f64, width: u32) -> Result<String, String> {
     let tools = toolchain(&state).await?;
     let out = std::env::temp_dir().join(format!(
-        "convertx-source-{}-{}.jpg",
+        "musadvd-source-{}-{}.jpg",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
     ));
-    let args = convertx_rust::encoder::frame_args(Path::new(&path), at_secs.max(0.0), width.clamp(64, 1920), &out);
+    let args = musadvd::encoder::frame_args(Path::new(&path), at_secs.max(0.0), width.clamp(64, 1920), &out);
     let result = tools.ffmpeg(&args, 0.0, |_| {}).await.map_err(|e| e.to_string());
     let bytes = std::fs::read(&out);
     let _ = std::fs::remove_file(&out);
@@ -406,7 +406,7 @@ async fn detect_crop(state: State<'_, AppState>, path: String, start_secs: Optio
     let tools = toolchain(&state).await?;
     let mut info = probe::probe(&tools.ffprobe, Path::new(&path)).await.map_err(|e| e.to_string())?;
     probe::apply_trim(&mut info, start_secs, end_secs)?;
-    convertx_rust::encoder::detect_crop(tools, &info).await.map_err(|e| e.to_string())
+    musadvd::encoder::detect_crop(tools, &info).await.map_err(|e| e.to_string())
 }
 
 /// Files passed on the command line (videos dropped onto the .exe, "Open with").
@@ -454,7 +454,7 @@ fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<Ap
     let settings = settings.sanitized();
     settings.save(&state.settings_path).map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings.clone();
-    convertx_rust::i18n::reload();
+    musadvd::i18n::reload();
     Ok(settings)
 }
 
@@ -466,13 +466,13 @@ struct LanguageOption {
 
 #[tauri::command]
 fn get_available_languages() -> Vec<LanguageOption> {
-    convertx_rust::i18n::available_languages().into_iter().map(|(code, name)| LanguageOption { code, name }).collect()
+    musadvd::i18n::available_languages().into_iter().map(|(code, name)| LanguageOption { code, name }).collect()
 }
 
 /// A locale file fresh from disk (the GUI keeps its own copy).
 #[tauri::command]
 fn get_locale_data(lang: String) -> Result<std::collections::HashMap<String, String>, String> {
-    convertx_rust::i18n::load(&lang)
+    musadvd::i18n::load(&lang)
 }
 
 #[derive(Serialize)]
@@ -499,7 +499,7 @@ fn settings_info(state: State<'_, AppState>) -> SettingsInfo {
 #[tauri::command]
 fn default_output_dir() -> String {
     let base = std::env::var_os("USERPROFILE").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    base.join("Videos").join("ConvertX DVD").to_string_lossy().into_owned()
+    base.join("Videos").join("MusaDVD").to_string_lossy().into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +518,7 @@ struct ProjectSettings {
     bd_menu_secs: Vec<f64>,
     /// Custom DVD/BD layout from the WYSIWYG editor.
     #[serde(default)]
-    custom_layout: Option<convertx_rust::layout::CustomLayout>,
+    custom_layout: Option<musadvd::layout::CustomLayout>,
 }
 
 #[derive(Serialize)]
@@ -656,7 +656,7 @@ struct ConversionConfig {
     menu_title: Option<String>,
     /// Menus from the menu editor instead of `template`.
     #[serde(default)]
-    custom_layout: Option<convertx_rust::layout::CustomLayout>,
+    custom_layout: Option<musadvd::layout::CustomLayout>,
 }
 
 #[derive(Clone, Serialize)]
@@ -750,7 +750,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                     }
                     Ok(r) => ConversionDone {
                         ok: true,
-                        message: convertx_rust::tf!(
+                        message: musadvd::tf!(
                             opts.ui_lang,
                             "done_summary",
                             kind = match opts.disc {
@@ -798,7 +798,7 @@ fn main() {
             // `--burn-studio`: start with the Burn Studio window only (the main window stays hidden).
             if std::env::args().any(|a| a == "--burn-studio") {
                 tauri::WebviewWindowBuilder::new(app, "burn-studio", tauri::WebviewUrl::App("burnStudio.html".into()))
-                    .title("Brennstudio – ConvertX Rust")
+                    .title("Brennstudio – MusaDVD")
                     .inner_size(1180.0, 800.0)
                     .min_inner_size(900.0, 620.0)
                     .build()?;
@@ -887,13 +887,13 @@ fn main() {
             burn_studio::studio_template_preview
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the ConvertX GUI");
+        .expect("error while running the MusaDVD GUI");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use convertx_rust::calculator::MAX_VIDEO_KBPS;
+    use musadvd::calculator::MAX_VIDEO_KBPS;
 
     #[test]
     fn calculation_for_two_titles() {
@@ -1039,21 +1039,21 @@ mod tests {
 
     #[test]
     fn dvd_calculation_uses_custom_layout_estimate() {
-        let still_menu = convertx_rust::layout::CustomMenu {
+        let still_menu = musadvd::layout::CustomMenu {
             id: "m1".into(),
             name: "Main".into(),
-            role: convertx_rust::layout::MenuRole::Title,
+            role: musadvd::layout::MenuRole::Title,
             title: None,
-            background: convertx_rust::layout::Background::default(),
+            background: musadvd::layout::Background::default(),
             duration_secs: None,
-            audio: convertx_rust::layout::MenuSound::None,
+            audio: musadvd::layout::MenuSound::None,
             intro_secs: None,
             elements: vec![],
         };
-        let l = convertx_rust::layout::CustomLayout {
+        let l = musadvd::layout::CustomLayout {
             version: 1,
-            canvas: convertx_rust::layout::Canvas::default(),
-            highlight: convertx_rust::layout::Highlight::default(),
+            canvas: musadvd::layout::Canvas::default(),
+            highlight: musadvd::layout::Highlight::default(),
             animations: true,
             menus: vec![still_menu],
             fast_play: None,

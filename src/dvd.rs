@@ -3,7 +3,7 @@
 //! Output layout:
 //! ```text
 //! <output>/<project>/VIDEO_TS/  finished DVD-Video structure ("<project> (2)" if taken)
-//! <output>/<project>.convertx-work/  menu PNGs, spumux/dvdauthor XMLs, title MPEGs, logs;
+//! <output>/<project>.musadvd-work/  menu PNGs, spumux/dvdauthor XMLs, title MPEGs, logs;
 //!                               removed after the build unless `keep_work`
 //! ```
 
@@ -188,7 +188,7 @@ pub(crate) async fn cancellable<T, E: Into<BuildError>>(
 
 /// Name of the temporary work directory inside the output directory, and of the marker file in
 /// it that identifies a work directory created by this program (only those are deleted).
-pub const WORK_DIR: &str = ".convertx-work";
+pub const WORK_DIR: &str = ".musadvd-work";
 
 /// Turns a project name into a valid Windows folder name: invalid characters become `_`,
 /// trailing dots/spaces are removed, reserved device names get a suffix, length is limited.
@@ -215,7 +215,7 @@ pub fn safe_folder_name(name: &str) -> String {
     cleaned
 }
 
-/// Temporary authoring directory `<out>/<project name>.convertx-work`. It is created before
+/// Temporary authoring directory `<out>/<project name>.musadvd-work`. It is created before
 /// probing, so the name comes from `opts` (same precedence as the default project folder name).
 /// Distinct names let two projects build into one output directory in parallel.
 pub fn work_dir(out: &Path, opts: &BuildOptions) -> PathBuf {
@@ -1152,7 +1152,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         )));
     }
     std::fs::create_dir_all(&work).at(&work)?;
-    std::fs::write(work.join(WORK_DIR), "temporary files of convertx-rust, safe to delete\n").at(&work)?;
+    std::fs::write(work.join(WORK_DIR), "temporary files of musadvd, safe to delete\n").at(&work)?;
     let tv = opts.tv_standard;
     if tv == TvStandard::Ntsc {
         log(Event::Step(tr(opts.ui_lang, "tv_ntsc").into()));
@@ -1982,14 +1982,14 @@ mod tests {
         let out = Path::new("out");
         let name = |o: &BuildOptions| work_dir(out, o).file_name().unwrap().to_string_lossy().into_owned();
         let mut o = BuildOptions { inputs: vec!["x/clip.mkv".into()], ..BuildOptions::default() };
-        assert_eq!(name(&o), "clip.convertx-work");
+        assert_eq!(name(&o), "clip.musadvd-work");
         o.menu_title = Some("Menü".into());
         o.project_name = Some("  ".into());
-        assert_eq!(name(&o), "Menü.convertx-work");
+        assert_eq!(name(&o), "Menü.musadvd-work");
         o.project_name = Some("Urlaub 2025".into());
-        assert_eq!(name(&o), "Urlaub 2025.convertx-work");
+        assert_eq!(name(&o), "Urlaub 2025.musadvd-work");
         o.project_name = Some("a/b:c".into());
-        assert_eq!(name(&o), "a_b_c.convertx-work");
+        assert_eq!(name(&o), "a_b_c.musadvd-work");
     }
 
     #[test]

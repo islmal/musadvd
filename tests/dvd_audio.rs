@@ -6,11 +6,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::calculator::DiscType;
-use convertx_rust::dvd::{self, BuildOptions, BuildReport, Event, StreamSelection};
-use convertx_rust::encoder::AudioMode;
-use convertx_rust::probe::Crop;
-use convertx_rust::tools::Toolchain;
+use musadvd::calculator::DiscType;
+use musadvd::dvd::{self, BuildOptions, BuildReport, Event, StreamSelection};
+use musadvd::encoder::AudioMode;
+use musadvd::probe::Crop;
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";
 
@@ -174,8 +174,8 @@ fn crop_changes_the_aspect_of_the_title() {
             "-c:v", "libx264", "-preset", "ultrafast", boxed.to_str().unwrap(),
         ],
     );
-    let info = rt.block_on(convertx_rust::probe::probe(&tools.ffprobe, &boxed)).unwrap();
-    let crop = rt.block_on(convertx_rust::encoder::detect_crop(&tools, &info)).unwrap();
+    let info = rt.block_on(musadvd::probe::probe(&tools.ffprobe, &boxed)).unwrap();
+    let crop = rt.block_on(musadvd::encoder::detect_crop(&tools, &info)).unwrap();
     assert!((88..=92).contains(&crop.top) && (88..=92).contains(&crop.bottom), "{crop:?}");
     assert!(crop.left <= 2 && crop.right <= 2, "{crop:?}");
     std::fs::remove_dir_all(&dir).ok();
@@ -190,7 +190,7 @@ fn loudness(tools: &Toolchain, file: &Path) -> f64 {
         .output()
         .unwrap();
     let log = String::from_utf8_lossy(&out.stderr).into_owned();
-    convertx_rust::encoder::parse_loudnorm_report(&log).unwrap_or_else(|| panic!("no loudnorm report in {log}")).integrated()
+    musadvd::encoder::parse_loudnorm_report(&log).unwrap_or_else(|| panic!("no loudnorm report in {log}")).integrated()
 }
 
 #[test]

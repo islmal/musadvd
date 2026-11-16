@@ -19,7 +19,7 @@ bin/*.iso
 # Disc images and build leftovers
 *.iso
 *.iso.part
-.convertx-work/
+.musadvd-work/
 output_menu/
 
 # Temporary patch scripts and scratch files

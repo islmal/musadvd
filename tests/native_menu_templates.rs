@@ -4,10 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use convertx_rust::author::TitleSpec;
-use convertx_rust::menu::{self, MenuSetOptions};
-use convertx_rust::spumux;
-use convertx_rust::template::Template;
+use musadvd::author::TitleSpec;
+use musadvd::menu::{self, MenuSetOptions};
+use musadvd::spumux;
+use musadvd::template::Template;
 
 const TEMPLATES: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates";
 

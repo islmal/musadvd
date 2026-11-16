@@ -1,6 +1,6 @@
 # Third-party notices
 
-ConvertX Rust is licensed under GPL-3.0-or-later (see `LICENSE`). Parts of it derive from or bundle
+MusaDVD is licensed under GPL-3.0-or-later (see `LICENSE`). Parts of it derive from or bundle
 the following projects.
 
 ## dvdauthor (GPL-2.0-or-later)

@@ -1,25 +1,26 @@
 $sh = New-Object -ComObject WScript.Shell
 
+$root = Split-Path -Parent $PSScriptRoot
 $destinations = @(
     "C:\Users\malik\Desktop",
-    "C:\convertx-rust"
+    $root
 )
 
 foreach ($dest in $destinations) {
     if (Test-Path $dest) {
         # GUI Shortcut
-        $scGui = $sh.CreateShortcut((Join-Path $dest "ConvertX GUI.lnk"))
-        $scGui.TargetPath = "C:\convertx-rust\target\release\convertx-gui.exe"
-        $scGui.WorkingDirectory = "C:\convertx-rust"
-        $scGui.IconLocation = "C:\convertx-rust\src-tauri\icons\icon.ico"
-        $scGui.Description = "ConvertX GUI (Release)"
+        $scGui = $sh.CreateShortcut((Join-Path $dest "MusaDVD GUI.lnk"))
+        $scGui.TargetPath = Join-Path $root "target\release\musadvd-gui.exe"
+        $scGui.WorkingDirectory = $root
+        $scGui.IconLocation = Join-Path $root "src-tauri\icons\icon.ico"
+        $scGui.Description = "MusaDVD GUI (Release)"
         $scGui.Save()
 
         # CLI Shortcut
-        $scCli = $sh.CreateShortcut((Join-Path $dest "ConvertX CLI.lnk"))
-        $scCli.TargetPath = "C:\convertx-rust\target\release\convertx-rust.exe"
-        $scCli.WorkingDirectory = "C:\convertx-rust"
-        $scCli.Description = "ConvertX CLI (Release)"
+        $scCli = $sh.CreateShortcut((Join-Path $dest "MusaDVD CLI.lnk"))
+        $scCli.TargetPath = Join-Path $root "target\release\musadvd.exe"
+        $scCli.WorkingDirectory = $root
+        $scCli.Description = "MusaDVD CLI (Release)"
         $scCli.Save()
     }
 }

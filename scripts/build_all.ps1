@@ -5,14 +5,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Build debug binaries
 Write-Host "==> Building debug binaries..."
-cargo build --bin convertx-rust
+cargo build --bin musadvd
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo build -p convertx-gui
+cargo build -p musadvd-gui
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Build release binaries
 Write-Host "==> Building release binaries..."
-cargo build --release --bin convertx-rust
+cargo build --release --bin musadvd
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 npx tauri build --no-bundle
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

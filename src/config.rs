@@ -690,11 +690,11 @@ impl AppSettings {
         self
     }
 
-    /// `%APPDATA%\convertx-rust\settings.json` (or `./convertx-settings.json` without APPDATA).
+    /// `%APPDATA%\musadvd\settings.json` (or `./musadvd-settings.json` without APPDATA).
     pub fn default_path() -> PathBuf {
         match std::env::var_os("APPDATA") {
-            Some(dir) => PathBuf::from(dir).join("convertx-rust").join("settings.json"),
-            None => PathBuf::from("convertx-settings.json"),
+            Some(dir) => PathBuf::from(dir).join("musadvd").join("settings.json"),
+            None => PathBuf::from("musadvd-settings.json"),
         }
     }
 

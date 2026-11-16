@@ -103,8 +103,8 @@ const state = {
 };
 let nextId = 1;
 
-const SETTINGS_KEY = "convertx-gui-settings";
-const LAYOUT_KEY = "convertx-menu-layout";
+const SETTINGS_KEY = "musadvd-gui-settings";
+const LAYOUT_KEY = "musadvd-menu-layout";
 
 /** DVD and Blu-ray menus are designed separately (4:3 TV frame vs 16:9 HD frame). */
 type Medium = "dvd" | "bd";

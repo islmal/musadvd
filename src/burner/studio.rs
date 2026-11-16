@@ -629,7 +629,7 @@ pub fn write_files(ctx: &Ctx, drive: &DriveInfo, plan: &BuildPlan, speed: &str, 
             Ok(Box::new(builder::stream_image(plan, io.ring_mib.max(1) as usize * (1 << 20), io.recovery_main_low, io.recovery_main_high, ctx.cancel.clone())))
         });
     }
-    let tmp = std::env::temp_dir().join(format!("convertx_studio_{}.iso", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("musadvd_studio_{}.iso", std::process::id()));
     ctx.log("Image wird für die Überprüfung zuerst als temporäre Datei erstellt …");
     let rec = Recorder::new(ctx, 1.0);
     let total = plan.total_sectors() as u64;

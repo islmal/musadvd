@@ -1,5 +1,5 @@
-use convertx_rust::author::{self, DvdLayout, PlaybackOptions, TitleSpec, TitlesetSpec, TvStandard, VobSpec};
-use convertx_rust::layout::{
+use musadvd::author::{self, DvdLayout, PlaybackOptions, TitleSpec, TitlesetSpec, TvStandard, VobSpec};
+use musadvd::layout::{
     self, Action, Background, Canvas, CustomLayout, CustomMenu, Element, ElementKey, Highlight, LayoutTitle, MenuRole, MenuSound,
 };
 
@@ -8,7 +8,7 @@ fn dummy_title() -> LayoutTitle {
         label: "Title 1".into(),
         chapters: 3,
         duration_secs: 120.0,
-        clip: convertx_rust::author::ClipSource { path: "t1.mpg".into(), start_secs: 0.0, has_audio: true },
+        clip: musadvd::author::ClipSource { path: "t1.mpg".into(), start_secs: 0.0, has_audio: true },
         audio_sources: vec![0],
         subtitle_sources: vec![0],
         audio_labels: vec!["Stereo".into()],
@@ -233,7 +233,7 @@ fn easter_egg_transparent_mask() {
 /// Only the plan and the arguments are checked, nothing is encoded.
 #[test]
 fn external_video_files_reach_menu_args_with_their_offsets() {
-    use convertx_rust::encoder::{self, Fit, MenuBackground, MenuLayer};
+    use musadvd::encoder::{self, Fit, MenuBackground, MenuLayer};
     use std::ffi::OsString;
 
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dvdauthor");
