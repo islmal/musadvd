@@ -9,7 +9,7 @@
   <body data-entry="main">
     <div class="app">
       <header class="toolbar">
-        <div class="brand"><span class="disc" aria-hidden="true"></span>MusaDVD</div>
+        <div class="brand"><span class="disc" aria-hidden="true"></span>MusaDVD<span id="app-version" class="app-version"></span></div>
         <div class="toolbar-actions">
           <button id="btn-add" class="btn" data-i18n="app.addVideos">＋ Add videos</button>
           <button id="btn-remove" class="btn" disabled data-i18n="app.remove">Remove</button>
@@ -49,6 +49,14 @@
               <label class="switch"><input id="two-pass" type="checkbox" /><span></span><span data-i18n="app.twoPass">2-pass encoding</span></label>
               <label class="switch"><input id="motion-menu" type="checkbox" /><span></span><span data-i18n="app.motionMenu">Motion menu</span></label>
             </div>
+            <div class="row" id="bd-video-row" hidden>
+              <label for="bd-video" data-i18n="app.bdVideo" data-i18n-title="app.bdVideoTip" title="">Video</label>
+              <select id="bd-video" data-i18n-title="app.bdVideoTip">
+                <option value="encode" data-i18n="app.bdVideoEncode">Re-encode</option>
+                <option value="auto" data-i18n="app.bdVideoAuto">Copy when compliant</option>
+                <option value="strict" data-i18n="app.bdVideoStrict">Copy only (strict)</option>
+              </select>
+            </div>
             <div class="row output-row">
               <input id="output" type="text" data-i18n-placeholder="app.outputPlaceholder" placeholder="Output folder" spellcheck="false" />
               <button id="btn-output" class="btn icon" data-i18n-title="app.chooseFolder" title="Choose folder">…</button>
@@ -64,6 +72,7 @@
             <button class="tab" data-tab="subtitles" role="tab" data-i18n="app.tab.subtitles">Subtitles</button>
             <button class="tab" data-tab="chapters" role="tab" data-i18n="app.tab.chapters">Chapters</button>
             <button class="tab" data-tab="edit" role="tab" data-i18n="app.tab.edit">Trim &amp; picture</button>
+            <button class="tab" data-tab="video" role="tab" data-i18n="app.tab.video" hidden>Video</button>
             <button class="tab" data-tab="template" role="tab" data-i18n="app.tab.template">Menu template</button>
           </nav>
           <div id="tab-body" class="tab-body"></div>

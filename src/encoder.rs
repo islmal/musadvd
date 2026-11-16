@@ -848,6 +848,107 @@ pub fn bd_video_filter(v: &VideoStream, rate: BdRate, resolution: Resolution, vp
     f.join(",")
 }
 
+/// What happens to the video stream of a Blu-ray / AVCHD title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BdVideoMode {
+    /// Always re-encode.
+    #[default]
+    Encode,
+    /// Copy streams that pass [`bd_video_copy`], encode the rest.
+    Auto,
+    /// Copy every title; the build fails when one does not pass [`bd_video_copy`].
+    Strict,
+}
+
+impl BdVideoMode {
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "auto" => BdVideoMode::Auto,
+            "strict" => BdVideoMode::Strict,
+            _ => BdVideoMode::Encode,
+        }
+    }
+}
+
+/// Average video bitrate of the (untrimmed) source in kbit/s: the stream's own, else the file
+/// size minus the audio tracks. shortcut: average only, peaks above the disc's VBV limit are
+/// not detected (that needs a full bitstream scan).
+pub fn source_video_kbps(info: &MediaInfo) -> Option<u32> {
+    let v = info.video.as_ref()?;
+    if let Some(b) = v.bit_rate {
+        return Some(b.div_ceil(1000));
+    }
+    let bytes = std::fs::metadata(&info.path).ok()?.len();
+    if info.duration_secs <= 0.0 {
+        return None;
+    }
+    let total = (bytes as f64 * 8.0 / 1000.0 / info.duration_secs) as u32;
+    let audio: u32 = info.audio.iter().map(|a| a.bit_rate.map_or(0, |b| b / 1000)).sum();
+    Some(total.saturating_sub(audio)).filter(|k| *k > 0)
+}
+
+/// Whether the video stream of `info` can go onto a Blu-ray/AVCHD title with `rate` and
+/// `resolution` unchanged: its average kbit/s, or why it has to be re-encoded (English, shown
+/// in logs and the GUI). `max_kbps`: the disc's video limit beside this title's audio.
+pub fn bd_video_copy(info: &MediaInfo, rate: BdRate, resolution: Resolution, vp: VideoProcessing, max_kbps: u32) -> Result<u32, String> {
+    let kbps = bd_stream_copy(info, vp, max_kbps)?;
+    let v = info.video.as_ref().ok_or("no video stream")?;
+    match crate::bd::bd_native_format(v) {
+        None => Err(not_bd_format(v)),
+        Some((r, _)) if r != resolution => {
+            let (w, h) = resolution.frame_size(TvStandard::Pal);
+            Err(format!("{}×{} source (title is {w}×{h})", v.width, v.height))
+        }
+        Some((_, r)) if r != rate => Err(format!("{} source (title runs at {})", r.name(), rate.name())),
+        Some(_) => Ok(kbps),
+    }
+}
+
+/// Why a source's picture format is no Blu-ray format.
+pub fn not_bd_format(v: &VideoStream) -> String {
+    let scan = if v.is_interlaced() { "interlaced" } else { "progressive" };
+    format!("{}×{} {:.3} fps {scan} is not a Blu-ray video format", v.width, v.height, v.fps)
+}
+
+/// Everything about a stream copy except the picture format (see [`bd_video_copy`]).
+/// shortcut: HRD/VBV parameters and GOP structure of the stream are not checked; a picky player
+/// may still reject an in-spec web rip, which is what the "encode" mode is for.
+pub fn bd_stream_copy(info: &MediaInfo, vp: VideoProcessing, max_kbps: u32) -> Result<u32, String> {
+    let v = info.video.as_ref().ok_or("no video stream")?;
+    if v.codec != "h264" {
+        return Err(format!("{} video (needs H.264)", v.codec.to_uppercase()));
+    }
+    let profile = v.profile.as_deref().unwrap_or("unknown");
+    if !matches!(profile, "Main" | "High") {
+        return Err(format!("H.264 profile {profile} (needs Main or High)"));
+    }
+    if v.pix_fmt != "yuv420p" {
+        return Err(format!("pixel format {} (needs 8-bit 4:2:0)", if v.pix_fmt.is_empty() { "unknown" } else { &v.pix_fmt }));
+    }
+    match v.level {
+        Some(l) if l <= 41 => {}
+        Some(l) => return Err(format!("H.264 level {}.{} (max 4.1)", l / 10, l % 10)),
+        None => return Err("unknown H.264 level".into()),
+    }
+    if v.hdr {
+        return Err("HDR video (needs SDR)".into());
+    }
+    if v.crop.is_some() {
+        return Err("crop active".into());
+    }
+    if info.trim.is_some() {
+        return Err("trim active".into());
+    }
+    if vp.deinterlace == Deinterlace::Yadif {
+        return Err("forced deinterlacing".into());
+    }
+    let kbps = source_video_kbps(info).ok_or("unknown video bitrate")?;
+    if kbps > max_kbps {
+        return Err(format!("{kbps} kbit/s video (disc limit {max_kbps})"));
+    }
+    Ok(kbps)
+}
+
 /// H.264 encoder for Blu-ray titles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BdEncoder {
@@ -919,6 +1020,8 @@ pub struct BdEncodeJob<'a> {
     /// Peak rate and VBV buffer of the video (kbit/s, kbit).
     pub maxrate_kbps: u32,
     pub bufsize_kbit: u32,
+    /// Stream copy of the source video (passed [`bd_video_copy`]): no filter, no encoder.
+    pub copy_video: bool,
 }
 
 impl BdEncodeJob<'_> {
@@ -928,7 +1031,7 @@ impl BdEncodeJob<'_> {
 
     /// x264 2-pass needs an analysis run; NVENC does it inside the single run.
     pub fn x264_two_pass(&self) -> bool {
-        self.two_pass && self.encoder == BdEncoder::X264
+        self.two_pass && self.encoder == BdEncoder::X264 && !self.copy_video
     }
 
     pub fn passlog_prefix(&self) -> PathBuf {
@@ -955,6 +1058,9 @@ impl BdEncodeJob<'_> {
     }
 
     fn video_codec_args(&self) -> Vec<OsString> {
+        if self.copy_video {
+            return ["-c:v", "copy"].map(OsString::from).to_vec();
+        }
         match self.encoder {
             BdEncoder::Nvenc => return self.nvenc_args(),
             BdEncoder::Qsv => return self.qsv_args(),
@@ -1025,7 +1131,7 @@ impl BdEncodeJob<'_> {
     fn input_args(&self, with_audio: bool) -> Vec<OsString> {
         let v = self.info.video.as_ref().expect("probed file has video");
         let mut a: Vec<OsString> = vec!["-y".into()];
-        if let Some(hw) = self.hwaccel {
+        if let Some(hw) = self.hwaccel.filter(|_| !self.copy_video) {
             a.extend(["-hwaccel".into(), hw.into()]);
         }
         a.extend(self.info.input_args());
@@ -1034,7 +1140,10 @@ impl BdEncodeJob<'_> {
             a.push(format!("{:.3}", self.info.duration_secs).into());
             a.extend(["-i", "anullsrc=r=48000:cl=stereo"].map(OsString::from));
         }
-        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), bd_video_filter(v, self.rate, self.resolution, self.video).into()]);
+        a.extend(["-map".into(), format!("0:{}", v.index).into()]);
+        if !self.copy_video {
+            a.extend(["-vf".into(), bd_video_filter(v, self.rate, self.resolution, self.video).into()]);
+        }
         a
     }
 
@@ -1806,6 +1915,10 @@ mod tests {
             field_order: field_order.into(),
             crop: None,
             hdr: false,
+            profile: None,
+            level: None,
+            pix_fmt: String::new(),
+            bit_rate: None,
         }
     }
 
@@ -2107,6 +2220,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bd_video_copy_rules() {
+        let film = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let mut info = bd_info();
+        let v = info.video.as_mut().unwrap();
+        (v.profile, v.level, v.pix_fmt, v.bit_rate) = (Some("High".into()), Some(41), "yuv420p".into(), Some(15_000_000));
+        let ok = |i: &MediaInfo, r| bd_video_copy(i, r, Resolution::Hd1080, VideoProcessing::default(), 30_000);
+        assert_eq!(ok(&info, film), Ok(15_000));
+        let bad = |f: &dyn Fn(&mut MediaInfo)| {
+            let mut i = info.clone();
+            f(&mut i);
+            ok(&i, film).unwrap_err()
+        };
+        assert!(bad(&|i| i.video.as_mut().unwrap().codec = "hevc".into()).contains("HEVC"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().profile = Some("High 10".into())).contains("profile"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().level = Some(51)).contains("5.1"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().width = 1280).contains("1280"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().fps = 60.0).contains("fps"));
+        assert!(bad(&|i| i.trim = Some(crate::probe::Trim { start: 1.0, end: 9.0 })).contains("trim"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().bit_rate = Some(40_000_000)).contains("limit"));
+        // 1080p25 does not exist on a BD; real 1080i25 is copied.
+        let pal = BdRate { fps: (25, 1), fake_interlaced: true };
+        let mut i = info.clone();
+        i.video.as_mut().unwrap().fps = 25.0;
+        assert!(ok(&i, pal).unwrap_err().contains("not a Blu-ray"));
+        i.video.as_mut().unwrap().field_order = "tt".into();
+        assert!(ok(&i, pal).is_ok());
+        // A compliant film source on a 720 title, or forced to another rate, is re-encoded.
+        assert!(bd_video_copy(&info, film, Resolution::Hd720, VideoProcessing::default(), 30_000).unwrap_err().contains("title is 1280×720"));
+        let f24 = BdRate { fps: (24, 1), fake_interlaced: false };
+        assert!(ok(&info, f24).unwrap_err().contains("title runs at 24"));
+    }
+
+    #[test]
+    fn bd_copy_job_skips_filter_and_encoder() {
+        let info = bd_info();
+        let job = BdEncodeJob { copy_video: true, two_pass: true, hwaccel: Some("cuda"), ..bd_job(&info) };
+        let args = strings(job.encode_args("out.mkv"));
+        assert!(args.contains("-c:v copy") && !args.contains("-vf") && !args.contains("-hwaccel"));
+        assert!(!job.x264_two_pass());
+    }
+
     fn bd_job(info: &MediaInfo) -> BdEncodeJob<'_> {
         BdEncodeJob {
             info,
@@ -2126,6 +2281,7 @@ mod tests {
             audio_filters: vec![],
             maxrate_kbps: BD_MAXRATE_KBPS,
             bufsize_kbit: BD_BUFSIZE_KBIT,
+            copy_video: false,
         }
     }
 

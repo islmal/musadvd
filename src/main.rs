@@ -158,6 +158,10 @@ enum Command {
         /// uncompressed audio (Blu-ray/AVCHD; DVD falls back to AC-3).
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// Blu-ray/AVCHD video: encode always re-encodes, auto copies H.264 streams that already
+        /// meet the disc spec (untrimmed, uncropped), strict copies every title or fails.
+        #[arg(long, value_enum, default_value = "encode")]
+        bd_video: BdVideoArg,
         /// Track names on menu buttons: smart (language + file title), language only, or generic (Tonspur 1).
         #[arg(long, value_enum, default_value = "smart")]
         track_labels: TrackLabelsArg,
@@ -317,6 +321,13 @@ impl From<HwAccelArg> for musadvd::config::HwAccelMode {
             HwAccelArg::Amd => Self::Amd,
         }
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BdVideoArg {
+    Encode,
+    Auto,
+    Strict,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -840,6 +851,7 @@ fn main() -> ExitCode {
             no_hw_encode,
             no_menu_animations,
             audio,
+            bd_video,
             track_labels,
             loudnorm,
             scale,
@@ -917,6 +929,11 @@ fn main() -> ExitCode {
                 hw_accel: if no_hw_encode { HwAccelArg::None } else { hw_accel }.into(),
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
+                bd_video: match bd_video {
+                    BdVideoArg::Encode => musadvd::encoder::BdVideoMode::Encode,
+                    BdVideoArg::Auto => musadvd::encoder::BdVideoMode::Auto,
+                    BdVideoArg::Strict => musadvd::encoder::BdVideoMode::Strict,
+                },
                 track_label_mode: track_labels.into(),
                 loudnorm,
                 video: musadvd::encoder::VideoProcessing {

@@ -15,6 +15,11 @@ export interface VideoInfo {
   fps: number;
   interlaced: boolean;
   dvdAspect: string;
+  /** Blu-ray stream copy of the untrimmed, uncropped file: average kbit/s, or why it is re-encoded. */
+  bdCopyKbps: number | null;
+  bdCopyIssue: string | null;
+  /** The Blu-ray format the file already has; a copy needs the title to keep it. */
+  bdFormat: { resolution: "1080" | "720"; rate: string } | null;
 }
 
 export interface AudioTrack {
@@ -106,6 +111,8 @@ export interface TitleLoad {
   durationSecs: number;
   audioKbps: number;
   subtitleStreams: number;
+  /** Video copied at this kbit/s (fixed size on the disc). */
+  copyVideoKbps?: number | null;
 }
 
 export interface ProjectSettings {
@@ -145,6 +152,10 @@ export interface InputConfig {
   mergeWithPrevious?: boolean;
   /** Own audio track names by ffprobe stream index. */
   audioNames?: Record<number, string>;
+  /** Blu-ray overrides: `1080`/`720`, a rate name (`23.976`, `25i`, ...), `encode`/`copy`. */
+  bdResolution?: string | null;
+  bdRate?: string | null;
+  bdVideo?: string | null;
 }
 
 export interface ConversionConfig {
@@ -158,6 +169,8 @@ export interface ConversionConfig {
   menuTitle: string | null;
   /** Menus from the menu editor instead of `template`. */
   customLayout?: CustomLayout | null;
+  /** Blu-ray/AVCHD video: re-encode, copy compliant streams, or copy all. */
+  bdVideo?: "encode" | "auto" | "strict";
 }
 
 export type BuildPhase =

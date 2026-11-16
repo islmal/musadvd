@@ -412,6 +412,8 @@ pub struct BuildOptions {
     pub project_name: Option<String>,
     /// Blu-ray: reject projects with more than one video (no playlist).
     pub bd_single_video: bool,
+    /// Blu-ray / AVCHD: re-encode the video, copy compliant streams, or copy all of them.
+    pub bd_video: crate::encoder::BdVideoMode,
     /// Lets another thread cancel the build.
     pub cancel: CancelToken,
     /// Menus from the menu editor instead of the ConvertX template (`template` is unused then).
@@ -455,6 +457,14 @@ pub struct StreamSelection {
     /// Own names of audio tracks by ffprobe stream index (replace the generated label).
     #[serde(default)]
     pub audio_names: std::collections::HashMap<u32, String>,
+    /// Blu-ray only: frame size (`1080`/`720`), frame rate name ([`crate::bd::BdRate::from_name`])
+    /// and video handling (`encode`/`copy`) of this title instead of the project's.
+    #[serde(default)]
+    pub bd_resolution: Option<String>,
+    #[serde(default)]
+    pub bd_rate: Option<String>,
+    #[serde(default)]
+    pub bd_video: Option<String>,
 }
 
 /// Index ranges of the menu entries: an input plus all directly following inputs that are merged
@@ -548,16 +558,37 @@ pub struct TitleLoad {
     /// Sum of the AC-3 bitrates of the selected tracks.
     pub audio_kbps: u32,
     pub subtitle_streams: usize,
+    /// Blu-ray title whose video is stream-copied at this average kbit/s: a fixed size that is
+    /// taken off the disc before the encoded titles share the rest.
+    #[serde(default)]
+    pub copy_video_kbps: Option<u32>,
 }
 
 /// Video bitrate for `titles` on `disc`, with `menu_mb` of menus already on the disc, limited by
 /// `profile`. Used by the build itself and by the GUI's live estimate.
 pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile: EncodingProfile) -> Result<BitratePlan, CalcError> {
-    let total_secs: f64 = titles.iter().map(|t| t.duration_secs).sum();
     let subs_kbit: f64 =
         titles.iter().map(|t| (t.subtitle_streams as u32 * SUBTITLE_KBPS) as f64 * t.duration_secs).sum();
-    let overhead = disc.default_mux_overhead_kbit() + menu_mb * 8192.0 + subs_kbit;
-    calculator::calculate_capped(disc, total_secs, avg_audio_kbps(titles), overhead, profile.max_video_kbps_for(disc))
+    let (copied, encoded): (Vec<TitleLoad>, Vec<TitleLoad>) = titles.iter().partition(|t| t.copy_video_kbps.is_some());
+    let copied_kbit: f64 = copied.iter().map(|t| (t.copy_video_kbps.unwrap_or(0) + t.audio_kbps) as f64 * t.duration_secs).sum();
+    let overhead = disc.default_mux_overhead_kbit() + menu_mb * 8192.0 + subs_kbit + copied_kbit;
+    if encoded.is_empty() && !copied.is_empty() {
+        // Nothing left to encode: the copies either fit or they do not.
+        let estimated_mb = overhead / 8192.0;
+        let fits = estimated_mb <= disc.target_mb() as f64;
+        return Ok(BitratePlan {
+            disc,
+            duration_secs: 0.0,
+            audio_kbps: 0,
+            mux_overhead_kbit: overhead,
+            raw_video_kbps: 0.0,
+            video_kbps: 0,
+            clamp: if fits { Clamp::None } else { Clamp::Min },
+            estimated_mb,
+        });
+    }
+    let total_secs: f64 = encoded.iter().map(|t| t.duration_secs).sum();
+    calculator::calculate_capped(disc, total_secs, avg_audio_kbps(&encoded), overhead, profile.max_video_kbps_for(disc))
 }
 
 /// Title frame size actually used: the chosen one, except that LP turns Full D1 into Half D1
@@ -1682,7 +1713,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     // 6. Bitrate ----------------------------------------------------------------------------------
     let loads: Vec<TitleLoad> = titles
         .iter()
-        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(), subtitle_streams: t.subtitles.len() })
+        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(), subtitle_streams: t.subtitles.len(), copy_video_kbps: None })
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = avg_audio_kbps(&loads);
@@ -2049,8 +2080,8 @@ mod tests {
     #[test]
     fn bitrate_plan_matches_calculator() {
         let loads = [
-            TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1 },
-            TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0 },
+            TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None },
+            TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None },
         ];
         assert_eq!(avg_audio_kbps(&loads), 491); // (640*3600 + 192*1800) / 5400
         let plan = bitrate_plan(DiscType::Dvd5, &loads, 1.0, EncodingProfile::Auto).unwrap();
@@ -2058,6 +2089,20 @@ mod tests {
         let direct = calculator::calculate_with_overhead(DiscType::Dvd5, 5400.0, 491, overhead).unwrap();
         assert_eq!(plan.video_kbps, direct.video_kbps);
         assert!(plan.fits());
+    }
+
+    #[test]
+    fn copied_titles_take_a_fixed_share_first() {
+        let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 640, subtitle_streams: 0, copy_video_kbps: None };
+        let copy = TitleLoad { copy_video_kbps: Some(20_000), ..enc };
+        let alone = bitrate_plan(DiscType::Bd25, &[enc], 0.0, EncodingProfile::Auto).unwrap();
+        let mixed = bitrate_plan(DiscType::Bd25, &[enc, copy], 0.0, EncodingProfile::Auto).unwrap();
+        assert!(mixed.video_kbps < alone.video_kbps, "the copy's size comes off the encoded title's budget");
+        assert!(mixed.fits() && mixed.estimated_mb > 20_640.0 * 3600.0 / 8192.0, "the estimate includes the copy");
+        let only = bitrate_plan(DiscType::Bd25, &[copy], 0.0, EncodingProfile::Auto).unwrap();
+        assert_eq!((only.video_kbps, only.clamp), (0, Clamp::None));
+        let too_big = bitrate_plan(DiscType::Bd25, &[copy; 4], 0.0, EncodingProfile::Auto).unwrap();
+        assert_eq!(too_big.clamp, Clamp::Min, "four 20 Mbit/s hours overflow a BD-25");
     }
 
     #[test]

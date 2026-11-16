@@ -45,6 +45,8 @@ pub struct BdTitleFiles {
     pub rate: BdRate,
     /// Codec of every disc audio track in this title's mkv.
     pub audio_kinds: Vec<AudioKind>,
+    /// Frame size of this title (titles may differ from each other and from the menus).
+    pub resolution: Resolution,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +55,6 @@ pub struct BdProject {
     /// Language of every audio track (same layout in every title).
     pub audio_langs: Vec<Option<String>>,
     pub sub_tracks: Vec<BdSubTrack>,
-    pub resolution: Resolution,
 }
 
 /// BD playlists hold at most 999 chapter marks.
@@ -90,7 +91,7 @@ impl BdProject {
     /// Mux job of title `i`, written as playlist / clip number `number` into `bdmv`.
     pub fn mux_job(&self, i: usize, number: usize, work: &Path, bdmv: &Path) -> MuxJob {
         let t = &self.titles[i];
-        let (width, _) = self.resolution.frame_size(crate::author::TvStandard::Pal);
+        let (width, _) = t.resolution.frame_size(crate::author::TvStandard::Pal);
         MuxJob {
             mkv: work.join(&t.mkv),
             video: VideoSpec { fps: t.rate.fps, width, interlaced: t.rate.fake_interlaced },
@@ -153,6 +154,7 @@ mod tests {
                     subs: vec!["title_01_s1.sup".into(), "title_01_s2.sup".into()],
                     rate,
                     audio_kinds: vec![AudioKind::Ac3, AudioKind::Dts],
+                    resolution: Resolution::Hd1080,
                 },
                 BdTitleFiles {
                     mkv: "title_02.mkv".into(),
@@ -161,6 +163,7 @@ mod tests {
                     subs: vec!["title_02_s1.sup".into(), "title_02_s2.sup".into()],
                     rate: BdRate { fps: (25, 1), fake_interlaced: true },
                     audio_kinds: vec![AudioKind::Lpcm, AudioKind::Ac3],
+                    resolution: Resolution::Hd1080,
                 },
             ],
             audio_langs: vec![Some("ger".into()), None],
@@ -168,7 +171,6 @@ mod tests {
                 BdSubTrack { kind: SubKind::Text, lang: Some("ger".into()) },
                 BdSubTrack { kind: SubKind::Pgs, lang: Some("eng".into()) },
             ],
-            resolution: Resolution::Hd1080,
         }
     }
 
@@ -195,7 +197,7 @@ mod tests {
     #[test]
     fn single_title_720p() {
         let mut p = project();
-        p.resolution = Resolution::Hd720;
+        p.titles[0].resolution = Resolution::Hd720;
         p.titles[0].rate = BdRate { fps: (60000, 1001), fake_interlaced: false };
         let job = p.mux_job(0, 0, Path::new("w"), Path::new("b"));
         assert_eq!((job.video.fps, job.video.width), ((60000, 1001), 1280));

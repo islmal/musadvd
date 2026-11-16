@@ -277,6 +277,10 @@ mod tests {
             field_order: "progressive".into(),
             crop: None,
             hdr: true,
+            profile: None,
+            level: None,
+            pix_fmt: String::new(),
+            bit_rate: None,
         };
         server.tokens.lock().unwrap().insert("tok".into(), Entry { path: src, video, vp: VideoProcessing::default() });
 

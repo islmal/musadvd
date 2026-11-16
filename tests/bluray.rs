@@ -783,3 +783,63 @@ mod menus {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Per-title Blu-ray video: an in-spec 1080p23.976 H.264 clip is stream-copied (auto mode),
+/// a 720p25 clip (ultrafast x264: Constrained Baseline, no BD profile) forced to 720p50 by its title override is re-encoded at that rate, and strict
+/// mode refuses the clip that cannot be copied.
+#[test]
+fn compliant_video_is_copied_and_titles_keep_their_own_format() {
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_vcopy_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _) = make_clips(&tools, &dir.join("clips"));
+    let film = dir.join("clips/film.mkv");
+    ffmpeg(
+        &tools,
+        &[
+            "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=24000/1001:d=8", "-f", "lavfi", "-i", "sine=f=440:d=8", "-c:v", "libx264",
+            "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-bluray-compat", "1", "-b:v", "6M",
+            "-c:a", "ac3", film.to_str().unwrap(),
+        ],
+    );
+    let one = || StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), ..StreamSelection::default() };
+    let opts = BuildOptions {
+        inputs: vec![film.clone(), a.clone()],
+        disc: DiscType::Bd25,
+        output: dir.join("out"),
+        resolution: Resolution::Hd1080,
+        fast_encode: true,
+        bd_video: musadvd::encoder::BdVideoMode::Auto,
+        selections: vec![one(), StreamSelection { bd_resolution: Some("720".into()), bd_rate: Some("50".into()), ..one() }],
+        ..BuildOptions::default()
+    };
+    let mut warnings = Vec::new();
+    let report = rt
+        .block_on(dvd::build_dvd(&opts, &mut |e| {
+            if let dvd::Event::Warning(w) = e {
+                warnings.push(w)
+            }
+        }))
+        .unwrap_or_else(|e| panic!("build failed: {e}"));
+    assert!(warnings.iter().any(|w| w.starts_with("a:") && w.contains("re-encoded")), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.starts_with("film:")), "the film title is copied: {warnings:?}");
+    let stream = |n: usize| report.project_dir.join(format!("BDMV/STREAM/{n:05}.m2ts"));
+    let copied = probe(&tools, &stream(0), "v:0", "stream=width,height,r_frame_rate,profile,level");
+    for want in ["width=1920", "height=1080", "r_frame_rate=24000/1001", "profile=High", "level=41"] {
+        assert!(copied.contains(want), "{want} in {copied}");
+    }
+    // The copied stream decodes cleanly after the BDAV mux.
+    let decode = Command::new(&tools.ffmpeg).args(["-v", "error", "-i"]).arg(stream(0)).args(["-f", "null", "-"]).output().unwrap();
+    assert!(decode.status.success() && decode.stderr.is_empty(), "{}", String::from_utf8_lossy(&decode.stderr));
+    let encoded = probe(&tools, &stream(1), "v:0", "stream=width,height,r_frame_rate");
+    for want in ["width=1280", "height=720", "r_frame_rate=50/1"] {
+        assert!(encoded.contains(want), "{want} in {encoded}");
+    }
+    assert!(report.titles[0].video_kbps > 0, "the copy reports its own bitrate");
+
+    // Strict: the 720p25 clip has no Blu-ray format, so nothing is built.
+    let strict = BuildOptions { inputs: vec![a], output: dir.join("strict"), bd_video: musadvd::encoder::BdVideoMode::Strict, selections: vec![one()], ..opts };
+    let err = build(&rt, &strict).unwrap_err().to_string();
+    assert!(err.contains("cannot be copied"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}

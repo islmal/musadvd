@@ -92,6 +92,13 @@ pub struct VideoStream {
     pub crop: Option<CropRect>,
     /// PQ (`smpte2084`) or HLG (`arib-std-b67`) transfer: needs tonemapping to SDR.
     pub hdr: bool,
+    /// ffprobe `profile` (`High`, `Main`, `High 10`, ...), `level` (41 = 4.1) and `pix_fmt`:
+    /// decide whether a Blu-ray title can keep the stream.
+    pub profile: Option<String>,
+    pub level: Option<i32>,
+    pub pix_fmt: String,
+    /// Stream bitrate in bit/s, if the container reports one (MKV usually does not).
+    pub bit_rate: Option<u32>,
 }
 
 impl VideoStream {
@@ -207,6 +214,8 @@ struct RawStream {
     bit_rate: Option<String>,
     sample_rate: Option<String>,
     profile: Option<String>,
+    level: Option<i32>,
+    pix_fmt: Option<String>,
     #[serde(default)]
     tags: RawTags,
     #[serde(default)]
@@ -292,6 +301,10 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                     field_order: s.field_order.unwrap_or_default(),
                     crop: None,
                     hdr: matches!(s.color_transfer.as_deref(), Some("smpte2084" | "arib-std-b67")),
+                    profile: s.profile.clone().filter(|p| !p.is_empty()),
+                    level: s.level.filter(|l| *l > 0),
+                    pix_fmt: s.pix_fmt.clone().unwrap_or_default(),
+                    bit_rate: s.bit_rate.as_deref().and_then(|b| b.trim().parse().ok()),
                 });
             }
             Some("audio") => info.audio.push(AudioStream {

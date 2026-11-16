@@ -1,4 +1,5 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getVersion } from "@tauri-apps/api/app";
 import { openSettings } from "./settings";
 import { openBurner } from "./burn";
 import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
@@ -67,9 +68,17 @@ interface Title {
   mergeWithPrevious: boolean;
   /** Own audio track names by ffprobe stream index (empty = generated label). */
   audioNames: Record<number, string>;
+  /** Blu-ray overrides (null = project setting / automatic). */
+  bdResolution: BdRes | null;
+  bdRate: string | null;
+  bdVideo: "encode" | "copy" | null;
 }
 
-type Tab = "audio" | "subtitles" | "chapters" | "edit" | "template";
+type BdRes = "1080" | "720";
+/** Frame rates a Blu-ray title may have per frame size (engine `BdRate::allowed`). */
+const BD_RATES: Record<BdRes, string[]> = { "1080": ["23.976", "24", "25i", "29.97i"], "720": ["23.976", "24", "50", "59.94"] };
+
+type Tab = "audio" | "subtitles" | "chapters" | "edit" | "video" | "template";
 
 type DiscChoice = "dvd5" | "dvd9" | "bd25" | "bd50" | "avchd5" | "avchd9" | "custom";
 
@@ -81,6 +90,8 @@ const state = {
   settings: null as AppSettings | null,
   twoPass: false,
   motion: false,
+  /** Blu-ray/AVCHD video: re-encode, copy compliant streams, or copy all (engine `BdVideoMode`). */
+  bdVideo: "encode" as BdVideo,
   templates: [] as TemplateInfo[],
   template: "",
   /** Menus from a ConvertX template or from the menu editor (the editor is the default; templates need ConvertXToDVD). */
@@ -103,6 +114,7 @@ const state = {
 };
 let nextId = 1;
 
+type BdVideo = "encode" | "auto" | "strict";
 const SETTINGS_KEY = "musadvd-gui-settings";
 const LAYOUT_KEY = "musadvd-menu-layout";
 
@@ -134,6 +146,7 @@ function loadSettings() {
     if (["dvd5", "dvd9", "bd25", "bd50", "avchd5", "avchd9", "custom"].includes(s.disc)) state.disc = s.disc;
     state.twoPass = !!s.twoPass;
     state.motion = !!s.motion;
+    if (["encode", "auto", "strict"].includes(s.bdVideo)) state.bdVideo = s.bdVideo;
     if (typeof s.template === "string") state.template = s.template;
     if (typeof s.output === "string") state.output = s.output;
     slots.dvd.mode = s.menuMode === "template" ? "template" : "custom";
@@ -153,11 +166,11 @@ function loadSettings() {
 function saveSettings() {
   try {
     // The heading is project-specific and therefore not remembered between sessions.
-    const { disc, twoPass, motion, template, output } = state;
+    const { disc, twoPass, motion, bdVideo, template, output } = state;
     slots[mediumOf(disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
     localStorage.setItem(
       SETTINGS_KEY,
-      JSON.stringify({ disc, twoPass, motion, template, output, menuMode: slots.dvd.mode, menuModeBd: slots.bd.mode }),
+      JSON.stringify({ disc, twoPass, motion, bdVideo, template, output, menuMode: slots.dvd.mode, menuModeBd: slots.bd.mode }),
     );
     for (const m of ["dvd", "bd"] as const) {
       const { layout, key } = slots[m];
@@ -349,6 +362,9 @@ async function addFiles(paths: string[]) {
         crop: null,
         mergeWithPrevious: false,
         audioNames: {},
+        bdResolution: null,
+        bdRate: null,
+        bdVideo: null,
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
@@ -501,6 +517,9 @@ async function splitByChapters(t: Title) {
     crop: t.crop ? { ...t.crop } : null,
     mergeWithPrevious: false,
     audioNames: { ...t.audioNames },
+    bdResolution: t.bdResolution,
+    bdRate: t.bdRate,
+    bdVideo: t.bdVideo,
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
@@ -621,6 +640,7 @@ async function runCalc() {
         durationSecs: effDuration(t),
         audioKbps: audioKbps(t),
         subtitleStreams: t.subs.size,
+        copyVideoKbps: bdCopy(t)?.kbps ?? null,
       })),
       motionMenu: usesMotion(),
       motionDuration: null,
@@ -639,6 +659,108 @@ async function runCalc() {
 // ---------------------------------------------------------------------------
 // Rendering: left side
 // ---------------------------------------------------------------------------
+
+function copyBadge(t: Title) {
+  const c = bdCopy(t);
+  if (!c) return "";
+  return c.issue
+    ? h("span", { class: "badge copy-badge encode", title: c.issue }, tr("main.bdEncodeBadge"))
+    : h("span", { class: "badge copy-badge copy", title: tr("main.bdCopyTip", { kbps: c.kbps ?? 0 }) }, tr("main.bdCopyBadge"));
+}
+
+const projectBdRes = (): BdRes => (state.settings?.bd_resolution === "720p" ? "720" : "1080");
+
+/** Blu-ray/AVCHD video copy verdict of a title (null = the video is encoded anyway). Mirrors
+ * the build: the title must keep the source's own format, trim and crop always force a
+ * re-encode; the disc's bitrate limit is checked there. `strict`: a failed copy stops the build. */
+function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: boolean } | null {
+  const v = t.meta.video;
+  const mode = t.bdVideo ?? state.bdVideo;
+  if (!isBluray() || mode === "encode" || !v) return null;
+  const f = v.bdFormat;
+  const changed = !!f && ((t.bdResolution ?? projectBdRes()) !== f.resolution || (!!t.bdRate && t.bdRate !== f.rate));
+  const issue =
+    v.bdCopyIssue ??
+    (changed ? tr("main.bdFormatChanged") : isTrimmed(t) ? tr("main.trimActive") : t.crop ? tr("main.cropActive") : null);
+  const strict = mode !== "auto";
+  return issue ? { kbps: null, issue, strict } : { kbps: v.bdCopyKbps, issue: null, strict };
+}
+
+function renderVideoTab(t: Title) {
+  const v = t.meta.video;
+  const res = t.bdResolution ?? projectBdRes();
+  const changed = () => {
+    renderTitleList();
+    renderFooter();
+    scheduleCalc();
+    renderTabs();
+  };
+  const select = (id: string, value: string, options: [string, string][], on: (v: string) => void) =>
+    h(
+      "select",
+      { id, onchange: (e: Event) => on((e.target as HTMLSelectElement).value) },
+      ...options.map(([val, label]) => h("option", { value: val, selected: val === value }, label)),
+    );
+  const label = (r: string) => (r.endsWith("i") ? r : `${r}p`);
+  const projectMode = tr(state.bdVideo === "encode" ? "app.bdVideoEncode" : state.bdVideo === "auto" ? "app.bdVideoAuto" : "app.bdVideoStrict");
+  const c = bdCopy(t);
+  const index = state.titles.indexOf(t);
+  return h(
+    "div",
+    { class: "video-tab" },
+    v
+      ? h(
+          "p",
+          { class: "hint" },
+          tr("main.bdSource", { codec: v.codec.toUpperCase(), w: v.width, h: v.height, fps: v.fps.toFixed(3), scan: v.interlaced ? "i" : "p" }),
+          " · ",
+          v.bdFormat ? tr("main.bdSourceFormat", { format: `${v.bdFormat.resolution} ${label(v.bdFormat.rate)}` }) : tr("main.bdNoFormat"),
+        )
+      : "",
+    h(
+      "div",
+      { class: "row" },
+      h("label", { for: "bd-res" }, tr("main.bdResolution")),
+      select(
+        "bd-res",
+        t.bdResolution ?? "",
+        [["", tr("main.projectDefault", { value: `${projectBdRes()}p` })], ["1080", "1080p"], ["720", "720p"]],
+        (val) => {
+          t.bdResolution = (val || null) as BdRes | null;
+          // A rate the new size does not have falls back to automatic.
+          if (t.bdRate && !BD_RATES[t.bdResolution ?? projectBdRes()].includes(t.bdRate)) t.bdRate = null;
+          changed();
+        },
+      ),
+    ),
+    h(
+      "div",
+      { class: "row" },
+      h("label", { for: "bd-rate" }, tr("main.bdRate")),
+      select("bd-rate", t.bdRate ?? "", [["", tr("main.bdRateAuto")], ...BD_RATES[res].map((r): [string, string] => [r, label(r)])], (val) => {
+        t.bdRate = val || null;
+        changed();
+      }),
+    ),
+    h(
+      "div",
+      { class: "row" },
+      h("label", { for: "bd-title-video" }, tr("main.bdVideoTitle")),
+      select(
+        "bd-title-video",
+        t.bdVideo ?? "",
+        [["", tr("main.projectDefault", { value: projectMode })], ["encode", tr("app.bdVideoEncode")], ["copy", tr("main.bdVideoCopy")]],
+        (val) => {
+          t.bdVideo = (val || null) as Title["bdVideo"];
+          changed();
+        },
+      ),
+      copyBadge(t),
+    ),
+    c?.issue ? h("p", { class: "hint" }, tr("main.bdReencodeReason", { reason: c.issue })) : "",
+    index === 0 ? h("p", { class: "hint" }, tr("main.bdMenuRateNote")) : "",
+  );
+}
 
 function renderTitleList() {
   const list = $("title-list");
@@ -671,7 +793,13 @@ function renderTitleList() {
             if (e.key === "Enter" || e.key === " ") select(t.id);
           },
         },
-        h("div", { class: "title-head" }, h("span", { class: "title-no" }, String(i + 1)), h("span", { class: "title-name" }, t.label)),
+        h(
+          "div",
+          { class: "title-head" },
+          h("span", { class: "title-no" }, String(i + 1)),
+          h("span", { class: "title-name" }, t.label),
+          copyBadge(t),
+        ),
         h(
           "div",
           { class: "title-meta" },
@@ -767,18 +895,14 @@ function renderFooter() {
     menusReady &&
     !singleVideoViolated() &&
     !counts.overLimit &&
+    !state.titles.some((t) => bdCopy(t)?.strict && bdCopy(t)?.issue) &&
     mergeMismatches().size === 0 &&
     !!state.output.trim() &&
     !!calc?.fits;
-  const motionToggle = document.getElementById("motion-menu") as HTMLInputElement | null;
-  if (motionToggle) {
-    motionToggle.disabled = state.menuMode === "custom" || isBluray();
-    motionToggle.title = isBluray()
-      ? tr("main.bluRayMenuesBewegen")
-      : state.menuMode === "custom"
-        ? tr("main.beimEigenenMenueBestimmen")
-        : "";
-  }
+  // The switch only steers ConvertX template menus on DVD; custom and Blu-ray menus move on their own.
+  const motionSwitch = document.getElementById("motion-menu")?.closest("label");
+  if (motionSwitch) motionSwitch.hidden = state.menuMode !== "template" || isBluray();
+  $("bd-video-row").hidden = !isBluray();
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
 }
@@ -793,6 +917,10 @@ function select(id: number) {
 }
 
 function renderTabs() {
+  // The Video tab holds Blu-ray-only options.
+  const videoTab = document.querySelector<HTMLButtonElement>('.tab[data-tab="video"]');
+  if (videoTab) videoTab.hidden = !isBluray();
+  if (state.tab === "video" && !isBluray()) state.tab = "audio";
   document.querySelectorAll<HTMLButtonElement>(".tab").forEach((b) => {
     const active = b.dataset.tab === state.tab;
     b.classList.toggle("active", active);
@@ -832,6 +960,7 @@ function renderTabs() {
   if (state.tab === "subtitles") body.append(renderSubtitleTab(t));
   if (state.tab === "chapters") body.append(renderChapterTab(t));
   if (state.tab === "edit") body.append(renderEditTab(t, editHooks));
+  if (state.tab === "video") body.append(renderVideoTab(t));
 }
 
 /** Connects the "Schnitt & Bild" tab to the title list and the size estimate. */
@@ -1631,6 +1760,9 @@ async function convert() {
         crop: t.crop,
         mergeWithPrevious: t.mergeWithPrevious,
         audioNames: t.audioNames,
+        bdResolution: isBluray() ? t.bdResolution : null,
+        bdRate: isBluray() ? t.bdRate : null,
+        bdVideo: isBluray() ? t.bdVideo : null,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
@@ -1640,6 +1772,7 @@ async function convert() {
       motionDuration: null,
       menuTitle: state.menuTitle.trim() || null,
       customLayout: state.menuMode === "custom" ? state.customLayout : null,
+      bdVideo: isBluray() ? state.bdVideo : "encode",
     });
   } catch (e) {
     onDone({ ok: false, message: String(e), videoTs: null, projectName: null, sizeMb: null, targetMb: 0, warnings: [] });
@@ -1715,6 +1848,15 @@ async function init() {
     state.twoPass = twoPass.checked;
     saveSettings();
   });
+  const bdVideo = $("bd-video") as HTMLSelectElement;
+  bdVideo.value = state.bdVideo;
+  bdVideo.addEventListener("change", () => {
+    state.bdVideo = bdVideo.value as BdVideo;
+    saveSettings();
+    scheduleCalc();
+    renderAll();
+  });
+  void getVersion().then((v) => ($("app-version").textContent = `v${v}`)).catch(() => {});
   const motion = $("motion-menu") as HTMLInputElement;
   motion.checked = state.motion;
   motion.addEventListener("change", () => {

@@ -34,6 +34,10 @@ fn fake_info() -> MediaInfo {
             field_order: "progressive".into(),
             crop: None,
             hdr: false,
+            profile: None,
+            level: None,
+            pix_fmt: String::new(),
+            bit_rate: None,
         }),
         audio: vec![AudioStream {
             index: 1,

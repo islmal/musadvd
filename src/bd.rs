@@ -28,7 +28,7 @@ use crate::dvd::{
     run_limited, safe_folder_name, select_streams, unique_dir, AtPath, BuildError, BuildOptions, BuildPhase, BuildReport,
     Event, Job, JobEvent, JobProgress, TitleLoad, TitleReport, WORK_DIR,
 };
-use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, EncodePhase, VideoProcessing, SILENCE_OUT};
+use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, BdVideoMode, EncodePhase, VideoProcessing, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
 use crate::i18n::{tr, UiLang};
 use crate::tf;
@@ -76,6 +76,43 @@ impl BdRate {
     pub fn keyint(self) -> u32 {
         self.fps_f64().round() as u32
     }
+}
+
+/// Every Blu-ray frame rate by its GUI/CLI name; [`BdRate::allowed`] says which frame size takes it.
+const BD_RATES: [(&str, BdRate); 6] = [
+    ("23.976", BdRate { fps: (24000, 1001), fake_interlaced: false }),
+    ("24", BdRate { fps: (24, 1), fake_interlaced: false }),
+    ("25i", BdRate { fps: (25, 1), fake_interlaced: true }),
+    ("29.97i", BdRate { fps: (30000, 1001), fake_interlaced: true }),
+    ("50", BdRate { fps: (50, 1), fake_interlaced: false }),
+    ("59.94", BdRate { fps: (60000, 1001), fake_interlaced: false }),
+];
+
+impl BdRate {
+    pub fn name(self) -> &'static str {
+        BD_RATES.iter().find(|(_, r)| *r == self).map_or("?", |(n, _)| n)
+    }
+
+    /// The rate called `name`, if `res` allows it.
+    pub fn from_name(name: &str, res: Resolution) -> Option<BdRate> {
+        BD_RATES.iter().find(|(n, _)| *n == name).map(|(_, r)| *r).filter(|r| r.allowed(res))
+    }
+
+    /// Film rates exist at both sizes; 1080 has 25/29.97 only interlaced, 720 50/59.94 only progressive.
+    pub fn allowed(self, res: Resolution) -> bool {
+        film_rate(self.fps_f64()).is_some() || self.fake_interlaced == (res != Resolution::Hd720)
+    }
+}
+
+/// The Blu-ray format (frame size and rate) a source already has, if it is one.
+pub fn bd_native_format(v: &probe::VideoStream) -> Option<(Resolution, BdRate)> {
+    let res = match (v.width, v.height) {
+        (1920, 1080) => Resolution::Hd1080,
+        (1280, 720) => Resolution::Hd720,
+        _ => return None,
+    };
+    let rate = BD_RATES.iter().map(|(_, r)| *r).find(|r| (v.fps - r.fps_f64()).abs() < 0.01 && r.fake_interlaced == v.is_interlaced())?;
+    rate.allowed(res).then_some((res, rate))
 }
 
 fn film_rate(fps: f64) -> Option<(u32, u32)> {
@@ -149,6 +186,11 @@ struct BdTitle {
     video: VideoProcessing,
     audio_target: AudioTarget,
     loudnorm: bool,
+    /// Frame size of this title (the project's unless the title overrides it).
+    resolution: Resolution,
+    video_mode: BdVideoMode,
+    /// Video is stream-copied at this average kbit/s ([`encoder::bd_video_copy`]).
+    copy_kbps: Option<u32>,
 }
 
 impl BdTitle {
@@ -220,9 +262,9 @@ async fn encode_bd_title(
     (two_pass, fast, hw_decode): (bool, bool, Option<HwAccelMode>),
     encoder: BdEncoder,
     (maxrate_kbps, bufsize_kbit): (u32, u32),
-    resolution: Resolution,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>, f64), BuildError> {
+    let resolution = t.resolution;
     let hwaccel = match hw_decode {
         Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
         None => None,
@@ -310,6 +352,7 @@ async fn encode_bd_title(
         audio_filters,
         maxrate_kbps,
         bufsize_kbit,
+        copy_video: t.copy_kbps.is_some(),
     };
     let frames_per_run = duration * rate.fps_f64();
     // Frames done count over both runs of a 2-pass encode; never let them go backwards.
@@ -604,19 +647,39 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             None => chapter_starts(&info, opts.chapters.interval_secs, opts.chapters.min_video_secs),
         };
         let fps = info.video.as_ref().map_or(0.0, |v| v.fps);
+        let resolution = match sel.bd_resolution.as_deref().filter(|s| !s.is_empty()) {
+            None => opts.resolution,
+            Some("1080") => Resolution::Hd1080,
+            Some("720") => Resolution::Hd720,
+            Some(other) => return Err(BuildError::Template(format!("{label}: unknown Blu-ray resolution {other}"))),
+        };
+        let rate = match sel.bd_rate.as_deref().filter(|s| !s.is_empty()) {
+            None => bd_frame_rate(&[fps], opts.tv_standard, resolution),
+            Some(name) => BdRate::from_name(name, resolution).ok_or_else(|| {
+                BuildError::Template(format!("{label}: {name} is not a Blu-ray frame rate at {}", resolution.label()))
+            })?,
+        };
+        let video_mode = match sel.bd_video.as_deref() {
+            Some("encode") => BdVideoMode::Encode,
+            Some("copy") => BdVideoMode::Strict,
+            _ => opts.bd_video,
+        };
         titles.push(BdTitle {
             label,
             audio,
             subs,
             chapters: chapters.iter().map(|c| c.0).collect(),
             stem: format!("title_{:02}", i + 1),
-            rate: bd_frame_rate(&[fps], opts.tv_standard, opts.resolution),
+            rate,
+            resolution,
+            video_mode,
             audio_mode: opts.audio_mode,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
             video: opts.video,
             audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
             loudnorm: opts.loudnorm,
+            copy_kbps: None,
             info,
         });
     }
@@ -648,8 +711,22 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }
     let tv = opts.tv_standard;
     let resolution = opts.resolution;
-    // Menus (and their clips) use the first title's rate.
-    let menu_rate = titles[0].rate;
+    let limits = opts.disc.limits();
+    for t in titles.iter_mut().filter(|t| t.video_mode != BdVideoMode::Encode) {
+        let max = limits.max_video_kbps.min(limits.max_total_kbps.saturating_sub(t.audio_kbps(&layout)));
+        match encoder::bd_video_copy(&t.info, t.rate, t.resolution, t.video, max) {
+            Ok(kbps) => {
+                t.copy_kbps = Some(kbps);
+                log(Event::Step(tf!(opts.ui_lang, "bd_video_copy", label = t.label, kbps = kbps)));
+            }
+            Err(why) if t.video_mode == BdVideoMode::Strict => {
+                return Err(BuildError::Template(format!("{}: the video cannot be copied – {why}", t.label)));
+            }
+            Err(why) => warn(log, tf!(opts.ui_lang, "bd_video_copy_fallback", label = t.label, reason = why)),
+        }
+    }
+    // Menus (and their clips) use the first title's rate, made valid for the menus' frame size.
+    let menu_rate = if titles[0].resolution == resolution { titles[0].rate } else { bd_frame_rate(&[titles[0].rate.fps_f64()], tv, resolution) };
     let medium_name = if opts.disc.is_avchd() { "AVCHD" } else { "Blu-ray" };
     log(Event::Step(tf!(
         opts.ui_lang,
@@ -722,7 +799,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // 4. Bitrate -----------------------------------------------------------------------------
     let loads: Vec<TitleLoad> = titles
         .iter()
-        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(&layout), subtitle_streams: layout.subs.len() })
+        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(&layout), subtitle_streams: layout.subs.len(), copy_video_kbps: t.copy_kbps })
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = crate::dvd::avg_audio_kbps(&loads);
@@ -781,10 +858,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         .zip(&encoders)
         .map(|(t, &encoder)| {
             let (t, tools, work, layout) = (t.clone(), tools.clone(), work.clone(), layout.clone());
-            let video_kbps = plan.video_kbps.min(max_total.saturating_sub(t.audio_kbps(&layout)));
+            let video_kbps = t.copy_kbps.unwrap_or_else(|| plan.video_kbps.min(max_total.saturating_sub(t.audio_kbps(&layout))));
             let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
-                encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, resolution, progress).await
+                encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, progress).await
             })
         })
         .collect();
@@ -868,11 +945,11 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 subs: (0..layout.subs.len()).map(|k| encoder::subtitle_file(&t.stem, k, SUB_EXT)).collect(),
                 rate: t.rate,
                 audio_kinds: t.audio_outs(&layout).iter().map(|o| o.kind()).collect(),
+                resolution: t.resolution,
             })
             .collect(),
         audio_langs: layout.audio_langs.clone(),
         sub_tracks: layout.subs.clone(),
-        resolution,
     };
     let menu_count = menus.as_ref().map_or(0, |m| m.count);
     log(Event::Phase(BuildPhase::Authoring));

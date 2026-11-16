@@ -400,6 +400,30 @@ input.small {
   user-select: none;
 }
 
+.switch[hidden],
+.row[hidden],
+.tab[hidden] {
+  display: none;
+}
+
+/* Blu-ray video copy verdict next to the title name. */
+.copy-badge {
+  margin-left: auto;
+  color: #fff;
+}
+.copy-badge.copy {
+  background: var(--good);
+}
+.copy-badge.encode {
+  background: var(--medium);
+}
+
+.app-version {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .switch input {
   position: absolute;
   opacity: 0;
