@@ -235,7 +235,9 @@ fn golden_video_ts_image_hash() {
     write_image(&plan, &iso, &ts, &AtomicBool::new(false), |_| {}).unwrap();
     let hash = format!("{:x}", Md5::digest(std::fs::read(&iso).unwrap()));
     std::fs::remove_dir_all(&dir).ok();
-    assert_eq!(hash, "52152f47535751cef7fc68aae5889f00");
+    // Re-captured after the MusaDVD rename (implementation ID `*MusaDVD`, application ID `MUSADVD`); the
+    // old value `52152f47…` is the same image with the `convertx-rust` identifiers.
+    assert_eq!(hash, "91039665c6b967f2dfcbebe632665330");
 }
 
 /// A data tree (deep folders, long and non-ASCII names, a duplicate) built by the Burn Studio
