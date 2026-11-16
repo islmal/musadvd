@@ -1,6 +1,6 @@
 # STATUS — MusaDVD
 
-> State as of **2026-11-16**. Architecture/context only; facts: `SYSTEM_STATE.txt`; build rules: `CLAUDE.md`.
+> State as of **2026-11-16**. Architecture/context only; facts: `SYSTEM_STATE.txt`; build rules: `CLAUDE.md`; module docs: `handbook/`.
 
 ## 1. Mission & Out-of-Scope
 
@@ -38,9 +38,10 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 4. Manual checks: QSV/AMF BD encoding on real Intel/AMD hardware, Burn Studio `io.backend = direct`, standalone player for BD/AVCHD/native subtitles.
 5. Purge old GitHub PR refs (`refs/pull/1..7/head`) or recreate repo before switching to Public.
 
-**Known issues:** `BuildError`/probe/burn-dialog strings remain German; 4K HDR live-player proxy and BD menus unverified on standalone players; slim manual-latch drives cannot auto-close via `eject -t` if popped open before verify.
+**Known issues:** `tests/disc_image.rs::golden_video_ts_image_hash` fails on Windows (hash `9103…` vs expected `5215…`, seen in the 2026-11-16 `cargo test` run; cause not investigated, so later test binaries did not run in that session); `BuildError`/probe/burn-dialog strings remain German; 4K HDR live-player proxy and BD menus unverified on standalone players; slim manual-latch drives cannot auto-close via `eject -t` if popped open before verify.
 
 ## 4. Milestone Changelog (last 10)
+- **2026-11-16 – Handbook consolidation:** `handbook/` holds English developer docs for every module, the CLI, settings/i18n and testing (index: `handbook/README.md`); the old German menu editor HTML/PDF guides were removed. All Markdown files are English by rule (`CLAUDE.md`, global rules). Docs only; no code verification needed.
 - **2026-11-16 – MusaDVD rename, Linux hardware validation & multi-platform CI:** Renamed project to **MusaDVD** (`musadvd` / `musadvd-gui`, `de.musadvd.app`, `.musadvd-work`). Verified on Linux Mint 22.3 (i5-1235U + USB BU40N): `vaapi` decode, full DVD-Video authoring + DVD+R burn playable in Linux VLC and PS4. Fixed `unix.rs` stdout+stderr draining & `ENOMEDIUM` verify retry, Linux `$HOME`/`$XDG_CONFIG_HOME` paths, `hw_decode: true` default + cross-vendor fallback, `tauri.{windows,linux}.conf.json` split, `release.yml` (Win `.exe`+`.zip`, Linux `.deb`+`.AppImage`+`.tar.gz` on pushes/tags), and `packaging/aur/PKGBUILD`.
 - **2026-10-28 – Public-release prep:** GPL-3.0-or-later (`LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`), history rewritten with `git-filter-repo`.
 - **2026-10-28 – Project-prefixed work dir:** `<project>.musadvd-work` (was `.convertx-work`).
