@@ -547,4 +547,12 @@ DATA_IMAGEFILE=-==/\\/[BUILD IMAGE]\\/\\==-\r\n\r\nWRITE_TEST_MODE=False\r\nWRIT
         assert!(folder("").ends_with("musadvd/graph") || folder("").ends_with(r"musadvd\graph"));
         assert_eq!(folder(" D:\\g "), PathBuf::from("D:\\g"));
     }
+
+    #[test]
+    fn proc_stat_cpu_line() {
+        let stat = "cpu  100 5 50 800 40 3 2 0 0 0\ncpu0 1 2 3 4 5 6 7 8\n";
+        assert_eq!(proc_stat_times(stat), Some((840, 1000)), "idle + iowait, sum of the first 8 fields");
+        assert_eq!(proc_stat_times("cpu0 1 2 3 4\n"), None, "aggregate line missing");
+        assert_eq!(proc_stat_times("cpu  1 x 3 4\n"), None);
+    }
 }

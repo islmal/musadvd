@@ -949,4 +949,40 @@ mod tests {
         let job = WriteJob { drive: drive("x"), speed: "auto".into(), erase: false, layer_break: None, volume: String::new(), image: String::new() };
         assert!(write(&ctx, &job, &|| Ok(Box::new(ZeroSource(1)))).is_err());
     }
+
+    /// Answers READ CAPACITY only (last LBA `last`), like a drive behind SG_IO or SPTI.
+    struct CapacityDrive(u32);
+
+    impl ScsiTransport for CapacityDrive {
+        fn exec(&self, cdb: &[u8], _dir: super::super::spti::DataDir, buf: &mut [u8], _t: u32) -> Result<super::super::spti::ScsiResult, BurnError> {
+            assert_eq!(cdb[0], 0x25, "only READ CAPACITY expected");
+            buf[..8].copy_from_slice(&[self.0.to_be_bytes(), 2048u32.to_be_bytes()].concat());
+            Ok(super::super::spti::ScsiResult { transferred: 8, ..super::super::spti::ScsiResult::GOOD })
+        }
+    }
+
+    /// The Read/Verify path on Linux: the device node sized by READ CAPACITY, then verified
+    /// against the image it was written from (and a one-sector mismatch found).
+    #[test]
+    fn disc_opened_through_a_transport_verifies_against_its_image() {
+        let dir = std::env::temp_dir().join(format!("musadvd_open_disc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (dev, iso) = (dir.join("sr0"), dir.join("image.iso"));
+        let data: Vec<u8> = (0..20 * 2048).map(|i| (i / 2048) as u8).collect();
+        std::fs::write(&dev, [&data[..], &[0xEE; 4096]].concat()).unwrap(); // lead-out padding past the capacity
+        std::fs::write(&iso, &data).unwrap();
+        let mut disc = open_disc_with(&CapacityDrive(19), dev.to_str().unwrap()).unwrap();
+        assert_eq!(disc.sectors(), 20);
+        let (mut image, _) = open_image(&iso).unwrap();
+        let cancel = AtomicBool::new(false);
+        let r = verifier::verify(&mut *disc, image.as_mut(), &VerifyOptions::default(), &cancel, &mut |_| {}).unwrap();
+        assert!(r.passed);
+        let mut bad = data.clone();
+        bad[7 * 2048] ^= 1;
+        std::fs::write(&iso, &bad).unwrap();
+        let (mut image, _) = open_image(&iso).unwrap();
+        let r = verifier::verify(&mut *disc, image.as_mut(), &VerifyOptions::default(), &cancel, &mut |_| {}).unwrap();
+        assert_eq!((r.passed, r.miscompares.clone()), (false, vec![7]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

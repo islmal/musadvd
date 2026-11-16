@@ -965,6 +965,23 @@ mod tests {
     }
 
     #[test]
+    fn sg_io_header_results() {
+        let mut fixed = [0u8; 18];
+        fixed[0] = 0x70;
+        fixed[2] = 0x02;
+        fixed[12] = 0x3A;
+        let r = sg_result(0, 0, 0, &[], 2048, 48).unwrap();
+        assert_eq!((r.ok(), r.transferred), (true, 2000), "resid is subtracted");
+        let r = sg_result(2, 0, 0x08, &fixed, 8, 8).unwrap();
+        assert_eq!(r.sense, Some(Sense { key: 2, asc: 0x3A, ascq: 0 }), "check condition is a delivered answer");
+        assert!(r.into_result("TUR").unwrap_err().to_string().contains("no disc"));
+        assert!(sg_result(0, 0x03, 0, &[], 0, 0).is_err(), "DID_TIME_OUT");
+        assert!(sg_result(0, 0, 0x06, &[], 0, 0).is_err(), "DRIVER_TIMEOUT");
+        assert!(sg_result(0, 0x01, 0, &[], 0, 0).is_err(), "DID_NO_CONNECT");
+        assert_eq!(sg_result(0, 0, 0, &[], 8, -4).unwrap().transferred, 8, "negative resid ignored");
+    }
+
+    #[test]
     fn result_checks() {
         assert!(ScsiResult::GOOD.ok());
         let bad = ScsiResult { status: 2, sense: Some(Sense { key: 5, asc: 0x20, ascq: 0 }), transferred: 0 };

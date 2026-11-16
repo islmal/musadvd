@@ -722,6 +722,25 @@ mod tests {
         burn_direct_with(f, Box::new(FakeDisc::pattern(sectors)), b, d, cancel, &tx)
     }
 
+    /// Discovery on Linux: zeros through the direct writer with options built from the settings
+    /// and the chosen speed (`studio::burn_dispatch`).
+    #[test]
+    fn discovery_zeros_with_settings_options() {
+        use crate::burner::source::ZeroSource;
+        use crate::config::{StudioIo, StudioWrite};
+        let f = Fake::new(0x1B);
+        let d = DirectOptions { retry_pause: Duration::ZERO, ..DirectOptions::from_settings(&StudioWrite::default(), &StudioIo::default()) }
+            .with_speed(crate::burner::WriteSpeed::Specific(5410));
+        assert_eq!(d.speed_kbps, Some(11079), "sectors/s → kB/s");
+        let (b, _) = opts();
+        let (tx, _rx) = channel();
+        burn_direct_with(&f, Box::new(ZeroSource(70)), &b, &d, &AtomicBool::new(false), &tx).unwrap();
+        assert!(f.ops().contains(&0xB6), "SET STREAMING sent");
+        let written = f.written.borrow();
+        assert_eq!(written.len(), 70 * S);
+        assert!(written.iter().all(|&b| b == 0));
+    }
+
     #[test]
     fn dvd_plus_r_sequence() {
         let f = Fake::new(0x1B);
