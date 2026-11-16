@@ -2,8 +2,11 @@
   "bundle": {
     "targets": ["deb", "appimage"],
     "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      },
       "deb": {
-        "depends": ["ffmpeg", "xorriso", "dvd+rw-tools"]
+        "depends": ["ffmpeg", "xorriso", "dvd+rw-tools", "gstreamer1.0-libav", "gstreamer1.0-plugins-good", "gstreamer1.0-plugins-bad"]
       }
     }
   }

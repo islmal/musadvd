@@ -139,7 +139,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   const hEnd = h("div", { class: "trim-handle", role: "slider", tabIndex: 0, "aria-label": tr("edit.endpunkt"), title: tr("edit.endpunktZiehen") });
   const playhead = h("div", { class: "trim-playhead" });
   const track = h("div", { class: "trim-track" }, range, playhead, hStart, hEnd);
-  const video = h("video", { playsinline: "", preload: "auto", "aria-label": tr("edit.vorschau") }) as HTMLVideoElement;
+  const video = h("video", { playsinline: "", preload: "none", "aria-label": tr("edit.vorschau") }) as HTMLVideoElement;
   const timeText = h("span", { class: "mono" });
   const playBtn = h("button", { class: "btn", type: "button" }, tr("edit.wiedergabe")) as HTMLButtonElement;
   const splitBtn = h("button", { class: "btn", type: "button", onclick: () => hooks.split() }, tr("edit.inSeparateTitelAufteilen")) as HTMLButtonElement;
@@ -301,7 +301,13 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   paint();
   paintMarks();
   paintPlayhead();
-  void seek(start, false);
+  // A still of the start frame instead of opening the stream: loading the <video> right when the tab
+  // opens froze WebKitGTK (Linux AppImage). The stream starts on the first play, seek or step.
+  sourceFrame(t.meta.path, start, 640)
+    .then((u) => {
+      if (!video.src) video.poster = u;
+    })
+    .catch(() => {});
   return h(
     "section",
     { class: "edit-section" },

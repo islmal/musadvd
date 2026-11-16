@@ -207,9 +207,11 @@ pub async fn preview_stream(
     Ok(format!("http://127.0.0.1:{}/s/{token}", server.port))
 }
 
+/// `async` so killing and waiting for ffmpeg runs off the UI thread (plain commands run on it).
 #[tauri::command]
-pub fn preview_stop(server: State<'_, Arc<PreviewServer>>) {
+pub async fn preview_stop(server: State<'_, Arc<PreviewServer>>) -> Result<(), String> {
     server.stop();
+    Ok(())
 }
 
 #[cfg(test)]
