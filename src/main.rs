@@ -4,12 +4,12 @@ use std::process::ExitCode;
 mod studio_cli;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use convertx_rust::author::{CommandContext, Domain, Resolution, TitleSpec, TvStandard};
-use convertx_rust::calculator::{self, Clamp, DiscType, EncodingProfile};
-use convertx_rust::dvd::{self, BuildOptions, Event};
-use convertx_rust::encoder::MenuAudio;
-use convertx_rust::menu::{self, MenuSetOptions, UiLang};
-use convertx_rust::template::Template;
+use musadvd::author::{CommandContext, Domain, Resolution, TitleSpec, TvStandard};
+use musadvd::calculator::{self, Clamp, DiscType, EncodingProfile};
+use musadvd::dvd::{self, BuildOptions, Event};
+use musadvd::encoder::MenuAudio;
+use musadvd::menu::{self, MenuSetOptions, UiLang};
+use musadvd::template::Template;
 
 #[derive(Parser)]
 #[command(version, about = "ConvertX clean-room tools: template parser and DVD bitrate calculator")]
@@ -58,7 +58,7 @@ enum Command {
         #[arg(long)]
         debug_frames: bool,
     },
-    /// Probe, encode, render all menus and author a complete VIDEO_TS.
+    /// Probe, encode, render all menus and author a complete VIDEO_TS. Ctrl+C cancels.
     BuildDvd {
         /// Input videos (.mkv, .mp4, ...), one title each.
         #[arg(long, num_args = 1.., required = true)]
@@ -94,7 +94,7 @@ enum Command {
         /// Language of fixed menu texts.
         #[arg(long, default_value = "de")]
         ui_lang: String,
-        /// Keep the work directory (<output>/<project>.convertx-work: intermediate MPEGs, menu PNGs, logs).
+        /// Keep the work directory (<output>/<project>.musadvd-work: intermediate MPEGs, menu PNGs, logs).
         #[arg(long)]
         keep_work: bool,
         /// 2-pass video encoding: an analysis run before the final encode. Takes about twice as
@@ -178,7 +178,7 @@ enum Command {
     },
     /// List DVD writers and the disc in each drive.
     Drives,
-    /// Create a burnable disc image (UDF 1.02 + ISO 9660) from a VIDEO_TS folder.
+    /// Create a burnable disc image (UDF 1.02 + ISO 9660) from a VIDEO_TS folder. Ctrl+C cancels.
     MakeIso {
         /// The VIDEO_TS folder.
         video_ts: PathBuf,
@@ -306,7 +306,7 @@ enum HwAccelArg {
     Amd,
 }
 
-impl From<HwAccelArg> for convertx_rust::config::HwAccelMode {
+impl From<HwAccelArg> for musadvd::config::HwAccelMode {
     fn from(a: HwAccelArg) -> Self {
         match a {
             HwAccelArg::None => Self::None,
@@ -324,7 +324,7 @@ enum AudioArg {
     Lpcm,
 }
 
-impl From<AudioArg> for convertx_rust::encoder::AudioMode {
+impl From<AudioArg> for musadvd::encoder::AudioMode {
     fn from(a: AudioArg) -> Self {
         match a {
             AudioArg::Auto => Self::Auto,
@@ -341,7 +341,7 @@ enum TrackLabelsArg {
     Generic,
 }
 
-impl From<TrackLabelsArg> for convertx_rust::probe::TrackLabelMode {
+impl From<TrackLabelsArg> for musadvd::probe::TrackLabelMode {
     fn from(a: TrackLabelsArg) -> Self {
         match a {
             TrackLabelsArg::Smart => Self::SmartMetadata,
@@ -435,8 +435,8 @@ fn burn(
     eject: bool,
     keep_iso: Option<Option<PathBuf>>,
 ) -> ExitCode {
-    use convertx_rust::burner::layerbreak::Capacities;
-    use convertx_rust::burner::{
+    use musadvd::burner::layerbreak::Capacities;
+    use musadvd::burner::{
         burn_video_ts, default_iso_path, is_bdmv_folder, media_problem, preferred_speed, speed_label, speed_x, system_burner,
         BurnError, BurnJob, BurnOptions, BurnPhase, BurnUpdate, DiscContent, WriteSpeed,
     };
@@ -477,7 +477,7 @@ fn burn(
         Err(e) => return fail(e.to_string()),
     };
     let list = || {
-        let arg = |d: &convertx_rust::burner::DriveInfo| {
+        let arg = |d: &musadvd::burner::DriveInfo| {
             let letter = d.path.trim_end_matches('\\');
             if letter.is_empty() { d.id.clone() } else { letter.to_string() }
         };
@@ -569,7 +569,7 @@ fn burn(
                 return;
             }
             self.printed = Some((pct, Instant::now()));
-            let left = convertx_rust::eta::format_remaining(u.remaining_secs);
+            let left = musadvd::eta::format_remaining(u.remaining_secs);
             eprint!("\r  {}: {pct:>3}% – noch {left}    ", self.message.trim_end_matches(['…', ' ']));
         }
     }
@@ -625,7 +625,7 @@ fn main() -> ExitCode {
         Command::IfoLayerbreak(a) => studio_cli::ifo_layerbreak(a),
         Command::DriveInfo(a) => studio_cli::drive_info(a),
         Command::Drives => {
-            use convertx_rust::burner::{speed_label, system_burner};
+            use musadvd::burner::{speed_label, system_burner};
             let burner = system_burner();
             match burner.list_drives() {
                 Ok(drives) if drives.is_empty() => {
@@ -661,9 +661,26 @@ fn main() -> ExitCode {
             }
         }
         Command::MakeIso { video_ts, output, label } => {
-            use convertx_rust::burner::{create_disc_image, layerbreak::Capacities};
+            use musadvd::burner::{
+                create_disc_image,
+                layerbreak::{Capacities, PlanError},
+                udf::ImageError,
+            };
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+            let cancel = Arc::new(AtomicBool::new(false));
+            {
+                let cancel = cancel.clone();
+                std::thread::spawn(move || {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+                    if rt.block_on(tokio::signal::ctrl_c()).is_ok() {
+                        cancel.store(true, Ordering::SeqCst);
+                        eprintln!("\nAbbruch angefordert (Ctrl+C) …");
+                    }
+                });
+            }
             let mut shown = 0;
-            match create_disc_image(&video_ts, &output, &label, Capacities::DVD, &Default::default(), |p| {
+            match create_disc_image(&video_ts, &output, &label, Capacities::DVD, &cancel, |p| {
                 let pct = (p * 100.0) as u32;
                 if pct >= shown + 10 {
                     shown = pct;
@@ -686,6 +703,11 @@ fn main() -> ExitCode {
                         });
                     }
                     ExitCode::SUCCESS
+                }
+                Err(PlanError::Image(ImageError::Cancelled)) => {
+                    eprintln!();
+                    eprintln!("Abgebrochen.");
+                    ExitCode::from(130)
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -835,13 +857,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             let ui_lang = ui_lang.trim().to_ascii_lowercase();
-            let languages = convertx_rust::i18n::available_languages();
+            let languages = musadvd::i18n::available_languages();
             if !languages.iter().any(|(code, _)| *code == ui_lang) {
                 let codes: Vec<&str> = languages.iter().map(|(code, _)| code.as_str()).collect();
                 eprintln!("error: unbekannte Sprache '{ui_lang}' (verfügbar: {})", codes.join(", "));
                 return ExitCode::FAILURE;
             }
-            let custom_layout = match layout.as_deref().map(convertx_rust::layout::CustomLayout::load) {
+            let custom_layout = match layout.as_deref().map(musadvd::layout::CustomLayout::load) {
                 Some(Err(e)) => {
                     eprintln!("error: {e}");
                     return ExitCode::FAILURE;
@@ -894,21 +916,21 @@ fn main() -> ExitCode {
                 audio_mode: audio.into(),
                 track_label_mode: track_labels.into(),
                 loudnorm,
-                video: convertx_rust::encoder::VideoProcessing {
+                video: musadvd::encoder::VideoProcessing {
                     scale: match scale {
-                        ScaleArg::Letterbox => convertx_rust::encoder::ScaleMode::Letterbox,
-                        ScaleArg::Panscan => convertx_rust::encoder::ScaleMode::PanScan,
-                        ScaleArg::Stretch => convertx_rust::encoder::ScaleMode::Stretch,
+                        ScaleArg::Letterbox => musadvd::encoder::ScaleMode::Letterbox,
+                        ScaleArg::Panscan => musadvd::encoder::ScaleMode::PanScan,
+                        ScaleArg::Stretch => musadvd::encoder::ScaleMode::Stretch,
                     },
                     filter: match scale_filter {
-                        ScaleFilterArg::Bilinear => convertx_rust::encoder::ScaleFilter::Bilinear,
-                        ScaleFilterArg::Bicubic => convertx_rust::encoder::ScaleFilter::Bicubic,
-                        ScaleFilterArg::Lanczos => convertx_rust::encoder::ScaleFilter::Lanczos,
+                        ScaleFilterArg::Bilinear => musadvd::encoder::ScaleFilter::Bilinear,
+                        ScaleFilterArg::Bicubic => musadvd::encoder::ScaleFilter::Bicubic,
+                        ScaleFilterArg::Lanczos => musadvd::encoder::ScaleFilter::Lanczos,
                     },
                     deinterlace: match deinterlace {
-                        DeinterlaceArg::Auto => convertx_rust::encoder::Deinterlace::Auto,
-                        DeinterlaceArg::Yadif => convertx_rust::encoder::Deinterlace::Yadif,
-                        DeinterlaceArg::Off => convertx_rust::encoder::Deinterlace::Off,
+                        DeinterlaceArg::Auto => musadvd::encoder::Deinterlace::Auto,
+                        DeinterlaceArg::Yadif => musadvd::encoder::Deinterlace::Yadif,
+                        DeinterlaceArg::Off => musadvd::encoder::Deinterlace::Off,
                     },
                 },
                 ..Default::default()
@@ -920,12 +942,25 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Ctrl+C cancels the build: tools are killed, work directory is removed.
+            // Pressing it a second time exits immediately.
+            let cancel = opts.cancel.clone();
+            runtime.spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    eprintln!("\nAbbruch angefordert (Ctrl+C) …");
+                    cancel.cancel();
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        eprintln!("\nSofortiger Abbruch.");
+                        std::process::exit(130);
+                    }
+                }
+            });
             let mut last_pct = u32::MAX;
             let mut eta_text = String::new();
             let mut on_event = move |ev: Event| match ev {
                 Event::Eta(e) => {
                     eta_text = match e.remaining_secs {
-                        Some(s) => format!(" – noch {} ([{}/{}] {})", convertx_rust::eta::format_remaining(s), e.phase_number, e.phase_count, e.phase_label),
+                        Some(s) => format!(" – noch {} ([{}/{}] {})", musadvd::eta::format_remaining(s), e.phase_number, e.phase_count, e.phase_label),
                         None => String::new(),
                     };
                 }
@@ -994,6 +1029,11 @@ fn main() -> ExitCode {
                         None => println!("  Arbeitsordner wurde entfernt (mit --keep-work behalten)"),
                     }
                     ExitCode::SUCCESS
+                }
+                Err(musadvd::dvd::BuildError::Cancelled) => {
+                    eprintln!();
+                    eprintln!("Abgebrochen.");
+                    ExitCode::from(130)
                 }
                 Err(e) => {
                     eprintln!();

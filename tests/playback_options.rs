@@ -5,10 +5,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::author::PlaybackOptions;
-use convertx_rust::config::AppSettings;
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::tools::Toolchain;
+use musadvd::author::PlaybackOptions;
+use musadvd::config::AppSettings;
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";
@@ -122,7 +122,7 @@ fn single_title_with_own_menu_but_no_title_menu() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// True if the output directory still holds a `<project>.convertx-work` folder.
+/// True if the output directory still holds a `<project>.musadvd-work` folder.
 fn has_work_dir(out: &std::path::Path) -> bool {
-    std::fs::read_dir(out).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".convertx-work"))
+    std::fs::read_dir(out).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".musadvd-work"))
 }

@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::author::TvStandard;
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::encoder::MenuAudio;
-use convertx_rust::tools::Toolchain;
+use musadvd::author::TvStandard;
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::encoder::MenuAudio;
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";

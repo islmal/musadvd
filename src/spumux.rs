@@ -90,12 +90,17 @@ pub struct ButtonDef {
     pub rect: [i32; 4],
     /// Targets up, down, left, right; `None` lets spumux pick the nearest button in that direction.
     pub nav: [Option<String>; 4],
+    /// Autoaction attribute: button automatically activates when highlighted.
+    pub autoaction: bool,
 }
 
 /// Whether `xml` is a plain bitmap subtitle stream this module can mux (no text rendering, no
-/// buttons).
+/// buttons). Handles both populated streams with `<spu>` tags and empty streams without subtitles.
 pub fn handles_xml(xml: &str) -> bool {
-    xml.contains("<spu ") && !xml.contains("<textsub") && !xml.contains("<button") && !xml.contains("highlight=")
+    (xml.contains("<spu ") || (xml.contains("<subpictures") && xml.contains("<stream>")))
+        && !xml.contains("<textsub")
+        && !xml.contains("<button")
+        && !xml.contains("highlight=")
 }
 
 /// Whether `xml` is a menu subpicture (highlight/select masks with buttons).
@@ -160,6 +165,7 @@ pub fn parse_xml(xml: &str, dir: &Path) -> Result<Vec<SpuDef>, SpumuxError> {
                         name: attr(b, "name").ok_or_else(|| bad("Button ohne Namen"))?,
                         rect: [coord("x0")?, coord("y0")?, coord("x1")?, coord("y1")?],
                         nav: ["up", "down", "left", "right"].map(|n| attr(b, n)),
+                        autoaction: attr(b, "autoaction").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("autoaction")),
                     });
                 }
                 Some(MenuDef { highlight: dir.join(h), select: dir.join(s), buttons })
@@ -472,6 +478,7 @@ struct ButtonOut {
     /// Absolute x0, y0, x1, y1.
     rect: [i32; 4],
     nav: [String; 4],
+    autoaction: bool,
 }
 
 /// Angle (degrees) and distance of the lateral offset `lat` at depth `dist` (`FUN_1400067d0`).
@@ -715,6 +722,7 @@ fn prepare_menu(menu: &MenuDef, x: u32, y: u32) -> Result<Option<(Prepared, u32,
             group: group_of[i],
             rect: [b.rect[0] + x as i32, b.rect[1] + y as i32, b.rect[2] + x as i32, b.rect[3] + y as i32],
             nav: [0, 1, 2, 3].map(|d| b.nav[d].clone().unwrap_or_else(|| default_target(&menu.buttons, i, [0, 180, 270, 90][d]))),
+            autoaction: b.autoaction,
         })
         .collect();
     Ok(Some((prep, sx, sy, clut, MenuData { groups: table, hl_palette: hl.palette, sel_palette: sel.palette, buttons })))
@@ -931,7 +939,7 @@ impl<W: Write> Mux<W> {
                 d.extend([3, m.buttons.len() as u8]);
                 for b in &m.buttons {
                     d.extend(b.name.bytes().chain([0]));
-                    d.extend([0, 0, 0, b.group]);
+                    d.extend([if b.autoaction { 1 } else { 0 }, 0, 0, b.group]);
                     for v in b.rect {
                         d.extend((v as u16).to_be_bytes());
                     }
@@ -1185,6 +1193,40 @@ mod tests {
         assert_eq!((d[0].start, d[0].end, d[0].x, d[0].y, d[0].force), (90_000, Some(225_000), 10, 20, true));
         assert_eq!((d[1].end, d[1].force), (None, false));
         assert!(!handles_xml("<subpictures><stream><textsub/></stream></subpictures>"));
+
+        let empty_xml = "<subpictures format=\"PAL\">\n  <stream>\n  </stream>\n</subpictures>";
+        assert!(handles_xml(empty_xml));
+        let empty_d = parse_xml(empty_xml, Path::new("w")).unwrap();
+        assert!(empty_d.is_empty());
+    }
+
+    #[test]
+    fn empty_subtitle_stream_muxes_without_error() {
+        let empty_xml = "<subpictures format=\"PAL\">\n  <stream>\n  </stream>\n</subpictures>";
+        let defs = parse_xml(empty_xml, Path::new("w")).unwrap();
+        let mut out = Vec::new();
+        let stats = mux(std::io::Cursor::new(vec![]), &mut out, defs, 0).unwrap();
+        assert_eq!(stats.added, 0);
+        assert_eq!(stats.skipped, 0);
+    }
+
+    #[test]
+    fn menu_xml_button_autoaction() {
+        let xml = r#"<subpictures><stream>
+    <spu start="00:00:00" highlight="h.png" select="s.png">
+        <button name="btn1" x0="10" y0="20" x1="50" y1="60" autoaction="1"/>
+        <button name="btn2" x0="70" y0="20" x1="110" y1="60"/>
+    </spu>
+</stream></subpictures>"#;
+        assert!(is_menu_xml(xml));
+        let d = parse_xml(xml, Path::new("w")).unwrap();
+        assert_eq!(d.len(), 1);
+        let menu = d[0].menu.as_ref().unwrap();
+        assert_eq!(menu.buttons.len(), 2);
+        assert_eq!(menu.buttons[0].name, "btn1");
+        assert!(menu.buttons[0].autoaction);
+        assert_eq!(menu.buttons[1].name, "btn2");
+        assert!(!menu.buttons[1].autoaction);
     }
 
     /// RLE + control sequence decode back to the source bitmap with the existing VobSub decoder.

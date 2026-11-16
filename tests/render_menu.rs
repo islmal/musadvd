@@ -5,8 +5,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use convertx_rust::author::{ButtonAction, TitleSpec};
-use convertx_rust::menu::{self, MenuSetOptions};
+use musadvd::author::{ButtonAction, TitleSpec};
+use musadvd::menu::{self, MenuSetOptions};
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";

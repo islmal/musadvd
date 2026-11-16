@@ -261,6 +261,12 @@ pub struct TitleSpec {
     /// Switch the first subtitle stream on when the title starts.
     #[serde(default)]
     pub force_subtitle: bool,
+    /// Default audio stream index to select on title start (0-based stream index, e.g. from preferred language).
+    #[serde(default)]
+    pub default_audio: Option<u32>,
+    /// Default subtitle stream index to select on title start (0-based stream index, e.g. from preferred language).
+    #[serde(default)]
+    pub default_subtitle: Option<u32>,
 }
 
 impl TitleSpec {
@@ -289,6 +295,8 @@ impl TitleSpec {
             audio_formats: vec![],
             subtitle_langs: vec![],
             force_subtitle: false,
+            default_audio: None,
+            default_subtitle: None,
         }
     }
 
@@ -815,12 +823,27 @@ pub struct MenuSpec {
     /// Template intro: the VOB starts with an intro of this many seconds (cell 1, no buttons), the
     /// page proper (buttons, loop or still) is cell 2 and starts there.
     pub intro_secs: Option<f64>,
+    /// Still pause length in seconds (None = inf or unpaused if motion). FastPlay menus use 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_secs: Option<u8>,
+    /// Explicit post command (overriding default cell loop). FastPlay menus use `jump title 1;`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<String>,
 }
 
 impl MenuSpec {
     /// A command-only PGC (no video, no buttons) running `commands`.
     pub fn commands(commands: impl Into<String>, entry: Option<&str>) -> Self {
-        MenuSpec { vob: String::new(), buttons: vec![], entry: entry.map(str::to_string), motion: false, pre: Some(commands.into()), intro_secs: None }
+        MenuSpec {
+            vob: String::new(),
+            buttons: vec![],
+            entry: entry.map(str::to_string),
+            motion: false,
+            pre: Some(commands.into()),
+            intro_secs: None,
+            pause_secs: None,
+            post: None,
+        }
     }
 
     pub fn is_command_only(&self) -> bool {
@@ -870,6 +893,9 @@ pub struct DvdLayout {
     pub tv: TvStandard,
     /// Extra `pre` commands of every title PGC (custom layouts reset their dispatch register).
     pub title_pre: Option<String>,
+    /// Optional FastPlay configuration (VMGM Menu 1 interactive countdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_play: Option<crate::layout::FastPlayConfig>,
 }
 
 /// Number of VM commands in a dvdauthor command string (statements end with `;`).
@@ -930,22 +956,29 @@ fn write_menus(
                 xml_escape(&b.action.command(ctx))
             );
         }
+        let pause = match menu.pause_secs {
+            Some(p) => format!(r#" pause="{p}""#),
+            None if menu.motion => String::new(),
+            None => r#" pause="inf""#.to_string(),
+        };
         if let Some(t) = menu.intro_secs {
             // Intro = cell 1 (no buttons: the SPU starts with cell 2), the page = cell 2.
             let _ = writeln!(x, r#"{indent}    <vob file="{}">"#, xml_escape(&menu.vob));
             let _ = writeln!(x, r#"{indent}      <cell start="0" end="{t:.3}" program="1"/>"#);
-            let pause = if menu.motion { "" } else { r#" pause="inf""# };
             let _ = writeln!(x, r#"{indent}      <cell start="{t:.3}"{pause}/>"#);
             let _ = writeln!(x, "{indent}    </vob>");
-            if menu.motion {
+            if let Some(ref post) = menu.post {
+                let _ = writeln!(x, "{indent}    <post>{}</post>", xml_escape(post));
+            } else if menu.motion {
                 let _ = writeln!(x, "{indent}    <post>jump cell 2;</post>");
             }
-        } else if menu.motion {
-            // Seamless loop: replaying the cell does not re-run the PGC's pre commands.
-            let _ = writeln!(x, r#"{indent}    <vob file="{}"/>"#, xml_escape(&menu.vob));
-            let _ = writeln!(x, "{indent}    <post>jump cell 1;</post>");
         } else {
-            let _ = writeln!(x, r#"{indent}    <vob file="{}" pause="inf"/>"#, xml_escape(&menu.vob));
+            let _ = writeln!(x, r#"{indent}    <vob file="{}"{pause}/>"#, xml_escape(&menu.vob));
+            if let Some(ref post) = menu.post {
+                let _ = writeln!(x, "{indent}    <post>{}</post>", xml_escape(post));
+            } else if menu.motion {
+                let _ = writeln!(x, "{indent}    <post>jump cell 1;</post>");
+            }
         }
         let _ = writeln!(x, "{indent}  </pgc>");
     }
@@ -1033,7 +1066,13 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
         let _ = writeln!(x, r#"      <video format="{}" aspect="{}"/>"#, tv.dvdauthor_format(), xml_escape(&layout.menu_aspect));
         let _ = writeln!(x, "    </menus>");
     } else {
-        let fpc = if opts.auto_start { "g1 = 0; jump title 1;" } else { "g1 = 0; jump menu 1;" };
+        let fpc = if opts.auto_start {
+            "g1 = 0; jump title 1;"
+        } else if layout.fast_play.as_ref().is_some_and(|fp| fp.enabled) {
+            "g1 = 0; g2 = 0; jump menu 1;"
+        } else {
+            "g1 = 0; jump menu 1;"
+        };
         let _ = writeln!(x, "    <fpc>{fpc}</fpc>");
         // Visible pages: only reset the play-all flag. Then one command-only dispatcher per title.
         let mut menus = String::new();
@@ -1089,9 +1128,14 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
         }
         let _ = writeln!(x, "      <pgc>");
         let mut title_pre = layout.title_pre.clone().unwrap_or_default();
-        if t.force_subtitle && !t.subtitle_langs.is_empty() {
+        if let Some(a) = t.default_audio {
+            title_pre = format!("{title_pre} if (s1 eq 15) audio = {a};").trim().to_string();
+        }
+        if let Some(s) = t.default_subtitle {
+            title_pre = format!("{title_pre} if (s2 eq 0) subtitle = {};", 64 + s).trim().to_string();
+        } else if t.force_subtitle && !t.subtitle_langs.is_empty() {
             // Subtitle stream 0 with the display flag (bit 6).
-            title_pre = format!("{title_pre} subtitle = 64;").trim().to_string();
+            title_pre = format!("{title_pre} if (s2 eq 0) subtitle = 64;").trim().to_string();
         }
         if !title_pre.is_empty() {
             write_commands(&mut x, "        ", "pre", &title_pre, t.first_vob())?;
@@ -1224,21 +1268,34 @@ fn menu_pgcs(menus: &[MenuSpec], domain: Domain, pre: &str, tv: TvStandard, aspe
         if !all_pre.is_empty() {
             pgc.prei = Some(parse_commands(&all_pre, &name)?);
         }
+        if let Some(p) = menu.pause_secs {
+            pgc.pauselen = p;
+        }
         if !menu.is_command_only() {
             let ctx = CommandContext { domain, menu: i as u32 + 1 };
             for b in &menu.buttons {
                 pgc.buttons.push(crate::dvd_mux::Button { name: b.name.clone(), commands: crate::dvdvm::parse(&b.action.command(ctx))?, streams: vec![] });
             }
-            let still = if menu.motion { 0 } else { 255 };
+            let still = if let Some(p) = menu.pause_secs {
+                p
+            } else if menu.motion {
+                0
+            } else {
+                255
+            };
             if let Some(t) = menu.intro_secs {
                 let secs = chapter_secs(&format!("{t:.3}"))?;
                 pgc.sources.push(source(&menu.vob, vec![cell(0.0, Some(secs), CellKind::Program, 0), cell(secs, None, CellKind::Neither, still)]));
-                if menu.motion {
+                if let Some(ref post) = menu.post {
+                    pgc.posti = Some(crate::dvdvm::parse(post)?);
+                } else if menu.motion {
                     pgc.posti = Some(crate::dvdvm::parse("jump cell 2;")?);
                 }
             } else {
                 pgc.sources.push(source(&menu.vob, vec![cell(0.0, None, CellKind::ChapterProgram, still)]));
-                if menu.motion {
+                if let Some(ref post) = menu.post {
+                    pgc.posti = Some(crate::dvdvm::parse(post)?);
+                } else if menu.motion {
                     pgc.posti = Some(crate::dvdvm::parse("jump cell 1;")?);
                 }
             }
@@ -1289,8 +1346,13 @@ fn title_pgc(layout: &DvdLayout, t: &TitleSpec, back: &str) -> Result<crate::dvd
     }
     let mut pgc = Pgc::new();
     let mut title_pre = layout.title_pre.clone().unwrap_or_default();
-    if t.force_subtitle && !t.subtitle_langs.is_empty() {
-        title_pre = format!("{title_pre} subtitle = 64;").trim().to_string();
+    if let Some(a) = t.default_audio {
+        title_pre = format!("{title_pre} if (s1 eq 15) audio = {a};").trim().to_string();
+    }
+    if let Some(s) = t.default_subtitle {
+        title_pre = format!("{title_pre} if (s2 eq 0) subtitle = {};", 64 + s).trim().to_string();
+    } else if t.force_subtitle && !t.subtitle_langs.is_empty() {
+        title_pre = format!("{title_pre} if (s2 eq 0) subtitle = 64;").trim().to_string();
     }
     if !title_pre.is_empty() {
         pgc.prei = Some(parse_commands(&title_pre, t.first_vob())?);
@@ -1376,7 +1438,13 @@ pub fn author_dvd(layout: &DvdLayout, work: &std::path::Path, dest: &std::path::
             let page = ts.main_menu_page.clamp(1, pages as u32);
             all.push(MenuSpec::commands(dispatcher_commands(i + 1, titles, page, !ts.menus.is_empty(), opts), None));
         }
-        let fpc = if opts.auto_start { "g1 = 0; jump title 1;" } else { "g1 = 0; jump menu 1;" };
+        let fpc = if opts.auto_start {
+            "g1 = 0; jump title 1;"
+        } else if layout.fast_play.as_ref().is_some_and(|fp| fp.enabled) {
+            "g1 = 0; g2 = 0; jump menu 1;"
+        } else {
+            "g1 = 0; jump menu 1;"
+        };
         (fpc, menu_pgcs(&all, Domain::Vmgm, "g1 = 0;", tv, &layout.menu_aspect)?)
     };
     vmgm.validate()?;
@@ -1549,6 +1617,7 @@ mod tests {
             playback: PlaybackOptions::default(),
             tv: TvStandard::Pal,
             title_pre: None,
+            fast_play: None,
             vmgm_menus: vec![],
             titlesets: vec![TitlesetSpec { main_menu_page: 0, menus: vec![], title: t }],
         };
@@ -1571,6 +1640,8 @@ mod tests {
             audio_formats: vec!["ac3".into(), "dts".into()],
             subtitle_langs: vec![Some("en".into())],
             force_subtitle: false,
+            default_audio: None,
+            default_subtitle: None,
         };
         let layout = DvdLayout {
             dest: "DVD".into(),
@@ -1578,13 +1649,14 @@ mod tests {
             playback: PlaybackOptions::default(),
             tv: TvStandard::Pal,
             title_pre: None,
+            fast_play: None,
             vmgm_menus: vec![
-                MenuSpec { vob: "menu.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None, intro_secs: None },
-                MenuSpec { vob: "menu_2.mpg".into(), buttons: vec![b], entry: None, motion: false, pre: None, intro_secs: None },
+                MenuSpec { vob: "menu.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None },
+                MenuSpec { vob: "menu_2.mpg".into(), buttons: vec![b], entry: None, motion: false, pre: None, intro_secs: None, pause_secs: None, post: None },
             ],
             titlesets: vec![
                 TitlesetSpec {
-                    menus: vec![MenuSpec { vob: "ts1_menu.mpg".into(), buttons: vec![c], entry: Some("root".into()), motion: true, pre: None, intro_secs: None }],
+                    menus: vec![MenuSpec { vob: "ts1_menu.mpg".into(), buttons: vec![c], entry: Some("root".into()), motion: true, pre: None, intro_secs: None, pause_secs: None, post: None }],
                     title: title("a&b.mpg", "16:9"),
                     main_menu_page: 1,
                 },
@@ -1634,8 +1706,9 @@ mod tests {
             playback: PlaybackOptions::default(),
             tv: TvStandard::Pal,
             title_pre: None,
+            fast_play: None,
             vmgm_menus: (0..pages)
-                .map(|i| MenuSpec { vob: format!("m{i}.mpg"), buttons: vec![b.clone()], entry: None, motion: false, pre: None, intro_secs: None })
+                .map(|i| MenuSpec { vob: format!("m{i}.mpg"), buttons: vec![b.clone()], entry: None, motion: false, pre: None, intro_secs: None, pause_secs: None, post: None })
                 .collect(),
             titlesets: (1..=MAX_TITLES)
                 .map(|n| TitlesetSpec {
@@ -1666,11 +1739,12 @@ mod tests {
             playback: opts,
             tv: TvStandard::Pal,
             title_pre: None,
-            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None, intro_secs: None }],
+            fast_play: None,
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![b.clone()], entry: Some("title".into()), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None }],
             titlesets: (1..=titles)
                 .map(|n| TitlesetSpec {
                     menus: if ts_menus {
-                        vec![MenuSpec { vob: format!("ts{n}.mpg"), buttons: vec![b.clone()], entry: Some("root".into()), motion: false, pre: None, intro_secs: None }]
+                        vec![MenuSpec { vob: format!("ts{n}.mpg"), buttons: vec![b.clone()], entry: Some("root".into()), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None }]
                     } else {
                         vec![]
                     },
@@ -1721,7 +1795,7 @@ mod tests {
     fn single_title_without_main_menu() {
         let ts = |menus: bool, force: bool| TitlesetSpec {
             menus: if menus {
-                vec![MenuSpec { vob: "ts.mpg".into(), buttons: vec![], entry: Some("root".into()), motion: false, pre: None, intro_secs: None }]
+                vec![MenuSpec { vob: "ts.mpg".into(), buttons: vec![], entry: Some("root".into()), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None }]
             } else {
                 vec![]
             },
@@ -1736,6 +1810,7 @@ mod tests {
             playback,
             tv: TvStandard::Pal,
             title_pre: None,
+            fast_play: None,
         };
         let base = PlaybackOptions::default();
         let x = dvdauthor_xml(&layout(ts(true, false), base)).unwrap();
@@ -1748,7 +1823,7 @@ mod tests {
         let x = dvdauthor_xml(&layout(ts(false, true), PlaybackOptions { loop_playback: true, ..base })).unwrap();
         assert!(x.contains("<fpc>g1 = 0; jump title 1;</fpc>"));
         assert!(x.contains("<post>jump title 1;</post>"));
-        assert!(x.contains("<pre>subtitle = 64;</pre>"), "first subtitle forced on");
+        assert!(x.contains("<pre>if (s2 eq 0) subtitle = 64;</pre>"), "first subtitle forced on");
 
         let x = dvdauthor_xml(&layout(ts(false, false), base)).unwrap();
         assert!(x.contains("<post>exit;</post>"));
@@ -1764,11 +1839,12 @@ mod tests {
         let layout = DvdLayout {
             dest: "DVD".into(),
             menu_aspect: "4:3".into(),
-            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![], entry: Some("title".into()), motion: false, pre: None, intro_secs: None }],
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![], entry: Some("title".into()), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None }],
             titlesets: vec![TitlesetSpec { menus: vec![], title: TitleSpec::placeholder(1), main_menu_page: 1 }],
             playback: PlaybackOptions::default(),
             tv: TvStandard::Ntsc,
             title_pre: None,
+            fast_play: None,
         };
         let x = dvdauthor_xml(&layout).unwrap();
         assert_eq!(x.matches(r#"<video format="ntsc""#).count(), 2, "menus and titles");
@@ -1783,7 +1859,8 @@ mod tests {
             playback: PlaybackOptions::default(),
             tv: TvStandard::Pal,
             title_pre: None,
-            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![button("b1", 0, 0, 10, 10)], entry: Some("title".into()), motion, pre: None, intro_secs: Some(3.0) }],
+            fast_play: None,
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![button("b1", 0, 0, 10, 10)], entry: Some("title".into()), motion, pre: None, intro_secs: Some(3.0), pause_secs: None, post: None }],
             titlesets: vec![TitlesetSpec {
                 menus: vec![],
                 title: TitleSpec {
@@ -1794,6 +1871,8 @@ mod tests {
                     audio_formats: vec!["ac3".into()],
                     subtitle_langs: vec![],
                     force_subtitle: false,
+                    default_audio: None,
+                    default_subtitle: None,
                 },
                 main_menu_page: 1,
             }],

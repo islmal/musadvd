@@ -27,7 +27,7 @@ use super::{
     MediaType, OpticalBurner, Telemetry, TelemetryHook, WriteSpeed,
 };
 
-const CLIENT_NAME: &str = "convertx-rust";
+const CLIENT_NAME: &str = "MusaDVD";
 /// E_IMAPI_RECORDER_MEDIA_NO_MEDIA
 const NO_MEDIA: HRESULT = HRESULT(0xC0AA0202u32 as i32);
 /// RPC_E_CHANGED_MODE: COM already initialised as STA on this thread (fine for IMAPI2).
@@ -264,6 +264,41 @@ fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnErro
         }
         r.map_err(|e| BurnError::Backend(format!("Layerwechsel konnte nicht gesetzt werden: {e} (Sense {:02X?})", &sense[..14])))
     }
+}
+
+/// Returns true if IMAPI2 reports at least one write feature page as currently active.
+/// Many USB-to-SATA bridge chipsets (e.g. for external Pioneer / LG writers) fail to report
+/// write feature pages in GET CONFIGURATION RT=01 (current features), causing IMAPI2's
+/// `IDiscFormat2Data::Write` to fail immediately with `E_IMAPI_RECORDER_FEATURE_IS_NOT_CURRENT`
+/// (0xC0AA020B / 0x80004005).
+pub fn is_write_feature_current(rec: &IDiscRecorder2) -> bool {
+    unsafe {
+        let Ok(sa) = rec.CurrentFeaturePages() else { return true };
+        let vs = variants(sa);
+        let features: Vec<i32> = vs.iter().filter_map(|v| variant_i32(v)).collect();
+        clear(vs);
+        // MMC write feature pages:
+        // 0x0020 (Random Writable), 0x0021 (Incremental Streaming), 0x0022 (Sector Erasable),
+        // 0x0023 (Formattable), 0x0024 (Defect Management), 0x0025 (Write Once),
+        // 0x0026 (Restricted Overwrite), 0x0027 (CD-RW CAV), 0x0028 (MRW),
+        // 0x002A (DVD+RW), 0x002B (DVD+R / DVD+R DL), 0x002C (Rigid Restricted Overwrite),
+        // 0x002D (CD Track at Once), 0x002E (CD Mastering), 0x002F (DVD-R/-RW Write),
+        // 0x0033 (Layer Jump Recording), 0x0037 (CD-RW Media Write), 0x0038 (BD-R Pseudo-Overwrite),
+        // 0x003A (DVD+RW Dual Layer), 0x0040 (BD-R Write), 0x0041 (BD-RE Write).
+        features.iter().any(|&f| {
+            matches!(f, 0x0020..=0x002F | 0x0033 | 0x0037..=0x003A | 0x0040..=0x0043)
+        })
+    }
+}
+
+/// Helper to query write feature status for a drive ID.
+pub fn is_imapi_write_feature_current(drive_id: &str) -> bool {
+    let _com = match Com::init() {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let Ok(rec) = recorder(drive_id) else { return true };
+    is_write_feature_current(&rec)
 }
 
 /// Where the bytes of the image come from.
@@ -634,6 +669,14 @@ impl OpticalBurner for ImapiBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
+        let _com = Com::init()?;
+        if let Ok(rec) = recorder(drive_id) {
+            if !is_write_feature_current(&rec) {
+                let source = Box::new(super::source::FileSource::open(iso_path)?);
+                let direct = super::mmcwrite::DirectOptions::default();
+                return super::mmcwrite::burn_direct(drive_id, true, source, speed, options, &direct, cancel, &progress_tx);
+            }
+        }
         let file = File::open(iso_path)?;
         let len = file.metadata()?.len();
         let feed = Feed::File(file);
@@ -654,6 +697,13 @@ impl OpticalBurner for ImapiBurner {
         cancel: &AtomicBool,
         progress_tx: Sender<BurnProgress>,
     ) -> Result<(), BurnError> {
+        let _com = Com::init()?;
+        if let Ok(rec) = recorder(drive_id) {
+            if !is_write_feature_current(&rec) {
+                let direct = super::mmcwrite::DirectOptions::default();
+                return super::mmcwrite::burn_direct(drive_id, true, source, speed, options, &direct, cancel, &progress_tx);
+            }
+        }
         let sectors = source.sectors();
         if options.verify && !source.rewindable() {
             return Err(BurnError::Unsupported("Die Überprüfung braucht eine Quelle, die erneut gelesen werden kann".into()));
@@ -744,6 +794,44 @@ fn burn_feed(
     let letter = letter.trim_end_matches('\\').to_string();
     // Dropped before the disc is ejected.
     let tray_lock = options.lock_tray.then(|| power::drive_letter(&letter).and_then(|l| TrayLock::acquire(l).ok())).flatten();
+
+    // On DVD+R DL, set the layer boundary before configuring and writing through IMAPI2.
+    // Changing the layer structure invalidates IMAPI's internal recorder state and requires
+    // a brief firmware settle time and a fresh IDiscFormat2Data instance.
+    let mut format = format;
+    if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
+        if media.layer_break_supported {
+            drop(format);
+            set_layer_break(&rec, l0).map_err(at("Layerwechsel setzen"))?;
+            let _ = progress_tx.send(BurnProgress::new(
+                BurnPhase::Preparing,
+                0.0,
+                "Warte auf Laufwerksbereitschaft (Layerwechsel) …",
+            ));
+            // Wait for drive firmware to finish L0 allocation and mark the write feature current.
+            let mut settled = None;
+            for _ in 0..24 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Ok(f) = format_for(&rec) {
+                    let ready = unsafe { f.IsCurrentMediaSupported(&rec).map(|b| b.as_bool()).unwrap_or(false) };
+                    if ready {
+                        settled = Some(f);
+                        break;
+                    }
+                }
+            }
+            format = settled.ok_or_else(|| {
+                BurnError::Backend("Laufwerk ist nach dem Setzen des Layerwechsels nicht bereit (Feature nicht aktuell)".into())
+            })?;
+        } else {
+            let _ = progress_tx.send(BurnProgress::new(
+                BurnPhase::Preparing,
+                0.0,
+                format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
+            ));
+        }
+    }
+
     unsafe {
         // DVD+R DL: forcing the close fails at the end of the write on some drives
         // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
@@ -759,17 +847,6 @@ fn burn_feed(
             WriteSpeed::Specific(s) => s as i32,
         };
         format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(|e| step("Schreibgeschwindigkeit setzen", e))?;
-    }
-    if let Some(l0) = options.layer_break.filter(|_| media.media_type == MediaType::Dvd9) {
-        if media.layer_break_supported {
-            set_layer_break(&rec, l0).map_err(at("Layerwechsel setzen"))?;
-        } else {
-            let _ = progress_tx.send(BurnProgress::new(
-                BurnPhase::Preparing,
-                0.0,
-                format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
-            ));
-        }
     }
     let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
     // IMAPI's write events report the real position; the image stream reports until the
@@ -802,7 +879,15 @@ fn burn_feed(
         }
         // Where it broke (data handed to IMAPI runs a little ahead of the disc).
         let at = pos.load(Ordering::Relaxed) as f64 * 100.0 / len.max(1) as f64;
-        return Err(match backend(e) {
+        let code = e.code().0 as u32;
+        let err = backend(e);
+        let msg = err.to_string();
+        if at == 0.0 && (code == 0xC0AA020B || msg.contains("Featureseite") || msg.contains("feature page")) {
+            return Err(BurnError::Backend(format!(
+                "{msg} - USB-Laufwerksbrücke meldet Schreibfeature nicht an IMAPI2. Bitte in den Einstellungen unter E/A „SPTI Direkt“ auswählen oder Backend auf „auto“ belassen."
+            )));
+        }
+        return Err(match err {
             BurnError::Backend(m) => BurnError::Backend(format!("{m} - beim Schreiben, {at:.1} % der Daten an IMAPI übergeben")),
             other => other,
         });
@@ -871,11 +956,14 @@ mod tests {
     /// Enumerates the real drives (no disc access beyond IMAPI queries).
     #[test]
     fn enumerate_drives() {
+        let _com = Com::init().expect("COM init");
         let drives = ImapiBurner.list_drives().expect("IMAPI2 available");
         for d in &drives {
             eprintln!("drive: {d:?}");
             let media = ImapiBurner.probe_media(&d.id).expect("probe");
             eprintln!("  media: {media:?}");
+            let rec = recorder(&d.id).unwrap();
+            let _ = is_write_feature_current(&rec);
         }
     }
 }

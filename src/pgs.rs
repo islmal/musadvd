@@ -4,6 +4,7 @@
 //! 32 MB/s, object decode 16 MB/s; verified against its output).
 
 use crate::igs::{rgb_to_ycrcb, rle_encode, segment};
+use crate::subpic::Picture;
 use crate::textsub::{render_cue_on, Canvas, Cue};
 
 /// Earliest cue start: the epoch's decode time must stay after zero.
@@ -25,9 +26,9 @@ pub fn frame_rate_code(fps: (u32, u32)) -> u8 {
     }
 }
 
-/// `.sup` of `cues` on `canvas` for a video of `fps`; cue times snap to video frames.
-pub fn build_sup(cues: &[Cue], canvas: &Canvas, fps: (u32, u32)) -> Vec<u8> {
-    let (w, h) = canvas.size;
+/// `.sup` of `pictures` on canvas `(w, h)` for a video of `fps`; picture times snap to video frames.
+pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fps: (u32, u32)) -> Vec<u8> {
+    let (w, h) = canvas_size;
     let code = frame_rate_code(fps) << 4;
     let frame = |t: f64| ((t * fps.0 as f64 / fps.1 as f64).round() as u64 * fps.1 as u64 * 90_000).div_ceil(fps.0 as u64);
     let plane = ticks(w as u64 * h as u64, 32_000_000);
@@ -55,26 +56,51 @@ pub fn build_sup(cues: &[Cue], canvas: &Canvas, fps: (u32, u32)) -> Vec<u8> {
         }
         p
     };
-    for cue in cues {
-        let Some((img, x, y)) = render_cue_on(canvas, &cue.lines) else { continue };
-        let start = frame(cue.start.max(MIN_START));
-        let end = frame(cue.end).max(start + 1);
+    for pic in pictures {
+        let (img, x, y) = (&pic.image, pic.x, pic.y);
+        let start = frame(pic.start.max(MIN_START));
+        let end = frame(pic.end).max(start + 1);
         let (iw, ih) = (img.width() as usize, img.height() as usize);
-        // Index 0 transparent; the renderer only produces white fill and black edge.
-        let px: Vec<u8> = img.pixels().map(|p| match p.0 {
-            [_, _, _, 0] => 0,
-            [255, 255, 255, 255] => 1,
-            _ => 2,
-        }).collect();
+        if iw == 0 || ih == 0 {
+            continue;
+        }
+
+        // Collect distinct non-transparent colors (up to 254)
+        let mut palette_colors: Vec<[u8; 4]> = Vec::new();
+        for p in img.pixels() {
+            if p.0[3] > 0 && !palette_colors.contains(&p.0) {
+                palette_colors.push(p.0);
+                if palette_colors.len() >= 254 {
+                    break;
+                }
+            }
+        }
+        // Sort colors by brightness descending so white/bright fill is early
+        palette_colors.sort_by_key(|c| std::cmp::Reverse(299 * c[0] as u32 + 587 * c[1] as u32 + 114 * c[2] as u32));
+
+        let px: Vec<u8> = img
+            .pixels()
+            .map(|p| {
+                if p.0[3] == 0 {
+                    0
+                } else if let Some(pos) = palette_colors.iter().position(|&c| c == p.0) {
+                    (pos as u8) + 1
+                } else {
+                    1
+                }
+            })
+            .collect();
         let rle = rle_encode(&px, iw, ih);
         let area = (iw * ih) as u64;
         let (win, obj) = (ticks(area, 32_000_000), ticks(area, 16_000_000));
         let dts = (start as u32).saturating_sub(plane + win + 1);
 
         let mut pds = vec![0, 0];
-        for (i, c) in [(0u8, [16, 128, 128, 0]), (1, [235, 128, 128, 255]), (2, [16, 128, 128, 255])] {
-            let [y, cr, cb] = if c[3] == 0 { [16, 128, 128] } else { let v = if i == 1 { 255 } else { 0 }; rgb_to_ycrcb(v, v, v) };
-            pds.extend([i, y, cr, cb, c[3]]);
+        // Index 0: transparent
+        pds.extend([0, 16, 128, 128, 0]);
+        for (i, c) in palette_colors.iter().enumerate() {
+            let [y_c, cr, cb] = rgb_to_ycrcb(c[0], c[1], c[2]);
+            pds.extend([(i as u8) + 1, y_c, cr, cb, c[3]]);
         }
         let mut ods = Vec::new();
         ods.extend(0u16.to_be_bytes());
@@ -97,6 +123,18 @@ pub fn build_sup(cues: &[Cue], canvas: &Canvas, fps: (u32, u32)) -> Vec<u8> {
         out.extend(segment(end - 90, 0, 0x80, &[]));
     }
     out
+}
+
+/// `.sup` of `cues` on `canvas` for a video of `fps`; cue times snap to video frames.
+pub fn build_sup(cues: &[Cue], canvas: &Canvas, fps: (u32, u32)) -> Vec<u8> {
+    let pictures: Vec<Picture> = cues
+        .iter()
+        .filter_map(|cue| {
+            let (image, x, y) = render_cue_on(canvas, &cue.lines)?;
+            Some(Picture { start: cue.start, end: cue.end, forced: false, x, y, image })
+        })
+        .collect();
+    build_sup_from_pictures(&pictures, canvas.size, fps)
 }
 
 #[cfg(test)]

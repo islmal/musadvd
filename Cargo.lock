@@ -582,40 +582,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "convertx-gui"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "convertx-rust",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-updater",
- "tokio",
-]
-
-[[package]]
-name = "convertx-rust"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "clap",
- "image",
- "md-5",
- "png 0.18.1",
- "rayon",
- "regex",
- "serde",
- "serde_derive",
- "serde_json",
- "tokio",
- "windows",
- "windows-core",
-]
-
-[[package]]
 name = "cookie"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2427,6 +2393,41 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "musadvd"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "clap",
+ "image",
+ "md-5",
+ "png 0.18.1",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tokio",
+ "unicode-bidi",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
+name = "musadvd-gui"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "musadvd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-updater",
+ "tokio",
 ]
 
 [[package]]
@@ -4891,6 +4892,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"

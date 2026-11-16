@@ -878,7 +878,7 @@ pub(crate) fn regid(b: &mut [u8], at: usize, ident: &str, suffix: &[u8]) {
 }
 
 const UDF_REV: [u8; 2] = [0x02, 0x01]; // 0x0102 little endian
-pub(crate) const IMPL_ID: &str = "*convertx-rust";
+pub(crate) const IMPL_ID: &str = "*MusaDVD";
 
 fn domain_regid(b: &mut [u8], at: usize) {
     regid(b, at, "*OSTA UDF Compliant", &[UDF_REV[0], UDF_REV[1], 0]);
@@ -1059,7 +1059,7 @@ fn iso_volume_descriptor(plan: &ImagePlan, si: usize, ts: &Timestamp) -> Vec<u8>
     text(&mut vd, 190, 128, label);
     text(&mut vd, 318, 128, "");
     text(&mut vd, 446, 128, "");
-    text(&mut vd, 574, 128, "CONVERTX-RUST");
+    text(&mut vd, 574, 128, "MUSADVD");
     text(&mut vd, 702, 37, "");
     text(&mut vd, 739, 37, "");
     text(&mut vd, 776, 37, "");

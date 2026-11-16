@@ -219,6 +219,7 @@ export const lock = (driveId: string, on: boolean) => invoke<void>("studio_lock"
 export const cancel = () => invoke<boolean>("studio_cancel");
 export const buildPlan = (input: BuildInput) => invoke<PlanInfo>("studio_build_plan", { input });
 export const inspect = (paths: string[]) => invoke<PathInfo[]>("studio_inspect", { paths });
+export const imageScrambled = (image: string) => invoke<boolean | null>("studio_image_scrambled", { image });
 export const writeImage = (driveId: string, image: string, speed: string, erase: boolean) =>
   invoke<void>("studio_write_image", { driveId, image, speed, erase });
 export const writeFiles = (driveId: string, input: BuildInput, speed: string, erase: boolean) =>

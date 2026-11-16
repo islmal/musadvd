@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
-use convertx_rust::burner::layerbreak::{plan_disc, Capacities};
-use convertx_rust::burner::udf::plan_image;
-use convertx_rust::burner::udf250;
-use convertx_rust::burner::{
+use musadvd::burner::layerbreak::{plan_disc, Capacities};
+use musadvd::burner::udf::plan_image;
+use musadvd::burner::udf250;
+use musadvd::burner::{
     burn_video_ts, media_problem, DiscContent, MediaType, BurnError, BurnJob, BurnOptions, BurnPhase, BurnProgress, BurnUpdate, DriveInfo, MediaInfo,
     OpticalBurner, WriteSpeed,
 };
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::tools::Toolchain;
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";
@@ -467,7 +467,7 @@ fn blu_ray_failure_and_cancel_leave_no_image() {
 
 #[test]
 fn blu_ray_content_is_recognised() {
-    use convertx_rust::burner::{is_bdmv_folder, DiscContent};
+    use musadvd::burner::{is_bdmv_folder, DiscContent};
     assert!(is_bdmv_folder(bd_fixture()));
     let c = DiscContent::of_folder(bd_fixture()).unwrap();
     assert!(c.bluray && !c.dual_layer && c.sectors > 1500, "{c:?}");
@@ -477,7 +477,7 @@ fn blu_ray_content_is_recognised() {
 // ---- CLI `burn`: error paths that stop before an image is written ---------------------------
 
 fn cli(args: &[&str]) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_convertx-rust")).arg("burn").args(args).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_musadvd")).arg("burn").args(args).output().unwrap();
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 

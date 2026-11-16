@@ -4,8 +4,8 @@
 //! differ (DejaVu Sans vs. hinted Arial), so only placement, extent and ink amount are compared,
 //! with tolerances.
 
-use convertx_rust::author::TvStandard;
-use convertx_rust::textsub::{parse_srt, render_cue};
+use musadvd::author::TvStandard;
+use musadvd::textsub::{parse_srt, render_cue};
 
 /// (x0, y0, x1, y1 of the visible pixels, fill pixels, outline pixels) from spumux.
 const REFERENCE: [((u32, u32, u32, u32), u32, u32); 3] =

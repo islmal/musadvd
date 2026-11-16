@@ -4,8 +4,8 @@
 // The stage is the TV frame in storage pixels (720x576 PAL / 720x480 NTSC) shown at 4:3, so
 // texts and pictures look as they will on the TV. Buttons are axis-aligned rectangles (no
 // rotation, at most 36 per menu, no overlaps) – the DVD subpicture only knows `x0 y0 x1 y1`.
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { checkLayout, imagePreview, loadLayout, saveLayout, textLines, titleFrame } from "./api";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
+import { audioWaveform, checkLayout, imagePreview, importConvertxTemplate, loadLayout, saveLayout, textLines, titleFrame } from "./api";
 import {
   FONTS,
   maxButtons,
@@ -14,6 +14,7 @@ import {
   chapterLabel,
   draftLayout,
   madeForOtherTitles,
+  remapLayoutByPaths,
   emptyMenu,
   isButton,
   isBdFrame,
@@ -22,16 +23,23 @@ import {
   pixelAspectOf,
   text as newText,
   type Action,
+  type VideoElement,
   type CustomLayout,
   type CustomMenu,
   type EditorTitle,
+  type ElementKey,
   type Fit,
   type LayoutElement,
   type TextElement,
 } from "./layout";
-import { t as tr } from "./i18n";
+import { currentLanguage, t as tr } from "./i18n";
 
 type Child = Node | string | null | undefined | false;
+/** A field-level undo step; `execute` re-applies it (for a future redo), `undo` reverts and re-renders. */
+interface Command {
+  execute(): void;
+  undo(): void;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -72,13 +80,28 @@ export interface EditorOptions extends EditorInit {
 
 const IMAGE_FILTER = [{ name: tr("menuEditor.bilder"), extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }];
 const AUDIO_FILTER = [{ name: tr("menuEditor.audio"), extensions: ["mp3", "wav", "flac", "m4a", "aac", "ac3", "ogg", "opus"] }];
+const VIDEO_FILTER = [{ name: "Videos", extensions: ["mp4", "mkv", "avi", "mov", "mpg", "mpeg", "ts", "m2ts"] }];
 const LAYOUT_FILTER = [{ name: tr("menuEditor.menueLayout"), extensions: ["json"] }];
+const TEMPLATE_FILTER = [{ name: tr("menuEditor.convertxVorlage"), extensions: ["ini"] }];
 const FIT_LABELS: [Fit, string][] = [
   ["contain", tr("menuEditor.einpassen")],
   ["cover", tr("menuEditor.fuellenZuschneiden")],
   ["stretch", tr("menuEditor.strecken")],
 ];
 const SNAP = 2;
+
+/** Intro key state at `t` like `menu_anim::lerp`: held before the first and after the last key, linear between. */
+export function interpolateKeyframes(keys: ElementKey[], t: number): ElementKey {
+  const first = keys[0];
+  const last = keys[keys.length - 1];
+  if (t <= first.t) return { ...first, t };
+  if (t >= last.t) return { ...last, t };
+  const i = keys.findIndex((k) => k.t > t);
+  const [a, b] = [keys[i - 1], keys[i]];
+  const f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1;
+  const mix = (p: number, q: number) => p + (q - p) * f;
+  return { t, x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h), opacity: mix(a.opacity, b.opacity) };
+}
 
 let closeHook: ((force: boolean) => boolean) | null = null;
 
@@ -90,10 +113,13 @@ export function requestClose(): boolean {
 /** Mounts the menu editor into the document body (the editor window). */
 export function mountMenuEditor(opts: EditorOptions) {
   const { titles, tv } = opts;
-  // A stored layout for other videos would show their titles: start from a draft for the
-  // current ones instead (the old layout stays reachable with "Rückgängig").
+  if (opts.layout && opts.layoutTitlesKey) {
+    const oldPaths = opts.layoutTitlesKey.split("\n");
+    const newPaths = titles.map((t) => t.path);
+    remapLayoutByPaths(opts.layout, oldPaths, newPaths);
+  }
   const stale = !!opts.layout && madeForOtherTitles(opts.layout, opts.layoutTitlesKey, titles);
-  let L: CustomLayout = structuredClone(opts.layout && !stale ? opts.layout : draftLayout(titles, tv, opts.heading));
+  let L: CustomLayout = structuredClone(opts.layout ?? draftLayout(titles, tv, opts.heading));
   let menuIdx = 0;
   let selIds: string[] = [];
   let closed = false;
@@ -103,8 +129,42 @@ export function mountMenuEditor(opts: EditorOptions) {
   let dirty = false;
   let confirmClose = false;
   let showSafe = true;
-  const history: string[] = stale && opts.layout ? [JSON.stringify(opts.layout)] : [];
+  /** Undo stack: legacy full-layout JSON snapshots, or small field-level commands (see `beginEdit`). */
+  const history: (string | Command)[] = stale && opts.layout ? [JSON.stringify(opts.layout)] : [];
   const previews = new Map<string, Promise<string>>();
+
+  let viewMode: "basic" | "timeline" = "basic";
+  let playheadTime = 0.0;
+  /** Intro key selected on the timeline (panel shows its values while its element is the only selection). */
+  let selKey: { id: string; i: number } | null = null;
+  let isPlaying = false;
+  let playTimer: number | null = null;
+  let timelineZoom = 1;
+  let isDrawingAabb = false;
+  /** Whether the stage was last rendered with the playhead inside the intro (Cell 1). */
+  let lastCell1 = false;
+
+  function snapToClosedGop(secs: number): number {
+    const isPal = tv.toLowerCase() === "pal";
+    const gopSize = isPal ? 15 : 18;
+    const fps = isPal ? 25.0 : 30000 / 1001;
+    const frame = Math.round(secs * fps);
+    const snappedFrame = Math.round(frame / gopSize) * gopSize;
+    return Number((snappedFrame / fps).toFixed(4));
+  }
+
+  function formatTimecode(secs: number): string {
+    const isPal = tv.toLowerCase() === "pal";
+    const fps = isPal ? 25.0 : 30000 / 1001;
+    const totalFrames = Math.max(0, Math.round(secs * fps));
+    const ff = totalFrames % Math.round(fps);
+    const totalSecs = Math.floor(totalFrames / fps);
+    const ss = totalSecs % 60;
+    const mm = Math.floor(totalSecs / 60) % 60;
+    const hh = Math.floor(totalSecs / 3600);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
+  }
 
   // ---- helpers --------------------------------------------------------------------------------
   const menu = (): CustomMenu => L.menus[Math.min(menuIdx, L.menus.length - 1)];
@@ -122,25 +182,74 @@ export function mountMenuEditor(opts: EditorOptions) {
   const H = () => L.canvas.height;
   const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? tr("menuEditor.missing")}`;
   const snap = (v: number) => Math.round(v / SNAP) * SNAP;
-  const clampBox = (e: LayoutElement) => {
+  const clampBox = (e: { x: number; y: number; w: number; h: number }) => {
     e.w = Math.max(8, Math.min(Math.round(e.w), W()));
     e.h = Math.max(8, Math.min(Math.round(e.h), H()));
     e.x = Math.max(0, Math.min(Math.round(e.x), W() - e.w));
     e.y = Math.max(0, Math.min(Math.round(e.y), H() - e.h));
   };
 
-  function remember() {
-    history.push(JSON.stringify(L));
+  function pushHistory(entry: string | Command) {
+    history.push(entry);
     if (history.length > 60) history.shift();
     dirty = true;
+  }
+  function remember() {
+    pushHistory(JSON.stringify(L));
   }
   function undo() {
     const last = history.pop();
     if (!last) return;
+    if (typeof last !== "string") {
+      last.undo();
+      return;
+    }
     L = JSON.parse(last);
     const alive = new Set(L.menus.flatMap((m) => m.elements.map((e) => e.id)));
     selIds = selIds.filter((id) => alive.has(id));
     renderAll();
+  }
+
+  /**
+   * Records `keys` of the objects `resolve` returns (call on pointer-down); the returned `commit`
+   * (call on pointer-up) pushes one command holding only those values, or nothing if unchanged.
+   * `resolve` is re-run on undo/redo because a snapshot undo replaces `L` with fresh objects.
+   */
+  function beginEdit<T extends object>(resolve: () => T[], keys: (keyof T)[], render: () => void): () => boolean {
+    const read = () => resolve().map((o) => keys.map((k) => structuredClone(o[k])));
+    const before = read();
+    return () => {
+      const after = read();
+      if (JSON.stringify(after) === JSON.stringify(before)) return false;
+      const write = (vals: T[keyof T][][]) => {
+        resolve().forEach((o, i) =>
+          keys.forEach((k, j) => {
+            const v = structuredClone(vals[i][j]);
+            if (v === undefined) delete o[k];
+            else o[k] = v;
+          }),
+        );
+        render();
+      };
+      pushHistory({ execute: () => write(after), undo: () => write(before) });
+      return true;
+    };
+  }
+  /** `beginEdit` on fields of the current menu; undo switches back to that menu. */
+  function beginMenuEdit(keys: (keyof CustomMenu)[]) {
+    const mi = menuIdx;
+    return beginEdit(() => [L.menus[mi]], keys, () => {
+      if (menuIdx !== mi) {
+        menuIdx = mi;
+        renderAll();
+        return;
+      }
+      renderHeader();
+      renderStage();
+      renderTimelinePane();
+      renderProps();
+      scheduleCheck();
+    });
   }
 
   function preview(kind: "image" | "frame", key: string, load: () => Promise<string>): Promise<string> {
@@ -160,6 +269,19 @@ export function mountMenuEditor(opts: EditorOptions) {
     return preview("frame", `${t.path}@${at.toFixed(1)}`, () => titleFrame(t.path, at));
   };
   const imageOf = (path: string) => preview("image", path, () => imagePreview(path));
+  type VideoSource = { title: number; startSecs?: number | null; path?: string };
+  /** Preview frame of a video element or background: its external file, or its title. */
+  const frameOfVideo = (v: VideoSource) => {
+    if (!v.path) return frameOf(v.title, v.startSecs);
+    const path = v.path;
+    const at = v.startSecs ?? 0;
+    return preview("frame", `${path}@${at.toFixed(1)}`, () => titleFrame(path, at));
+  };
+  const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
+  /** Name of a video source for badges and the layer list. */
+  const videoLabel = (v: VideoSource) => (v.path ? fileName(v.path) : (titles[v.title - 1]?.label ?? tr("menuEditor.titelFehlt2", { title: v.title })));
+  /** Start shown for a video without an explicit one (the engine: 10 % of a title, max. 5 min; a file: 0). */
+  const defaultStart = (v: VideoSource) => (v.path ? 0 : Math.round(Math.min((titles[v.title - 1]?.durationSecs ?? 0) * 0.1, 300)));
 
   /** Line breaks of wrapped texts, computed by the engine (same fonts and metrics as the build). */
   const lineCache = new Map<string, Promise<string[]>>();
@@ -208,6 +330,8 @@ export function mountMenuEditor(opts: EditorOptions) {
         return tr("menuEditor.tonspur", { trackLabel: trackLabel("audio", menu()?.title, a.source) });
       case "setSubtitle":
         return a.source === null ? tr("menuEditor.untertitelAus") : tr("menuEditor.untertitel", { trackLabel: trackLabel("subtitle", menu()?.title, a.source) });
+      case "customVm":
+        return `VM: ${a.script}`;
     }
   }
 
@@ -229,6 +353,14 @@ export function mountMenuEditor(opts: EditorOptions) {
   const stage = el("div", { class: "ed-stage" });
   const viewport = el("div", { class: "ed-viewport" }, stage);
   const toolbar = el("div", { class: "ed-toolbar" });
+  // Timeline: header/hint are DOM (rebuilt by renderTimelinePane); tracks are one canvas, kept
+  // sticky inside a sized scroller so native scrollbars and the wheel drive the draw offset.
+  const tlBar = el("div", { style: "display: contents;" });
+  const tlCanvas = el("canvas", { class: "ed-tl-canvas" }) as HTMLCanvasElement;
+  const tlSizer = el("div", { class: "ed-tl-sizer" }, tlCanvas);
+  const tlScroll = el("div", { class: "ed-tl-scroll" }, tlSizer);
+  const timelinePane = el("div", { class: "ed-timeline-pane", style: "display: none;" }, tlBar, tlScroll);
+  const centerSection = el("section", { class: "ed-center" }, toolbar, viewport, timelinePane);
   const layersBox = el("section", { class: "ed-layers", "aria-label": tr("menuEditor.elemente") });
   const props = el("aside", { class: "ed-props", "aria-label": tr("menuEditor.eigenschaften") });
   const status = el("footer", { class: "ed-status", role: "status" });
@@ -237,7 +369,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     "div",
     { class: "ed", role: "dialog", "aria-modal": "true", "aria-label": tr("menuEditor.menueEditor") },
     el("header", { class: "ed-header" }, el("h2", {}, tr("menuEditor.menueEditor")), headerButtons),
-    el("div", { class: "ed-body" }, menusPane, el("section", { class: "ed-center" }, toolbar, viewport), props),
+    el("div", { class: "ed-body" }, menusPane, centerSection, props),
     status,
   );
   document.body.append(editor);
@@ -270,6 +402,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     renderMenus();
     renderToolbar();
     renderStage();
+    renderTimelinePane();
     renderProps();
     renderStatus();
     scheduleCheck();
@@ -279,8 +412,40 @@ export function mountMenuEditor(opts: EditorOptions) {
     headerButtons.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
       el("button", { class: "btn", type: "button", onclick: () => void loadFile() }, tr("menuEditor.laden")),
+      el("button", { class: "btn", type: "button", onclick: () => void importTemplate() }, tr("menuEditor.ausVorlage")),
       el("button", { class: "btn", type: "button", onclick: () => void saveFile() }, tr("menuEditor.speichern")),
       el("button", { class: "btn", type: "button", disabled: history.length === 0, onclick: undo, title: tr("menuEditor.strgZ") }, tr("menuEditor.rueckgaengig")),
+      el("span", { class: "ed-spacer" }),
+      el(
+        "div",
+        { class: "ed-seg ed-view-toggle", role: "group" },
+        el(
+          "button",
+          {
+            type: "button",
+            class: `btn${viewMode === "basic" ? " active" : ""}`,
+            onclick: () => {
+              viewMode = "basic";
+              stopPlay();
+              renderAll();
+            },
+          },
+          "Einfach",
+        ),
+        el(
+          "button",
+          {
+            type: "button",
+            class: `btn${viewMode === "timeline" ? " active" : ""}`,
+            onclick: () => {
+              viewMode = "timeline";
+              timelineZoom = fitZoom();
+              renderAll();
+            },
+          },
+          "Erweitert (Timeline)",
+        ),
+      ),
       el("span", { class: "ed-spacer" }),
       el(
         "button",
@@ -357,7 +522,22 @@ export function mountMenuEditor(opts: EditorOptions) {
     toolbar.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: addText }, tr("menuEditor.text")),
       el("button", { class: "btn", type: "button", onclick: () => void addImage() }, tr("menuEditor.bild")),
-      el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: addVideo }, tr("menuEditor.video")),
+      el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addVideo() }, tr("menuEditor.video")),
+      el("button", { class: "btn", type: "button", onclick: () => void addExternalVideo() }, tr("menuEditor.externesVideo")),
+      el(
+        "button",
+        {
+          class: `btn${isDrawingAabb ? " active" : ""}`,
+          type: "button",
+          title: "Zeichnet einen 2-Pixel-gerasterten Button-Bereich (AABB)",
+          onclick: () => {
+            isDrawingAabb = !isDrawingAabb;
+            stage.style.cursor = isDrawingAabb ? "crosshair" : "";
+            renderToolbar();
+          },
+        },
+        "+ Button-Bereich",
+      ),
       el("span", { class: "ed-spacer" }),
       el(
         "label",
@@ -394,9 +574,26 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   }
 
+  /** Box and opacity of `e` at the playhead: its intro keys while the timeline playhead is in the intro. */
+  function boxAt(e: LayoutElement): LayoutElement {
+    if (viewMode !== "timeline" || !e.intro?.length || playheadTime >= (menu().introSecs ?? 0)) return e;
+    const k = interpolateKeyframes(e.intro, playheadTime);
+    return { ...e, x: k.x, y: k.y, w: k.w, h: k.h, opacity: k.opacity };
+  }
+  /** Moves keyed elements to the playhead without rebuilding the stage (playback, scrubbing). */
+  function animateStage() {
+    for (const e of menu()?.elements ?? []) {
+      if (!e.intro?.length) continue;
+      const node = stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(e.id)}"]`);
+      if (!node) continue;
+      const b = boxAt(e);
+      applyBox(node, b);
+      (node.firstElementChild as HTMLElement).style.opacity = String(b.opacity);
+    }
+  }
   function renderElement(e: LayoutElement): HTMLElement {
     const inner = el("div", { class: "ed-inner" });
-    inner.style.opacity = String(e.opacity);
+    inner.style.opacity = String(boxAt(e).opacity);
     if (e.type === "text") {
       inner.classList.add("ed-text");
       inner.textContent = e.text;
@@ -428,21 +625,40 @@ export function mountMenuEditor(opts: EditorOptions) {
         const r = fitOnScreen(img.naturalWidth, img.naturalHeight, sideways ? e.h : e.w, sideways ? e.w : e.h, e.fit, sideways);
         Object.assign(img.style, { position: "absolute", objectFit: "fill", width: `${r.w}px`, height: `${r.h}px`, left: `${r.x}px`, top: `${r.y}px` });
       });
-      const src = e.type === "image" ? imageOf(e.src) : frameOf(e.title, e.startSecs);
+      const src = e.type === "image" ? imageOf(e.src) : frameOfVideo(e);
       src.then((url) => (img.src = url)).catch(() => inner.classList.add("ed-missing"));
-      if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${titles[e.title - 1]?.label ?? tr("menuEditor.titelFehlt2", { title: e.title })}`));
+      if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${videoLabel(e)}`));
     }
+    const isCell1 = viewMode === "timeline" && isButton(e) && playheadTime < (menu().introSecs ?? 0.0);
+    const classes = [
+      "ed-el",
+      isButton(e) ? "is-button" : "",
+      e.group ? "in-group" : "",
+      isSel(e.id) ? "selected" : "",
+      isCell1 ? "hli-inactive" : "",
+      e.easterEgg ? "is-easter-egg" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
     const node = el(
       "div",
       {
-        class: `ed-el${isButton(e) ? " is-button" : ""}${e.group ? " in-group" : ""}${isSel(e.id) ? " selected" : ""}`,
+        class: classes,
         title: actionLabel(e.action),
         "data-id": e.id,
         style: `--ed-hl: ${e.highlight?.color ?? L.highlight.color}`,
       },
       inner,
     );
-    applyBox(node, e);
+    if (isCell1) {
+      node.append(el("span", { class: "ed-hli-badge" }, "Subpicture Inaktiv (Cell 1: hli_ss == 0)"));
+    }
+    if (e.easterEgg) {
+      node.append(el("span", { class: "ed-easter-egg-badge" }, "🥚 Easter Egg"));
+    }
+    applyBox(node, boxAt(e));
+    // Cell 1 buttons are only dimmed: they stay editable, otherwise a playhead at 0 locks the whole menu.
     if (isSel(e.id)) {
       for (const corner of ["nw", "ne", "sw", "se"]) {
         node.append(el("span", { class: `ed-handle ${corner}`, "data-handle": corner }));
@@ -456,9 +672,10 @@ export function mountMenuEditor(opts: EditorOptions) {
     const m = menu();
     stage.replaceChildren();
     if (!m) return;
+    lastCell1 = viewMode === "timeline" && playheadTime < (m.introSecs ?? 0);
     stage.style.backgroundColor = m.background.color;
     const bgSrc = m.background.video
-      ? frameOf(m.background.video.title, m.background.video.startSecs)
+      ? frameOfVideo(m.background.video)
       : m.background.image
         ? imageOf(m.background.image)
         : null;
@@ -488,6 +705,657 @@ export function mountMenuEditor(opts: EditorOptions) {
     renderLayers();
   }
 
+  const timelineTotal = () => Math.max(1, (menu().introSecs ?? 0) + (menu().durationSecs ?? 20));
+  const pxPerSec = () => 45 * timelineZoom;
+  /** Zoom at which the whole menu fits next to the name column. */
+  const fitZoom = () => Math.round(Math.max(0.25, Math.min(10, (centerSection.clientWidth - 190) / (timelineTotal() * 45))) * 100) / 100;
+  const frameSecs = () => 1 / (tv.toLowerCase() === "pal" ? 25 : 30000 / 1001);
+
+  function stopPlay() {
+    if (playTimer !== null) clearInterval(playTimer);
+    playTimer = null;
+    isPlaying = false;
+  }
+
+  /** Moves the playhead (canvas redraw only); the stage only re-renders when Cell 1/2 flips. */
+  function setPlayhead(t: number) {
+    playheadTime = Math.max(0, Math.min(timelineTotal(), t));
+    const tc = timelinePane.querySelector(".ed-timeline-timecode");
+    if (tc) tc.textContent = formatTimecode(playheadTime);
+    requestTimelineDraw();
+    if (playheadTime < (menu().introSecs ?? 0) !== lastCell1) renderStage();
+    else animateStage();
+  }
+
+  function togglePlay() {
+    if (isPlaying) {
+      stopPlay();
+    } else {
+      isPlaying = true;
+      let last = performance.now();
+      playTimer = window.setInterval(() => {
+        const now = performance.now();
+        let t = playheadTime + (now - last) / 1000;
+        last = now;
+        // Like the disc: the intro plays once, then Cell 2 loops.
+        if (t >= timelineTotal()) t = menu().introSecs ?? 0;
+        setPlayhead(t);
+      }, 40);
+    }
+    renderTimelinePane();
+  }
+
+  /**
+   * Pointer drag on the timeline canvas (pointer-captured: the canvas is never rebuilt). The menu
+   * fields in `edits` become one undo command on release; a pure playhead scrub records nothing.
+   */
+  function dragOnRuler(ev: PointerEvent, onMove: (secs: number) => void, edits: (keyof CustomMenu)[] = []) {
+    ev.preventDefault();
+    const commit = edits.length > 0 ? beginMenuEdit(edits) : null;
+    const secsAt = (e: PointerEvent) => (e.clientX - tlCanvas.getBoundingClientRect().left - TL_NAME_W + tlScroll.scrollLeft) / pxPerSec();
+    const mv = (e: PointerEvent) => onMove(secsAt(e));
+    const up = () => {
+      tlCanvas.removeEventListener("pointermove", mv);
+      tlCanvas.removeEventListener("pointerup", up);
+      tlCanvas.removeEventListener("pointercancel", up);
+      commit?.();
+      renderAll();
+    };
+    tlCanvas.setPointerCapture(ev.pointerId);
+    tlCanvas.addEventListener("pointermove", mv);
+    tlCanvas.addEventListener("pointerup", up);
+    tlCanvas.addEventListener("pointercancel", up);
+    mv(ev);
+  }
+
+  // ---- timeline canvas ----------------------------------------------------------------------------
+  const TL_NAME_W = 150;
+  const TL_RULER_H = 28;
+  const TL_GAP = 4;
+  const TL_ROW_H = 32;
+  const TL_BTN_H = 18;
+  type TlHit = { x: number; y: number; w: number; h: number; kind: "ruler" | "markerT" | "markerL" | "element" | "keyframe"; id?: string; key?: number; tip?: string };
+  /** Drop indicator (canvas y) while an element row is dragged in the name column. */
+  let tlDropY: number | null = null;
+  /** Hit boxes in canvas CSS pixels from the last draw, bottom-most first. */
+  let tlHits: TlHit[] = [];
+  let tlRaf = 0;
+  /** Redraws at most once per frame, and only when something asked for it. */
+  function requestTimelineDraw() {
+    if (!tlRaf) tlRaf = requestAnimationFrame(() => {
+      tlRaf = 0;
+      drawTimeline();
+    });
+  }
+  /** Decoded video thumbnails by title@secs; `null` while loading. */
+  const tlThumbs = new Map<string, HTMLImageElement | null>();
+  function tlThumb(v: VideoSource, secs: number): HTMLImageElement | null {
+    const k = `${v.path ?? v.title}@${secs.toFixed(1)}`;
+    if (!tlThumbs.has(k)) {
+      if (tlThumbs.size > 300) tlThumbs.clear();
+      tlThumbs.set(k, null);
+      frameOfVideo({ ...v, startSecs: secs })
+        .then((url) => {
+          const img = new Image();
+          img.onload = () => {
+            tlThumbs.set(k, img);
+            requestTimelineDraw();
+          };
+          img.src = url;
+        })
+        .catch(() => undefined);
+    }
+    return tlThumbs.get(k) ?? null;
+  }
+  const WAVE_PER_SEC = 40;
+  /**
+   * Waveform peaks by audio source; `null` while loading or when it has no audio. Kept out of the
+   * layout so it never lands in the undo stack. Covers the longest menu (60 s intro + 600 s loop).
+   */
+  const tlWaves = new Map<string, number[] | null>();
+  function tlWave(s: CustomMenu["audio"]): number[] | null {
+    const t = s.type === "title" ? titles[s.title - 1] : undefined;
+    // shortcut: a title without startSecs uses the editor's preview start, not the build's clip start; pass the real one from the backend if they differ.
+    const src = s.type === "file" ? { path: s.path, start: 0 } : t && s.type === "title" ? { path: t.path, start: s.startSecs ?? Math.min(t.durationSecs * 0.1, 300) } : null;
+    if (!src) return null;
+    const k = `${src.path}@${src.start}`;
+    if (!tlWaves.has(k)) {
+      tlWaves.set(k, null);
+      audioWaveform(src.path, src.start, 660)
+        .then((peaks) => {
+          tlWaves.set(k, peaks);
+          requestTimelineDraw();
+        })
+        .catch(() => undefined);
+    }
+    return tlWaves.get(k) ?? null;
+  }
+
+  function drawTimeline() {
+    const m = menu();
+    if (viewMode !== "timeline" || !m) return;
+    const T = m.introSecs ?? 0;
+    const loopSecs = m.durationSecs ?? 20;
+    const total = timelineTotal();
+    const px = pxPerSec();
+    const trackW = total * px + 40;
+    tlSizer.style.width = `${TL_NAME_W + trackW}px`;
+    tlSizer.style.height = `${TL_RULER_H + TL_GAP + 3 * (TL_ROW_H + TL_GAP) + m.elements.length * (TL_BTN_H + TL_GAP) + 8}px`;
+
+    const vw = tlScroll.clientWidth;
+    const vh = tlScroll.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (tlCanvas.width !== Math.round(vw * dpr) || tlCanvas.height !== Math.round(vh * dpr)) {
+      tlCanvas.width = Math.round(vw * dpr);
+      tlCanvas.height = Math.round(vh * dpr);
+      tlCanvas.style.width = `${vw}px`;
+      tlCanvas.style.height = `${vh}px`;
+    }
+    const ctx = tlCanvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, vw, vh);
+    const css = getComputedStyle(timelinePane);
+    const cssVar = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
+    const muted = cssVar("--muted", "#94a3b8");
+    const accent = cssVar("--accent", "#3b82f6");
+    const font = (size: number, weight = 400) => `${weight} ${size}px ${css.fontFamily}`;
+    const sx = tlScroll.scrollLeft;
+    const sy = tlScroll.scrollTop;
+    const X = (secs: number) => TL_NAME_W + secs * px - sx;
+    const hits: TlHit[] = [];
+    ctx.textBaseline = "middle";
+
+    /** One bar of a track; `striped` is the locked (Cell 1) look. */
+    const region = (from: number, len: number, y: number, h: number, fill: string, edge: string, label: string, color: string, size = 11, striped = false) => {
+      const x = X(from);
+      const w = len * px;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, w, h);
+      if (striped) {
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 8;
+        for (let k = x - h; k < x + w; k += 22.6) {
+          ctx.beginPath();
+          ctx.moveTo(k, y + h);
+          ctx.lineTo(k + h, y);
+          ctx.stroke();
+        }
+      }
+      ctx.fillStyle = edge;
+      ctx.fillRect(x + w - 2, y, 2, h);
+      if (label) {
+        ctx.fillStyle = color;
+        ctx.font = font(size);
+        ctx.fillText(label, x + 8, y + h / 2);
+      }
+      ctx.restore();
+    };
+
+    // ---- rows (clipped below the ruler, right of the name column) ----
+    const rows: { label: string; h: number; sel: boolean; id?: string; keys?: ElementKey[]; draw: (y: number, h: number) => void }[] = [];
+    const vid = m.background.video ?? m.elements.find((e): e is VideoElement => e.type === "video");
+    rows.push({
+      label: tr("menuEditor.tlVideo"),
+      h: TL_ROW_H,
+      sel: false,
+      draw: (y, h) => {
+        if (vid && (vid.path || titles[vid.title - 1])) {
+          const n = Math.min(24, Math.ceil(trackW / 64));
+          const slot = (total * px) / n;
+          ctx.globalAlpha = 0.55;
+          for (let i = 0; i < n; i++) {
+            const x = X(0) + i * slot;
+            if (x + slot < TL_NAME_W || x > vw) continue;
+            const t = ((i + 0.5) * total) / n;
+            const img = tlThumb(vid, (vid.startSecs ?? 0) + (t >= T ? t - T : t));
+            if (!img) continue;
+            // background-size: cover
+            const s = Math.max(slot / img.naturalWidth, h / img.naturalHeight);
+            const cw = slot / s;
+            const ch = h / s;
+            ctx.drawImage(img, (img.naturalWidth - cw) / 2, (img.naturalHeight - ch) / 2, cw, ch, x, y, slot, h);
+          }
+          ctx.globalAlpha = 1;
+        }
+        if (T > 0) region(0, T, y, h, "rgba(59, 130, 246, 0.35)", "#3b82f6", tr("menuEditor.tlIntro", { secs: T.toFixed(1) }), "#93c5fd");
+        region(T, loopSecs, y, h, "rgba(34, 197, 94, 0.35)", "#22c55e", tr("menuEditor.tlLoop", { secs: loopSecs.toFixed(1) }), "#86efac");
+      },
+    });
+    rows.push({
+      label: tr("menuEditor.tlAudio"),
+      h: TL_ROW_H,
+      sel: false,
+      draw: (y, h) => {
+        region(0, total, y, h, "rgba(168, 85, 247, 0.25)", "rgba(168, 85, 247, 0.4)", "", "");
+        const wave = tlWave(m.audio);
+        if (wave) {
+          // One bar per screen column: the loudest peak that falls into it (zoomed out, many do).
+          ctx.fillStyle = muted;
+          const x0 = X(0);
+          const end = Math.min(vw, X(Math.min(total, wave.length / WAVE_PER_SEC)));
+          for (let x = Math.max(TL_NAME_W, Math.floor(x0)); x < end; x++) {
+            const a = Math.floor(((x - x0) / px) * WAVE_PER_SEC);
+            const b = Math.max(a + 1, Math.floor(((x + 1 - x0) / px) * WAVE_PER_SEC));
+            let v = 0;
+            for (let i = a; i < b && i < wave.length; i++) v = Math.max(v, wave[i]);
+            const lh = Math.max(1, (v / 255) * (h - 4));
+            ctx.fillRect(x, y + (h - lh) / 2, 1, lh);
+          }
+        }
+        ctx.strokeStyle = "rgba(168, 85, 247, 0.4)";
+        ctx.strokeRect(X(0) + 0.5, y + 0.5, total * px - 1, h - 1);
+        ctx.fillStyle = css.color;
+        ctx.font = font(11);
+        ctx.fillText(m.audio.type === "none" ? tr("menuEditor.tlNoAudio") : tr("menuEditor.tlAudioLoops"), X(0) + 8, y + h / 2);
+      },
+    });
+    rows.push({
+      label: tr("menuEditor.tlLayers", { n: m.elements.length }),
+      h: TL_ROW_H,
+      sel: false,
+      draw: (y, h) => {
+        if (T > 0) region(0, T, y, h, "#1e293b", "#64748b", tr("menuEditor.tlLocked"), "#94a3b8", 10, true);
+        region(T, loopSecs, y, h, "rgba(234, 179, 8, 0.35)", "#eab308", tr("menuEditor.tlActive"), "#fef08a", 10);
+      },
+    });
+    // NLE order: the top row is the frontmost layer (last in `elements`)
+    for (const e of [...m.elements].reverse()) {
+      const name =
+        e.type === "text" ? e.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlText") : e.type === "image" ? tr("menuEditor.bild2") : videoLabel(e);
+      rows.push({
+        label: e.type !== "text" && isButton(e) ? actionLabel(e.action) : name,
+        h: TL_BTN_H,
+        sel: isSel(e.id),
+        id: e.id,
+        keys: T > 0 ? e.intro : undefined,
+        draw: isButton(e)
+          ? (y, h) => {
+              if (T > 0) region(0, T, y, h, "#1e293b", "#64748b", "", "", 10, true);
+              region(T, loopSecs, y, h, "rgba(234, 179, 8, 0.35)", "#eab308", actionLabel(e.action), "#fef08a", 10);
+            }
+          : (y, h) => region(0, T + loopSecs, y, h, "rgba(100, 116, 139, 0.35)", "#64748b", name, "#cbd5e1", 10),
+      });
+    }
+    let y = TL_RULER_H + TL_GAP - sy;
+    for (const r of rows) {
+      if (y + r.h > TL_RULER_H && y < vh) {
+        // track background and bars, clipped to the scrolling area
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(TL_NAME_W, TL_RULER_H, vw - TL_NAME_W, vh - TL_RULER_H);
+        ctx.clip();
+        ctx.beginPath();
+        ctx.roundRect(X(0), y, trackW, r.h, 4);
+        ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
+        ctx.fill();
+        ctx.save();
+        ctx.clip();
+        r.draw(y, r.h);
+        ctx.restore();
+        if (r.sel) {
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(X(0) + 0.5, y + 0.5, trackW - 1, r.h - 1);
+        }
+        // intro keyframes: NLE diamonds at their time
+        const d = r.h / 2 - 2;
+        r.keys?.forEach((k, i) => {
+          const picked = selKey?.id === r.id && selKey?.i === i;
+          const cx = X(k.t);
+          const cy = y + r.h / 2;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy - d);
+          ctx.lineTo(cx + d, cy);
+          ctx.lineTo(cx, cy + d);
+          ctx.lineTo(cx - d, cy);
+          ctx.closePath();
+          ctx.fillStyle = picked ? accent : "#ffffff";
+          ctx.fill();
+          ctx.strokeStyle = "#0f172a";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        });
+        ctx.restore();
+        // name column (fixed horizontally)
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, TL_RULER_H, TL_NAME_W - 4, vh - TL_RULER_H);
+        ctx.clip();
+        ctx.fillStyle = r.sel ? accent : css.color;
+        ctx.font = font(11, r.id ? (r.sel ? 700 : 400) : 600);
+        ctx.fillText(r.label, r.id ? 20 : 8, y + r.h / 2);
+        if (r.id) {
+          // grip: the row can be dragged to change the stacking order
+          ctx.fillStyle = muted;
+          ctx.fillText("⋮⋮", 7, y + r.h / 2);
+        }
+        ctx.restore();
+        if (r.id) hits.push({ x: 0, y: Math.max(y, TL_RULER_H), w: vw, h: Math.min(r.h, y + r.h - TL_RULER_H), kind: "element", id: r.id });
+        r.keys?.forEach((k, i) => {
+          const cx = X(k.t);
+          if (cx >= TL_NAME_W) hits.push({ x: cx - 7, y: Math.max(y, TL_RULER_H), w: 14, h: r.h, kind: "keyframe", id: r.id, key: i, tip: `${k.t.toFixed(2)} s` });
+        });
+      }
+      y += r.h + TL_GAP;
+    }
+    if (tlDropY !== null) {
+      ctx.fillStyle = accent;
+      ctx.fillRect(0, tlDropY - 1, vw, 2);
+    }
+
+    // ---- ruler (fixed vertically) ----
+    ctx.fillStyle = cssVar("--panel", "#0f172a");
+    ctx.fillRect(0, 0, vw, TL_RULER_H);
+    ctx.fillStyle = cssVar("--border", "#334155");
+    ctx.fillRect(TL_NAME_W, TL_RULER_H - 1, vw - TL_NAME_W, 1);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(TL_NAME_W, 0, vw - TL_NAME_W, vh);
+    ctx.clip();
+    const tickStep = [1, 2, 5, 10, 30, 60, 120, 300].find((s) => s * px >= 56) ?? 300;
+    ctx.font = font(9);
+    ctx.textBaseline = "alphabetic";
+    for (let sec = 0; sec <= total; sec += tickStep) {
+      const x = X(sec);
+      if (x < TL_NAME_W - 60 || x > vw) continue;
+      ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.fillRect(x, TL_RULER_H - 8, 1, 8);
+      ctx.fillStyle = muted;
+      ctx.fillText(`${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`, x + 3, TL_RULER_H - 7);
+    }
+    hits.push({ x: TL_NAME_W, y: 0, w: vw - TL_NAME_W, h: TL_RULER_H, kind: "ruler" });
+
+    // ---- markers: a 2 px line through the ruler with a pill label (T right of it, L left of it) ----
+    ctx.textBaseline = "middle";
+    ctx.font = font(9, 700);
+    const marker = (secs: number, color: string, label: string, right: boolean, kind: "markerT" | "markerL", tip: string) => {
+      const x = X(secs);
+      const pw = ctx.measureText(label).width + 12;
+      const px0 = right ? x - 1 : x + 3 - pw;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, 0, 2, TL_RULER_H);
+      ctx.beginPath();
+      ctx.roundRect(px0, 0, pw, 14, 7);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, px0 + 6, 7);
+      hits.push({ x: Math.min(px0, x - 4), y: 0, w: pw + 5, h: TL_RULER_H, kind, tip });
+    };
+    marker(T, "#3b82f6", tr("menuEditor.tlIntroEnd"), true, "markerT", tr("menuEditor.tlIntroTip", { secs: T.toFixed(2) }));
+    marker(total, "#22c55e", tr("menuEditor.tlLoopEnd"), false, "markerL", tr("menuEditor.tlLoopTip", { secs: total.toFixed(2) }));
+
+    // ---- playhead over everything ----
+    const phx = X(playheadTime);
+    ctx.fillStyle = "#ef4444";
+    ctx.fillRect(phx, 0, 2, vh);
+    ctx.beginPath();
+    ctx.moveTo(phx - 5, 0);
+    ctx.lineTo(phx + 7, 0);
+    ctx.lineTo(phx + 1, 8);
+    ctx.fill();
+    ctx.restore();
+    tlHits = hits;
+  }
+
+  function tlHitAt(ev: PointerEvent): TlHit | undefined {
+    const r = tlCanvas.getBoundingClientRect();
+    const x = ev.clientX - r.left;
+    const y = ev.clientY - r.top;
+    for (let i = tlHits.length - 1; i >= 0; i--) {
+      const h = tlHits[i];
+      if (x >= h.x && x < h.x + h.w && y >= h.y && y < h.y + h.h) return h;
+    }
+    return undefined;
+  }
+  tlCanvas.addEventListener("pointermove", (ev) => {
+    if (tlCanvas.hasPointerCapture(ev.pointerId)) return;
+    const h = tlHitAt(ev);
+    const inNames = ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W;
+    tlCanvas.style.cursor =
+      !h ? "" : h.kind === "markerT" || h.kind === "markerL" || h.kind === "keyframe" ? "ew-resize" : h.kind === "element" && inNames ? "grab" : "pointer";
+    tlCanvas.title = h?.tip ?? "";
+  });
+  tlCanvas.addEventListener("pointerdown", (ev) => {
+    const h = tlHitAt(ev);
+    if (ev.button !== 0 || !h) return;
+    const m = menu();
+    selKey = h.kind === "keyframe" ? { id: h.id!, i: h.key! } : null;
+    if (h.kind === "element") {
+      const b = m.elements.find((e) => e.id === h.id);
+      if (!b) return;
+      selIds = groupMembers(b).map((x) => x.id);
+      renderStage();
+      renderProps();
+      requestTimelineDraw();
+      if (ev.clientX - tlCanvas.getBoundingClientRect().left < TL_NAME_W) dragRow(ev, b.id);
+    } else if (h.kind === "keyframe") {
+      selIds = [h.id!];
+      const k = m.elements.find((e) => e.id === h.id)?.intro?.[h.key!];
+      if (k) setPlayhead(k.t);
+      renderStage();
+      renderProps();
+      dragKeyframe(ev, h.id!, h.key!);
+    } else if (h.kind === "markerT") {
+      dragOnRuler(ev, (secs) => {
+        m.introSecs = snapToClosedGop(Math.max(0, Math.min(60, secs)));
+        requestTimelineDraw();
+        if (playheadTime < m.introSecs !== lastCell1) renderStage();
+      }, ["introSecs"]);
+    } else if (h.kind === "markerL") {
+      dragOnRuler(ev, (secs) => {
+        const t0 = m.introSecs ?? 0;
+        m.durationSecs = Math.min(600, Math.max(1, snapToClosedGop(Math.max(t0 + 1, secs)) - t0));
+        requestTimelineDraw();
+      }, ["durationSecs"]);
+    } else {
+      stopPlay();
+      dragOnRuler(ev, (secs) => setPlayhead(secs));
+    }
+  });
+  /**
+   * Drags an element row in the name column; dropping it above/below another row moves the element
+   * in front of/behind it in `elements` (the stacking order, one undo step). Below 4 px it stays a click.
+   */
+  function dragRow(ev: PointerEvent, id: string) {
+    ev.preventDefault();
+    const y0 = ev.clientY;
+    let target: { id: string; after: boolean } | null = null;
+    const mv = (e: PointerEvent) => {
+      if (tlDropY === null && Math.abs(e.clientY - y0) < 4) return;
+      const y = e.clientY - tlCanvas.getBoundingClientRect().top;
+      const rows = tlHits.filter((h) => h.kind === "element");
+      const h = rows.find((r) => y < r.y + r.h + TL_GAP) ?? rows[rows.length - 1];
+      if (!h?.id) return;
+      const after = y >= h.y + h.h / 2;
+      target = { id: h.id, after };
+      tlDropY = after ? h.y + h.h + TL_GAP / 2 : h.y - TL_GAP / 2;
+      tlCanvas.style.cursor = "grabbing";
+      requestTimelineDraw();
+    };
+    const up = () => {
+      tlCanvas.removeEventListener("pointermove", mv);
+      tlCanvas.removeEventListener("pointerup", up);
+      tlCanvas.removeEventListener("pointercancel", up);
+      const dropped = tlDropY !== null ? target : null;
+      tlDropY = null;
+      tlCanvas.style.cursor = "";
+      // rows run top = frontmost, so visually below a row means before it in `elements`
+      if (dropped) moveElement(id, dropped.id, !dropped.after);
+      else requestTimelineDraw();
+    };
+    tlCanvas.setPointerCapture(ev.pointerId);
+    tlCanvas.addEventListener("pointermove", mv);
+    tlCanvas.addEventListener("pointerup", up);
+    tlCanvas.addEventListener("pointercancel", up);
+  }
+  /** Element by id in the current menu (re-resolved: a snapshot undo replaces the objects). */
+  const elementOf = (mi: number, id: string) => L.menus[mi]?.elements.find((e) => e.id === id);
+  /** Time-shifts one intro key between its neighbours (and 0..introSecs); one undo step. */
+  function dragKeyframe(ev: PointerEvent, id: string, i: number) {
+    const mi = menuIdx;
+    const m = menu();
+    const keys = elementOf(mi, id)?.intro;
+    if (!keys?.[i]) return;
+    const T = m.introSecs ?? 0;
+    const lo = keys[i - 1]?.t ?? 0;
+    const hi = keys[i + 1]?.t ?? T;
+    const commit = beginEdit(() => [elementOf(mi, id)!], ["intro"], renderAll);
+    const secsAt = (e: PointerEvent) => (e.clientX - tlCanvas.getBoundingClientRect().left - TL_NAME_W + tlScroll.scrollLeft) / pxPerSec();
+    const mv = (e: PointerEvent) => {
+      keys[i].t = Math.round(Math.min(hi, Math.max(lo, secsAt(e))) * 100) / 100;
+      tlCanvas.title = `${keys[i].t.toFixed(2)} s`;
+      requestTimelineDraw();
+    };
+    const up = () => {
+      tlCanvas.removeEventListener("pointermove", mv);
+      tlCanvas.removeEventListener("pointerup", up);
+      tlCanvas.removeEventListener("pointercancel", up);
+      if (commit()) renderAll();
+    };
+    ev.preventDefault();
+    tlCanvas.setPointerCapture(ev.pointerId);
+    tlCanvas.addEventListener("pointermove", mv);
+    tlCanvas.addEventListener("pointerup", up);
+    tlCanvas.addEventListener("pointercancel", up);
+  }
+  // Double-click on an element track inside the intro adds a key there (copy of the nearest key, or of the element).
+  tlCanvas.addEventListener("dblclick", (ev) => {
+    const r = tlCanvas.getBoundingClientRect();
+    if (ev.clientX - r.left < TL_NAME_W) return;
+    const h = tlHits.find((x) => x.kind === "element" && ev.clientY - r.top >= x.y && ev.clientY - r.top < x.y + x.h);
+    const m = menu();
+    const T = m.introSecs ?? 0;
+    const t = Math.round(((ev.clientX - r.left - TL_NAME_W + tlScroll.scrollLeft) / pxPerSec()) * 100) / 100;
+    if (!h?.id || T <= 0 || t < 0 || t > T) return;
+    const mi = menuIdx;
+    const e = elementOf(mi, h.id);
+    if (!e) return;
+    const keys = e.intro ?? [];
+    if (keys.some((k) => Math.abs(k.t - t) < 0.01)) return;
+    const near = keys.reduce<ElementKey | null>((b, k) => (!b || Math.abs(k.t - t) < Math.abs(b.t - t) ? k : b), null);
+    const src = near ?? e;
+    const commit = beginEdit(() => [elementOf(mi, h.id!)!], ["intro"], renderAll);
+    e.intro = [...keys, { t, x: src.x, y: src.y, w: src.w, h: src.h, opacity: src.opacity }].sort((a, b) => a.t - b.t);
+    commit();
+    renderAll();
+  });
+  function moveElement(id: string, targetId: string, after: boolean) {
+    const all = menu().elements;
+    const from = all.findIndex((e) => e.id === id);
+    if (from < 0 || id === targetId) return;
+    const before = JSON.stringify(L);
+    const [e] = all.splice(from, 1);
+    all.splice(all.findIndex((x) => x.id === targetId) + (after ? 1 : 0), 0, e);
+    if (JSON.stringify(L) === before) return;
+    pushHistory(before);
+    renderAll();
+  }
+  tlScroll.addEventListener("scroll", requestTimelineDraw, { passive: true });
+  new ResizeObserver(requestTimelineDraw).observe(tlScroll);
+
+  function renderTimelinePane() {
+    if (viewMode !== "timeline") {
+      stopPlay();
+      timelinePane.style.display = "none";
+      centerSection.classList.remove("has-timeline");
+      return;
+    }
+    timelinePane.style.display = "flex";
+    centerSection.classList.add("has-timeline");
+
+    const m = menu();
+    const isPal = tv.toLowerCase() === "pal";
+    const T = m.introSecs ?? 0.0;
+    playheadTime = Math.min(playheadTime, timelineTotal());
+
+    const timecodeDisplay = el("span", { class: "ed-timeline-timecode", title: "Position des roten Playheads (Std:Min:Sek:Frame)" }, formatTimecode(playheadTime));
+    const gopPill = el(
+      "span",
+      { class: "ed-gop-pill", title: "Schnitte rasten auf Closed-GOP-Grenzen ein (DVD-Pflicht f\u00fcr nahtlose Schleifen)" },
+      `Raster: ${isPal ? "0,6 s (PAL)" : "0,6 s (NTSC)"}`,
+    );
+
+    const playBtn = el("button", { class: `btn${isPlaying ? " active" : ""}`, type: "button", title: "Vorschau abspielen/pausieren (Leertaste)", onclick: togglePlay }, isPlaying ? "⏸ Pause" : "▶ Vorschau");
+    const setTBtn = el(
+      "button",
+      {
+        class: "btn",
+        type: "button",
+        title: "Das Intro endet an der Position des roten Playheads",
+        onclick: () => {
+          remember();
+          m.introSecs = snapToClosedGop(playheadTime);
+          renderAll();
+        },
+      },
+      "Intro endet hier",
+    );
+    const noIntroBtn =
+      T > 0
+        ? el(
+            "button",
+            {
+              class: "btn",
+              type: "button",
+              title: "Kein Intro: Buttons sind von Anfang an aktiv",
+              onclick: () => {
+                remember();
+                m.introSecs = 0;
+                renderAll();
+              },
+            },
+            "Kein Intro",
+          )
+        : null;
+
+    // Redraw only: rebuilding the header would replace the slider mid-drag.
+    const setZoom = (z: number) => {
+      timelineZoom = Math.max(0.25, Math.min(10, z));
+      zoomSlider.value = String(timelineZoom);
+      requestTimelineDraw();
+    };
+    const zoomSlider = el("input", {
+      type: "range",
+      min: "0.25",
+      max: "10",
+      step: "any",
+      value: String(timelineZoom),
+      style: "width: 90px;",
+      title: "Zoom",
+      oninput: (e: Event) => setZoom(Number((e.target as HTMLInputElement).value)),
+    }) as HTMLInputElement;
+    const fitBtn = el("button", { class: "btn", type: "button", title: "Zoom so w\u00e4hlen, dass alles sichtbar ist", onclick: () => setZoom(fitZoom()) }, "Einpassen");
+
+    const timelineHeader = el(
+      "div",
+      { class: "ed-timeline-header" },
+      playBtn,
+      timecodeDisplay,
+      setTBtn,
+      noIntroBtn,
+      gopPill,
+      el("span", { class: "ed-spacer" }),
+      fitBtn,
+      zoomSlider,
+    );
+
+    const hint = el(
+      "div",
+      { class: "ed-timeline-hint" },
+      T > 0
+        ? `Das Men\u00fc spielt zuerst das Intro (blau, ${T.toFixed(1)} s) einmal ab und wiederholt dann die Schleife (gr\u00fcn). Buttons sind erst nach dem Intro anklickbar. Blauen Marker ziehen = Introl\u00e4nge, gr\u00fcnen Marker ziehen = Schleifenende, ins Lineal klicken = Playhead setzen.`
+        : `Das Men\u00fc l\u00e4uft als Schleife (gr\u00fcn) und alle Buttons sind sofort aktiv. F\u00fcr ein Intro, das nur einmal abgespielt wird: Playhead an die gew\u00fcnschte Stelle setzen und „Intro endet hier“ klicken – oder den blauen Marker ziehen.`,
+    );
+
+    tlBar.replaceChildren(timelineHeader, hint);
+    requestTimelineDraw();
+  }
+
   // ---- selection, drag & resize -------------------------------------------------------------------
   function refreshSelection() {
     renderStage();
@@ -512,14 +1380,45 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   }
 
+  /**
+   * Intro key the stage edits instead of `e`'s base box: the selected key of `e`, or, while another
+   * element's key is selected, `e`'s key at the playhead. Anything else clears the key selection.
+   */
+  function stageKey(e: LayoutElement): ElementKey | null {
+    if (viewMode === "timeline" && selKey) {
+      const own = selKey.id === e.id ? e.intro?.[selKey.i] : undefined;
+      if (own) {
+        // the stage must show the key's state, or the drag would jump from the interpolated box
+        if (Math.abs(own.t - playheadTime) >= 0.005) setPlayhead(own.t);
+        return own;
+      }
+      const i = e.intro?.findIndex((k) => Math.abs(k.t - playheadTime) < 0.005) ?? -1;
+      if (i >= 0) {
+        selKey = { id: e.id, i };
+        requestTimelineDraw();
+        return e.intro![i];
+      }
+    }
+    if (selKey) requestTimelineDraw();
+    selKey = null;
+    return null;
+  }
+
   function startDrag(ev: PointerEvent, e: LayoutElement) {
     if (ev.button !== 0) return;
+    const key = stageKey(e);
     ev.stopPropagation();
     ev.preventDefault();
     const handle = (ev.target as HTMLElement).dataset.handle;
     // Plain click on an already-selected element: collapse the selection if it was not a drag.
     let collapseTo: string[] | null = null;
-    if (!handle) {
+    if (key) {
+      // A key moves alone (no group/multi-select drag).
+      if (selIds.length !== 1 || selIds[0] !== e.id) {
+        selIds = [e.id];
+        refreshSelection();
+      }
+    } else if (!handle) {
       const ids = (ev.altKey ? [e] : groupMembers(e)).map((x) => x.id);
       if (ev.shiftKey) {
         if (isSel(e.id)) {
@@ -537,7 +1436,15 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
     }
     // The stage may have been re-rendered: continue on the fresh nodes.
-    const targets = selection().map((t) => ({ t, node: stage.querySelector<HTMLElement>(`[data-id="${t.id}"]`), x: t.x, y: t.y, w: t.w, h: t.h }));
+    const boxes: { id: string; box: { x: number; y: number; w: number; h: number } }[] = key ? [{ id: e.id, box: key }] : selection().map((t) => ({ id: t.id, box: t }));
+    const targets = boxes.map(({ id, box: t }) => ({ t, node: stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`), x: t.x, y: t.y, w: t.w, h: t.h }));
+    // Keys may start off-canvas (slide-ins), so only base boxes are clamped to the frame.
+    const clamp = (b: { x: number; y: number; w: number; h: number }) => (key ? undefined : clampBox(b));
+    const show = (node: HTMLElement | null, b: { x: number; y: number; w: number; h: number }) => {
+      if (!node) return;
+      applyBox(node, key ? { ...e, x: b.x, y: b.y, w: b.w, h: b.h } : (b as LayoutElement));
+      if (key) renderProps();
+    };
     const union = unionBox(targets.map((s0) => ({ x: s0.x, y: s0.y, w: s0.w, h: s0.h })));
     const startX = ev.clientX;
     const startY = ev.clientY;
@@ -550,13 +1457,13 @@ export function mountMenuEditor(opts: EditorOptions) {
       moved = true;
       if (!handle) {
         // Snap the selection's top-left corner, clamp the union box inside the canvas.
-        const ddx = Math.max(-union.x, Math.min(snap(union.x + dx) - union.x, W() - union.w - union.x));
-        const ddy = Math.max(-union.y, Math.min(snap(union.y + dy) - union.y, H() - union.h - union.y));
+        const ddx = key ? snap(union.x + dx) - union.x : Math.max(-union.x, Math.min(snap(union.x + dx) - union.x, W() - union.w - union.x));
+        const ddy = key ? snap(union.y + dy) - union.y : Math.max(-union.y, Math.min(snap(union.y + dy) - union.y, H() - union.h - union.y));
         for (const s0 of targets) {
           s0.t.x = Math.round(s0.x + ddx);
           s0.t.y = Math.round(s0.y + ddy);
-          clampBox(s0.t);
-          if (s0.node) applyBox(s0.node, s0.t);
+          clamp(s0.t);
+          show(s0.node, s0.t);
         }
         return;
       }
@@ -582,17 +1489,17 @@ export function mountMenuEditor(opts: EditorOptions) {
         s0.t.y = snap(y);
         s0.t.w = snap(Math.max(8, w));
         s0.t.h = snap(Math.max(8, h));
-        clampBox(s0.t);
-        if (s0.node) applyBox(s0.node, s0.t);
+        clamp(s0.t);
+        show(s0.node, s0.t);
       }
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       if (moved) {
-        history.push(before);
-        dirty = true;
+        pushHistory(before);
         renderProps();
+        if (key) renderStage();
         renderHeader();
         scheduleCheck();
       } else if (collapseTo) {
@@ -604,11 +1511,103 @@ export function mountMenuEditor(opts: EditorOptions) {
     window.addEventListener("pointerup", onUp);
   }
 
-  /** Drag on the empty stage draws a marquee; a click without movement clears the selection. */
+  /** Drag on the empty stage draws a marquee or an AABB button box; a click without movement clears the selection. */
   stage.addEventListener("pointerdown", (ev) => {
     const t = ev.target as HTMLElement;
     if (ev.button !== 0 || !(t === stage || t.classList.contains("ed-bg") || t.classList.contains("ed-safe"))) return;
     ev.preventDefault();
+
+    if (isDrawingAabb) {
+      const origin = stage.getBoundingClientRect();
+      const pos = (e: PointerEvent) => ({ x: (e.clientX - origin.left) / scaleX, y: (e.clientY - origin.top) / scaleY });
+      const start = pos(ev);
+      const snapX = (val: number) => Math.max(0, Math.min(W() - 2, Math.floor(val / 2) * 2));
+      const snapY = (val: number) => Math.max(0, Math.min(H() - 2, Math.floor(val / 2) * 2));
+
+      const startX = snapX(start.x);
+      const startY = snapY(start.y);
+
+      const box = el("div", { class: "ed-aabb-preview" });
+      stage.append(box);
+
+      const onMove = (mv: PointerEvent) => {
+        const cur = pos(mv);
+        const curX = snapX(cur.x);
+        const curY = snapY(cur.y);
+        const x0 = Math.min(startX, curX);
+        const y0 = Math.min(startY, curY);
+        const x1 = Math.max(startX, curX) | 1;
+        const y1 = Math.max(startY, curY) | 1;
+        Object.assign(box.style, {
+          left: `${x0}px`,
+          top: `${y0}px`,
+          width: `${x1 - x0 + 1}px`,
+          height: `${y1 - y0 + 1}px`,
+        });
+      };
+
+      const onUp = (up: PointerEvent) => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        box.remove();
+
+        const cur = pos(up);
+        const curX = snapX(cur.x);
+        const curY = snapY(cur.y);
+        const x0 = Math.min(startX, curX);
+        const y0 = Math.min(startY, curY);
+        const x1 = Math.min(W() - 1, Math.max(startX, curX) | 1);
+        const y1 = Math.min(H() - 1, Math.max(startY, curY) | 1);
+        const w = x1 - x0 + 1;
+        const h = y1 - y0 + 1;
+
+        if (w < 16 || h < 16) {
+          isDrawingAabb = false;
+          stage.style.cursor = "";
+          renderToolbar();
+          return;
+        }
+
+        const currentButtons = menu().elements.filter(isButton);
+        if (currentButtons.length >= 36) {
+          alert(tr("menuEditor.maxButtonsAlert"));
+          isDrawingAabb = false;
+          stage.style.cursor = "";
+          renderToolbar();
+          return;
+        }
+
+        const overlaps = currentButtons.some((b) => {
+          return x0 < b.x + b.w && x0 + w > b.x && y0 < b.y + b.h && y0 + h > b.y;
+        });
+
+        if (overlaps) {
+          alert(tr("menuEditor.overlappingButtonsAlert"));
+          isDrawingAabb = false;
+          stage.style.cursor = "";
+          renderToolbar();
+          return;
+        }
+
+        remember();
+        const newBtn = newText(x0, y0, w, h, `Button ${currentButtons.length + 1}`, {
+          size: Math.max(14, Math.min(28, Math.round(h * 0.5))),
+          wrap: true,
+          align: "center",
+          action: { type: "playTitle", title: 1 },
+        });
+        menu().elements.push(newBtn);
+        selIds = [newBtn.id];
+        isDrawingAabb = false;
+        stage.style.cursor = "";
+        renderAll();
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      return;
+    }
+
     const origin = stage.getBoundingClientRect();
     const pos = (e: PointerEvent) => ({ x: (e.clientX - origin.left) / scaleX, y: (e.clientY - origin.top) / scaleY });
     const a = pos(ev);
@@ -654,8 +1653,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       const first = e.text.split("\n")[0].trim();
       return first.length > 28 ? `${first.slice(0, 27)}…` : first || tr("menuEditor.leererText");
     }
-    if (e.type === "image") return e.src.split(/[\\/]/).pop() ?? e.src;
-    return titles[e.title - 1]?.label ?? tr("menuEditor.titelFehlt2", { title: e.title });
+    if (e.type === "image") return fileName(e.src);
+    return videoLabel(e);
   }
 
   /** Pulses the stage nodes of `ids` so the user sees where they are. */
@@ -772,6 +1771,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         set(input.value);
         renderStage();
         renderToolbar();
+        requestTimelineDraw();
       });
     }
     input.addEventListener("change", () => {
@@ -782,6 +1782,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       renderMenus();
       renderToolbar();
       renderHeader();
+      renderTimelinePane();
       if (opts2.rerender) renderProps();
       scheduleCheck();
     });
@@ -811,7 +1812,50 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     const sel = selection();
     const e = selected();
-    props.replaceChildren(...(sel.length > 1 ? multiProps(sel) : e ? elementProps(m, e) : menuProps(m)));
+    const key = e && selKey?.id === e.id && sel.length === 1 ? e.intro?.[selKey.i] : undefined;
+    props.replaceChildren(...(key ? keyProps(m, e!, key) : sel.length > 1 ? multiProps(sel) : e ? elementProps(m, e) : menuProps(m)));
+  }
+
+  /** Values of one intro key; `t` stays between its neighbours and inside the intro. */
+  function keyProps(m: CustomMenu, e: LayoutElement, k: ElementKey): HTMLElement[] {
+    const keys = e.intro!;
+    const i = keys.indexOf(k);
+    const lo = keys[i - 1]?.t ?? 0;
+    const hi = keys[i + 1]?.t ?? (m.introSecs ?? 0);
+    const field = (key: "x" | "y" | "w" | "h", min = 0) =>
+      row(key.toUpperCase(), num(Math.round(k[key]), (v) => (k[key] = Math.max(min, v)), { step: "1" }));
+    return [
+      el("h3", {}, tr("menuEditor.keyframe", { n: i + 1, total: keys.length })),
+      group(
+        tr("menuEditor.keyframeWerte"),
+        row(tr("menuEditor.keyframeZeit"), num(k.t, (v) => (k.t = Math.round(Math.min(hi, Math.max(lo, v)) * 100) / 100), { step: "0.1", min: String(lo), max: String(hi) })),
+        field("x", -10000),
+        field("y", -10000),
+        field("w", 1),
+        field("h", 1),
+        row(tr("menuEditor.deckkraft"), num(k.opacity, (v) => (k.opacity = Math.min(1, Math.max(0, v))), { step: "0.05", min: "0", max: "1" })),
+      ),
+      el(
+        "div",
+        { class: "ed-row-buttons" },
+        el("button", { class: "btn", type: "button", onclick: () => ((selKey = null), renderProps(), requestTimelineDraw()) }, tr("menuEditor.zumElement")),
+        el(
+          "button",
+          {
+            class: "btn danger",
+            type: "button",
+            onclick: () => {
+              remember();
+              keys.splice(i, 1);
+              if (!keys.length) delete e.intro;
+              selKey = null;
+              renderAll();
+            },
+          },
+          tr("menuEditor.keyframeLoeschen"),
+        ),
+      ),
+    ];
   }
 
   function multiProps(sel: LayoutElement[]): HTMLElement[] {
@@ -844,7 +1888,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   function menuProps(m: CustomMenu): HTMLElement[] {
     const bg = m.background;
-    const bgKind = bg.video ? "video" : bg.image ? "image" : "color";
+    const bgKind = bg.video ? (bg.video.path ? "videoFile" : "video") : bg.image ? "image" : "color";
     const sound = m.audio;
     return [
       el("h3", {}, tr("menuEditor.menue")),
@@ -869,6 +1913,17 @@ export function mountMenuEditor(opts: EditorOptions) {
           tr("menuEditor.dauerS"),
           num(m.durationSecs ?? 20, (v) => (m.durationSecs = Math.max(1, Math.min(600, v))), { min: "1", max: "600", step: "1" }),
         ),
+        row(
+          "Intro-Dauer (T)",
+          num(
+            m.introSecs ?? 0,
+            (v) => {
+              m.introSecs = snapToClosedGop(Math.max(0, Math.min(60, v)));
+              renderAll();
+            },
+            { min: "0", max: "60", step: tv.toLowerCase() === "pal" ? "0.6" : "0.6006" },
+          ),
+        ),
         el("p", { class: "ed-hint" }, isMoving(m) ? tr("menuEditor.bewegtesMenueWirdAls") : tr("menuEditor.standbildKeineVideosKein")),
       ),
       group(
@@ -880,6 +1935,7 @@ export function mountMenuEditor(opts: EditorOptions) {
               ["color", tr("menuEditor.farbe")],
               ["image", tr("menuEditor.bild2")],
               ["video", tr("menuEditor.videoEinesTitels")],
+              ["videoFile", tr("menuEditor.videodateiWaehlen")],
             ],
             bgKind,
             (v) => {
@@ -889,6 +1945,15 @@ export function mountMenuEditor(opts: EditorOptions) {
               } else if (v === "video") {
                 bg.image = null;
                 bg.video = { title: 1, startSecs: null };
+              } else if (v === "videoFile") {
+                // `bind` already recorded the undo state before this change.
+                void chooseFile(VIDEO_FILTER).then((p) => {
+                  if (p) {
+                    bg.image = null;
+                    bg.video = { title: 0, startSecs: null, path: p };
+                  }
+                  renderAll();
+                });
               } else {
                 bg.video = null;
                 void chooseFile(IMAGE_FILTER).then((p) => {
@@ -908,15 +1973,15 @@ export function mountMenuEditor(opts: EditorOptions) {
           select(OVERLAY_LABELS, bg.gradientOverlay ?? "none", (v) => (bg.gradientOverlay = v as GradientOverlay)),
         ),
         bg.image ? row(tr("menuEditor.bild2"), el("span", { class: "ed-path", title: bg.image }, bg.image.split(/[\\/]/).pop() ?? "")) : null,
-        bg.video
+        bg.video?.path ? row(tr("menuEditor.datei"), el("span", { class: "ed-path", title: bg.video.path }, fileName(bg.video.path))) : null,
+        bg.video && !bg.video.path
           ? row(tr("menuEditor.titel4"), select(titleOptions(), String(bg.video.title), (v) => (bg.video = { ...bg.video!, title: Number(v) })))
           : null,
         bg.video
           ? row(
               tr("menuEditor.startS"),
-              // Without an explicit start the engine uses 10 % of the runtime (max. 5 min).
               num(
-                bg.video.startSecs ?? Math.round(Math.min((titles[bg.video.title - 1]?.durationSecs ?? 0) * 0.1, 300)),
+                bg.video.startSecs ?? defaultStart(bg.video),
                 (v) => (bg.video = { ...bg.video!, startSecs: Math.max(0, v) }),
                 { min: "0", step: "1" },
               ),
@@ -993,6 +2058,7 @@ export function mountMenuEditor(opts: EditorOptions) {
             ["playChapter", tr("menuEditor.kapitelAbspielen")],
             ["menu", tr("menuEditor.menueOeffnen")],
             ["playAll", tr("menuEditor.alleTitelAbspielen")],
+            ["customVm", "VM-Skript (DVD VM)"],
             // Streams belong to a titleset: only in a title's root/settings menus.
             ...(streamTitle ? ([["setAudio", tr("menuEditor.tonspurWaehlen")], ["setSubtitle", tr("menuEditor.untertitelWaehlen")]] as [string, string][]) : []),
           ],
@@ -1008,11 +2074,13 @@ export function mountMenuEditor(opts: EditorOptions) {
                     ? { type: "menu", menu: firstOther }
                     : v === "playAll"
                       ? { type: "playAll" }
-                      : v === "setAudio"
-                        ? { type: "setAudio", source: streamTitle?.audioTracks?.[0]?.source ?? 0 }
-                        : v === "setSubtitle"
-                          ? { type: "setSubtitle", source: null }
-                          : null,
+                      : v === "customVm"
+                        ? { type: "customVm", script: "g4 = 1;" }
+                        : v === "setAudio"
+                          ? { type: "setAudio", source: streamTitle?.audioTracks?.[0]?.source ?? 0 }
+                          : v === "setSubtitle"
+                            ? { type: "setSubtitle", source: null }
+                            : null,
             );
           },
         ),
@@ -1020,6 +2088,15 @@ export function mountMenuEditor(opts: EditorOptions) {
     ];
     if (!streamTitle) {
       out.push(el("p", { class: "ed-hint" }, tr("menuEditor.tonUndUntertitelwahlGibt")));
+    }
+    if (a?.type === "customVm") {
+      out.push(
+        row(
+          "VM-Befehle",
+          bind(el("input", { type: "text", value: a.script }) as HTMLInputElement, (v) => setAction({ type: "customVm", script: v }), { live: true }),
+        ),
+        el("p", { class: "ed-hint" }, "Direkte DVD-VM-Anweisungen (z.B. „if (g4 == 1) link button 2; else jump menu 3;“)."),
+      );
     }
     if (a?.type === "setAudio" && streamTitle) {
       const tracks = streamTitle.audioTracks ?? [];
@@ -1085,10 +2162,56 @@ export function mountMenuEditor(opts: EditorOptions) {
               `${m.name}${m.role === "title" ? "" : tr("menuEditor.titel5", { m: m.role === "root" ? "Root" : tr("menuEditor.einstellungen"), title: m.title })}`,
             ]),
             a.menu,
-            (v) => setAction({ type: "menu", menu: v }),
+            (v) => setAction({ type: "menu", menu: v, transition: a.transition }),
+          ),
+        ),
+        row(
+          tr("menuEditor.transition"),
+          select(
+            [
+              ["none", tr("menuEditor.transitionNone")],
+              ["file", tr("menuEditor.transitionFile")],
+            ],
+            a.transition ? "file" : "none",
+            (v) => {
+              if (v === "none") {
+                setAction({ type: "menu", menu: a.menu, transition: null });
+                renderProps();
+              } else {
+                void chooseFile(VIDEO_FILTER).then((p) => {
+                  if (p) {
+                    remember();
+                    setAction({
+                      type: "menu",
+                      menu: a.menu,
+                      transition: {
+                        video: { source: "file", path: p, inPointSecs: 0 },
+                        durationSecs: 2.0,
+                        audio: { type: "none" },
+                      },
+                    });
+                    renderAll();
+                  }
+                });
+              }
+            },
           ),
         ),
       );
+      if (a.transition) {
+        out.push(
+          row(
+            "Dauer (s)",
+            num(
+              a.transition.durationSecs,
+              (v) => {
+                if (a.transition) a.transition.durationSecs = Math.max(0.5, Math.min(30, v));
+              },
+              { min: "0.5", max: "30", step: "0.5" },
+            ),
+          ),
+        );
+      }
     }
     return out;
   }
@@ -1212,8 +2335,38 @@ export function mountMenuEditor(opts: EditorOptions) {
       typeGroup.push(
         group(
           tr("menuEditor.video2"),
-          row(tr("menuEditor.titel4"), select(titleOptions(), String(v.title), (x) => (v.title = Number(x)))),
-          row(tr("menuEditor.startS"), num(v.startSecs ?? Math.round(Math.min((titles[v.title - 1]?.durationSecs ?? 0) * 0.1, 300)), (x) => (v.startSecs = Math.max(0, x)), { min: "0", step: "1" })),
+          row(
+            tr("menuEditor.quelle"),
+            select(
+              [
+                ["title", tr("menuEditor.projektTitel")],
+                ["file", tr("menuEditor.videodateiWaehlen")],
+              ],
+              v.path ? "file" : "title",
+              (x) => {
+                if (x === "title") {
+                  delete v.path;
+                  v.title = Math.max(1, v.title);
+                  v.startSecs = null;
+                  return;
+                }
+                // `bind` already recorded the undo state before this change.
+                void chooseFile(VIDEO_FILTER).then((p) => {
+                  if (p) {
+                    v.path = p;
+                    v.title = 0;
+                    v.startSecs = null;
+                  }
+                  renderAll();
+                });
+              },
+              { disabled: titles.length === 0 && !v.path },
+            ),
+          ),
+          v.path
+            ? row(tr("menuEditor.datei"), el("span", { class: "ed-path", title: v.path }, fileName(v.path)))
+            : row(tr("menuEditor.titel4"), select(titleOptions(), String(v.title), (x) => (v.title = Number(x)))),
+          row(tr("menuEditor.startS"), num(v.startSecs ?? defaultStart(v), (x) => (v.startSecs = Math.max(0, x)), { min: "0", step: "1" })),
           row(tr("menuEditor.anpassung"), select(FIT_LABELS, v.fit, (x) => (v.fit = x as Fit))),
           el("p", { class: "ed-hint" }, tr("menuEditor.dasVideoLaeuftIm")),
         ),
@@ -1224,6 +2377,29 @@ export function mountMenuEditor(opts: EditorOptions) {
       el("h3", {}, kind),
       ...(typeGroup as HTMLElement[]),
       group(tr("menuEditor.button2"), ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...buttonColorControls(e)),
+      ...(isButton(e)
+        ? [
+            group(
+              "Easter Egg (Versteckter Button)",
+              el(
+                "label",
+                { class: "ed-check" },
+                el("input", {
+                  type: "checkbox",
+                  checked: !!e.easterEgg,
+                  onchange: (ev: Event) => {
+                    remember();
+                    e.easterEgg = (ev.target as HTMLInputElement).checked;
+                    renderStage();
+                    renderProps();
+                  },
+                }),
+                "Als Easter Egg markieren",
+              ),
+              el("p", { class: "ed-hint" }, "Navigation per Fernbedienung aktiv, aber die Button-Markierung ist zu 100% unsichtbar."),
+            ),
+          ]
+        : []),
       group(
         tr("menuEditor.positionGroesse"),
         el(
@@ -1324,21 +2500,27 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (!p) return;
     addElement({ id: newId("i"), type: "image", src: p, fit: "contain", x: Math.round(W() / 2 - 100), y: Math.round(H() / 2 - 75), w: 200, h: 150, rotation: 0, opacity: 1, action: null });
   }
-  function addVideo() {
+  function addVideo(path?: string) {
     addElement({
       id: newId("v"),
       type: "video",
-      title: 1,
+      title: path ? 0 : 1,
       startSecs: null,
       fit: "cover",
+      ...(path ? { path } : {}),
       x: Math.round(W() / 2 - 120),
       y: Math.round(H() / 2 - 68),
       w: 240,
       h: 136,
       rotation: 0,
       opacity: 1,
-      action: { type: "playTitle", title: 1 },
+      // An external clip has no title to play; it becomes a button only when given an action.
+      action: path ? null : { type: "playTitle", title: 1 },
     });
+  }
+  async function addExternalVideo() {
+    const p = await chooseFile(VIDEO_FILTER);
+    if (p) addVideo(p);
   }
   function removeElements(list: LayoutElement[]) {
     if (list.length === 0) return;
@@ -1390,8 +2572,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
     }
     if (!changed) return;
-    history.push(before);
-    dirty = true;
+    pushHistory(before);
     renderAll();
   }
   /** Dissolves groups left with a single member. */
@@ -1491,6 +2672,30 @@ export function mountMenuEditor(opts: EditorOptions) {
     selIds = [];
     renderAll();
   }
+  /** Replaces the layout with a converted ConvertX template (undoable like loading a file). */
+  async function importTemplate() {
+    let go = false;
+    try {
+      go = await ask(tr("menuEditor.vorlageUeberschreibt"), { title: tr("menuEditor.ausVorlage"), kind: "warning" });
+    } catch (e) {
+      flash(tr("menuEditor.dateiauswahlFehlgeschlagen", { e }), "error");
+    }
+    if (!go) return;
+    const p = await chooseFile(TEMPLATE_FILTER);
+    if (!p) return;
+    try {
+      const { layout, warnings } = await importConvertxTemplate(p, titles, currentLanguage());
+      remember();
+      L = layout;
+      menuIdx = 0;
+      selIds = [];
+      selKey = null;
+      renderAll();
+      flash(warnings.length ? tr("menuEditor.vorlageImportiertHinweise", { n: warnings.length, first: warnings[0] }) : tr("menuEditor.vorlageImportiert"), "ok");
+    } catch (e) {
+      flash(tr("menuEditor.vorlageFehlgeschlagen", { e }), "error");
+    }
+  }
   async function loadFile() {
     const p = await chooseFile(LAYOUT_FILTER);
     if (!p) return;
@@ -1550,6 +2755,10 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     closed = true;
     closeHook = null;
+    if (playTimer !== null) {
+      clearInterval(playTimer);
+      playTimer = null;
+    }
     ro.disconnect();
     window.removeEventListener("keydown", onKey, true);
     window.clearTimeout(checkTimer);
@@ -1575,6 +2784,26 @@ export function mountMenuEditor(opts: EditorOptions) {
       return;
     }
     const sel = selection();
+    if (viewMode === "timeline" && !ctrl) {
+      const gop = tv.toLowerCase() === "pal" ? 15 : 18;
+      if (ev.key === " ") {
+        ev.preventDefault();
+        togglePlay();
+        return;
+      }
+      if (ev.key === "Home") {
+        ev.preventDefault();
+        setPlayhead(0);
+        return;
+      }
+      if (sel.length === 0 && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) {
+        ev.preventDefault();
+        stopPlay();
+        setPlayhead(playheadTime + (ev.key === "ArrowLeft" ? -1 : 1) * (ev.shiftKey ? gop : 1) * frameSecs());
+        renderTimelinePane(); // play button label after stopPlay()
+        return;
+      }
+    }
     if (sel.length === 0) return;
     const step = ev.shiftKey ? 10 : 1;
     const moves: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };

@@ -1080,6 +1080,9 @@ mod tests {
     fn conditional_jump() {
         // `if (g1 eq 1) jump title 3` negates to `if g1 != 1 goto next`.
         assert_eq!(build("if (g1 eq 1) jump title 3; jump menu 2;", Domain::Vmgm), ["00b1000100010003", "3002000000030000", "3006000200c00000"]);
+        assert!(compile_str("if (g2 eq 0) audio = 3;", &ctx(), Domain::Vts).is_ok());
+        assert!(compile_str("if (s1 eq 15) audio = 3;", &ctx(), Domain::Vts).is_ok());
+        assert!(compile_str("if (s2 eq 0) subtitle = 64;", &ctx(), Domain::Vts).is_ok());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Output layout:
 //! ```text
 //! <output>/<project>/VIDEO_TS/  finished DVD-Video structure ("<project> (2)" if taken)
-//! <output>/<project>.convertx-work/  menu PNGs, spumux/dvdauthor XMLs, title MPEGs, logs;
+//! <output>/<project>.musadvd-work/  menu PNGs, spumux/dvdauthor XMLs, title MPEGs, logs;
 //!                               removed after the build unless `keep_work`
 //! ```
 
@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::author::{
-    self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, Resolution, TvStandard, DvdLayout, MenuKind, MenuLinks, MenuSpec, TitleEntry,
+    self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, Resolution, TvStandard, DvdLayout, MenuFrame, MenuKind, MenuLinks, MenuSpec, TitleEntry,
     TitleSpec, TitlesetSpec, VobSpec, MAX_CHAPTERS, MAX_TITLES,
 };
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
@@ -188,7 +188,7 @@ pub(crate) async fn cancellable<T, E: Into<BuildError>>(
 
 /// Name of the temporary work directory inside the output directory, and of the marker file in
 /// it that identifies a work directory created by this program (only those are deleted).
-pub const WORK_DIR: &str = ".convertx-work";
+pub const WORK_DIR: &str = ".musadvd-work";
 
 /// Turns a project name into a valid Windows folder name: invalid characters become `_`,
 /// trailing dots/spaces are removed, reserved device names get a suffix, length is limited.
@@ -215,7 +215,7 @@ pub fn safe_folder_name(name: &str) -> String {
     cleaned
 }
 
-/// Temporary authoring directory `<out>/<project name>.convertx-work`. It is created before
+/// Temporary authoring directory `<out>/<project name>.musadvd-work`. It is created before
 /// probing, so the name comes from `opts` (same precedence as the default project folder name).
 /// Distinct names let two projects build into one output directory in parallel.
 pub fn work_dir(out: &Path, opts: &BuildOptions) -> PathBuf {
@@ -493,16 +493,24 @@ pub(crate) fn check_group_shapes(members: &[MemberShape]) -> Result<(), BuildErr
 }
 
 /// Makes the members of a merged DVD title compatible: all use the first member's aspect and,
-/// if the audio formats differ at some track, all are re-encoded to AC-3.
+/// if the audio formats differ at track index k, only track k across all members is re-encoded to AC-3.
+/// Compliant tracks matching across all members remain stream-copied.
 fn harmonize_group(members: &mut [TitlePlan]) {
     let Some(first) = members.first() else { return };
-    let formats = |m: &TitlePlan| m.audio_outs().iter().map(|o| o.dvdauthor_format()).collect::<Vec<_>>();
-    let (aspect, first_formats) = (first.aspect, formats(first));
-    let same_audio = members.iter().all(|m| formats(m) == first_formats);
+    let aspect = first.aspect;
+    let track_count = first.audio.len();
     for m in members.iter_mut() {
         m.aspect = aspect;
-        if !same_audio {
-            m.audio_mode = AudioMode::Ac3;
+    }
+    for k in 0..track_count {
+        let first_format = members[0].audio_outs().get(k).map(|o| o.dvdauthor_format());
+        let same = members.iter().all(|m| m.audio_outs().get(k).map(|o| o.dvdauthor_format()) == first_format);
+        if !same {
+            for m in members.iter_mut() {
+                if let Some(mode) = m.audio_modes.get_mut(k) {
+                    *mode = AudioMode::Ac3;
+                }
+            }
         }
     }
 }
@@ -582,6 +590,44 @@ pub fn estimate_menu_mb(titles: usize, motion: bool, motion_secs: f64) -> f64 {
     }
 }
 
+/// Estimated size of custom DVD menus from the menu editor before they are rendered:
+/// still pages cost about 0.15 MB, moving pages (video or audio) cost about 5.5 MB per 25 s.
+pub fn estimate_custom_layout_mb(layout: &crate::layout::CustomLayout, default_secs: f64) -> f64 {
+    let menus_mb: f64 = layout
+        .menus
+        .iter()
+        .map(|m| {
+            let moving = m.background.video.is_some()
+                || m.elements.iter().any(|e| matches!(e.content, crate::layout::Content::Video { .. }))
+                || m.audio != crate::layout::MenuSound::None;
+            if moving {
+                let secs = m.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0);
+                let intro = if layout.animations { m.intro_secs.unwrap_or(0.0).clamp(0.0, 60.0) } else { 0.0 };
+                (secs + intro) * 5.5 / 25.0
+            } else {
+                0.15
+            }
+        })
+        .sum();
+    let fp_mb = match layout.fast_play.as_ref().filter(|fp| fp.enabled) {
+        Some(fp) => {
+            let moving = fp.splash.as_ref().is_some_and(|s| s.video.is_some()) || fp.audio != crate::layout::MenuSound::None;
+            if moving { (fp.timeout_secs as f64) * 5.5 / 25.0 } else { 0.15 }
+        }
+        None => 0.0,
+    };
+    let trans_mb: f64 = layout
+        .menus
+        .iter()
+        .flat_map(|m| &m.elements)
+        .filter_map(|e| match &e.action {
+            Some(crate::layout::Action::Menu { transition: Some(tr), .. }) => Some(tr.duration_secs * 5.5 / 25.0),
+            _ => None,
+        })
+        .sum();
+    menus_mb + fp_mb + trans_mb
+}
+
 /// User-defined chapter starts: sorted, deduplicated (>= 1 s apart), inside the runtime, first at 0.
 pub fn custom_chapters(starts: &[f64], duration_secs: f64) -> Vec<(f64, Option<String>)> {
     let end = (duration_secs - 1.0).max(0.0);
@@ -647,6 +693,7 @@ struct TitlePlan {
     chapter_titles: Vec<Option<String>>,
     aspect: Aspect,
     audio_mode: AudioMode,
+    audio_modes: Vec<AudioMode>,
     track_label_mode: TrackLabelMode,
     ui_lang: UiLang,
     video: VideoProcessing,
@@ -675,7 +722,14 @@ impl TitlePlan {
     }
 
     fn audio_outs(&self) -> Vec<AudioOut> {
-        self.audio.iter().map(|&i| plan_audio(&self.info.audio[i], AudioTarget::Dvd, self.audio_mode, self.loudnorm || self.info.trim.is_some())).collect()
+        self.audio
+            .iter()
+            .enumerate()
+            .map(|(idx, &i)| {
+                let mode = self.audio_modes.get(idx).copied().unwrap_or(self.audio_mode);
+                plan_audio(&self.info.audio[i], AudioTarget::Dvd, mode, self.loudnorm || self.info.trim.is_some())
+            })
+            .collect()
     }
 
     fn audio_kbps(&self) -> u32 {
@@ -931,6 +985,7 @@ async fn encode_title(
         resolution,
         hwaccel,
         audio_mode: t.audio_mode,
+        audio_modes: t.audio_modes.clone(),
         video: t.video,
         audio_filters,
     };
@@ -1026,13 +1081,8 @@ pub(crate) fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &Bui
         }
         subtitles.truncate(MAX_SUBTITLE_STREAMS);
     }
-    // Preferred languages become stream 0 (the player's default); the rest keep their order.
-    if let Some(lang) = &opts.preferred_audio_lang {
-        audio.sort_by_key(|&a| !language_matches(lang, info.audio[a].language.as_deref()));
-    }
-    if let Some(lang) = &opts.preferred_subtitle_lang {
-        subtitles.sort_by_key(|&s| !language_matches(lang, info.subtitles[s].language.as_deref()));
-    }
+    // Track order is preserved from the source file so menu buttons and player track lists
+    // match the original media. Preferred languages are activated on playback via VM commands.
     (audio, subtitles, notes)
 }
 
@@ -1102,7 +1152,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         )));
     }
     std::fs::create_dir_all(&work).at(&work)?;
-    std::fs::write(work.join(WORK_DIR), "temporary files of convertx-rust, safe to delete\n").at(&work)?;
+    std::fs::write(work.join(WORK_DIR), "temporary files of musadvd, safe to delete\n").at(&work)?;
     let tv = opts.tv_standard;
     if tv == TvStandard::Ntsc {
         log(Event::Step(tr(opts.ui_lang, "tv_ntsc").into()));
@@ -1133,6 +1183,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             None => chapter_starts(&info, opts.chapters.interval_secs, opts.chapters.min_video_secs),
         };
         let aspect = opts.aspect_policy.aspect_for(info.video.as_ref().map_or(16.0 / 9.0, |v| v.display_aspect));
+        let audio_modes = vec![opts.audio_mode; audio.len()];
         titles.push(TitlePlan {
             label,
             audio,
@@ -1141,6 +1192,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
             audio_mode: opts.audio_mode,
+            audio_modes,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
             video: opts.video,
@@ -1559,6 +1611,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         files.custom.as_ref().expect("checked"),
                         files.motion_secs.unwrap_or(1.0),
                         audio.as_ref(),
+                        files.intro.as_ref().map(|i| i.secs),
                         &work.join(&raw),
                     ),
                     Some(secs) => encoder::motion_menu_args(
@@ -1578,9 +1631,17 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     // The intro frames go ffmpeg -> Rust (slot videos) -> ffmpeg over pipes, never to disk.
                     Some(intro) => {
                         // Stream 0 is the page background, the slot videos follow.
-                        let streams: Vec<RawStream> = std::iter::once(encoder::dvd_background_stream(tv, files.intro_fill, intro.frames))
-                            .chain(files.video_slots.iter().map(|s| encoder::dvd_slot_stream(tv, s, intro.frames)))
-                            .collect();
+                        let streams: Vec<RawStream> = if let Some(media) = &files.custom {
+                            let frame = MenuFrame::from(tv);
+                            let rate = menu_anim::dvd_rate(tv);
+                            std::iter::once(encoder::intro_background_stream(&frame, rate, media, intro.frames))
+                                .chain(intro.slots.iter().filter_map(|&l| encoder::intro_slot_stream(&frame, rate, &media.layers[l], intro.frames)))
+                                .collect()
+                        } else {
+                            std::iter::once(encoder::dvd_background_stream(tv, files.intro_fill, intro.frames))
+                                .chain(files.video_slots.iter().map(|s| encoder::dvd_slot_stream(tv, s, intro.frames)))
+                                .collect()
+                        };
                         let (sprites, frames, end) = (intro.sprites.clone(), intro.frames, intro.end);
                         let (w, h) = tv.size();
                         let compose = Arc::new(move |k: usize, streams: &[&[u8]]| {
@@ -1592,9 +1653,17 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     None => tools.ffmpeg(&args, secs, |_| {}).await?,
                 }
                 let xml = files.spumux_xml.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                let spu_log = tools.spumux(&work, &xml, &raw, &vob, 0).await?;
-                std::fs::write(work.join(format!("{xml}.log")), spu_log).at(&work)?;
-                std::fs::remove_file(work.join(&raw)).at(&work.join(&raw))?;
+                if !xml.is_empty() && files.spumux_xml.exists() {
+                    let spu_log = tools.spumux(&work, &xml, &raw, &vob, 0).await?;
+                    std::fs::write(work.join(format!("{xml}.log")), spu_log).at(&work)?;
+                    std::fs::remove_file(work.join(&raw)).at(&work.join(&raw))?;
+                } else {
+                    let dest = work.join(&vob);
+                    if dest.exists() {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                    std::fs::rename(work.join(&raw), &dest).at(&dest)?;
+                }
                 Ok(file_mb(&work.join(&vob)))
             })
         })
@@ -1773,11 +1842,17 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     .iter()
                     .map(|&a| t.info.audio[a].language.as_deref().and_then(probe::iso639_1).map(str::to_string))
                     .collect(),
+                default_audio: opts.preferred_audio_lang.as_ref().and_then(|pref| {
+                    t.audio.iter().position(|&a| language_matches(pref, t.info.audio[a].language.as_deref())).map(|p| p as u32)
+                }),
                 subtitle_langs: t
                     .subtitles
                     .iter()
                     .map(|&s| t.info.subtitles[s].language.as_deref().and_then(probe::iso639_1).map(str::to_string))
                     .collect(),
+                default_subtitle: opts.preferred_subtitle_lang.as_ref().and_then(|pref| {
+                    t.subtitles.iter().position(|&s| language_matches(pref, t.info.subtitles[s].language.as_deref())).map(|p| p as u32)
+                }),
                 force_subtitle: opts.force_first_subtitle,
             },
         })
@@ -1791,6 +1866,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         playback: opts.playback,
         tv,
         title_pre,
+        fast_play: opts.custom_layout.as_ref().and_then(|c| c.fast_play.clone()),
     };
     // The authoring XML is only kept for the report (and the work directory): the native authoring
     // takes the layout directly.
@@ -1906,14 +1982,14 @@ mod tests {
         let out = Path::new("out");
         let name = |o: &BuildOptions| work_dir(out, o).file_name().unwrap().to_string_lossy().into_owned();
         let mut o = BuildOptions { inputs: vec!["x/clip.mkv".into()], ..BuildOptions::default() };
-        assert_eq!(name(&o), "clip.convertx-work");
+        assert_eq!(name(&o), "clip.musadvd-work");
         o.menu_title = Some("Menü".into());
         o.project_name = Some("  ".into());
-        assert_eq!(name(&o), "Menü.convertx-work");
+        assert_eq!(name(&o), "Menü.musadvd-work");
         o.project_name = Some("Urlaub 2025".into());
-        assert_eq!(name(&o), "Urlaub 2025.convertx-work");
+        assert_eq!(name(&o), "Urlaub 2025.musadvd-work");
         o.project_name = Some("a/b:c".into());
-        assert_eq!(name(&o), "a_b_c.convertx-work");
+        assert_eq!(name(&o), "a_b_c.musadvd-work");
     }
 
     #[test]
@@ -1988,6 +2064,43 @@ mod tests {
     fn menu_estimate() {
         assert!((estimate_menu_mb(2, false, 25.0) - 7.0 * 0.15).abs() < 1e-9);
         assert!((estimate_menu_mb(2, true, 25.0) - (7.0 * 0.15 + 4.0 * 5.5)).abs() < 1e-9);
+
+        let still_menu = crate::layout::CustomMenu {
+            id: "m1".into(),
+            name: "Main".into(),
+            role: crate::layout::MenuRole::Title,
+            title: None,
+            background: crate::layout::Background::default(),
+            duration_secs: None,
+            audio: crate::layout::MenuSound::None,
+            intro_secs: None,
+            elements: vec![],
+        };
+        let motion_menu = crate::layout::CustomMenu {
+            id: "m2".into(),
+            name: "Chapters".into(),
+            role: crate::layout::MenuRole::Root,
+            title: Some(1),
+            background: crate::layout::Background {
+                video: Some(crate::layout::VideoRef { title: 1, start_secs: None, path: None }),
+                ..Default::default()
+            },
+            duration_secs: Some(25.0),
+            audio: crate::layout::MenuSound::None,
+            intro_secs: Some(5.0),
+            elements: vec![],
+        };
+        let l = crate::layout::CustomLayout {
+            version: 1,
+            canvas: crate::layout::Canvas::default(),
+            highlight: crate::layout::Highlight::default(),
+            animations: true,
+            fast_play: None,
+            menus: vec![still_menu, motion_menu],
+        };
+        // 1 still (0.15 MB) + 1 motion (25s loop + 5s intro = 30s @ 5.5MB/25s = 6.6 MB) = 6.75 MB
+        let custom_mb = estimate_custom_layout_mb(&l, 25.0);
+        assert!((custom_mb - (0.15 + 30.0 * 5.5 / 25.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -2153,7 +2266,7 @@ mod tests {
         };
         let mut src = info(60.0, vec![]);
         src.audio = vec![a(1, "eng"), a(2, "ger"), a(3, "fra")];
-        src.subtitles = vec![s(4, "subrip", SubtitleKind::Text), s(5, "dvb_subtitle", SubtitleKind::Bitmap)];
+        src.subtitles = vec![s(4, "subrip", SubtitleKind::Text), s(5, "unknown_bitmap", SubtitleKind::Bitmap)];
         let opts = BuildOptions {
             audio_langs: vec!["de".into(), "en".into()],
             preferred_audio_lang: Some("de".into()),
@@ -2161,11 +2274,11 @@ mod tests {
         };
         let none = StreamSelection::default();
 
-        // Language filter, preferred language first; the unsupported bitmap is skipped.
+        // Language filter: source order is preserved (preferred language activates via VM command).
         let (audio, subs, notes) = select_streams(&src, &none, &opts, "Film");
-        assert_eq!(audio, vec![1, 0]);
+        assert_eq!(audio, vec![0, 1]);
         assert_eq!(subs, vec![0]);
-        assert!(notes.len() == 1 && notes[0].contains("dvb_subtitle"), "{notes:?}");
+        assert!(notes.len() == 1 && notes[0].contains("unknown_bitmap"), "{notes:?}");
 
         // No language matches: the first track, with a warning.
         let jp = BuildOptions { audio_langs: vec!["ja".into()], ..BuildOptions::default() };
@@ -2177,5 +2290,100 @@ mod tests {
         let chosen = StreamSelection { audio: Some(vec![3]), subtitles: Some(vec![]), ..StreamSelection::default() };
         let (audio, subs, _) = select_streams(&src, &chosen, &opts, "Film");
         assert_eq!((audio, subs), (vec![2], vec![]));
+    }
+
+    #[test]
+    fn harmonize_group_selective_audio_reencode() {
+        use crate::probe::AudioStream;
+
+        let mut info1 = info(60.0, vec![]);
+        info1.audio = vec![
+            AudioStream {
+                index: 1,
+                codec: "ac3".into(),
+                channels: 2,
+                channel_layout: "stereo".into(),
+                language: Some("eng".into()),
+                title: None,
+                default: true,
+                bit_rate: Some(192_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+            AudioStream {
+                index: 2,
+                codec: "dts".into(),
+                channels: 6,
+                channel_layout: "5.1".into(),
+                language: Some("ger".into()),
+                title: None,
+                default: false,
+                bit_rate: Some(768_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+        ];
+        let mut info2 = info(60.0, vec![]);
+        info2.audio = vec![
+            AudioStream {
+                index: 1,
+                codec: "ac3".into(),
+                channels: 2,
+                channel_layout: "stereo".into(),
+                language: Some("eng".into()),
+                title: None,
+                default: true,
+                bit_rate: Some(192_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+            AudioStream {
+                index: 2,
+                codec: "aac".into(),
+                channels: 2,
+                channel_layout: "stereo".into(),
+                language: Some("ger".into()),
+                title: None,
+                default: false,
+                bit_rate: Some(128_000),
+                sample_rate: Some(48_000),
+                profile: None,
+            },
+        ];
+
+        let make_title = |info: MediaInfo, stem: &str| TitlePlan {
+            info,
+            label: stem.into(),
+            audio: vec![0, 1],
+            subtitles: vec![],
+            chapters: vec![0.0],
+            chapter_titles: vec![None],
+            aspect: Aspect::Wide,
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![AudioMode::Auto, AudioMode::Auto],
+            track_label_mode: TrackLabelMode::SmartMetadata,
+            ui_lang: UiLang::DE,
+            video: VideoProcessing::default(),
+            loudnorm: false,
+            motion_secs: 15.0,
+            stem: stem.into(),
+            thumbnail: None,
+            chapter_thumbs: vec![],
+        };
+
+        let mut group = vec![make_title(info1, "part1"), make_title(info2, "part2")];
+        harmonize_group(&mut group);
+
+        // Track 0 was ac3 on both -> remains Auto / Copy
+        assert_eq!(group[0].audio_modes[0], AudioMode::Auto);
+        assert_eq!(group[1].audio_modes[0], AudioMode::Auto);
+        assert!(matches!(group[0].audio_outs()[0], AudioOut::Copy { .. }));
+        assert!(matches!(group[1].audio_outs()[0], AudioOut::Copy { .. }));
+
+        // Track 1 differed (ac3 vs aac) -> both re-encoded to AC-3
+        assert_eq!(group[0].audio_modes[1], AudioMode::Ac3);
+        assert_eq!(group[1].audio_modes[1], AudioMode::Ac3);
+        assert!(matches!(group[0].audio_outs()[1], AudioOut::Ac3 { .. }));
+        assert!(matches!(group[1].audio_outs()[1], AudioOut::Ac3 { .. }));
     }
 }

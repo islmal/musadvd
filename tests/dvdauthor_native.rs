@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use convertx_rust::author::{
+use musadvd::author::{
     self, ButtonAction, DvdLayout, MenuButton, MenuSpec, Navigation, PlaybackOptions, Rect, TitleSpec, TitlesetSpec, TvStandard, VobSpec,
 };
-use convertx_rust::menu::IndexedImage;
-use convertx_rust::spumux;
+use musadvd::menu::IndexedImage;
+use musadvd::spumux;
 use md5::{Digest, Md5};
 
 fn root() -> PathBuf {
@@ -157,11 +157,13 @@ fn title(files: &[(&str, &[&str])], aspect: &str, audio: &[(&str, Option<&str>)]
         audio_formats: audio.iter().map(|a| a.0.to_string()).collect(),
         subtitle_langs: subs.iter().map(|s| s.map(str::to_string)).collect(),
         force_subtitle: false,
+        default_audio: None,
+        default_subtitle: None,
     }
 }
 
 fn layout(tv: TvStandard, vmgm_menus: Vec<MenuSpec>, titlesets: Vec<TitlesetSpec>, playback: PlaybackOptions) -> DvdLayout {
-    DvdLayout { dest: "DVD".into(), menu_aspect: "4:3".into(), vmgm_menus, titlesets, playback, tv, title_pre: None }
+    DvdLayout { dest: "DVD".into(), menu_aspect: "4:3".into(), vmgm_menus, titlesets, playback, tv, title_pre: None, fast_play: None }
 }
 
 fn plain(t: TitleSpec) -> TitlesetSpec {
@@ -254,7 +256,7 @@ fn menu_vob(work: &Path, src: &Path, out: &str, tv: TvStandard, buttons: &[MenuB
 }
 
 fn menu_spec(vob: &str, buttons: Vec<MenuButton>, entry: Option<&str>) -> MenuSpec {
-    MenuSpec { vob: vob.into(), buttons, entry: entry.map(str::to_string), motion: false, pre: None, intro_secs: None }
+    MenuSpec { vob: vob.into(), buttons, entry: entry.map(str::to_string), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None }
 }
 
 fn menu_case(name: &str, playback: PlaybackOptions) {

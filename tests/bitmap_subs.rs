@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::dvd::{self, BuildOptions, BuildReport};
-use convertx_rust::tools::Toolchain;
+use musadvd::dvd::{self, BuildOptions, BuildReport};
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";

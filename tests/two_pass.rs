@@ -5,13 +5,13 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::author::TvStandard;
-use convertx_rust::calculator::DiscType;
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::encoder::{self, Aspect, EncodeJob, EncodePhase, MenuAudio, NULL_DEVICE};
-use convertx_rust::menu::UiLang;
-use convertx_rust::probe::{self, AudioStream, MediaInfo, VideoStream};
-use convertx_rust::tools::Toolchain;
+use musadvd::author::TvStandard;
+use musadvd::calculator::DiscType;
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::encoder::{self, Aspect, EncodeJob, EncodePhase, MenuAudio, NULL_DEVICE};
+use musadvd::menu::UiLang;
+use musadvd::probe::{self, AudioStream, MediaInfo, VideoStream};
+use musadvd::tools::Toolchain;
 
 const TEMPLATE: &str =
     r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style\10_TitlesPerPageNoRoot.ini";
@@ -70,6 +70,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         video: Default::default(),
         hwaccel: None,
         audio_mode: Default::default(),
+        audio_modes: vec![],
         audio_filters: vec![],
     }
 }

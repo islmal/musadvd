@@ -40,5 +40,25 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: ConvertX Rust ${{ github.ref_name }}
-          releaseBody: Download the installer below; installed copies update themselves.
+          releaseName: MusaDVD ${{ github.ref_name }}
+          releaseBody: Download the installer or portable ZIP below; installed copies update themselves.
+
+      - name: Build CLI binary
+        run: cargo build --release --bin musadvd
+
+      - name: Package and upload portable ZIP
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $stage = "portable/MusaDVD"
+          New-Item -ItemType Directory -Force -Path "$stage/bin", "$stage/locales" | Out-Null
+          Copy-Item "target/release/musadvd-gui.exe" "$stage/"
+          Copy-Item "target/release/musadvd.exe" "$stage/"
+          Copy-Item "bin/*.exe" "$stage/bin/"
+          Copy-Item "frontend/src/locales/*.json" "$stage/locales/"
+          Copy-Item "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md" "$stage/"
+          $zip = "MusaDVD-$tag-windows-x64-portable.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          gh release upload $tag $zip --clobber

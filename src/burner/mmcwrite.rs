@@ -152,7 +152,7 @@ impl Kind {
 
 /// READ FORMAT CAPACITIES: (blocks, format type) of every descriptor; the first one is the
 /// current or maximum capacity.
-fn format_capacities(b: &[u8]) -> Vec<(u32, u8)> {
+pub(crate) fn format_capacities(b: &[u8]) -> Vec<(u32, u8)> {
     let n = (*b.get(3).unwrap_or(&0) as usize).min(b.len().saturating_sub(4));
     b.get(4..4 + n).unwrap_or(&[]).chunks_exact(8).map(|d| (u32::from_be_bytes([d[0], d[1], d[2], d[3]]), d[4] >> 2)).collect()
 }
@@ -340,7 +340,14 @@ fn write_disc(
         return Err(BurnError::Unsupported(format!("die {} ist nicht leer", spti::profile_name(profile))));
     }
     let caps = format_capacities(&drive.query("READ FORMAT CAPACITIES", &spti::read_format_capacities(252), 252)?);
-    let capacity = caps.first().map_or(0, |c| c.0 as u64);
+    let mut capacity = caps.first().map_or(0, |c| c.0 as u64);
+    if capacity == 0 {
+        if let Ok(track_info) = drive.query("READ TRACK INFORMATION", &spti::read_track_information(1, 1, 48), 48) {
+            if track_info.len() >= 20 {
+                capacity = u32::from_be_bytes([track_info[16], track_info[17], track_info[18], track_info[19]]) as u64;
+            }
+        }
+    }
     if sectors > capacity {
         match o.overburn {
             Overburn::Overburn => progress(tx, BurnPhase::Preparing, 0.0, "Warnung: Das Image ist größer als die Disc (Overburn)"),
@@ -396,7 +403,11 @@ fn write_disc(
             let mut p = [0u8; 12];
             p[1] = 10;
             p[8..12].copy_from_slice(&l0.to_be_bytes());
-            drive.send("Layerwechsel", &spti::send_disc_structure(f, 12), DataDir::ToDevice, &mut p, 30)?;
+            if let Err(e) = drive.send("Layerwechsel", &spti::send_disc_structure(f, 12), DataDir::ToDevice, &mut p, 30) {
+                // If the drive already has this exact layer break or rejects setting it via MMC,
+                // warn rather than aborting before a single byte is written.
+                progress(tx, BurnPhase::Preparing, 0.0, &format!("Hinweis: Layerwechsel konnte nicht gesetzt werden ({e}), fahre fort …"));
+            }
         }
     }
     if o.reserve_track && (matches!(kind, Kind::DvdPlusR | Kind::BdR) || (kind == Kind::DvdMinus && o.incremental)) {
@@ -456,9 +467,10 @@ fn write_disc(
             Kind::DvdPlusRw => (false, true),
             Kind::DvdRwRo | Kind::BdRe => (false, false),
         };
-        // shortcut: track number 1 for the track close is the MMC default but unverified on real drives.
         if track {
-            drive.run_long("CLOSE TRACK", &spti::close_track_session(1, 1, false))?;
+            if let Err(e) = drive.run_long("CLOSE TRACK", &spti::close_track_session(1, 1, false)) {
+                progress(tx, BurnPhase::Finalizing, 0.0, &format!("Hinweis bei CLOSE TRACK: {e}"));
+            }
         }
         if session {
             drive.run_long("CLOSE SESSION", &spti::close_track_session(2, 0, false))?;
@@ -536,22 +548,23 @@ pub fn burn_direct(
     if let (None, super::WriteSpeed::Specific(s)) = (direct.speed_kbps, speed) {
         direct.speed_kbps = Some(s * 2048 / 1000); // sectors/s → kB/s
     }
+    let letter = {
+        let _com = Com::init()?;
+        volume_paths(&recorder(drive_id)?).into_iter().next().and_then(|p| super::power::drive_letter(&p))
+    };
     if spti_transport {
-        let letter = {
-            let _com = Com::init()?;
-            volume_paths(&recorder(drive_id)?).into_iter().next().and_then(|p| super::power::drive_letter(&p))
+        if let Some(letter) = letter {
+            if let Ok(t) = SptiTransport::open(letter) {
+                let _volume = if direct.lock_volume { DriveHandle::open(letter, true).ok().filter(|h| h.lock_volume().is_ok()) } else { None };
+                return burn_direct_with(&t, source, options, &direct, cancel, tx);
+            }
         }
-        .ok_or_else(|| BurnError::Backend("Das Laufwerk hat keinen Laufwerksbuchstaben".into()))?;
-        let t = SptiTransport::open(letter)?;
-        let _volume = if direct.lock_volume { DriveHandle::open(letter, true).ok().filter(|h| h.lock_volume().is_ok()) } else { None };
-        burn_direct_with(&t, source, options, &direct, cancel, tx)
-    } else {
-        let t = ImapiExTransport::open(drive_id)?;
-        t.acquire_exclusive("convertx-rust")?;
-        let r = burn_direct_with(&t, source, options, &direct, cancel, tx);
-        t.release_exclusive();
-        r
     }
+    let t = ImapiExTransport::open(drive_id)?;
+    t.acquire_exclusive("MusaDVD")?;
+    let r = burn_direct_with(&t, source, options, &direct, cancel, tx);
+    t.release_exclusive();
+    r
 }
 
 #[cfg(test)]

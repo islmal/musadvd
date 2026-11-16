@@ -1,4 +1,4 @@
-# ConvertX Rust
+# MusaDVD
 
 DVD, Blu-ray and AVCHD authoring in Rust: a desktop app (Tauri; German, English, Russian) and a
 CLI that turn video files into a menu-driven disc structure, an image, or a burned disc.
@@ -18,6 +18,13 @@ user's own ConvertXToDVD installation.
 Windows first; output has only been checked in VLC. Authoring is limited to what the engine
 emits; see [STATUS.md](STATUS.md) for the out-of-scope list and known issues.
 
+## Download
+
+Prebuilt Windows binaries are published on [GitHub Releases](https://github.com/islmal/musadvd/releases):
+
+- **Installer (`.exe`)** — standard Windows setup with auto-updater
+- **Portable (`.zip`)** — extract and run `musadvd-gui.exe` or `musadvd.exe` (includes `ffmpeg`/`ffprobe`)
+
 ## Build
 
 Copy `ffmpeg.exe` and `ffprobe.exe` (gyan.dev full build) into `bin/`, then:
@@ -25,15 +32,15 @@ Copy `ffmpeg.exe` and `ffprobe.exe` (gyan.dev full build) into `bin/`, then:
 ```
 cargo build --release                                                    # CLI
 npm run build                                                            # frontend
-cargo build --release -p convertx-gui --features tauri/custom-protocol   # GUI
+cargo build --release -p musadvd-gui --features tauri/custom-protocol   # GUI
 cargo test --workspace
 ```
 
 ## CLI
 
 ```
-convertx-rust drives
-convertx-rust --help
+musadvd drives
+musadvd --help
 ```
 
 ## Licence & credits

@@ -1,19 +1,19 @@
 [package]
-name = "convertx-gui"
+name = "musadvd-gui"
 version = "0.1.0"
 edition = "2021"
-description = "Desktop GUI (Tauri) for the convertx-rust DVD authoring engine"
+description = "Desktop GUI (Tauri) for the MusaDVD authoring engine"
 license = "GPL-3.0-or-later"
 
 [[bin]]
-name = "convertx-gui"
+name = "musadvd-gui"
 path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-convertx-rust = { path = ".." }
+musadvd = { path = ".." }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"

@@ -926,7 +926,22 @@ impl ColorRemap {
             self.newcolors[idx] = i as i32;
             return Ok(i as u8);
         }
-        err("ERR:  color map full, unable to allocate new colors.")
+        // When all 16 palette entries of the PGC are used, map to the closest
+        // existing entry in YCbCr color space instead of failing the build.
+        let (y0, c1_0, c2_0) = (((nc >> 16) & 0xff) as i32, ((nc >> 8) & 0xff) as i32, (nc & 0xff) as i32);
+        let best = (0..16)
+            .filter(|&i| colors[i] != COLOR_UNUSED)
+            .min_by_key(|&i| {
+                let c = colors[i] & 0xff_ffff;
+                let (y, c1, c2) = (((c >> 16) & 0xff) as i32, ((c >> 8) & 0xff) as i32, (c & 0xff) as i32);
+                let dy = y0 - y;
+                let dc1 = c1_0 - c1;
+                let dc2 = c2_0 - c2;
+                dy * dy + dc1 * dc1 + dc2 * dc2
+            })
+            .unwrap_or(0);
+        self.newcolors[idx] = best as i32;
+        Ok(best as u8)
     }
 
     fn remapbyte(&mut self, colors: &mut [i32; 16], b: &mut u8) -> Result<()> {
@@ -2166,7 +2181,10 @@ pub fn fix_vobus(files: &VobFiles, set: &PgcSet, ctx_for: &dyn Fn(usize) -> dvdv
                     {
                         vobuindex
                     } else {
-                        // dvdauthor reads one entry past the array here (never written, so zero in practice).
+                        // In dvdauthor C (dvdvob.c), id + 1 is guaranteed in-bounds by the preceding branch:
+                        // findspuidx returns id in -1..len-1; the first branch handled id >= 0 with SPU overlapping this VOBU,
+                        // and the else-if handled id + 1 == numaudpts or next SPU starting at/after this VOBU.
+                        // Thus, (id + 1) as usize < ach.audpts.len() is guaranteed, with defensive fallback to 0.
                         findvobubysect(vob, ach.audpts.get((id + 1) as usize).map_or(0, |a| a.asect))
                     };
                     let back = target < vobuindex;
@@ -2279,5 +2297,25 @@ mod tests {
         let mut p = [0x21u8, 0, 1, 0, 1];
         writepts(&mut p, 987_654_321);
         assert_eq!(readpts(&p), 987_654_321);
+    }
+
+    #[test]
+    fn remapcolor_falls_back_to_closest_when_palette_full() {
+        let mut cr = ColorRemap::new();
+        let mut colors = [0i32; 16];
+        for i in 0..16 {
+            colors[i] = (i as i32 * 10) << 16 | 0x8080;
+        }
+        // Exact match
+        cr.newcolors[0] = COLOR_UNUSED | (50 << 16) | 0x8080;
+        assert_eq!(cr.remapcolor(&mut colors, 0).unwrap(), 5);
+
+        // 17th color closest to Y = 50 (index 5)
+        cr.newcolors[1] = COLOR_UNUSED | (52 << 16) | 0x8080;
+        assert_eq!(cr.remapcolor(&mut colors, 1).unwrap(), 5);
+
+        // 18th color closest to Y = 150 (index 15)
+        cr.newcolors[2] = COLOR_UNUSED | (148 << 16) | 0x8080;
+        assert_eq!(cr.remapcolor(&mut colors, 2).unwrap(), 15);
     }
 }

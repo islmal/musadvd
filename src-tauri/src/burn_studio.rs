@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
-use convertx_rust::burner::builder::{self, BuildError, BuildInput, BuildPlan, Content, Source};
-use convertx_rust::burner::graph::{self, TemplateContext};
-use convertx_rust::burner::layerbreak::{Capacities, LayerBreak};
-use convertx_rust::burner::spti::DriveDetails;
-use convertx_rust::burner::studio::{self, Ctx, Event, Outcome};
-use convertx_rust::burner::tools::{self, Candidate, CandidateOptions};
-use convertx_rust::burner::{power, sidecar, system_burner, DriveInfo, MediaInfo};
+use musadvd::burner::builder::{self, BuildError, BuildInput, BuildPlan, Content, Source};
+use musadvd::burner::graph::{self, TemplateContext};
+use musadvd::burner::layerbreak::{Capacities, LayerBreak};
+use musadvd::burner::spti::DriveDetails;
+use musadvd::burner::studio::{self, Ctx, Event, Outcome};
+use musadvd::burner::tools::{self, Candidate, CandidateOptions};
+use musadvd::burner::{power, sidecar, system_burner, DriveInfo, MediaInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -221,7 +221,7 @@ pub struct PlanInfo {
     needs_answer: Option<Content>,
 }
 
-fn plan_of(input: &BuildInputDto, cfg: &convertx_rust::config::StudioBuild) -> Result<BuildPlan, BuildError> {
+fn plan_of(input: &BuildInputDto, cfg: &musadvd::config::StudioBuild) -> Result<BuildPlan, BuildError> {
     builder::plan_build(&input.input(), cfg)
 }
 
@@ -324,6 +324,16 @@ fn delete_image(ctx: &Ctx, image: &Path, o: &mut Outcome) {
 }
 
 #[tauri::command]
+pub async fn studio_image_scrambled(image: String) -> Option<bool> {
+    tokio::task::spawn_blocking(move || {
+        musadvd::burner::css::image_scrambled(Path::new(&image))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
 pub fn studio_write_image(
     app: AppHandle,
     state: State<'_, StudioState>,
@@ -411,7 +421,7 @@ pub async fn studio_ifo_candidates(state: State<'_, AppState>, source: String, s
     blocking(move || {
         let path = PathBuf::from(&source);
         if path.is_dir() {
-            let cfg = convertx_rust::config::StudioBuild { prompts: "always".into(), ..Default::default() };
+            let cfg = musadvd::config::StudioBuild { prompts: "always".into(), ..Default::default() };
             match builder::plan_build(&studio::build_input(&[path], ""), &cfg).map_err(|e| e.to_string())?.image {
                 builder::BuiltImage::Udf(p) => tools::ifo_candidates(&p, Capacities::DVD, opts).map_err(|e| e.to_string()),
                 builder::BuiltImage::Bd(_) => Err("Blu-ray-Images haben keinen Layerwechsel.".into()),

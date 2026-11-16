@@ -542,6 +542,8 @@ pub struct EncodeJob<'a> {
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
     pub audio_mode: AudioMode,
+    /// Per-track audio mode overrides; if empty or index not found, falls back to `audio_mode`.
+    pub audio_modes: Vec<AudioMode>,
     /// Audio filter (loudnorm) per audio track; a filtered track is never copied. Missing
     /// entries mean no filter.
     pub audio_filters: Vec<Option<String>>,
@@ -672,7 +674,10 @@ impl EncodeJob<'_> {
         self.audio
             .iter()
             .enumerate()
-            .map(|(n, a)| plan_audio(a, AudioTarget::Dvd, self.audio_mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
+            .map(|(n, a)| {
+                let mode = self.audio_modes.get(n).copied().unwrap_or(self.audio_mode);
+                plan_audio(a, AudioTarget::Dvd, mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some())
+            })
             .collect()
     }
 
@@ -744,6 +749,7 @@ pub fn extract_subtitle_args(info: &MediaInfo, tracks: &[(usize, &SubtitleStream
         let map = format!("0:{}", sub.index);
         let (codec, format) = match (sub.kind, sub.codec.as_str()) {
             (SubtitleKind::Text, _) => ("srt", "srt"),
+            (_, "dvb_teletext") => ("srt", "srt"),
             (_, "hdmv_pgs_subtitle") => ("copy", "sup"),
             _ => continue,
         };
@@ -772,7 +778,7 @@ pub async fn run_encode(
     }
     for (n, sub) in job.subtitles.iter().enumerate() {
         let xml = job.subtitle_xml(n);
-        let text = if sub.kind == SubtitleKind::Text {
+        let text = if sub.kind == SubtitleKind::Text || sub.codec == "dvb_teletext" {
             text_subtitle_xml(job, n, sub).await?
         } else {
             bitmap_subtitle_xml(tools, job, n, sub).await?
@@ -1117,6 +1123,30 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
             .await
             .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
         }
+        "dvb_subtitle" | "xsub" => {
+            let temp_vob = job.dir.join(format!("{}_temp_sub_{}.vob", job.stem, n));
+            let mut args = vec!["-y".into()];
+            args.extend(job.info.input_args());
+            args.extend(["-map".into(), format!("0:{}", sub.index).into(), "-c:s".into(), "dvdsub".into(), "-f".into(), "dvd".into()]);
+            args.push(temp_vob.as_os_str().to_owned());
+            tools.ffmpeg(&args, job.info.duration_secs, |_| {}).await?;
+            let probe_args = subpic::vobsub_probe_args(&temp_vob, 0);
+            let json = tools.ffprobe_output(&probe_args).await?;
+            let _ = std::fs::remove_file(&temp_vob);
+            let v = job.info.video.as_ref().expect("probed file has video");
+            let trim = job.info.trim;
+            let fallback = (720, if v.width == 720 { v.height } else if v.height >= 576 { 576 } else { 480 });
+            tokio::task::spawn_blocking(move || {
+                let mut probe = subpic::parse_vobsub_probe(&json)?;
+                if let Some(t) = trim {
+                    probe = probe.trimmed(t.start, t.end);
+                }
+                let (palette, size) = subpic::parse_idx_header(&String::from_utf8_lossy(&probe.extradata));
+                Ok(subpic::decode_vobsub(&probe.packets, palette.as_ref(), size.unwrap_or(fallback)))
+            })
+            .await
+            .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+        }
         other => Err(subpic::SubpicError::Format(format!("{other} wird nicht unterstützt"))),
     }
     .map_err(fail)?;
@@ -1180,6 +1210,27 @@ pub fn frame_args(input: &Path, at_secs: f64, width: u32, output: &Path) -> Vec<
         format!("scale=trunc(ih*dar/2)*2:ih,setsar=1,scale={width}:-2").into(),
         output.as_os_str().to_owned(),
     ]
+}
+
+/// Peaks per second of [`waveform_peaks`] (menu editor timeline).
+pub const WAVEFORM_PEAKS_PER_SEC: u32 = 40;
+/// Decode rate for the waveform: high enough that a peak is a real amplitude, not an alias.
+const WAVEFORM_RATE: u32 = 2000;
+
+/// Arguments decoding `secs` of the first audio stream of `input` from `start_secs` as mono
+/// unsigned 8-bit PCM to stdout (input for [`waveform_peaks`]).
+pub fn waveform_args(input: &Path, start_secs: f64, secs: f64) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["-ss".into(), format!("{start_secs:.3}").into(), "-t".into(), format!("{secs:.3}").into(), "-i".into()];
+    args.push(input.as_os_str().to_owned());
+    args.extend(["-vn", "-ac", "1", "-ar", &WAVEFORM_RATE.to_string(), "-acodec", "pcm_u8", "-f", "u8", "pipe:1"].map(OsString::from));
+    args
+}
+
+/// Folds `pcm_u8` samples (silence = 128) into one 0–255 peak per 1/[`WAVEFORM_PEAKS_PER_SEC`] s.
+pub fn waveform_peaks(pcm: &[u8]) -> Vec<u8> {
+    pcm.chunks((WAVEFORM_RATE / WAVEFORM_PEAKS_PER_SEC) as usize)
+        .map(|c| c.iter().map(|&s| s.abs_diff(128)).max().unwrap_or(0).saturating_mul(2))
+        .collect()
 }
 
 /// A moving preview inside a motion menu, in output (PAL/NTSC frame) coordinates.
@@ -1475,11 +1526,12 @@ pub fn custom_menu_args(
     media: &CustomMenuMedia,
     duration_secs: f64,
     audio: Option<&ClipSource>,
+    intro_secs: Option<f64>,
     output: &Path,
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
     let frame = MenuFrame::from(tv);
-    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3", None);
+    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3", intro_secs);
     a.extend(
         [
             "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
@@ -1487,6 +1539,16 @@ pub fn custom_menu_args(
         ]
         .map(OsString::from),
     );
+    if let Some(t) = intro_secs {
+        a.extend([
+            "-force_key_frames".into(),
+            format!("expr:gte(t,{:.3})", t).into(),
+            "-flags".into(),
+            "+cgop".into(),
+            "-sc_threshold".into(),
+            "1000000000".into(),
+        ]);
+    }
     a.push(output.as_os_str().to_owned());
     a
 }
@@ -1612,7 +1674,7 @@ pub fn intro_background_stream(frame: &MenuFrame, rate: BdRate, media: &CustomMe
 /// the clip's end back to the mark `t`: the last `x` seconds fade from the clip's own end into the
 /// sound at [t - x, t], so the signal continues.
 fn menu_sound_filters(f: &mut Vec<String>, audio_input: usize, d: &str, duration_secs: f64, intro_secs: Option<f64>) {
-    let head = format!("[{audio_input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo");
+    let head = format!("[{audio_input}:a:0]{DVD_AUDIO_SYNC},aformat=sample_fmts=fltp:channel_layouts=stereo");
     match intro_secs {
         Some(t) => {
             let x = t.min(0.5);
@@ -1723,6 +1785,16 @@ mod tests {
     use super::*;
     use crate::probe::SubtitleKind;
 
+    #[test]
+    fn waveform_peaks_fold_amplitude() {
+        // 50 samples per peak: silence, a full swing, a small swing, then a short tail.
+        let mut pcm = vec![128u8; 50];
+        pcm.extend([128u8; 49].iter().chain(&[0]));
+        pcm.extend([138u8; 50]);
+        pcm.extend([128u8, 255]);
+        assert_eq!(waveform_peaks(&pcm), vec![0, 255, 20, 254]);
+    }
+
     fn video(w: u32, h: u32, dar: f64, field_order: &str) -> VideoStream {
         VideoStream {
             index: 0,
@@ -1823,6 +1895,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
             audio_filters: vec![],
         };
         let args: Vec<String> = job.encode_args("pipe:1").iter().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -1968,7 +2041,7 @@ mod tests {
                 MenuLayer::Image("over.png".into()),
             ],
         };
-        let a = joined(&custom_menu_args(TvStandard::Pal, &media, 20.0, Some(&clip("music.mp3")), Path::new("m.mpg")));
+        let a = joined(&custom_menu_args(TvStandard::Pal, &media, 20.0, Some(&clip("music.mp3")), None, Path::new("m.mpg")));
         // Inputs in order: background, layers, sound.
         let order: Vec<usize> = ["bg.jpg", "under.png", "movie.mkv", "over.png", "music.mp3"]
             .iter()
@@ -1989,7 +2062,7 @@ mod tests {
 
         // Colour background, no layers, silence, NTSC.
         let still = CustomMenuMedia { background: MenuBackground::Color([0x10, 0x20, 0xA0]), overlay: BackgroundOverlay::None, layers: vec![] };
-        let a = joined(&custom_menu_args(TvStandard::Ntsc, &still, 1.0, None, Path::new("m.mpg")));
+        let a = joined(&custom_menu_args(TvStandard::Ntsc, &still, 1.0, None, None, Path::new("m.mpg")));
         assert!(a.contains("color=c=0x1020A0:s=720x480:r=30000/1001:d=1.000"), "{a}");
         assert!(a.contains("[bg]format=yuv420p,setdar=4/3[vout]") && a.contains("[1:a]asetpts=N/SR/TB[aout]"), "{a}");
         assert!(a.contains("-target ntsc-dvd"));
@@ -1997,7 +2070,7 @@ mod tests {
         // Shading over the background.
         let with = |overlay| {
             let m = CustomMenuMedia { overlay, ..media.clone() };
-            joined(&custom_menu_args(TvStandard::Pal, &m, 20.0, None, Path::new("m.mpg")))
+            joined(&custom_menu_args(TvStandard::Pal, &m, 20.0, None, None, Path::new("m.mpg")))
         };
         let a = with(BackgroundOverlay::Vignette);
         assert!(a.contains("gblur=sigma=8.0,vignette=angle=PI/4,format=rgba,setsar=1[bg]"), "{a}");
@@ -2008,6 +2081,11 @@ mod tests {
         assert!(a.contains("color=c=black:s=720x576:r=25:d=0.04,format=rgba,geq=r=0:g=0:b=0:a='215*clip((Y/H-0.35)/0.65\\,0\\,1)',loop=loop=-1:size=1,trim=duration=20.000"), "{a}");
         // The shaded background is what the first layer goes onto.
         assert!(a.contains("[bg0][shade]overlay=0:0:format=rgb[bg];") && a.contains("[bg][l0]overlay"), "{a}");
+
+        // Custom menu with intro: forced closed GOP at intro split boundary
+        let intro_args = joined(&custom_menu_args(TvStandard::Pal, &still, 23.0, None, Some(3.0), Path::new("m.mpg")));
+        assert!(intro_args.contains("-force_key_frames expr:gte(t,3.000)"), "{intro_args}");
+        assert!(intro_args.contains("-flags +cgop -sc_threshold 1000000000"), "{intro_args}");
     }
 
     fn strings(a: Vec<OsString>) -> String {
@@ -2367,11 +2445,43 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
             audio_filters: vec![],
         };
         let args: Vec<String> = job.encode_args("o.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.join(" ").contains("-c:a:0 copy -sn"), "{args:?}");
         assert_eq!(job.audio_kbps_total(), 384);
+    }
+
+    #[test]
+    fn selective_audio_modes_in_dvd_job() {
+        let mut info = bd_info();
+        info.audio = vec![
+            audio("ac3", 6, Some(384), Some(48_000), None),
+            audio("aac", 2, Some(192), Some(48_000), None),
+        ];
+        let job = EncodeJob {
+            info: &info,
+            audio: vec![&info.audio[0], &info.audio[1]],
+            subtitles: vec![],
+            video_kbps: 5000,
+            aspect: Aspect::Wide,
+            dir: PathBuf::from("w"),
+            stem: "t".into(),
+            two_pass: false,
+            fast: false,
+            tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
+            video: Default::default(),
+            hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![AudioMode::Auto, AudioMode::Ac3],
+            audio_filters: vec![],
+        };
+        let outs = job.audio_outs();
+        assert_eq!(outs.len(), 2);
+        assert!(matches!(outs[0], AudioOut::Copy { .. }), "track 0 should remain stream copy");
+        assert!(matches!(outs[1], AudioOut::Ac3 { .. }), "track 1 should be re-encoded to AC-3");
     }
 
     #[test]
@@ -2405,6 +2515,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
             audio_filters: vec![],
         };
         let dvd = strings(job.encode_args("o.mpg"));

@@ -25,7 +25,7 @@ const MIN_PICTURE_SECS: f64 = 0.04;
 
 /// Bitmap subtitle codecs this module converts.
 pub fn supported(codec: &str) -> bool {
-    matches!(codec, "hdmv_pgs_subtitle" | "dvd_subtitle")
+    matches!(codec, "hdmv_pgs_subtitle" | "dvd_subtitle" | "dvb_subtitle" | "xsub" | "dvb_teletext")
 }
 
 /// A `.sup` stream with one empty display set (presentation composition with no objects, then
@@ -665,6 +665,14 @@ fn dist(a: [u8; 3], b: [u8; 3]) -> u32 {
     a.iter().zip(&b).map(|(x, y)| (*x as i32 - *y as i32).pow(2) as u32).sum()
 }
 
+fn dist4(a: [u8; 4], b: [u8; 4]) -> u32 {
+    let dr = a[0] as i32 - b[0] as i32;
+    let dg = a[1] as i32 - b[1] as i32;
+    let db = a[2] as i32 - b[2] as i32;
+    let da = a[3] as i32 - b[3] as i32;
+    (dr * dr + dg * dg + db * db + 2 * da * da) as u32
+}
+
 /// Up to 3 representative colours of `colors` (k-means, seeded with the darkest, middle and
 /// brightest colour).
 fn representatives(colors: &[[u8; 3]]) -> Vec<[u8; 3]> {
@@ -695,36 +703,98 @@ fn representatives(colors: &[[u8; 3]]) -> Vec<[u8; 3]> {
     centers
 }
 
-/// Transparent + up to 3 opaque colours (alpha < 128 counts as transparent), cropped to the
-/// visible pixels. Returns the image and its offset inside `img`; `None` when nothing is visible.
+/// Chooses up to 3 palette colors with alpha preservation for anti-aliasing.
+fn choose_reps(pixels: &[[u8; 4]]) -> Vec<[u8; 4]> {
+    let mut distinct: Vec<[u8; 4]> = pixels.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() <= 3 {
+        return distinct;
+    }
+    let opaque: Vec<[u8; 3]> = pixels.iter().filter(|p| p[3] >= 192).map(|p| [p[0], p[1], p[2]]).collect();
+    let translucent: Vec<[u8; 4]> = pixels.iter().filter(|p| p[3] < 192).copied().collect();
+
+    if translucent.is_empty() {
+        return representatives(&opaque).into_iter().map(|c| [c[0], c[1], c[2], 255]).collect();
+    }
+
+    if opaque.is_empty() {
+        distinct.sort_by_key(|p| p[3]);
+        let mut centers = vec![distinct[0], distinct[distinct.len() / 2], distinct[distinct.len() - 1]];
+        let step = (pixels.len() / 20_000).max(1);
+        for _ in 0..8 {
+            let mut sums = [[0u64; 5]; 3];
+            for c in pixels.iter().step_by(step) {
+                let k = (0..centers.len()).min_by_key(|&k| dist4(*c, centers[k])).unwrap_or(0);
+                for (s, v) in sums[k][..4].iter_mut().zip(c) {
+                    *s += *v as u64;
+                }
+                sums[k][4] += 1;
+            }
+            for (center, s) in centers.iter_mut().zip(&sums) {
+                if s[4] > 0 {
+                    *center = [(s[0] / s[4]) as u8, (s[1] / s[4]) as u8, (s[2] / s[4]) as u8, (s[3] / s[4]) as u8];
+                }
+            }
+        }
+        return centers;
+    }
+
+    let trans_count = translucent.len() as u64;
+    let (sum_r, sum_g, sum_b, sum_a) = translucent.iter().fold((0u64, 0u64, 0u64, 0u64), |(r, g, b, a), p| {
+        (r + p[0] as u64, g + p[1] as u64, b + p[2] as u64, a + p[3] as u64)
+    });
+    // Quantize RGB to multiples of 16 so cues share palette entries instead of diverging by single bits
+    let quant = |v: u64| ((((v / trans_count) as u32 + 8) / 16 * 16).min(255)) as u8;
+    let edge = [quant(sum_r), quant(sum_g), quant(sum_b), (sum_a / trans_count) as u8];
+
+    let op_reps = representatives(&opaque);
+    if op_reps.len() == 1 {
+        let op = [op_reps[0][0], op_reps[0][1], op_reps[0][2], 255];
+        let mut t_distinct: Vec<[u8; 4]> = translucent;
+        t_distinct.sort_by_key(|p| p[3]);
+        let t1 = t_distinct[0];
+        let t2 = t_distinct[t_distinct.len() - 1];
+        vec![op, t1, t2]
+    } else {
+        vec![
+            [op_reps[0][0], op_reps[0][1], op_reps[0][2], 255],
+            [op_reps[1][0], op_reps[1][1], op_reps[1][2], 255],
+            edge,
+        ]
+    }
+}
+
+/// Transparent + up to 3 colors (alpha < 64 counts as transparent background), cropped to the
+/// visible pixels. Semi-transparent anti-aliased edge alpha is preserved in the palette.
+/// Returns the image and its offset inside `img`; `None` when nothing is visible.
 pub fn quantize(img: &RgbaImage) -> Option<(IndexedImage, u32, u32)> {
-    let opaque = |p: &Rgba<u8>| p.0[3] >= 128;
+    let visible = |p: &Rgba<u8>| p.0[3] >= 64;
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-    let mut colors = Vec::new();
+    let mut pixels = Vec::new();
     for (x, y, p) in img.enumerate_pixels() {
-        if opaque(p) {
+        if visible(p) {
             x0 = x0.min(x);
             y0 = y0.min(y);
             x1 = x1.max(x);
             y1 = y1.max(y);
-            colors.push([p.0[0], p.0[1], p.0[2]]);
+            pixels.push(p.0);
         }
     }
-    if colors.is_empty() {
+    if pixels.is_empty() {
         return None;
     }
-    let reps = representatives(&colors);
+    let reps = choose_reps(&pixels);
     let mut palette = [[0u8; 4]; 4];
     for (slot, c) in palette.iter_mut().skip(1).zip(reps.iter().cycle()) {
-        *slot = [c[0], c[1], c[2], 255];
+        *slot = *c;
     }
     let mut out = IndexedImage::new(x1 - x0 + 1, y1 - y0 + 1, palette);
     for y in y0..=y1 {
         for x in x0..=x1 {
             let p = img.get_pixel(x, y);
-            if opaque(p) {
-                let c = [p.0[0], p.0[1], p.0[2]];
-                let k = (0..reps.len()).min_by_key(|&k| dist(c, reps[k])).unwrap_or(0);
+            if visible(p) {
+                let k = (0..reps.len()).min_by_key(|&k| dist4(p.0, reps[k])).unwrap_or(0);
                 out.pixels[((y - y0) * out.width + x - x0) as usize] = k as u8 + 1;
             }
         }
@@ -1047,5 +1117,22 @@ mod tests {
         let p = VobsubProbe { packets: vec![(5.0, vec![1; 8]), (12.0, vec![2; 8]), (30.0, vec![3; 8])], extradata: vec![] }.trimmed(10.0, 20.0);
         assert_eq!(p.packets.len(), 1);
         assert_eq!(p.packets[0].0, 2.0);
+    }
+
+    #[test]
+    fn quantize_preserves_anti_aliased_alpha() {
+        let mut img = RgbaImage::new(10, 10);
+        // White text, black outline, anti-aliased edge at alpha 120
+        for x in 3..7 {
+            img.put_pixel(x, 3, Rgba([255, 255, 255, 255]));
+            img.put_pixel(x, 4, Rgba([0, 0, 0, 255]));
+            img.put_pixel(x, 5, Rgba([0, 0, 0, 120]));
+        }
+        let (q, _, _) = quantize(&img).unwrap();
+        // Slot 0 is transparent (alpha 0)
+        assert_eq!(q.palette[0][3], 0);
+        // At least one palette slot should preserve the semi-transparent alpha around 120
+        let has_translucent_slot = q.palette.iter().skip(1).any(|slot| slot[3] > 60 && slot[3] < 180);
+        assert!(has_translucent_slot, "Quantized palette should preserve anti-aliased edge alpha: {:?}", q.palette);
     }
 }

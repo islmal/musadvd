@@ -5,13 +5,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use convertx_rust::author::{self, ChapterEntry, ClipSource, MenuKind, MenuLinks, TvStandard, PAL_HEIGHT, PAL_WIDTH};
-use convertx_rust::calculator::DiscType;
-use convertx_rust::dvd::{self, BuildOptions};
-use convertx_rust::encoder::{self, MenuAudio, VideoSlot};
-use convertx_rust::menu::{self, page_by_style, RenderOptions, UiLang};
-use convertx_rust::template::Template;
-use convertx_rust::tools::Toolchain;
+use musadvd::author::{self, ChapterEntry, ClipSource, MenuKind, MenuLinks, TvStandard, PAL_HEIGHT, PAL_WIDTH};
+use musadvd::calculator::DiscType;
+use musadvd::dvd::{self, BuildOptions};
+use musadvd::encoder::{self, MenuAudio, VideoSlot};
+use musadvd::menu::{self, page_by_style, RenderOptions, UiLang};
+use musadvd::template::Template;
+use musadvd::tools::Toolchain;
 
 const DIR: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates\Open Style";
 

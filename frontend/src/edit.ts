@@ -296,7 +296,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     hooks.changed();
     hooks.status(tr("edit.kapitelBeiGesetzt", { fmtPrecise: fmtPrecise(c) }));
   };
-  const btn = (label: string, onclick: () => void) => h("button", { class: "btn", type: "button", onclick }, label);
+  const btn = (label: string, onclick: () => void, title?: string) => h("button", { class: "btn", type: "button", onclick, title }, label);
 
   paint();
   paintMarks();
@@ -314,7 +314,11 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
       h(
         "div",
         { class: "player-controls" },
+        btn("◀◀", () => void seek(Math.max(0, pos() - 1.0), false), tr("edit.eineSekundeZurueck")),
+        btn("◀", () => void seek(Math.max(0, pos() - 0.1), false), tr("edit.zehntelSekundeZurueck")),
         playBtn,
+        btn("▶", () => void seek(Math.min(dur, pos() + 0.1), false), tr("edit.zehntelSekundeVor")),
+        btn("▶▶", () => void seek(Math.min(dur, pos() + 1.0), false), tr("edit.eineSekundeVor")),
         timeText,
         btn(tr("edit.startHierSetzen"), () => set("start", pos(), true, false)),
         btn(tr("edit.endeHierSetzen"), () => set("end", pos(), true, false)),

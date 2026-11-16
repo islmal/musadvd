@@ -411,7 +411,14 @@ impl Template {
             name: loc_get("template_name"),
             description: loc_get("Description"),
             thumbnail: loc_get("Thumbnail"),
-            titles_per_page: root.get("TitlesPerTitleMenuPage").and_then(|v| v.trim().parse().ok()),
+            titles_per_page: root.get("TitlesPerTitleMenuPage").and_then(|v| v.trim().parse().ok()).or_else(|| {
+                let title_page = pages.iter().find(|p| p.style == "MNUS_TITLE").or_else(|| pages.first())?;
+                let count = title_page.buttons.iter().filter(|b| {
+                    let l = b.location.to_ascii_uppercase();
+                    l == "ML_PLAY_EPISODE" || l == "ML_PLAY_SERIES_EPISODE" || l == "ML_PLAY_BONUS"
+                }).count() as u32;
+                (count > 0).then_some(count)
+            }),
             chapters_per_page: root.get("ChaptersPerPage").and_then(|v| v.trim().parse().ok()),
             text_styles: parse_text_styles(ini),
             pages,
