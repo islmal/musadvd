@@ -141,7 +141,7 @@ impl Kind {
             0x0013 => Kind::DvdRwRo,
             0x0041 | 0x0042 => Kind::BdR,
             0x0043 => Kind::BdRe,
-            p => return Err(BurnError::Unsupported(format!("{} wird von SPTI Direkt nicht beschrieben", spti::profile_name(p)))),
+            p => return Err(BurnError::Unsupported(format!("{} cannot be written by SPTI Direct", spti::profile_name(p)))),
         })
     }
 
@@ -256,7 +256,7 @@ impl Feed {
         match (&mut self.reader, &mut self.source) {
             (Some(r), _) => r.read_exact(buf),
             (None, Some(s)) => s.read(lba, buf),
-            (None, None) => Err(io::Error::other("Quelle nicht mehr verfügbar")),
+            (None, None) => Err(io::Error::other("Source no longer available")),
         }
     }
 
@@ -264,9 +264,9 @@ impl Feed {
     fn finish(&mut self) -> Result<Box<dyn SectorSource>, BurnError> {
         self.reader = None;
         if let Some(h) = self.producer.take() {
-            return h.join().map_err(|_| BurnError::Image("Abbruch im Bildlieferanten".into()))?.map_err(BurnError::Image);
+            return h.join().map_err(|_| BurnError::Image("Cancelled in the image supplier".into()))?.map_err(BurnError::Image);
         }
-        self.source.take().ok_or_else(|| BurnError::Image("Bildquelle nicht mehr verfügbar".into()))
+        self.source.take().ok_or_else(|| BurnError::Image("Image source no longer available".into()))
     }
 
     fn fail(&mut self, e: io::Error, cancel: &AtomicBool) -> BurnError {
@@ -297,22 +297,22 @@ pub fn burn_direct_with(
 ) -> Result<(), BurnError> {
     let verify = options.verify && !direct.test_mode;
     if verify && !source.rewindable() {
-        return Err(BurnError::Unsupported("Die Überprüfung braucht eine Quelle, die erneut gelesen werden kann".into()));
+        return Err(BurnError::Unsupported("Verification needs a source that can be read again".into()));
     }
     let drive = Drive { t, o: direct, cancel };
-    progress(tx, BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …");
+    progress(tx, BurnPhase::Preparing, 0.0, "Preparing drive …");
     if options.lock_tray {
-        drive.run("Sperren der Disc", &spti::prevent_allow_medium_removal(true))?;
+        drive.run("Locking the disc", &spti::prevent_allow_medium_removal(true))?;
     }
     let result = write_disc(&drive, source, options, verify, tx);
     if options.lock_tray {
-        let _ = drive.run("Entsperren der Disc", &spti::prevent_allow_medium_removal(false));
+        let _ = drive.run("Unlocking the disc", &spti::prevent_allow_medium_removal(false));
     }
     result?;
     if options.eject {
-        let _ = drive.run("Auswerfen", &spti::start_stop_unit(true));
+        let _ = drive.run("Eject", &spti::start_stop_unit(true));
     }
-    progress(tx, BurnPhase::Done, 1.0, "Fertig");
+    progress(tx, BurnPhase::Done, 1.0, "Done");
     Ok(())
 }
 
@@ -326,18 +326,18 @@ fn write_disc(
     let (o, cancel) = (drive.o, drive.cancel);
     let sectors = source.sectors();
     if sectors == 0 || sectors > u32::MAX as u64 {
-        return Err(BurnError::Image("leeres oder zu großes Image".into()));
+        return Err(BurnError::Image("empty or oversized image".into()));
     }
     let cfg = drive.query("GET CONFIGURATION", &spti::get_configuration(0, 0, 8), 8)?;
     let profile = cfg.get(6..8).map_or(0, |p| u16::from_be_bytes([p[0], p[1]]));
     let kind = Kind::of(profile)?;
     if o.test_mode && kind != Kind::DvdMinus {
-        return Err(BurnError::Unsupported(format!("Testschreiben gibt es nur auf DVD-R/-RW, nicht auf {}", spti::profile_name(profile))));
+        return Err(BurnError::Unsupported(format!("Test writing is only available on DVD-R/-RW, not on {}", spti::profile_name(profile))));
     }
     let info = drive.query("READ DISC INFORMATION", &spti::read_disc_information(34), 34)?;
     let blank = spti::parse_disc_information(&info).is_some_and(|i| i.status == 0);
     if !kind.random_writable() && !blank {
-        return Err(BurnError::Unsupported(format!("die {} ist nicht leer", spti::profile_name(profile))));
+        return Err(BurnError::Unsupported(format!("the {} is not blank", spti::profile_name(profile))));
     }
     let caps = format_capacities(&drive.query("READ FORMAT CAPACITIES", &spti::read_format_capacities(252), 252)?);
     let mut capacity = caps.first().map_or(0, |c| c.0 as u64);
@@ -350,10 +350,10 @@ fn write_disc(
     }
     if sectors > capacity {
         match o.overburn {
-            Overburn::Overburn => progress(tx, BurnPhase::Preparing, 0.0, "Warnung: Das Image ist größer als die Disc (Overburn)"),
+            Overburn::Overburn => progress(tx, BurnPhase::Preparing, 0.0, "Warning: the image is larger than the disc (overburn)"),
             Overburn::Truncate => {
                 return Err(BurnError::Unsupported(
-                    "Das Image ist größer als die Disc; ein Dateisystem-Image kann nicht abgeschnitten werden – bitte kleineres Image oder größere Disc wählen".into(),
+                    "The image is larger than the disc; a file system image cannot be truncated – choose a smaller image or a larger disc".into(),
                 ))
             }
             Overburn::Prompt => return Err(BurnError::NotEnoughSpace { needed: sectors, free: capacity }),
@@ -369,9 +369,9 @@ fn write_disc(
             _ => 0x13,
         };
         let blocks = caps.iter().skip(1).find(|c| c.1 == ftype).map(|c| c.0).ok_or_else(|| {
-            BurnError::Unsupported(format!("das Laufwerk bietet das Format {ftype:#04X} für diese Disc nicht an"))
+            BurnError::Unsupported(format!("the drive does not offer format {ftype:#04X} for this disc"))
         })?;
-        progress(tx, BurnPhase::Formatting, 0.0, "Disc wird formatiert …");
+        progress(tx, BurnPhase::Formatting, 0.0, "Formatting disc …");
         let mut list = spti::format_list(ftype, blocks);
         drive.send("FORMAT UNIT", &spti::format_unit(), DataDir::ToDevice, &mut list, 7200)?;
         drive.wait_ready()?;
@@ -382,15 +382,15 @@ fn write_disc(
     if let Some(kbps) = o.speed_kbps {
         let mut d = spti::streaming_descriptor((sectors - 1) as u32, kbps, kbps);
         if drive.send("SET STREAMING", &spti::set_streaming(), DataDir::ToDevice, &mut d, 30).is_err() {
-            progress(tx, BurnPhase::Preparing, 0.0, "Warnung: Das Laufwerk übernimmt die Schreibgeschwindigkeit nicht");
+            progress(tx, BurnPhase::Preparing, 0.0, "Warning: the drive does not accept the write speed");
         }
     }
     if o.opc && !kind.random_writable() && drive.run("OPC", &spti::send_opc_information(true)).is_err() {
-        progress(tx, BurnPhase::Preparing, 0.0, "Warnung: OPC-Kalibrierung vom Laufwerk abgelehnt");
+        progress(tx, BurnPhase::Preparing, 0.0, "Warning: the drive rejected OPC calibration");
     }
     if let Some(l0) = options.layer_break {
         if l0 as u64 >= sectors {
-            return Err(BurnError::Image("der Layerwechsel liegt hinter dem Ende des Images".into()));
+            return Err(BurnError::Image("the layer break lies beyond the end of the image".into()));
         }
         // shortcut: formats and the parameter layout follow MMC-5 but are unverified on real drives.
         let format = match profile {
@@ -406,7 +406,7 @@ fn write_disc(
             if let Err(e) = drive.send("Layerwechsel", &spti::send_disc_structure(f, 12), DataDir::ToDevice, &mut p, 30) {
                 // If the drive already has this exact layer break or rejects setting it via MMC,
                 // warn rather than aborting before a single byte is written.
-                progress(tx, BurnPhase::Preparing, 0.0, &format!("Hinweis: Layerwechsel konnte nicht gesetzt werden ({e}), fahre fort …"));
+                progress(tx, BurnPhase::Preparing, 0.0, &format!("Note: the layer break could not be set ({e}), continuing …"));
             }
         }
     }
@@ -419,7 +419,7 @@ fn write_disc(
     let mut buf = vec![0u8; chunk as usize * S];
     let (mut lba, mut last_permille, mut last_sample) = (0u64, u64::MAX, None::<Instant>);
     let sample_wanted = options.telemetry.is_some() || o.device_low > 0;
-    let text = if o.test_mode { "Testschreiben …" } else { "Daten werden geschrieben …" };
+    let text = if o.test_mode { "Test writing …" } else { "Writing data …" };
     while lba < sectors {
         if cancel.load(Ordering::Relaxed) {
             let _ = drive.run_long("SYNCHRONIZE CACHE", &spti::synchronize_cache(false));
@@ -432,7 +432,7 @@ fn write_disc(
             return Err(feed.fail(e, cancel));
         }
         drive
-            .send(&format!("Schreibfehler bei Sektor {lba}"), &spti::write10(lba as u32, n as u16), DataDir::ToDevice, data, 60)
+            .send(&format!("Write error at sector {lba}"), &spti::write10(lba as u32, n as u16), DataDir::ToDevice, data, 60)
             .map_err(|e| if cancel.load(Ordering::Relaxed) { BurnError::Cancelled } else { e })?;
         lba += n;
         if sample_wanted && last_sample.is_none_or(|t| t.elapsed() >= o.sample) {
@@ -457,7 +457,7 @@ fn write_disc(
         }
     }
 
-    progress(tx, BurnPhase::Finalizing, 0.0, "Disc wird abgeschlossen …");
+    progress(tx, BurnPhase::Finalizing, 0.0, "Finalizing disc …");
     drive.run_long("SYNCHRONIZE CACHE", &spti::synchronize_cache(false))?;
     if !o.test_mode {
         // DVD-R/-RW in disc-at-once mode closes itself with the cache flush.
@@ -469,7 +469,7 @@ fn write_disc(
         };
         if track {
             if let Err(e) = drive.run_long("CLOSE TRACK", &spti::close_track_session(1, 1, false)) {
-                progress(tx, BurnPhase::Finalizing, 0.0, &format!("Hinweis bei CLOSE TRACK: {e}"));
+                progress(tx, BurnPhase::Finalizing, 0.0, &format!("Note on CLOSE TRACK: {e}"));
             }
         }
         if session {
@@ -488,7 +488,7 @@ fn set_write_parameters(drive: &Drive<'_>) -> Result<(), BurnError> {
     let mut b = drive.query("MODE SENSE", &spti::mode_sense10(0x05, 64), 64)?;
     let at = 8 + b.get(6..8).map_or(0, |d| u16::from_be_bytes([d[0], d[1]]) as usize);
     if b.len() < at + 14 {
-        return Err(BurnError::Backend("MODE SENSE: Schreibparameter-Seite zu kurz".into()));
+        return Err(BurnError::Backend("MODE SENSE: write parameter page too short".into()));
     }
     b[0] = 0;
     b[1] = 0; // mode data length is reserved in MODE SELECT
@@ -505,7 +505,7 @@ fn set_write_parameters(drive: &Drive<'_>) -> Result<(), BurnError> {
 
 /// Reads the disc with READ(10) and compares it with the (re-read) source.
 fn verify_disc(drive: &Drive<'_>, mut src: Box<dyn SectorSource>, sectors: u64, tx: &Sender<BurnProgress>) -> Result<(), BurnError> {
-    progress(tx, BurnPhase::Verifying, 0.0, "Disc wird überprüft …");
+    progress(tx, BurnPhase::Verifying, 0.0, "Verifying disc …");
     let chunk = 32u64;
     let (mut disc, mut want) = (vec![0u8; chunk as usize * S], vec![0u8; chunk as usize * S]);
     let mut lba = 0;
@@ -514,13 +514,13 @@ fn verify_disc(drive: &Drive<'_>, mut src: Box<dyn SectorSource>, sectors: u64, 
             return Err(BurnError::Cancelled);
         }
         let n = chunk.min(sectors - lba) as usize;
-        drive.send(&format!("Lesefehler bei Sektor {lba}"), &spti::read10(lba as u32, n as u16), DataDir::FromDevice, &mut disc[..n * S], 60)?;
-        src.read(lba, &mut want[..n * S]).map_err(|e| BurnError::Image(format!("Quelle nicht lesbar: {e}")))?;
+        drive.send(&format!("Read error at sector {lba}"), &spti::read10(lba as u32, n as u16), DataDir::FromDevice, &mut disc[..n * S], 60)?;
+        src.read(lba, &mut want[..n * S]).map_err(|e| BurnError::Image(format!("Source unreadable: {e}")))?;
         if let Some(i) = (0..n).find(|&i| disc[i * S..(i + 1) * S] != want[i * S..(i + 1) * S]) {
             return Err(BurnError::VerifyFailed { sector: lba + i as u64 });
         }
         lba += n as u64;
-        progress(tx, BurnPhase::Verifying, lba as f64 / sectors as f64, "Disc wird überprüft …");
+        progress(tx, BurnPhase::Verifying, lba as f64 / sectors as f64, "Verifying disc …");
     }
     Ok(())
 }
@@ -823,13 +823,13 @@ mod tests {
         let f = Fake::new(0x1B);
         f.write_errors.borrow_mut().extend([not_ready, not_ready]);
         let e = burn(&f, 40, &b, &DirectOptions { sw_retries: 1, ..d.clone() }, &AtomicBool::new(false)).unwrap_err();
-        assert!(e.to_string().contains("Sektor 0"), "{e}");
+        assert!(e.to_string().contains("sector 0"), "{e}");
         assert_eq!(f.ops().last(), Some(&0x1E), "tray unlocked after the error");
         // A write error is not retried.
         let f = Fake::new(0x1B);
         f.write_errors.borrow_mut().push_back(Sense { key: 3, asc: 0x0C, ascq: 0 });
         let e = burn(&f, 40, &b, &d, &AtomicBool::new(false)).unwrap_err();
-        assert!(e.to_string().contains("Schreibfehler"), "{e}");
+        assert!(e.to_string().contains("Write error"), "{e}");
         assert_eq!(f.writes().len(), 1);
     }
 
@@ -841,7 +841,7 @@ mod tests {
         let no = AtomicBool::new(false);
         assert!(matches!(burn(&f, 100, &b, &d, &no), Err(BurnError::NotEnoughSpace { needed: 100, free: 50 })));
         let e = burn(&f, 100, &b, &DirectOptions { overburn: Overburn::Truncate, ..d.clone() }, &no).unwrap_err();
-        assert!(e.to_string().contains("abgeschnitten"), "{e}");
+        assert!(e.to_string().contains("truncated"), "{e}");
         assert!(f.writes().is_empty(), "refused before writing");
         burn(&f, 100, &b, &DirectOptions { overburn: Overburn::Overburn, ..d }, &no).unwrap();
         assert_eq!(f.written.borrow().len(), 100 * S);

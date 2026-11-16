@@ -83,8 +83,8 @@ const state = {
   motion: false,
   templates: [] as TemplateInfo[],
   template: "",
-  /** Menus from a ConvertX template or from the menu editor. */
-  menuMode: "template" as "template" | "custom",
+  /** Menus from a ConvertX template or from the menu editor (the editor is the default; templates need ConvertXToDVD). */
+  menuMode: "custom" as "template" | "custom",
   customLayout: null as CustomLayout | null,
   /** `titlesKey` of the videos the custom layout was made for (null = unknown). */
   customLayoutKey: null as string | null,
@@ -111,8 +111,8 @@ type Medium = "dvd" | "bd";
 type MenuSlot = { layout: CustomLayout | null; key: string | null; mode: "template" | "custom" };
 const mediumOf = (d: DiscChoice): Medium => (["bd25", "bd50", "avchd5", "avchd9"].includes(d) ? "bd" : "dvd");
 const slots: Record<Medium, MenuSlot> = {
-  dvd: { layout: null, key: null, mode: "template" },
-  bd: { layout: null, key: null, mode: "template" },
+  dvd: { layout: null, key: null, mode: "custom" },
+  bd: { layout: null, key: null, mode: "custom" },
 };
 /** localStorage key suffix of a medium's layout (the DVD keys predate the Blu-ray ones). */
 const slotKey = (m: Medium) => (m === "bd" ? `${LAYOUT_KEY}-bd` : LAYOUT_KEY);
@@ -136,8 +136,8 @@ function loadSettings() {
     state.motion = !!s.motion;
     if (typeof s.template === "string") state.template = s.template;
     if (typeof s.output === "string") state.output = s.output;
-    slots.dvd.mode = s.menuMode === "custom" ? "custom" : "template";
-    slots.bd.mode = s.menuModeBd === "custom" ? "custom" : "template";
+    slots.dvd.mode = s.menuMode === "template" ? "template" : "custom";
+    slots.bd.mode = s.menuModeBd === "template" ? "template" : "custom";
     for (const m of ["dvd", "bd"] as const) {
       const layout = localStorage.getItem(slotKey(m));
       if (layout) slots[m].layout = JSON.parse(layout) as CustomLayout;
@@ -1283,6 +1283,8 @@ function renderCustomMenuTab(): HTMLElement {
 
 function renderTemplateTab() {
   const outer = h("div", { class: "template-tab" });
+  // Without ConvertXToDVD templates the menu editor is the only choice: no switch.
+  if (state.templates.length === 0) return outer.append(renderCustomMenuTab()), outer;
   const modes: ["template" | "custom", string][] = [
     ["template", tr("main.convertxVorlage")],
     ["custom", tr("main.eigenesMenueEditor")],
@@ -1675,6 +1677,7 @@ async function init() {
     if (state.converting || !state.settings) return;
     const [info, languages] = await Promise.all([settingsInfo(), availableLanguages()]);
     openSettings(state.settings, info, languages, async (saved) => {
+      const previousTemplateDir = state.settings?.template_dir;
       const langChanged = saved.ui_language !== state.settings?.ui_language;
       const relabel = langChanged || saved.track_label_mode !== state.settings?.track_label_mode;
       state.settings = saved;
@@ -1684,6 +1687,10 @@ async function init() {
         renderAll();
       }
       if (relabel) void relabelTitles();
+      if (saved.template_dir !== previousTemplateDir) {
+        await refreshTemplates();
+        renderAll();
+      }
       updateCustomDiscLabel();
       status(tr("main.einstellungenGespeichert"));
       void refreshLayoutCheck();
@@ -1760,18 +1767,7 @@ async function init() {
   await onBuildDone(onDone);
   await onBuildCancelled(onCancelled);
 
-  try {
-    state.templates = await listTemplates();
-    if (!state.templates.some((t) => t.path === state.template)) {
-      state.template =
-        state.templates.find((t) => t.path.endsWith("10_TitlesPerPageNoRoot.ini"))?.path ??
-        state.templates.find((t) => t.folder === "Open Style")?.path ??
-        state.templates[0]?.path ??
-        "";
-    }
-  } catch (e) {
-    status(tr("main.menuevorlagen", { e }), "error");
-  }
+  await refreshTemplates();
   renderAll();
   status(tr("main.bereitVideosPerDrag"));
 
@@ -1783,6 +1779,29 @@ async function init() {
     const parts = burnDir.split(/[\\/]/).filter(Boolean);
     lastDvd = { videoTs: burnDir, projectName: parts.length > 1 ? parts[parts.length - 2] : null };
     void openBurner(lastDvd.videoTs, lastDvd.projectName, state.settings, false);
+  }
+}
+
+/** Looks up the ConvertX templates; without any, the menu editor becomes the only menu mode. */
+async function refreshTemplates() {
+  try {
+    state.templates = await listTemplates();
+  } catch (e) {
+    state.templates = [];
+    status(tr("main.menuevorlagen", { e }), "error");
+  }
+  if (state.templates.length === 0) {
+    state.menuMode = "custom";
+    slots.dvd.mode = "custom";
+    slots.bd.mode = "custom";
+    return;
+  }
+  if (!state.templates.some((t) => t.path === state.template)) {
+    state.template =
+      state.templates.find((t) => t.path.endsWith("10_TitlesPerPageNoRoot.ini"))?.path ??
+      state.templates.find((t) => t.folder === "Open Style")?.path ??
+      state.templates[0]?.path ??
+      "";
   }
 }
 

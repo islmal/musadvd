@@ -77,7 +77,7 @@ fn half_d1_pal_wide_source_becomes_4_3() {
     };
     let (report, steps) = build(&rt, &opts);
     assert_eq!(report.resolution, Resolution::HalfD1);
-    assert!(report.warnings.iter().any(|w| w.contains("Half D1 erlaubt nur 4:3")), "{:?}", report.warnings);
+    assert!(report.warnings.iter().any(|w| w.contains("allows 4:3 only")), "{:?}", report.warnings);
     assert!(steps.iter().any(|s| s.contains("Half D1 352×576")), "{steps:?}");
     assert_eq!(report.titles[0].aspect.as_str(), "4:3");
     assert!(report.authoring_xml.contains(r#"<video format="pal" aspect="4:3"/>"#), "{}", report.authoring_xml);
@@ -104,7 +104,7 @@ fn sif_ntsc() {
     assert_eq!(report.resolution, Resolution::Sif);
     assert!(report.warnings.iter().all(|w| !w.contains("erlaubt nur 4:3")), "4:3 source: no warning");
     assert_eq!(report.plan.video_kbps, 6000, "MP ceiling on a short project");
-    assert!(steps.iter().any(|s| s.contains("Profil MP ≤ 6000 kbps")), "{steps:?}");
+    assert!(steps.iter().any(|s| s.contains("profile MP ≤ 6000 kbps")), "{steps:?}");
     assert_eq!(video_format(&tools, &report.video_ts.join("VTS_01_1.VOB")), "352,240,4:3");
     assert!(video_format(&tools, &report.video_ts.join("VIDEO_TS.VOB")).starts_with("720,480"));
     std::fs::remove_dir_all(&dir).ok();
@@ -127,7 +127,7 @@ fn lp_switches_full_d1_to_half_d1_on_a_small_target() {
     let kbps = report.plan.video_kbps;
     assert!((1000..3000).contains(&kbps), "test setup must land below 3000 kbps: {kbps}");
     assert_eq!(report.resolution, Resolution::HalfD1);
-    assert!(steps.iter().any(|s| s.starts_with("LP-Profil: unter 3000 kbps")), "{steps:?}");
+    assert!(steps.iter().any(|s| s.starts_with("LP profile: below 3000 kbps")), "{steps:?}");
     assert_eq!(video_format(&tools, &report.video_ts.join("VTS_01_1.VOB")), "352,576,4:3");
     std::fs::remove_dir_all(&dir).ok();
 }

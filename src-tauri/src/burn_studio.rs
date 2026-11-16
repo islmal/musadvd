@@ -36,13 +36,13 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
 }
 
 fn drive_by_id(id: &str) -> Result<DriveInfo, String> {
-    system_burner().list_drives().map_err(|e| e.to_string())?.into_iter().find(|d| d.id == id).ok_or_else(|| "Laufwerk nicht gefunden.".to_string())
+    system_burner().list_drives().map_err(|e| e.to_string())?.into_iter().find(|d| d.id == id).ok_or_else(|| "Drive not found.".to_string())
 }
 
 /// Runs `op` on a thread with the events wired to the window; `studio-done` ends it.
 fn run(app: AppHandle, studio_state: &StudioState, app_state: &AppState, op: impl FnOnce(&Ctx) -> Result<Outcome, String> + Send + 'static) -> Result<(), String> {
     if studio_state.busy.swap(true, Ordering::SeqCst) {
-        return Err("Es läuft bereits ein Vorgang.".into());
+        return Err("An operation is already running.".into());
     }
     let cancel = Arc::new(AtomicBool::new(false));
     *studio_state.cancel.lock().unwrap_or_else(|e| e.into_inner()) = cancel.clone();
@@ -136,7 +136,7 @@ pub async fn studio_lock(state: State<'_, StudioState>, drive_id: String, lock: 
         return Ok(());
     }
     let drive = drive_by_id(&drive_id)?;
-    let letter = power::drive_letter(&drive.path).ok_or("Das Laufwerk hat keinen Laufwerksbuchstaben.")?;
+    let letter = power::drive_letter(&drive.path).ok_or("The drive has no drive letter.")?;
     let (tx, rx) = channel::<()>();
     let (ready_tx, ready_rx) = channel::<Result<(), String>>();
     std::thread::spawn(move || match power::TrayLock::acquire(letter) {
@@ -319,7 +319,7 @@ fn delete_image(ctx: &Ctx, image: &Path, o: &mut Outcome) {
         for ext in ["dvd", "mds", "cue"] {
             let _ = std::fs::remove_file(image.with_extension(ext));
         }
-        o.message.push_str(if gone { " Das Image wurde gelöscht." } else { " Das Image konnte nicht gelöscht werden." });
+        o.message.push_str(if gone { " The image was deleted." } else { " The image could not be deleted." });
     }
 }
 
@@ -424,7 +424,7 @@ pub async fn studio_ifo_candidates(state: State<'_, AppState>, source: String, s
             let cfg = musadvd::config::StudioBuild { prompts: "always".into(), ..Default::default() };
             match builder::plan_build(&studio::build_input(&[path], ""), &cfg).map_err(|e| e.to_string())?.image {
                 builder::BuiltImage::Udf(p) => tools::ifo_candidates(&p, Capacities::DVD, opts).map_err(|e| e.to_string()),
-                builder::BuiltImage::Bd(_) => Err("Blu-ray-Images haben keinen Layerwechsel.".into()),
+                builder::BuiltImage::Bd(_) => Err("Blu-ray images have no layer break.".into()),
             }
         } else {
             tools::ifo_candidates_iso(&path, Capacities::DVD, opts).map_err(|e| e.to_string())
@@ -438,12 +438,12 @@ pub async fn studio_ifo_candidates(state: State<'_, AppState>, source: String, s
 pub async fn studio_sidecar_write(kind: String, image: String, layer_break: Option<u32>) -> Result<String, String> {
     blocking(move || {
         let image = PathBuf::from(&image);
-        let name = image.file_name().ok_or("Ungültiger Image-Name")?.to_string_lossy().into_owned();
+        let name = image.file_name().ok_or("Invalid image name")?.to_string_lossy().into_owned();
         let io = |e: std::io::Error| e.to_string();
         let out = match kind.as_str() {
             "dvd" => {
                 let out = image.with_extension("dvd");
-                let lb = layer_break.filter(|&l| l > 0).ok_or("Die .dvd-Datei braucht einen Layerwechsel.")?;
+                let lb = layer_break.filter(|&l| l > 0).ok_or("The .dvd file needs a layer break.")?;
                 sidecar::write_dvd(&out, &sidecar::DvdLayout { layer_break: lb, image: name }).map_err(io)?;
                 out
             }
@@ -458,7 +458,7 @@ pub async fn studio_sidecar_write(kind: String, image: String, layer_break: Opti
                 sidecar::write_mds(&out, &sidecar::Mds { sectors, layer_break: layer_break.filter(|&l| l > 0), image: name }).map_err(io)?;
                 out
             }
-            other => return Err(format!("Unbekannte Layout-Datei '{other}'")),
+            other => return Err(format!("Unknown layout file '{other}'")),
         };
         Ok(out.display().to_string())
     })

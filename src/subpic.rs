@@ -60,8 +60,8 @@ pub enum SubpicError {
 impl fmt::Display for SubpicError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SubpicError::Format(m) => write!(f, "Bild-Untertitel: {m}"),
-            SubpicError::Io { path, error } => write!(f, "Bild-Untertitel {}: {error}", path.display()),
+            SubpicError::Format(m) => write!(f, "Bitmap subtitle: {m}"),
+            SubpicError::Io { path, error } => write!(f, "Bitmap subtitle {}: {error}", path.display()),
         }
     }
 }
@@ -192,7 +192,7 @@ pub fn decode_pgs(sup: &[u8]) -> Result<Decoded, SubpicError> {
     let mut pos = 0;
     while pos + 13 <= sup.len() {
         if &sup[pos..pos + 2] != b"PG" {
-            return Err(bad(format!("kein PGS-Segment bei Byte {pos}")));
+            return Err(bad(format!("no PGS segment at byte {pos}")));
         }
         let pts = be32(sup, pos + 2).unwrap_or(0) as f64 / CLOCK;
         let kind = sup[pos + 10];
@@ -589,7 +589,7 @@ pub fn parse_vobsub_probe(json: &str) -> Result<VobsubProbe, SubpicError> {
     struct Format {
         start_time: Option<String>,
     }
-    let out: Out = serde_json::from_str(json).map_err(|e| bad(format!("unerwartete ffprobe-Ausgabe ({e})")))?;
+    let out: Out = serde_json::from_str(json).map_err(|e| bad(format!("unexpected ffprobe output ({e})")))?;
     let num = |s: &Option<String>| s.as_deref().and_then(|v| v.parse::<f64>().ok());
     let start = out.format.as_ref().and_then(|f| num(&f.start_time)).unwrap_or(0.0);
     let packets = out

@@ -54,11 +54,11 @@ impl std::fmt::Display for LayerBreakError {
         match self {
             LayerBreakError::TooLarge { sectors, max } => write!(
                 f,
-                "das Image ist zu groß für eine DVD-9 ({:.2} GB > {:.2} GB)",
+                "the image is too large for a DVD-9 ({:.2} GB > {:.2} GB)",
                 *sectors as f64 * SECTOR as f64 / 1e9,
                 *max as f64 * SECTOR as f64 / 1e9
             ),
-            LayerBreakError::NoCell => write!(f, "keine geeignete Zellgrenze für den Layerwechsel gefunden"),
+            LayerBreakError::NoCell => write!(f, "no suitable cell boundary for the layer break found"),
         }
     }
 }
@@ -116,7 +116,7 @@ pub fn cell_starts(plan: &ImagePlan) -> Result<Vec<CellStart>, ImageError> {
             Some(d) => d.clone(),
             None => std::fs::read(&f.source).map_err(|error| ImageError::Io { path: f.source.clone(), error })?,
         };
-        let bad = || ImageError::NotDvdVideo(format!("{} ist beschädigt", f.name));
+        let bad = || ImageError::NotDvdVideo(format!("{} is corrupt", f.name));
         if !ifo.starts_with(b"DVDVIDEO-VTS") {
             return Err(bad());
         }
@@ -140,7 +140,7 @@ pub fn cell_starts(plan: &ImagePlan) -> Result<Vec<CellStart>, ImageError> {
 
 /// Adds `shift` to the start sector of every title in titleset ≥ `from_vts` (TT_SRPT).
 pub fn patch_tt_srpt(vmg_ifo: &mut [u8], from_vts: u32, shift: u32) -> Result<(), ImageError> {
-    let bad = || ImageError::NotDvdVideo("VIDEO_TS.IFO ist beschädigt".into());
+    let bad = || ImageError::NotDvdVideo("VIDEO_TS.IFO is corrupt".into());
     if !vmg_ifo.starts_with(b"DVDVIDEO-VMG") {
         return Err(bad());
     }

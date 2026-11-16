@@ -55,8 +55,8 @@ pub enum VerifyError {
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::Image(e) => write!(f, "Image nicht lesbar: {e}"),
-            VerifyError::Cancelled => write!(f, "abgebrochen"),
+            VerifyError::Image(e) => write!(f, "Image unreadable: {e}"),
+            VerifyError::Cancelled => write!(f, "cancelled"),
         }
     }
 }

@@ -1,7 +1,7 @@
-# Implementation Plan: Studio-Grade Disney-Style DVD Authoring
+# Implementation Plan: Studio-Grade DVD Authoring
 ### FastPlay, Multi-Track Timeline, Seamless Motion Intros, Bridge PGCs & Advanced VM Logic
 
-**File Location:** [`docs/plans/2026-11-10-disney-fastplay-and-custom-motion-menus.md`](file:///c:/convertx-rust/docs/plans/2026-11-10-disney-fastplay-and-custom-motion-menus.md)  
+**File Location:** [`docs/plans/2026-11-10-fastplay-and-custom-motion-menus.md`](file:///c:/convertx-rust/docs/plans/2026-11-10-fastplay-and-custom-motion-menus.md)  
 **Date:** 2026-11-10  
 **Target Architecture:** `convertx-rust` engine ([`src/`](file:///c:/convertx-rust/src/)) & Tauri v2 / Vanilla TypeScript frontend ([`frontend/src/`](file:///c:/convertx-rust/frontend/src/), [`src-tauri/`](file:///c:/convertx-rust/src-tauri/))  
 **Design Principles:** Clean-room implementation, strict DVD-Video standard compliance, zero external binary CLI dependencies beyond bundled `ffmpeg`/`ffprobe` (native [`spumux.rs`](file:///c:/convertx-rust/src/spumux.rs), [`dvdvm.rs`](file:///c:/convertx-rust/src/dvdvm.rs), [`dvd_mux.rs`](file:///c:/convertx-rust/src/dvd_mux.rs), and [`ifo.rs`](file:///c:/convertx-rust/src/ifo.rs)).
@@ -17,9 +17,9 @@ The `convertx-rust` backend authoring engine already contains the low-level buil
 
 However, these capabilities are currently locked behind legacy ConvertX INI/Delphi templates ([`template.rs`](file:///c:/convertx-rust/src/template.rs)). The modern Tauri/TypeScript WYSIWYG editor outputs a [`CustomLayout`](file:///c:/convertx-rust/src/layout.rs#L61-L75) JSON structure, but the backend hardcodes `intro: None` for custom layouts, completely bypassing the two-cell pipeline, FastPlay PGC generation, and transition handling. Furthermore, the frontend lacks a multi-track timeline, GOP-accurate snapping, and fine-grained VM register controls.
 
-This expanded implementation plan establishes the architecture, schema extensions, VM macro generation, and frontend canvas/timeline tooling needed to deliver commercial "Disney-grade" DVD authoring:
+This expanded implementation plan establishes the architecture, schema extensions, VM macro generation, and frontend canvas/timeline tooling needed to deliver commercial-grade DVD authoring:
 1. **Interactive Timeline Editor:** A dual-mode "Basic / Advanced (Timeline)" editor featuring multi-track visualization for video backgrounds, audio crossfades, and button visibility tracks with closed GOP boundary snapping (15 frames PAL, 18 frames NTSC).
-2. **Disney FastPlay:** A timed First Play PGC (`FP_PGC` / `pauselen = 10`) that automatically launches Title 1 if unattended, while routing to the VTSM Root Menu / VMGM Main Menu upon user interruption.
+2. **FastPlay:** A timed First Play PGC (`FP_PGC` / `pauselen = 10`) that automatically launches Title 1 if unattended, while routing to the VTSM Root Menu / VMGM Main Menu upon user interruption.
 3. **Custom Motion Intros & Two-Cell VOB Pipeline:** Seamlessly piping custom intro sprites and video layers into two-cell VOBs, keeping subpicture highlights strictly disabled (`hli_ss == 0`) during Cell 1 ($0 \le t < T$) and active in Cell 2.
 4. **Menu-to-Menu Transition Videos (Bridge PGCs):** Standalone video transition PGCs executed upon button press that play a cutscene/wipe animation before jumping to the destination menu.
 5. **Hidden Easter Eggs:** 100% transparent subpicture button hotspots with full directional remote navigation.
@@ -74,7 +74,7 @@ pub struct CustomLayout {
     pub highlight: Highlight,
     #[serde(default = "yes")]
     pub animations: bool,
-    /// Disney-style FastPlay automation configuration.
+    /// Timed FastPlay automation configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_play: Option<FastPlayConfig>,
     pub menus: Vec<CustomMenu>,

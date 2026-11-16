@@ -76,7 +76,7 @@ mod win {
             let handle = unsafe {
                 CreateFileW(PCWSTR(path.as_ptr()), access, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
             }
-            .map_err(|e| BurnError::Backend(format!("Laufwerk {letter}: konnte nicht geöffnet werden: {e}")))?;
+            .map_err(|e| BurnError::Backend(format!("Drive {letter}: could not be opened: {e}")))?;
             Ok(DriveHandle { handle, letter })
         }
 
@@ -94,7 +94,7 @@ mod win {
                     None,
                 )
             }
-            .map_err(|e| BurnError::Backend(format!("Laufwerk {}: {e}", self.letter)))
+            .map_err(|e| BurnError::Backend(format!("Drive {}: {e}", self.letter)))
         }
 
         /// Locks the volume (fails while files are open) – an optional step before ejecting.
@@ -178,7 +178,7 @@ mod other {
     }
 
     fn unsupported<T>() -> Result<T, BurnError> {
-        Err(BurnError::Unsupported("Laufwerkssteuerung nur unter Windows".into()))
+        Err(BurnError::Unsupported("Drive control is only available on Windows".into()))
     }
 
     pub struct DriveHandle(());

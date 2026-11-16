@@ -35,7 +35,7 @@ impl Content {
         match self {
             Content::DvdVideo => "DVD-Video",
             Content::Bluray => "Blu-ray",
-            Content::Data => "Daten",
+            Content::Data => "Data",
         }
     }
 }
@@ -128,7 +128,7 @@ pub fn skip_reason(a: Attrs, f: &StudioFilter) -> Option<&'static str> {
     } else if f.skip_system && a.system {
         Some("Systemdatei")
     } else if f.skip_reparse && a.reparse {
-        Some("Verknüpfung (Reparse Point)")
+        Some("Link (reparse point)")
     } else {
         None
     }
@@ -141,7 +141,7 @@ fn walk(dir: &Path, rel: &str, f: &StudioFilter, out: &mut Vec<TreeEntry>, skipp
         let path = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
         let Ok(link_meta) = std::fs::symlink_metadata(&path) else {
-            skipped.push(Skipped { path, reason: "nicht lesbar".into() });
+            skipped.push(Skipped { path, reason: "unreadable".into() });
             continue;
         };
         if let Some(reason) = skip_reason(attrs_of(&link_meta, &name), f) {
@@ -151,7 +151,7 @@ fn walk(dir: &Path, rel: &str, f: &StudioFilter, out: &mut Vec<TreeEntry>, skipp
         let meta = match std::fs::metadata(&path) {
             Ok(m) => m,
             Err(_) => {
-                skipped.push(Skipped { path, reason: "nicht lesbar".into() });
+                skipped.push(Skipped { path, reason: "unreadable".into() });
                 continue;
             }
         };
@@ -244,7 +244,7 @@ fn ecc_shared(plan: &ImagePlan) -> Vec<String> {
         if let Some(b) = plan.file(&bup) {
             let last = f.lba + f.sectors().saturating_sub(1);
             if last / 16 == b.lba / 16 {
-                out.push(format!("{} und {bup} teilen sich einen ECC-Block", f.name));
+                out.push(format!("{} and {bup} share an ECC block", f.name));
             }
         }
     }
@@ -267,8 +267,8 @@ impl fmt::Display for BuildError {
         match self {
             BuildError::Image(e) => write!(f, "{e}"),
             BuildError::Plan(e) => write!(f, "{e}"),
-            BuildError::NeedsAnswer(c) => write!(f, "Der Ordner sieht nach {} aus – als Disc aufbauen?", c.name()),
-            BuildError::Empty => write!(f, "keine Dateien zum Brennen"),
+            BuildError::NeedsAnswer(c) => write!(f, "The folder looks like {} – build it as a disc?", c.name()),
+            BuildError::Empty => write!(f, "no files to burn"),
         }
     }
 }
@@ -441,7 +441,7 @@ fn fix_dvd_sectors(
     if changed == 0 {
         return Ok(image);
     }
-    warnings.push(format!("{changed} Titel-Startsektoren in VIDEO_TS.IFO/BUP korrigiert"));
+    warnings.push(format!("{changed} title start sectors corrected in VIDEO_TS.IFO/BUP"));
     let padding: std::collections::HashMap<u32, u32> = layer_break.and_then(|lb| lb.padding).into_iter().collect();
     Ok(plan_image_with(video_ts, label, &padding, &overrides, audio_ts)?)
 }
@@ -573,7 +573,7 @@ mod tests {
         let f = StudioFilter::default();
         assert_eq!(skip_reason(Attrs { hidden: true, ..Default::default() }, &f), Some("versteckt"));
         assert_eq!(skip_reason(Attrs { system: true, ..Default::default() }, &f), Some("Systemdatei"));
-        assert!(skip_reason(Attrs { reparse: true, ..Default::default() }, &f).unwrap().contains("Verknüpfung"));
+        assert!(skip_reason(Attrs { reparse: true, ..Default::default() }, &f).unwrap().contains("Link"));
         assert_eq!(skip_reason(Attrs::default(), &f), None);
         let off = StudioFilter { skip_hidden: false, skip_system: false, skip_reparse: false, skip_in_use: false };
         assert_eq!(skip_reason(Attrs { hidden: true, system: true, reparse: true }, &off), None);
@@ -673,7 +673,7 @@ mod tests {
     fn fix_vts_sectors_rewrites_the_image_tables() {
         let dir = synthetic_dvd("dvd_fix", &[(1, vec![Cell { first: 0, last: 99, flags: 0 }])]);
         let plan = plan_build(&input(&dir), &always()).unwrap();
-        assert!(plan.warnings.iter().any(|w| w.contains("korrigiert")), "{:?}", plan.warnings);
+        assert!(plan.warnings.iter().any(|w| w.contains("corrected")), "{:?}", plan.warnings);
         let BuiltImage::Udf(ref p) = plan.image else { panic!() };
         let f = p.file("VIDEO_TS.IFO").unwrap();
         let data = f.data.as_ref().expect("patched content");

@@ -38,7 +38,7 @@ fn fastplay_dvdauthor_xml_and_routing() {
         location: "CUSTOM".into(),
         rect: Rect { x0: 300, y0: 400, x1: 500, y1: 450 },
         action: ButtonAction::Commands("g1 = 0; jump menu 2;".into()),
-        label: Some("Hauptmenü".into()),
+        label: Some("Main menu".into()),
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
@@ -145,7 +145,7 @@ fn fastplay_target_title_and_vtsm_root_routing() {
         location: "CUSTOM".into(),
         rect: Rect { x0: 300, y0: 400, x1: 500, y1: 450 },
         action: ButtonAction::Commands("g1 = 0; jump titleset 2 menu;".into()),
-        label: Some("Hauptmenü".into()),
+        label: Some("Main menu".into()),
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
@@ -245,7 +245,7 @@ fn custom_layout_fastplay_page_rendering() {
 
     let main_menu = CustomMenu {
         id: "main".into(),
-        name: "Hauptmenü".into(),
+        name: "Main menu".into(),
         role: MenuRole::Title,
         title: None,
         background: Background::default(),

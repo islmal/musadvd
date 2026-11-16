@@ -154,14 +154,14 @@ impl SectorSource for ZeroSource {
 /// medium. A blank, writable disc is required.
 pub fn discovery(media: &MediaInfo, requested: Option<u64>) -> Result<ZeroSource, String> {
     if !media.present {
-        return Err("keine Disc im Laufwerk".into());
+        return Err("no disc in the drive".into());
     }
     if !media.writable || !media.blank {
-        return Err("Für den Discovery-Test wird eine leere, beschreibbare Disc benötigt".into());
+        return Err("The Discovery test needs a blank, writable disc".into());
     }
     let sectors = requested.unwrap_or(media.free_sectors);
     if sectors == 0 || sectors > media.free_sectors {
-        return Err(format!("{sectors} Sektoren passen nicht auf die Disc ({} frei)", media.free_sectors));
+        return Err(format!("{sectors} sectors do not fit on the disc ({} free)", media.free_sectors));
     }
     Ok(ZeroSource(sectors))
 }
@@ -181,7 +181,7 @@ impl Bin2352Source {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
         if len % RAW != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Größe ist kein Vielfaches von 2352 Bytes"));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Size is not a multiple of 2352 bytes"));
         }
         Ok(Bin2352Source { file, sectors: len / RAW })
     }
@@ -234,7 +234,7 @@ impl<R: Read + Send> SectorSource for ReadSource<R> {
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
         check(buf);
         if lba != self.next {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "nur sequenzielles Lesen möglich"));
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "only sequential reading is possible"));
         }
         self.r.read_exact(buf)?;
         self.next += (buf.len() / S) as u64;
@@ -269,7 +269,7 @@ pub fn spawn_ring_feed(source: Box<dyn SectorSource>, ring_bytes: usize, low_pct
                         Err(e) => break Err(e.to_string()),
                     }
                 }
-                Err(e) => break Err(format!("Quelle nicht lesbar: {e}")),
+                Err(e) => break Err(format!("Source unreadable: {e}")),
             }
         };
         match result {
@@ -313,7 +313,7 @@ impl StreamSource {
         let worker = self.worker.take().expect("finish is called once");
         self.reader = None; // a producer that is not done fails instead of blocking
 
-        worker.join().unwrap_or_else(|_| Err("Abbruch im Image-Erzeuger".into()))
+        worker.join().unwrap_or_else(|_| Err("Cancelled in the image builder".into()))
     }
 }
 
@@ -333,7 +333,7 @@ impl SectorSource for StreamSource {
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
         check(buf);
         if lba != self.next {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "nur sequenzielles Lesen möglich"));
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "only sequential reading is possible"));
         }
         self.reader.as_mut().expect("reader is present until finish").read_exact(buf)?;
         self.next += (buf.len() / S) as u64;
@@ -385,7 +385,7 @@ pub(crate) mod fake {
                         if *left != u32::MAX {
                             *left -= 1;
                         }
-                        return Err(io::Error::other(format!("Lesefehler bei Sektor {}", lba + i)));
+                        return Err(io::Error::other(format!("Read error at sector {}", lba + i)));
                     }
                 }
             }
@@ -460,7 +460,7 @@ mod tests {
             }
         };
         assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted, "the consumer sees an abort, not a short end");
-        assert!(feed.producer.join().unwrap().err().unwrap().starts_with("Quelle nicht lesbar"));
+        assert!(feed.producer.join().unwrap().err().unwrap().starts_with("Source unreadable"));
     }
 
     #[test]
@@ -511,9 +511,9 @@ mod tests {
         assert_eq!(discovery(&blank, Some(1000)).unwrap().sectors(), 1000);
         assert!(discovery(&blank, Some(2_295_105)).is_err());
         assert!(discovery(&blank, Some(0)).is_err());
-        assert!(discovery(&MediaInfo::none(), None).unwrap_err().contains("keine Disc"));
+        assert!(discovery(&MediaInfo::none(), None).unwrap_err().contains("no disc"));
         let used = MediaInfo { blank: false, ..blank };
-        assert!(discovery(&used, None).unwrap_err().contains("leere"));
+        assert!(discovery(&used, None).unwrap_err().contains("blank"));
     }
 
     #[test]
@@ -569,12 +569,12 @@ mod tests {
     fn stream_source_reports_producer_errors() {
         let mut src = StreamSource::spawn(10, 4096, 0, 100, |sink| {
             sink.write_all(&[1u8; S]).map_err(|e| e.to_string())?;
-            Err("Quelle verschwunden".to_string())
+            Err("Source disappeared".to_string())
         });
         let mut buf = vec![0u8; S];
         src.read(0, &mut buf).unwrap();
         assert!(src.read(1, &mut buf).is_err(), "stream ends early");
-        assert_eq!(src.finish().unwrap_err(), "Quelle verschwunden");
+        assert_eq!(src.finish().unwrap_err(), "Source disappeared");
     }
 
     #[test]

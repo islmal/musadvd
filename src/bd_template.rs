@@ -191,7 +191,7 @@ impl Nav<'_> {
             (Kind::Titles | Kind::Episodes | Kind::Bonus, "ML_PLAY_ALL") => go(Action::PlayAll),
             (_, "ML_PLAY_ALL" | "ML_RESUME") => {
                 if loc == "ML_RESUME" {
-                    warnings.push("ML_RESUME: Blu-ray kennt kein Fortsetzen, der Titel startet von vorn".into());
+                    warnings.push("ML_RESUME: Blu-ray has no resume, the title starts from the beginning".into());
                 }
                 go(Action::PlayTitle { title: t.max(1) })
             }
@@ -215,7 +215,7 @@ impl Nav<'_> {
             (_, "ML_GO_CHAPTER_MENU") => (self.chapter_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Chapters, t, 1)).and_then(|id| menu(id)),
             (_, "ML_GO_SETTINGS_MENU") => (self.settings_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Settings, t, 1)).and_then(|id| menu(id)),
             (_, other) => {
-                warnings.push(format!("Button „{}“: Aktion {other} wird auf Blu-ray nicht unterstützt, er bleibt ohne Funktion", b.name));
+                warnings.push(format!("Button '{}': action {other} is not supported on Blu-ray, the button does nothing", b.name));
                 Some(Mapped::default())
             }
         }
@@ -302,7 +302,7 @@ impl Nav<'_> {
             if path.is_file() {
                 Some(path.to_string_lossy().into_owned())
             } else {
-                warnings.push(format!("Bild nicht gefunden: {}", path.display()));
+                warnings.push(format!("Image not found: {}", path.display()));
                 None
             }
         };
@@ -383,7 +383,7 @@ impl Nav<'_> {
                 None => (b.x as f64, b.y as f64, b.width as f64, b.height as f64),
             };
             let Some(r) = clip(frame.rect(page_rect.0, page_rect.1, page_rect.2, page_rect.3)) else {
-                warnings.push(format!("Button „{}“ liegt außerhalb der Seite und wurde ausgelassen", b.name));
+                warnings.push(format!("Button '{}' lies outside the page and was skipped", b.name));
                 continue;
             };
             let content = match text {
@@ -403,7 +403,7 @@ impl Nav<'_> {
                     match candidates.map(|v| resolve_resource(src.dir, v)).find(|p| p.is_file()) {
                         Some(p) => Content::Image { src: p.to_string_lossy().into_owned(), fit },
                         None => {
-                            warnings.push(format!("Button „{}“ hat keine Bilddatei für die Markierung und wurde ausgelassen", b.name));
+                            warnings.push(format!("Button '{}' has no image file for the highlight and was skipped", b.name));
                             continue;
                         }
                     }
@@ -434,11 +434,11 @@ pub fn layout_from_template(
 ) -> Result<(CustomLayout, Vec<String>), LayoutError> {
     let fail = |m: &str| LayoutError(vec![m.to_string()]);
     if titles.is_empty() {
-        return Err(fail("keine Titel für das Menü"));
+        return Err(fail("no titles for the menu"));
     }
     let title_page = page_by_style(template, "MNUS_TITLE")
         .or(template.pages.first())
-        .ok_or_else(|| fail("Die Menü-Vorlage enthält keine Seiten"))?;
+        .ok_or_else(|| fail("The menu template contains no pages"))?;
     let main_dir = template_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut warnings = Vec::new();
 
@@ -449,9 +449,9 @@ pub fn layout_from_template(
             page_by_style(t, style).map(|page| Source { tpl: t, dir, page })
         })
     });
-    for (name, s) in [("Root", &root), ("Kapitel", &chap), ("Einstellungen", &set)] {
+    for (name, s) in [("Root", &root), ("Chapters", &chap), ("Settings", &set)] {
         if s.is_none() {
-            warnings.push(format!("Kein {name}-Menü in der Vorlage gefunden, wird weggelassen"));
+            warnings.push(format!("No {name} menu found in the template, leaving it out"));
         }
     }
 
@@ -512,33 +512,33 @@ pub fn layout_from_template(
         });
     };
     for n in 1..=nav.title_pages {
-        add(&title_src, Kind::Titles, 0, n, nav.title_pages, format!("Titelmenü {n}"), &mut warnings);
+        add(&title_src, Kind::Titles, 0, n, nav.title_pages, format!("Title menu {n}"), &mut warnings);
     }
     if let Some(page) = episodes {
         let src = Source { tpl: template, dir: &main_dir, page };
         for n in 1..=nav.episodes_pages {
-            add(&src, Kind::Episodes, 0, n, nav.episodes_pages, format!("Episodenmenü {n}"), &mut warnings);
+            add(&src, Kind::Episodes, 0, n, nav.episodes_pages, format!("Episode menu {n}"), &mut warnings);
         }
     }
     if let Some(page) = bonus {
         let src = Source { tpl: template, dir: &main_dir, page };
         for n in 1..=nav.bonus_pages {
-            add(&src, Kind::Bonus, 0, n, nav.bonus_pages, format!("Bonusmenü {n}"), &mut warnings);
+            add(&src, Kind::Bonus, 0, n, nav.bonus_pages, format!("Bonus menu {n}"), &mut warnings);
         }
     }
     for t in 1..=titles.len() as u32 {
         let i = t as usize - 1;
         if let Some(src) = &root {
-            add(src, Kind::Root, t, 1, 1, format!("Titel {t}"), &mut warnings);
+            add(src, Kind::Root, t, 1, 1, format!("Title {t}"), &mut warnings);
         }
         if let (Some(src), n) = (&chap, nav.chapter_pages[i]) {
             for p in 1..=n {
-                add(src, Kind::Chapters, t, p, n, format!("Kapitel {t} – Seite {p}"), &mut warnings);
+                add(src, Kind::Chapters, t, p, n, format!("Chapter {t} – page {p}"), &mut warnings);
             }
         }
         if let (Some(src), n) = (&set, nav.settings_pages[i]) {
             for p in 1..=n {
-                add(src, Kind::Settings, t, p, n, format!("Einstellungen {t} – Seite {p}"), &mut warnings);
+                add(src, Kind::Settings, t, p, n, format!("Settings {t} – page {p}"), &mut warnings);
             }
         }
     }

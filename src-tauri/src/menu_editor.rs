@@ -108,9 +108,9 @@ pub struct ImportedTemplate {
 #[tauri::command]
 pub async fn import_convertx_template(path: String, titles: Vec<EditorTitle>, lang: String) -> Result<ImportedTemplate, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let template = Template::load(&path).map_err(|e| format!("Vorlage konnte nicht gelesen werden: {e}"))?;
+        let template = Template::load(&path).map_err(|e| format!("Template could not be read: {e}"))?;
         if template.pages.is_empty() {
-            return Err("Die Vorlage enthält keine Menüseiten.".to_string());
+            return Err("The template contains no menu pages.".to_string());
         }
         let layout_titles = layout_titles(&titles);
         // shortcut: chapter sample frames are spread evenly; the editor has no chapter times. Pass them in if the stills matter.
@@ -158,11 +158,11 @@ pub fn image_preview(path: String) -> Result<String, String> {
         "bmp" => "image/bmp",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        _ => return Err(format!("{path}: kein unterstütztes Bildformat")),
+        _ => return Err(format!("{path}: unsupported image format")),
     };
     let size = std::fs::metadata(p).map_err(|e| format!("{path}: {e}"))?.len();
     if size > MAX_PREVIEW_BYTES {
-        return Err(format!("{path}: Bild ist zu groß für die Vorschau"));
+        return Err(format!("{path}: image is too large for the preview"));
     }
     let bytes = std::fs::read(p).map_err(|e| format!("{path}: {e}"))?;
     Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
@@ -201,11 +201,11 @@ mod tests {
         };
         assert!(check_layout(layout.clone(), t(5), "PAL".into()).is_empty());
         let errs = check_layout(layout, t(3), "PAL".into());
-        assert!(errs[0].contains("Kapitel 5"), "{errs:?}");
+        assert!(errs[0].contains("Chapter 5"), "{errs:?}");
         assert!(image_preview("x.txt".into()).is_err());
         // Blu-ray: the 720×576 default canvas is not 16:9; chapters are checked the same way.
         let errs = check_layout(layout_with_canvas(1920, 1080), t(3), "BD1080".into());
-        assert!(errs.iter().all(|e| !e.contains("16:9")) && errs[0].contains("Kapitel 5"), "{errs:?}");
+        assert!(errs.iter().all(|e| !e.contains("16:9")) && errs[0].contains("Chapter 5"), "{errs:?}");
         let errs = check_layout(layout_with_canvas(720, 576), t(5), "BD720".into());
         assert!(errs.iter().any(|e| e.contains("16:9")), "{errs:?}");
     }

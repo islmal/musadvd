@@ -106,7 +106,7 @@ fn ctx() -> Ctx {
                 return;
             }
             *l = (p.phase.clone(), pct);
-            let left = p.eta_secs.map_or(String::new(), |s| format!(" – noch {}", musadvd::eta::format_remaining(s)));
+            let left = p.eta_secs.map_or(String::new(), |s| format!(" – {} left", musadvd::eta::format_remaining(s)));
             eprint!("\r  {}: {pct:>3}% ({:.1}x){left}    ", p.phase, p.speed_x);
         }
     });
@@ -123,7 +123,7 @@ fn finish(r: Result<Outcome, String>) -> ExitCode {
         }
         Ok(o) => {
             println!("{}", o.message);
-            o.files.iter().for_each(|f| println!("  Datei: {f}"));
+            o.files.iter().for_each(|f| println!("  File: {f}"));
             o.layout_file.iter().for_each(|f| println!("  Layout: {f}"));
             o.md5.iter().for_each(|m| println!("  MD5: {m}"));
             o.graph.iter().for_each(|g| println!("  Graph: {g}"));
@@ -144,7 +144,7 @@ pub fn read_disc(a: ReadDisc) -> ExitCode {
 
 pub fn verify_disc(a: VerifyDisc) -> ExitCode {
     if let Some(image) = a.image.as_ref().filter(|p| !p.is_file()) {
-        return fail(format!("{}: Image nicht gefunden", image.display()));
+        return fail(format!("{}: image not found", image.display()));
     }
     let drive = match studio::find_drive(a.drive.as_deref()) {
         Ok(d) => d,
@@ -155,7 +155,7 @@ pub fn verify_disc(a: VerifyDisc) -> ExitCode {
 
 pub fn build_iso(a: BuildIso) -> ExitCode {
     if let Some(p) = a.sources.iter().find(|p| !p.exists()) {
-        return fail(format!("{}: nicht gefunden", p.display()));
+        return fail(format!("{}: not found", p.display()));
     }
     let c = ctx();
     let mut cfg = c.settings.build.clone();
@@ -166,15 +166,15 @@ pub fn build_iso(a: BuildIso) -> ExitCode {
     let plan = match builder::plan_build(&input, &cfg) {
         Ok(p) => p,
         Err(BuildError::NeedsAnswer(content)) => {
-            return fail(format!("Der Ordner sieht nach {} aus – mit --as-disc als Disc oder mit --as-data als Daten aufbauen.", content.name()));
+            return fail(format!("The folder looks like {} – build it with --as-disc as a disc or with --as-data as data.", content.name()));
         }
         Err(e) => return fail(e),
     };
-    println!("{} · Label {} · {} Sektoren ({:.2} GB)", plan.content.name(), plan.label, plan.total_sectors(), plan.total_sectors() as f64 * 2048.0 / 1e9);
+    println!("{} · label {} · {} sectors ({:.2} GB)", plan.content.name(), plan.label, plan.total_sectors(), plan.total_sectors() as f64 * 2048.0 / 1e9);
     if let Some(lb) = plan.layer_break {
-        println!("  Layerwechsel bei Sektor {}", lb.l0_sectors);
+        println!("  Layer break at sector {}", lb.l0_sectors);
     }
-    plan.warnings.iter().for_each(|w| println!("  Hinweis: {w}"));
+    plan.warnings.iter().for_each(|w| println!("  Note: {w}"));
     finish(studio::build(&Ctx { settings: musadvd::config::BurnStudioSettings { build: cfg, ..c.settings.clone() }, ..c }, &plan, &a.output))
 }
 
@@ -208,21 +208,21 @@ pub fn ifo_layerbreak(a: IfoLayerbreak) -> ExitCode {
         };
         match plan.image {
             builder::BuiltImage::Udf(p) => tools::ifo_candidates(&p, Capacities::DVD, opts).map_err(|e| e.to_string()),
-            builder::BuiltImage::Bd(_) => Err("Blu-ray-Images haben keinen Layerwechsel (IFO-Inspektor nur für DVD-Video)".into()),
+            builder::BuiltImage::Bd(_) => Err("Blu-ray images have no layer break (the IFO inspector is for DVD-Video only)".into()),
         }
     } else if a.source.is_file() {
         tools::ifo_candidates_iso(&a.source, Capacities::DVD, opts).map_err(|e| e.to_string())
     } else {
-        Err(format!("{}: nicht gefunden", a.source.display()))
+        Err(format!("{}: not found", a.source.display()))
     };
     match found {
         Err(e) => fail(e),
         Ok(c) if c.is_empty() => {
-            println!("Keine möglichen Layerwechsel gefunden (passt auf eine einlagige Disc oder keine Zellen).");
+            println!("No possible layer breaks found (fits on a single-layer disc, or no cells).");
             ExitCode::SUCCESS
         }
         Ok(list) => {
-            println!("{:>4} {:>4} {:>4} {:>4} {:>10} {:>10} {:>10} {:>6} {:<9} {}", "VTS", "TTN", "PGC", "Zelle", "Start", "L0", "L1", "L0 %", "nahtlos", "Füllsektoren");
+            println!("{:>4} {:>4} {:>4} {:>4} {:>10} {:>10} {:>10} {:>6} {:<9} {}", "VTS", "TTN", "PGC", "Cell", "Start", "L0", "L1", "L0 %", "seamless", "Padding sectors");
             for c in list {
                 println!(
                     "{:>4} {:>4} {:>4} {:>4} {:>10} {:>10} {:>10} {:>5.1}% {:<9} {}{}",
@@ -243,35 +243,35 @@ pub fn drive_info(a: DriveInfoArgs) -> ExitCode {
     let s = settings();
     println!("{}", drive.name);
     match studio::media_of(&drive) {
-        Ok(m) if !m.present => println!("  keine Disc eingelegt"),
-        Ok(m) => println!("  {} ({}), {}, frei {:.2} GB", m.physical, if m.writable { "beschreibbar" } else { "nicht beschreibbar" }, if m.blank { "leer" } else { "beschrieben" }, m.free_sectors as f64 * 2048.0 / 1e9),
-        Err(e) => println!("  Disc nicht lesbar: {e}"),
+        Ok(m) if !m.present => println!("  no disc inserted"),
+        Ok(m) => println!("  {} ({}), {}, frei {:.2} GB", m.physical, if m.writable { "writable" } else { "not writable" }, if m.blank { "blank" } else { "written" }, m.free_sectors as f64 * 2048.0 / 1e9),
+        Err(e) => println!("  Disc unreadable: {e}"),
     }
     match studio::drive_details(&drive, &s.io) {
         Ok(d) => {
             println!("  {} {} {}", d.vendor, d.model, d.firmware);
-            println!("  Profil: {}{}", d.current_profile_name, if d.ready { "" } else { " (nicht bereit)" });
+            println!("  Profil: {}{}", d.current_profile_name, if d.ready { "" } else { " (not ready)" });
             let profiles: Vec<_> = d.profiles.iter().map(|p| p.name).collect();
-            println!("  Unterstützt: {}", profiles.join(", "));
+            println!("  Supported: {}", profiles.join(", "));
             for (label, v) in [("Book-Typ", &d.book_type), ("Media-ID", &d.media_id), ("Status", &d.disc_status)] {
                 if let Some(v) = v {
                     println!("  {label}: {v}");
                 }
             }
             if let Some(l) = d.layer_break {
-                println!("  Layerwechsel: Sektor {l}");
+                println!("  Layer break: sector {l}");
             }
             if let Some(c) = d.capacity_sectors {
-                println!("  Kapazität: {c} Sektoren");
+                println!("  Capacity: {c} sectors");
             }
             if !d.write_speeds_kbps.is_empty() {
-                println!("  Schreibgeschwindigkeiten (kB/s): {}", d.write_speeds_kbps.iter().map(u32::to_string).collect::<Vec<_>>().join(", "));
+                println!("  Write speeds (kB/s): {}", d.write_speeds_kbps.iter().map(u32::to_string).collect::<Vec<_>>().join(", "));
             }
-            d.notes.iter().for_each(|n| println!("  Hinweis: {n}"));
+            d.notes.iter().for_each(|n| println!("  Note: {n}"));
             ExitCode::SUCCESS
         }
         Err(e) => {
-            println!("  MMC-Abfrage nicht möglich: {e}");
+            println!("  MMC query not possible: {e}");
             ExitCode::FAILURE
         }
     }

@@ -229,6 +229,7 @@ export interface AppSettings {
   text_overflow_action: "reduce_font_size" | "truncate";
   menu_audio: "title" | "silence" | "file";
   menu_audio_file: string;
+  template_dir: string;
   tv_standard: "PAL" | "NTSC";
   dvd_resolution: "Full D1" | "Half D1" | "SIF";
   bd_resolution: "1080p" | "720p";

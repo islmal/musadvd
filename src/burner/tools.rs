@@ -31,8 +31,8 @@ impl fmt::Display for LabelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LabelError::Io(p, e) => write!(f, "{}: {e}", p.display()),
-            LabelError::NotRecognised => write!(f, "kein ISO-9660- oder UDF-Image"),
-            LabelError::Corrupt(m) => write!(f, "beschädigtes Image: {m}"),
+            LabelError::NotRecognised => write!(f, "not an ISO 9660 or UDF image"),
+            LabelError::Corrupt(m) => write!(f, "corrupt image: {m}"),
         }
     }
 }
@@ -194,11 +194,11 @@ fn first_extent(img: &mut Img, lba: u64) -> Result<(u32, u32), LabelError> {
     let (ea, ad) = match tag_id(&b) {
         261 => (168, 176),
         266 => (208, 216),
-        _ => return Err(LabelError::Corrupt("Metadaten-Dateieintrag fehlt")),
+        _ => return Err(LabelError::Corrupt("metadata file entry missing")),
     };
     let at = ad + le32(&b, ea) as usize;
     if le32(&b, ea + 4) < 8 || at + 8 > S {
-        return Err(LabelError::Corrupt("Metadaten-Dateieintrag ohne Extent"));
+        return Err(LabelError::Corrupt("metadata file entry without extent"));
     }
     Ok((le32(&b, at), le32(&b, at + 4)))
 }
@@ -210,7 +210,7 @@ fn fsd_sectors(img: &mut Img, seq: &[(u64, Vec<u8>)]) -> Result<Vec<u64>, LabelE
         .iter()
         .find(|d| tag_id(&d.1) == 5)
         .map(|d| le32(&d.1, 188) as u64)
-        .ok_or(LabelError::Corrupt("Partition Descriptor fehlt"))?;
+        .ok_or(LabelError::Corrupt("Partition Descriptor missing"))?;
     let lvd = &lvd.1;
     let block = le32(lvd, 252) as u64;
     let part_ref = u16::from_le_bytes([lvd[256], lvd[257]]) as usize;
@@ -285,7 +285,7 @@ fn patch_all(img: &mut Img, new: &str) -> Result<String, LabelError> {
         for lba in fsd_sectors(img, main)? {
             let mut d = img.read(lba)?;
             if tag_id(&d) != 256 {
-                return Err(LabelError::Corrupt("File Set Descriptor nicht gefunden"));
+                return Err(LabelError::Corrupt("File Set Descriptor not found"));
             }
             set_dstring(&mut d, 112, 128, new);
             set_dstring(&mut d, 304, 32, new);
@@ -434,7 +434,7 @@ pub fn ifo_candidates_iso(iso: &Path, caps: Capacities, opts: CandidateOptions) 
         let Some(n) = e.name.strip_prefix("VTS_").filter(|_| e.name.ends_with("_0.IFO")).and_then(|r| r[..2].parse().ok()) else {
             continue;
         };
-        let lba = e.first_sector().ok_or(IsoError::Corrupt("IFO ohne Daten"))?;
+        let lba = e.first_sector().ok_or(IsoError::Corrupt("IFO without data"))?;
         vts.push((n, lba, img.read_file(&format!("VIDEO_TS/{}", e.name))?));
     }
     Ok(candidates(&vts, img.total_sectors, caps, opts))

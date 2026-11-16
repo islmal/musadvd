@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::OnceCell;
 
-/// Where ConvertXToDVD 7 installs its menu templates.
+/// Where ConvertXToDVD 7 installs its menu templates (Windows only; elsewhere the user sets `template_dir`).
 const DEFAULT_TEMPLATE_ROOT: &str = r"C:\ProgramData\VSO\ConvertXToDVD\7\Templates";
 struct AppState {
     tools: OnceCell<Toolchain>,
@@ -297,13 +297,26 @@ struct TemplateInfo {
     has_video_slots: bool,
 }
 
-fn template_root() -> PathBuf {
-    std::env::var_os("CONVERTX_TEMPLATES").map_or_else(|| PathBuf::from(DEFAULT_TEMPLATE_ROOT), PathBuf::from)
+/// Template folder: `CONVERTX_TEMPLATES`, else the `template_dir` setting, else the Windows default.
+/// A folder that holds a `Templates` subfolder (the ConvertX install root) is accepted too.
+fn template_root(settings: &AppSettings) -> Option<PathBuf> {
+    let root = if let Some(dir) = std::env::var_os("CONVERTX_TEMPLATES") {
+        PathBuf::from(dir)
+    } else if !settings.template_dir.is_empty() {
+        PathBuf::from(&settings.template_dir)
+    } else if cfg!(windows) {
+        PathBuf::from(DEFAULT_TEMPLATE_ROOT)
+    } else {
+        return None;
+    };
+    let nested = root.join("Templates");
+    Some(if nested.is_dir() { nested } else { root })
 }
 
 #[tauri::command]
-fn list_templates() -> Result<Vec<TemplateInfo>, String> {
-    let root = template_root();
+fn list_templates(state: State<'_, AppState>) -> Result<Vec<TemplateInfo>, String> {
+    // No templates installed is normal (the GUI then offers only the menu editor), not an error.
+    let Some(root) = template_root(&state.settings()).filter(|r| r.is_dir()) else { return Ok(Vec::new()) };
     let folders = std::fs::read_dir(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     let mut out = Vec::new();
     for folder in folders.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
@@ -338,11 +351,14 @@ fn list_templates() -> Result<Vec<TemplateInfo>, String> {
 
 /// Template thumbnail (JPEG/PNG next to the .ini) as a data URL for an `<img>`.
 #[tauri::command]
-fn template_preview(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
-    let root = template_root();
+fn template_preview(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    preview_data_url(template_root(&state.settings()), &path)
+}
+
+fn preview_data_url(root: Option<PathBuf>, path: &str) -> Result<String, String> {
+    let p = Path::new(path);
     // Only serve images from the template folders.
-    if !p.starts_with(&root) {
+    if !root.is_some_and(|root| p.starts_with(root)) {
         return Err("preview outside the template folder".into());
     }
     let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
@@ -682,10 +698,10 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
         return Err("Keine Videos im Projekt.".into());
     }
     if config.output.trim().is_empty() {
-        return Err("Kein Ausgabeordner gewählt.".into());
+        return Err("No output folder selected.".into());
     }
     if state.converting.swap(true, Ordering::SeqCst) {
-        return Err("Es läuft bereits eine Konvertierung.".into());
+        return Err("A conversion is already running.".into());
     }
     let mut opts = BuildOptions {
         inputs: config.inputs.iter().map(|i| PathBuf::from(&i.path)).collect(),
@@ -730,7 +746,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
         let done = match tokio::runtime::Runtime::new() {
             Err(e) => ConversionDone {
                 ok: false,
-                message: format!("Laufzeitumgebung konnte nicht starten: {e}"),
+                message: format!("Runtime could not start: {e}"),
                 video_ts: None,
                 project_name: None,
                 size_mb: None,
@@ -747,7 +763,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                         // All tools are stopped and the work directory is gone at this point.
                         cancel_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                         busy.store(false, Ordering::SeqCst);
-                        let _ = app.emit("convert-cancelled", "Konvertierung abgebrochen");
+                        let _ = app.emit("convert-cancelled", "Conversion cancelled");
                         return;
                     }
                     Ok(r) => ConversionDone {
@@ -800,7 +816,7 @@ fn main() {
             // `--burn-studio`: start with the Burn Studio window only (the main window stays hidden).
             if std::env::args().any(|a| a == "--burn-studio") {
                 tauri::WebviewWindowBuilder::new(app, "burn-studio", tauri::WebviewUrl::App("burnStudio.html".into()))
-                    .title("Brennstudio – MusaDVD")
+                    .title("Burn Studio – MusaDVD")
                     .inner_size(1180.0, 800.0)
                     .min_inner_size(900.0, 620.0)
                     .build()?;
@@ -1075,6 +1091,6 @@ mod tests {
 
     #[test]
     fn preview_is_confined_to_templates() {
-        assert!(template_preview(r"C:\Windows\win.ini".into()).is_err());
+        assert!(preview_data_url(Some(PathBuf::from(DEFAULT_TEMPLATE_ROOT)), r"C:\Windows\win.ini").is_err());
     }
 }

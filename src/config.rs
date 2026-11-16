@@ -87,6 +87,9 @@ pub struct AppSettings {
     pub menu_audio: String,
     /// Audio file for `menu_audio = "file"`.
     pub menu_audio_file: String,
+    /// Folder with ConvertXToDVD's menu templates (or its `Templates` parent). Empty = the default
+    /// Windows install location; without any templates the GUI offers only the menu editor.
+    pub template_dir: String,
     // Output & TV format
     pub tv_standard: String,
     pub dvd_resolution: String,
@@ -157,7 +160,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
-            ui_language: "de".into(),
+            ui_language: "en".into(),
             auto_start_playback: false,
             loop_playback: false,
             play_sequentially: false,
@@ -167,6 +170,7 @@ impl Default for AppSettings {
             text_overflow_action: TEXT_OVERFLOW_ACTIONS[0].into(),
             menu_audio: MENU_AUDIO_MODES[0].into(),
             menu_audio_file: String::new(),
+            template_dir: String::new(),
             tv_standard: TV_STANDARDS[0].into(),
             dvd_resolution: DVD_RESOLUTIONS[0].into(),
             bd_resolution: BD_RESOLUTIONS[0].into(),
@@ -183,7 +187,7 @@ impl Default for AppSettings {
             auto_chapter_enabled: true,
             auto_chapter_interval_seconds: 300,
             auto_chapter_min_video_length_seconds: 900,
-            chapter_naming_template: "Kapitel #<c>".into(),
+            chapter_naming_template: "Chapter #<c>".into(),
             default_audio_language: "de".into(),
             default_subtitle_language: String::new(),
             force_first_subtitle: false,
@@ -627,7 +631,7 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::Io { path, error } => write!(f, "{}: {error}", path.display()),
-            ConfigError::Json { path, error } => write!(f, "{}: ungültige Einstellungen ({error})", path.display()),
+            ConfigError::Json { path, error } => write!(f, "{}: invalid settings ({error})", path.display()),
         }
     }
 }
@@ -652,11 +656,12 @@ impl AppSettings {
     /// Clamps numbers into sensible ranges and normalises the string choices.
     pub fn sanitized(mut self) -> Self {
         let code = self.ui_language.trim().to_ascii_lowercase();
-        self.ui_language = if available_languages().iter().any(|(c, _)| *c == code) { code } else { "de".into() };
+        self.ui_language = if available_languages().iter().any(|(c, _)| *c == code) { code } else { "en".into() };
         self.text_overflow_action = choice(&self.text_overflow_action, TEXT_OVERFLOW_ACTIONS);
         self.tv_standard = choice(&self.tv_standard, TV_STANDARDS);
         self.menu_audio = choice(&self.menu_audio, MENU_AUDIO_MODES);
         self.menu_audio_file = self.menu_audio_file.trim().to_string();
+        self.template_dir = self.template_dir.trim().to_string();
         if self.menu_audio == "file" && self.menu_audio_file.is_empty() {
             self.menu_audio = MENU_AUDIO_MODES[0].into();
         }
@@ -725,9 +730,9 @@ impl AppSettings {
                 let backup = path.with_extension("json.bak");
                 let moved = std::fs::rename(path, &backup).is_ok();
                 let note = if moved {
-                    format!("{e} – gesichert als {}, Standardwerte werden verwendet", backup.display())
+                    format!("{e} – backed up as {}, using default values", backup.display())
                 } else {
-                    format!("{e} – Standardwerte werden verwendet")
+                    format!("{e} – using default values")
                 };
                 (AppSettings::default(), Some(note))
             }
@@ -877,7 +882,7 @@ mod tests {
     fn defaults() {
         let s = AppSettings::default();
         assert_eq!(s.target_size_mb, 4300);
-        assert_eq!(s.chapter_naming_template, "Kapitel #<c>");
+        assert_eq!(s.chapter_naming_template, "Chapter #<c>");
         assert_eq!(s.default_audio_language, "de");
         assert!(s.return_to_title_menu_after_title);
         assert_eq!(s.max_concurrent_encodes, default_jobs(), "same default as the engine");
@@ -914,7 +919,7 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         let (s, note) = AppSettings::load_or_default(&path);
         assert_eq!(s, AppSettings::default());
-        assert!(note.unwrap().contains("Standardwerte"));
+        assert!(note.unwrap().contains("default values"));
         assert!(path.with_extension("json.bak").is_file());
         assert!(!path.exists());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
@@ -934,22 +939,24 @@ mod tests {
             default_subtitle_language: " EN ".into(),
             menu_audio: "file".into(),
             menu_audio_file: "  ".into(),
+            template_dir: "  ".into(),
             ..AppSettings::default()
         }
         .sanitized();
         assert_eq!(s.menu_audio, "title", "file mode without a file falls back");
         let old = AppSettings { menu_audio: "first_title".into(), ..AppSettings::default() }.sanitized();
         assert_eq!(old.menu_audio, "title", "value of older versions is migrated");
+        assert_eq!(s.template_dir, "", "blank template folder = automatic");
         assert_eq!(s.tv_standard, "PAL");
         assert_eq!(s.aspect_ratio_policy, "16:9");
         assert_eq!(s.process_priority, "Normal");
         assert_eq!(s.max_concurrent_encodes, 1);
         assert_eq!(s.target_size_mb, 100);
         assert_eq!(s.auto_chapter_interval_seconds, 30);
-        assert_eq!(s.chapter_naming_template, "Kapitel #<c>");
+        assert_eq!(s.chapter_naming_template, "Chapter #<c>");
         assert_eq!(s.default_audio_language, "");
         assert_eq!(s.default_subtitle_language, "en");
-        assert_eq!(AppSettings { ui_language: "xx".into(), ..AppSettings::default() }.sanitized().ui_language, "de");
+        assert_eq!(AppSettings { ui_language: "xx".into(), ..AppSettings::default() }.sanitized().ui_language, "en");
         assert_eq!(AppSettings { ui_language: "en".into(), ..AppSettings::default() }.sanitized().ui_language, "en");
         assert_eq!(AppSettings { ui_language: "ru".into(), ..AppSettings::default() }.sanitized().ui_language, "ru");
         let mut o = BuildOptions::default();

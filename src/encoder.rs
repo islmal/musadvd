@@ -1098,7 +1098,7 @@ pub async fn run_bd_encode(
 /// Decodes bitmap subtitle `n` (PGS from its extracted `.sup`, VobSub via ffprobe), writes its
 /// images into `<stem>_s<n>/` and returns the spumux XML.
 async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) -> Result<String, ToolError> {
-    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Bild-Untertitel #{}", sub.index), status: String::new(), log: e.to_string() };
+    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Bitmap subtitle #{}", sub.index), status: String::new(), log: e.to_string() };
     let decoded = match sub.codec.as_str() {
         "hdmv_pgs_subtitle" => {
             let path = job.dir.join(job.sup(n));
@@ -1147,7 +1147,7 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
             .await
             .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
         }
-        other => Err(subpic::SubpicError::Format(format!("{other} wird nicht unterstützt"))),
+        other => Err(subpic::SubpicError::Format(format!("{other} is not supported"))),
     }
     .map_err(fail)?;
     let target = job.subpicture_target(decoded.canvas);
@@ -1162,7 +1162,7 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
 /// Renders text subtitle `n` (its extracted `.srt`) natively into `<stem>_s<n>/` and returns the
 /// spumux XML, like [`bitmap_subtitle_xml`].
 async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) -> Result<String, ToolError> {
-    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Text-Untertitel #{}", sub.index), status: String::new(), log: e.to_string() };
+    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Text subtitle #{}", sub.index), status: String::new(), log: e.to_string() };
     let path = job.dir.join(job.srt(n));
     let data = std::fs::read(&path).map_err(|error| ToolError::Io { tool: path.display().to_string(), error })?;
     let (dir, tv, folder) = (job.dir.clone(), job.tv, format!("{}_s{}", job.stem, n + 1));

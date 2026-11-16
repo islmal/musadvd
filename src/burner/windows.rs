@@ -44,7 +44,7 @@ pub(super) fn backend(e: windows::core::Error) -> BurnError {
 /// An IMAPI error with the setup step it came from.
 fn step(name: &str, e: windows::core::Error) -> BurnError {
     match backend(e) {
-        BurnError::Backend(m) => BurnError::Backend(format!("{m} - bei: {name}")),
+        BurnError::Backend(m) => BurnError::Backend(format!("{m} - at: {name}")),
         other => other,
     }
 }
@@ -52,7 +52,7 @@ fn step(name: &str, e: windows::core::Error) -> BurnError {
 /// Adds the step to an error that already is a `BurnError::Backend`.
 fn at(name: &'static str) -> impl Fn(BurnError) -> BurnError {
     move |e| match e {
-        BurnError::Backend(m) if !m.contains(" - bei: ") => BurnError::Backend(format!("{m} - bei: {name}")),
+        BurnError::Backend(m) if !m.contains(" - at: ") => BurnError::Backend(format!("{m} - at: {name}")),
         other => other,
     }
 }
@@ -160,7 +160,7 @@ fn physical_name(t: IMAPI_MEDIA_PHYSICAL_TYPE) -> &'static str {
         IMAPI_MEDIA_TYPE_BDR => "BD-R",
         IMAPI_MEDIA_TYPE_BDRE => "BD-RE",
         IMAPI_MEDIA_TYPE_BDROM => "BD-ROM",
-        _ => "unbekannt",
+        _ => "unknown",
     }
 }
 
@@ -262,7 +262,7 @@ fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnErro
         if exclusive {
             let _ = rec.ReleaseExclusiveAccess();
         }
-        r.map_err(|e| BurnError::Backend(format!("Layerwechsel konnte nicht gesetzt werden: {e} (Sense {:02X?})", &sense[..14])))
+        r.map_err(|e| BurnError::Backend(format!("The layer break could not be set: {e} (sense {:02X?})", &sense[..14])))
     }
 }
 
@@ -370,10 +370,10 @@ impl ISequentialStream_Impl for ImageStream_Impl {
         let events = self.events_seen.load(Ordering::Relaxed);
         if events {
         } else if pos >= self.len {
-            self.send(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Disc wird abgeschlossen …"));
+            self.send(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Finalizing disc …"));
         } else if pos - last.min(pos) >= 8 << 20 || last == 0 {
             self.reported.store(pos, Ordering::Relaxed);
-            self.send(BurnProgress::new(BurnPhase::Writing, pos as f64 / self.len as f64, "Daten werden geschrieben …"));
+            self.send(BurnProgress::new(BurnPhase::Writing, pos as f64 / self.len as f64, "Writing data …"));
         }
         // Before the write events start, the data handed over is the best position there is.
         if let (Some(hook), false) = (&self.hook, events) {
@@ -460,15 +460,15 @@ fn write_update(action: IMAPI_FORMAT2_DATA_WRITE_ACTION, start_lba: i32, sector_
         | IMAPI_FORMAT2_DATA_WRITE_ACTION_FORMATTING_MEDIA
         | IMAPI_FORMAT2_DATA_WRITE_ACTION_INITIALIZING_HARDWARE
         | IMAPI_FORMAT2_DATA_WRITE_ACTION_CALIBRATING_POWER => {
-            Some(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"))
+            Some(BurnProgress::new(BurnPhase::Formatting, 0.0, "Preparing disc …"))
         }
         IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA if sector_count > 0 => {
             let done = (last_written_lba as i64 - start_lba as i64).max(0) as f64;
-            Some(BurnProgress::new(BurnPhase::Writing, done / sector_count as f64, "Daten werden geschrieben …"))
+            Some(BurnProgress::new(BurnPhase::Writing, done / sector_count as f64, "Writing data …"))
         }
         // IMAPI's own verification (if a drive does it) counts as part of closing the disc.
         IMAPI_FORMAT2_DATA_WRITE_ACTION_FINALIZATION | IMAPI_FORMAT2_DATA_WRITE_ACTION_VERIFYING => {
-            Some(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Disc wird abgeschlossen …"))
+            Some(BurnProgress::new(BurnPhase::Finalizing, 0.0, "Finalizing disc …"))
         }
         _ => None,
     }
@@ -682,7 +682,7 @@ impl OpticalBurner for ImapiBurner {
         let feed = Feed::File(file);
         let mut verify = |device: &mut File, tx: &Sender<BurnProgress>| {
             verify_against_image(device, iso_path, cancel, &mut |f| {
-                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Disc wird überprüft …"));
+                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Verifying disc …"));
             })
         };
         burn_feed(drive_id, feed, len, None, speed, options, cancel, progress_tx, &mut verify)
@@ -706,7 +706,7 @@ impl OpticalBurner for ImapiBurner {
         }
         let sectors = source.sectors();
         if options.verify && !source.rewindable() {
-            return Err(BurnError::Unsupported("Die Überprüfung braucht eine Quelle, die erneut gelesen werden kann".into()));
+            return Err(BurnError::Unsupported("Verification needs a source that can be read again".into()));
         }
         // A source with a ring of its own (image built on the fly) is read directly; any other
         // gets a producer thread and a ring buffer.
@@ -723,10 +723,10 @@ impl OpticalBurner for ImapiBurner {
             let mut src = producer
                 .take()
                 .and_then(|h| h.join().ok())
-                .ok_or_else(|| BurnError::Image("Bildquelle nicht mehr verfügbar".into()))?
+                .ok_or_else(|| BurnError::Image("Image source no longer available".into()))?
                 .map_err(BurnError::Image)?;
             verify_against_source(device, &mut src, cancel, &mut |f| {
-                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Disc wird überprüft …"));
+                let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Verifying disc …"));
             })
         };
         let result = burn_feed(drive_id, feed, sectors * 2048, stats.clone(), speed, options, cancel, progress_tx, &mut verify);
@@ -762,25 +762,25 @@ fn burn_feed(
 ) -> Result<(), BurnError> {
     let com = Com::init()?;
     let _standby = options.prevent_standby.then(StandbyGuard::new);
-    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Laufwerk wird vorbereitet …"));
-    let rec = recorder(drive_id).map_err(at("Laufwerk öffnen"))?;
-    let (media, format) = probe(&rec).map_err(at("Medium prüfen"))?;
+    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Preparing drive …"));
+    let rec = recorder(drive_id).map_err(at("open drive"))?;
+    let (media, format) = probe(&rec).map_err(at("check medium"))?;
     let sectors = len.div_ceil(2048);
     if !media.present {
         return Err(BurnError::NoMedia);
     }
     if !media.writable {
-        return Err(BurnError::Unsupported(format!("{} kann in diesem Laufwerk nicht beschrieben werden", media.physical)));
+        return Err(BurnError::Unsupported(format!("{} cannot be written in this drive", media.physical)));
     }
     if !media.blank && !media.rewritable {
-        return Err(BurnError::Unsupported(format!("die {} ist nicht leer", media.physical)));
+        return Err(BurnError::Unsupported(format!("the {} is not blank", media.physical)));
     }
     if !media.blank && !options.erase {
-        return Err(BurnError::Unsupported(format!("die {} enthält Daten und darf nicht gelöscht werden", media.physical)));
+        return Err(BurnError::Unsupported(format!("the {} contains data and must not be erased", media.physical)));
     }
     let (media, format) = if !media.blank && media.physical == "DVD-RW" {
         // Sequential DVD-RW has to be blanked before it can take a new disc-at-once image.
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "DVD-RW wird gelöscht …"));
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Erasing DVD-RW …"));
         erase(&rec)?;
         probe(&rec)?
     } else {
@@ -806,7 +806,7 @@ fn burn_feed(
             let _ = progress_tx.send(BurnProgress::new(
                 BurnPhase::Preparing,
                 0.0,
-                "Warte auf Laufwerksbereitschaft (Layerwechsel) …",
+                "Waiting for the drive to become ready (layer break) …",
             ));
             // Wait for drive firmware to finish L0 allocation and mark the write feature current.
             let mut settled = None;
@@ -821,13 +821,13 @@ fn burn_feed(
                 }
             }
             format = settled.ok_or_else(|| {
-                BurnError::Backend("Laufwerk ist nach dem Setzen des Layerwechsels nicht bereit (Feature nicht aktuell)".into())
+                BurnError::Backend("The drive is not ready after setting the layer break (feature not current)".into())
             })?;
         } else {
             let _ = progress_tx.send(BurnProgress::new(
                 BurnPhase::Preparing,
                 0.0,
-                format!("{}: Layerwechsel wird vom Laufwerk festgelegt", media.physical),
+                format!("{}: the drive decides the layer break", media.physical),
             ));
         }
     }
@@ -836,19 +836,19 @@ fn burn_feed(
         // DVD+R DL: forcing the close fails at the end of the write on some drives
         // (IMAPI_E_FEATURE_NOT_CURRENT, seen at ~94 %), so IMAPI's default close is used.
         if media.media_type != MediaType::Dvd9 {
-            format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(|e| step("Disc schließen setzen", e))?;
+            format.SetForceMediaToBeClosed(VARIANT_TRUE).map_err(|e| step("set close disc", e))?;
         }
         if !media.blank {
             // Rewritable disc with old content: overwrite from the start.
-            format.SetForceOverwrite(VARIANT_TRUE).map_err(|e| step("Überschreiben setzen", e))?;
+            format.SetForceOverwrite(VARIANT_TRUE).map_err(|e| step("set overwrite", e))?;
         }
         let sps = match speed {
             WriteSpeed::Max => -1,
             WriteSpeed::Specific(s) => s as i32,
         };
-        format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(|e| step("Schreibgeschwindigkeit setzen", e))?;
+        format.SetWriteSpeed(sps, VARIANT_FALSE).map_err(|e| step("set write speed", e))?;
     }
-    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Disc wird vorbereitet …"));
+    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Preparing disc …"));
     // IMAPI's write events report the real position; the image stream reports until the
     // first event arrives (or throughout, without events).
     let events_seen = Arc::new(AtomicBool::new(false));
@@ -884,20 +884,20 @@ fn burn_feed(
         let msg = err.to_string();
         if at == 0.0 && (code == 0xC0AA020B || msg.contains("Featureseite") || msg.contains("feature page")) {
             return Err(BurnError::Backend(format!(
-                "{msg} - USB-Laufwerksbrücke meldet Schreibfeature nicht an IMAPI2. Bitte in den Einstellungen unter E/A „SPTI Direkt“ auswählen oder Backend auf „auto“ belassen."
+                "{msg} - the USB drive bridge does not report the write feature to IMAPI2. In the settings under I/O choose 'SPTI Direct' or leave the backend on 'auto'."
             )));
         }
         return Err(match err {
-            BurnError::Backend(m) => BurnError::Backend(format!("{m} - beim Schreiben, {at:.1} % der Daten an IMAPI übergeben")),
+            BurnError::Backend(m) => BurnError::Backend(format!("{m} - while writing, {at:.1} % of the data handed to IMAPI")),
             other => other,
         });
     }
 
     if options.verify {
         if letter.is_empty() {
-            return Err(BurnError::Backend("Überprüfung nicht möglich: Laufwerk hat keinen Laufwerksbuchstaben".into()));
+            return Err(BurnError::Backend("Verification not possible: the drive has no drive letter".into()));
         }
-        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Disc wird überprüft …"));
+        let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Verifying disc …"));
         let mut device = File::open(format!(r"\\.\{letter}"))?;
         verify(&mut device, &progress_tx)?;
     }
@@ -907,7 +907,7 @@ fn burn_feed(
             let _ = rec.EjectMedia();
         }
     }
-    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Fertig"));
+    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Done, 1.0, "Done"));
     Ok(())
 }
 
@@ -919,7 +919,7 @@ mod tests {
     fn write_updates_map_to_phases() {
         let prep = write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_CALIBRATING_POWER, 0, 0, 0).unwrap();
         assert_eq!((prep.phase, prep.fraction), (BurnPhase::Formatting, 0.0));
-        assert_eq!(prep.message, "Disc wird vorbereitet …", "same text as before the write starts");
+        assert_eq!(prep.message, "Preparing disc …", "same text as before the write starts");
         for a in [IMAPI_FORMAT2_DATA_WRITE_ACTION_VALIDATING_MEDIA, IMAPI_FORMAT2_DATA_WRITE_ACTION_FORMATTING_MEDIA, IMAPI_FORMAT2_DATA_WRITE_ACTION_INITIALIZING_HARDWARE] {
             assert_eq!(write_update(a, 0, 0, 0).unwrap().phase, BurnPhase::Formatting);
         }
@@ -927,7 +927,7 @@ mod tests {
         let w = write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 0, 2_000_000, 500_000).unwrap();
         assert_eq!(w.phase, BurnPhase::Writing);
         assert!((w.fraction - 0.25).abs() < 1e-9);
-        assert_eq!(w.message, "Daten werden geschrieben …");
+        assert_eq!(w.message, "Writing data …");
         let w = write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 1000, 2000, 2000).unwrap();
         assert!((w.fraction - 0.5).abs() < 1e-9, "relative to the start LBA");
         assert_eq!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 1000, 2000, 500).unwrap().fraction, 0.0);
@@ -935,7 +935,7 @@ mod tests {
         assert!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_WRITING_DATA, 0, 0, 10).is_none(), "no sector count yet");
         for a in [IMAPI_FORMAT2_DATA_WRITE_ACTION_FINALIZATION, IMAPI_FORMAT2_DATA_WRITE_ACTION_VERIFYING] {
             let f = write_update(a, 0, 100, 100).unwrap();
-            assert_eq!((f.phase, f.message.as_str()), (BurnPhase::Finalizing, "Disc wird abgeschlossen …"));
+            assert_eq!((f.phase, f.message.as_str()), (BurnPhase::Finalizing, "Finalizing disc …"));
         }
         assert!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION_COMPLETED, 0, 100, 100).is_none());
         assert!(write_update(IMAPI_FORMAT2_DATA_WRITE_ACTION(99), 0, 100, 100).is_none());
