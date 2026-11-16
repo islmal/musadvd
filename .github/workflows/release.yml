@@ -34,6 +34,7 @@ jobs:
           curl.exe -L --fail -o ffmpeg.7z https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z
           if ($LASTEXITCODE) { exit 1 }
           7z x ffmpeg.7z -offmpeg-extract
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
           Copy-Item ffmpeg-extract\*\bin\ffmpeg.exe bin\
           Copy-Item ffmpeg-extract\*\bin\ffprobe.exe bin\
 
