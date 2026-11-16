@@ -2038,6 +2038,24 @@ export function mountMenuEditor(opts: EditorOptions) {
     ];
   }
 
+  /** A project video shows what its button plays: the title, the chapter's start, or the title of the menu it opens. */
+  function followAction(e: LayoutElement) {
+    if (e.type !== "video" || e.path) return;
+    const a = e.action;
+    const shown = a?.type === "playTitle" || a?.type === "playChapter" ? a.title : a?.type === "menu" ? L.menus.find((m) => m.id === a.menu)?.title : null;
+    if (!shown) return;
+    if (a?.type === "playChapter") e.startSecs = titles[shown - 1]?.chapterStarts?.[a.chapter - 1] ?? null;
+    else if (e.title !== shown) e.startSecs = null;
+    e.title = shown;
+  }
+
+  /** The other direction: picking the video's title retargets a title/chapter button to it. */
+  function retargetAction(e: LayoutElement, title: number) {
+    const a = e.action;
+    if (a?.type === "playTitle") e.action = { type: "playTitle", title };
+    else if (a?.type === "playChapter") e.action = { type: "playChapter", title, chapter: 1 };
+  }
+
   function actionControls(e: LayoutElement): HTMLElement[] {
     const a = e.action ?? null;
     const type = a?.type ?? "none";
@@ -2047,6 +2065,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     const setAction = (next: Action | null) => {
       e.action = next;
       if (next && e.rotation !== 0) e.rotation = 0; // DVD hitboxes cannot rotate
+      followAction(e);
     };
     const out: HTMLElement[] = [
       row(
@@ -2065,11 +2084,13 @@ export function mountMenuEditor(opts: EditorOptions) {
           type,
           (v) => {
             const firstOther = L.menus.find((m) => m.id !== menu().id)?.id ?? menu().id;
+            // A project video keeps showing its title when the button starts to play it.
+            const t0 = e.type === "video" && !e.path && e.title > 0 ? e.title : 1;
             setAction(
               v === "playTitle"
-                ? { type: "playTitle", title: 1 }
+                ? { type: "playTitle", title: t0 }
                 : v === "playChapter"
-                  ? { type: "playChapter", title: 1, chapter: 1 }
+                  ? { type: "playChapter", title: t0, chapter: 1 }
                   : v === "menu"
                     ? { type: "menu", menu: firstOther }
                     : v === "playAll"
@@ -2365,7 +2386,11 @@ export function mountMenuEditor(opts: EditorOptions) {
           ),
           v.path
             ? row(tr("menuEditor.datei"), el("span", { class: "ed-path", title: v.path }, fileName(v.path)))
-            : row(tr("menuEditor.titel4"), select(titleOptions(), String(v.title), (x) => (v.title = Number(x)))),
+            : row(tr("menuEditor.titel4"), select(titleOptions(), String(v.title), (x) => {
+                v.title = Number(x);
+                retargetAction(v, v.title);
+                followAction(v);
+              })),
           row(tr("menuEditor.startS"), num(v.startSecs ?? defaultStart(v), (x) => (v.startSecs = Math.max(0, x)), { min: "0", step: "1" })),
           row(tr("menuEditor.anpassung"), select(FIT_LABELS, v.fit, (x) => (v.fit = x as Fit))),
           el("p", { class: "ed-hint" }, tr("menuEditor.dasVideoLaeuftIm")),

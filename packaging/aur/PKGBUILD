@@ -1,12 +1,13 @@
 # Maintainer: islmal <https://github.com/islmal/musadvd>
 pkgname=musadvd-bin
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="DVD, Blu-ray and AVCHD authoring engine, desktop GUI, and Burn Studio"
 arch=('x86_64')
 url="https://github.com/islmal/musadvd"
 license=('GPL-3.0-or-later')
-depends=('ffmpeg' 'libisoburn' 'dvd+rw-tools' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator')
+depends=('ffmpeg' 'libisoburn' 'dvd+rw-tools' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator'
+         'gst-plugins-base' 'gst-plugins-good' 'gst-plugins-bad' 'gst-libav')
 provides=('musadvd')
 conflicts=('musadvd')
 source=("https://github.com/islmal/musadvd/releases/download/v${pkgver}/MusaDVD-v${pkgver}-linux-x86_64-portable.tar.gz")

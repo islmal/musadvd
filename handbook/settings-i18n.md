@@ -26,7 +26,7 @@ One set of files, `frontend/src/locales/<code>.json`, serves both the GUI and th
   texts (`engine.tpl.<English text>`) and language names (`lang.<iso639-1>`).
 - **English (`en.json`) is the master.** Fallback chain: language, then `en`, then the key itself.
   The default UI language is `en` (existing settings files keep their stored language). Shipped: `en`, `de`, `ru`.
-- Engine catalogs are read at runtime from `<exe-dir>/locales`, `<exe-dir>/../lib/MusaDVD/locales` (Linux .deb/AppImage), `<cwd>/locales` or the repository
+- Engine catalogs are read at runtime from `<exe-dir>/locales`, `<exe-dir>/../lib/MusaDVD/locales` (Linux .deb/AppImage), `<exe-dir>/../share/musadvd/locales` (Arch), `<cwd>/locales` or the repository
   path. A release exe without `locales/` next to it shows only keys.
 - `save_settings` calls `i18n::reload()`; each reload leaks the old catalogs (known shortcut).
 

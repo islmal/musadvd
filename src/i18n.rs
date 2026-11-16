@@ -1,7 +1,7 @@
 //! Engine-side UI language: the texts the engine writes onto discs, into track labels and into the
 //! job log. They live in the same locale files as the GUI strings
 //! (`frontend/src/locales/<code>.json`, keys prefixed `engine.`), which are read at runtime from
-//! `<exe-dir>/locales`, `<exe-dir>/../lib/MusaDVD/locales` (Linux packages), `<cwd>/locales` or the repo path, so a new language is just a new JSON file.
+//! `<exe-dir>/locales`, `<exe-dir>/../lib/MusaDVD/locales` and `<exe-dir>/../share/musadvd/locales` (Linux packages), `<cwd>/locales` or the repo path, so a new language is just a new JSON file.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,8 @@ fn locales_dirs() -> Vec<PathBuf> {
         // Linux packages (.deb, AppImage): Tauri puts resources in `<prefix>/lib/<productName>`,
         // the executable in `<prefix>/bin`.
         dirs.push(dir.join("../lib/MusaDVD/locales"));
+        // Arch package (`packaging/aur/PKGBUILD`): `/usr/bin` + `/usr/share/musadvd/locales`.
+        dirs.push(dir.join("../share/musadvd/locales"));
     }
     let candidates = [std::env::current_dir().ok().map(|d| d.join("locales")), Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/src/locales")))];
     for dir in candidates.into_iter().flatten() {
