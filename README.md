@@ -46,7 +46,7 @@ musadvd --help
 ## Documentation
 
 All handbooks and module documentation are in [handbook/](handbook/README.md): architecture, engine,
-burner and GUI modules, CLI, settings and testing, plus the German menu editor user guides.
+burner and GUI modules, CLI, settings and testing.
 
 ## Licence & credits
 

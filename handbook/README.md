@@ -15,17 +15,6 @@ agents are in [`../CLAUDE.md`](../CLAUDE.md); the architecture summary and open 
 | [cli.md](cli.md) | The `musadvd` command-line interface |
 | [settings-i18n.md](settings-i18n.md) | Settings file, locale files and how to add a language |
 | [testing.md](testing.md) | Test suites, fixtures, oracles, scripts and CI |
-| [menu-editor-technical.md](menu-editor-technical.md) | Menu editor, timeline, layout JSON model and menu rendering pipeline (technical reference) |
-
-## User handbooks (German)
-
-These are end-user guides for the menu editor and are written in German (the GUI default language).
-
-| Document | Format |
-|---|---|
-| [Menu editor handbook](menu-editor-handbook.html) / [PDF](Menue-Editor-Handbuch.pdf) | HTML, PDF |
-| [Timeline guide](timeline-guide.html) / [PDF](Menue-Editor-Timeline-Anleitung.pdf) | HTML, PDF |
-| [Technical reference, PDF edition](Menue-Editor-Technical-Reference.pdf) | PDF (print of an earlier `menu-editor-technical.md`) |
 
 ## Plans
 
@@ -34,7 +23,6 @@ ones in `archive/`). They are history, not reference: when a plan and the code d
 
 ## Writing rules
 
-- All Markdown files (handbook, STATUS.md, plans, READMEs) are written in **English**. The German
-  user handbooks above are the only deliberate exception; they are end-user material.
+- All Markdown files (handbook, STATUS.md, plans, READMEs) are written in **English**.
 - Refer to code by function or file name, never by line number.
 - Facts a script can produce (file tree, line counts, dependencies) do not belong in prose.

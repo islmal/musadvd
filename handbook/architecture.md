@@ -84,7 +84,8 @@ camcorder layout). Only HDMV is supported: no BD-J, no pop-up menus.
   `bd_template.rs`, which scales pages and translates `ML_*` button locations to `layout::Action`s.
 - **Intros / motion menus**: `menu_anim.rs` interpolates keyframes and composites sprites in
   memory (rayon); frames are piped to the encoder and never touch disk. A page is one clip
-  `[intro | loop]` with marks; details in [menu-editor-technical.md](menu-editor-technical.md).
+  `[intro | loop]` with marks;
+  see `frontend/src/menuEditor.ts` and `layout.rs` for the model.
 
 ## Burn Studio
 

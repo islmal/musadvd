@@ -31,7 +31,7 @@ embedded `dist/`.
 | `main.ts` | Main window: title list, drag reorder, merge, project settings, size estimate, conversion. |
 | `order.ts` | Pure title-list helpers (`moveItem`); also run by `scripts/check-order.mjs`. |
 | `edit.ts` | "Schnitt & Bild" tab: trimmer with live player, crop inspector, chapter marks. |
-| `menuEditor.ts` | WYSIWYG menu editor: menu manager, stage with drag/resize, properties, Canvas timeline with intro keyframes, template import. Details in [menu-editor-technical.md](menu-editor-technical.md). |
+| `menuEditor.ts` | WYSIWYG menu editor: menu manager, stage with drag/resize, properties, Canvas timeline with intro keyframes, template import. |
 | `layout.ts` | `CustomLayout` types (same JSON as `src/layout.rs`) and a first-draft generator. |
 | `editorWindow.ts` | Editor window entry: receives project data, reports applied layouts to the main window. |
 | `settings.ts` | General settings dialog (navigation tree + pages). |
