@@ -36,11 +36,12 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 2. Fix the 2 Linux unit-test assumptions (`author::tests::title_spec_cli`, `menu::tests::long_text_is_shrunk_then_ellipsized`).
 3. Linux Burn Studio parity (`SG_IO` `ScsiTransport` for Discovery/Read/Verify/Graphs on Linux).
 4. Manual checks: QSV/AMF BD encoding on real Intel/AMD hardware, Burn Studio `io.backend = direct`, standalone player for BD/AVCHD/native subtitles.
-5. Re-add the Actions secrets (`TAURI_SIGNING_PRIVATE_KEY`, password) and re-enable Actions + the `Release` workflow in the recreated repo before the next release.
+5. Verify the 0.1.1 Linux AppImage/.deb on real hardware (trim tab, locales) and decide how `.deb` users get updates (the updater only replaces AppImages).
 
-**Known issues:** `tests/disc_image.rs::golden_video_ts_image_hash` fails on Windows (hash `9103…` vs expected `5215…`, seen in the 2026-11-16 `cargo test` run; cause not investigated, so later test binaries did not run in that session); 4K HDR live-player proxy and BD menus unverified on standalone players; slim manual-latch drives cannot auto-close via `eject -t` if popped open before verify.
+**Known issues:** menu editor: a report that buttons with play-all/VM/audio/subtitle actions cannot be restyled could not be reproduced (Windows app + mock editor); `tests/disc_image.rs::golden_video_ts_image_hash` fails on Windows (hash `9103…` vs expected `5215…`, seen in the 2026-11-16 `cargo test` run; cause not investigated, so later test binaries did not run in that session); 4K HDR live-player proxy and BD menus unverified on standalone players; slim manual-latch drives cannot auto-close via `eject -t` if popped open before verify.
 
 ## 4. Milestone Changelog (last 10)
+- **2026-11-16 – 0.1.1 (Linux fixes, menu editor):** Linux AppImage froze in the trim tab: the web view had no GStreamer plugins (`bundleMediaFramework` in `tauri.linux.conf.json`, GStreamer deps in the `.deb` and `PKGBUILD`); the tab now shows a poster frame instead of loading the `<video>` and `preview_stop` is async. Locale files are also searched in `../lib/MusaDVD/locales` and `../share/musadvd/locales`. Menu editor: a project video follows its button's title/chapter/menu and vice versa (`followAction`/`retargetAction`). Verified: mock editor in the browser pane, Windows app by hand, `cargo test --lib`, `npm run build`; Linux build not tested yet.
 - **2026-11-16 – Repo recreated:** `islmal/musadvd` was deleted and recreated (public) from `main` + `native-authoring` so `refs/pull/*` of the pre-rewrite history are gone; PRs, issues, release `v0.1.0` and Actions history were not kept. Actions is disabled at repo level to prevent release runs. Verified: `git ls-remote origin` shows only the two branches.
 - **2026-11-16 – English by default:** engine errors, warnings, burn dialog and CLI texts are English literals (the former German-only ones were translated); default UI/disc language is `en`; `template_dir` setting, the ConvertX tab only appears when templates exist and the menu editor is the default menu mode. Verified: `cargo test --lib` (384), GUI tests, the affected integration tests, `npm run build`; `golden_video_ts_image_hash` still red.
 - **2026-11-16 – Handbook consolidation:** `handbook/` holds English developer docs for every module, the CLI, settings/i18n and testing (index: `handbook/README.md`); the old German menu editor HTML/PDF guides were removed. All Markdown files are English by rule (`CLAUDE.md`, global rules). Docs only; no code verification needed.
@@ -50,13 +51,11 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 - **2026-10-28 – DVD closed GOPs + continuous audio PTS:** `-flags +cgop -sc_threshold 1000000000` and `DVD_AUDIO_SYNC` `aresample`.
 - **2026-10-28 – GPU vendor selection:** `HwAccelMode` (`none`/`nvidia`/`intel`/`amd`), `BdEncoder::{Qsv,Amf}`, `probe_hw_encoder`.
 - **2026-10-28 – Title drag reorder + merge pre-check:** Pointer-event drag (`initTitleDrag`), `mergeMismatches` validation.
-- **2026-10-27 – Native authoring cleanup:** `.ref-src/` removed; `dvdauthor.exe`/`tsMuxeR.exe`/`spumux.exe` all replaced by native Rust.
-- **2026-10-27 – Native BDAV muxer:** `bd_mux`, `bd_clip`, `pgs` replacing `tsMuxeR.exe` (verified via `tsmuxer_native`).
-- **2026-10-27 – Native DVD authoring:** `author::author_dvd` (`dvdvm`, `dvd_mux`, `ifo`) replacing `dvdauthor.exe`.
-- **2026-10-27 – Native text subtitles:** `textsub.rs` (DejaVu Sans + `ab_glyph`) replacing `spumux.exe`.
 
 ## 5. Dead Ends & Anti-Patterns
 - Old e-mail in rewritten history: ✗ mailmap covers it → ✓ needs `git filter-repo --replace-text`.
 - GitHub `refs/pull/*/head` survive mirror push: ✗ `push --force --mirror` removes them → ✓ PR refs are read-only; only Support or a new repo removes them.
 - Linux burn progress stuck at 15%: ✗ `growisofs` writes `%` to `stderr` → ✓ `growisofs` writes `%` to `stdout`; drain both `stdout` and `stderr`.
 - Tauri Linux build fails on `../bin/*.exe`: ✗ shared `tauri.conf.json` resources → ✓ move `.exe` glob to `tauri.windows.conf.json`.
+- Linux AppImage freezes when the trim tab opens: ✗ ffmpeg preview child / UI-thread kill → ✓ missing GStreamer plugins in the bundled web view (`appsink`/`autoaudiosink` not found); bundle the media framework.
+- Locale keys instead of text on Linux: ✗ broken locale JSON → ✓ package layout puts resources in `<prefix>/lib/<productName>`, not next to the exe; add the package paths to `i18n::locales_dirs`.
