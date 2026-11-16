@@ -1,7 +1,7 @@
 # convertx-rust – working rules
 
-Answer the user in German; code, comments, identifiers and STATUS.md are English. UI text and
-user-facing errors are German. Architecture and open issues: [STATUS.md](STATUS.md); file tree,
+Answer the user in German; code, comments, identifiers and **every Markdown file** (STATUS.md, plans, handbook) are English. UI text and
+user-facing errors are German. Architecture and open issues: [STATUS.md](STATUS.md); module documentation, CLI and testing guides: [handbook/](handbook/README.md); file tree,
 dependencies and git state: `SYSTEM_STATE.txt` (generated).
 
 ## Shell setup (every session)
@@ -22,7 +22,7 @@ Toolchain: rustup host `x86_64-pc-windows-gnu` (MinGW from scoop needed for `dll
 cargo check --workspace
 cargo test --workspace                       # ~3 min, needs bin/ tools + ConvertX templates
 npm run build                                # frontend → dist/ (tsc + vite)
-cargo build --release -p convertx-gui --features tauri/custom-protocol   # GUI exe with embedded frontend
+cargo build --release -p musadvd-gui --features tauri/custom-protocol   # GUI exe with embedded frontend
 cargo build --release                        # CLI
 cargo check --lib --tests --target x86_64-unknown-linux-gnu             # Unix burner compile check
 ```

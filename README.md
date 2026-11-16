@@ -43,6 +43,11 @@ musadvd drives
 musadvd --help
 ```
 
+## Documentation
+
+All handbooks and module documentation are in [handbook/](handbook/README.md): architecture, engine,
+burner and GUI modules, CLI, settings and testing, plus the German menu editor user guides.
+
 ## Licence & credits
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). Derived and bundled components (dvdauthor, tsMuxer,

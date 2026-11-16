@@ -1,6 +1,6 @@
 # Menu editor – technical reference (for AI agents)
 
-Scope: the custom menu editor (`frontend/src/menuEditor.ts`), its Canvas timeline, the layout JSON model shared with Rust, and the Rust pipeline that turns a layout into DVD/Blu-ray menus. Refer to functions by name – line numbers drift. Project rules: [CLAUDE.md](../CLAUDE.md); architecture overview: [STATUS.md](../STATUS.md). Design plan of the timeline: [2026-11-10-disney-fastplay-and-custom-motion-menus.md](plans/2026-11-10-disney-fastplay-and-custom-motion-menus.md).
+Scope: the custom menu editor (`frontend/src/menuEditor.ts`), its Canvas timeline, the layout JSON model shared with Rust, and the Rust pipeline that turns a layout into DVD/Blu-ray menus. Refer to functions by name – line numbers drift. Project rules: [CLAUDE.md](../CLAUDE.md); architecture overview: [STATUS.md](../STATUS.md). Design plan of the timeline: [2026-11-10-disney-fastplay-and-custom-motion-menus.md](../docs/plans/2026-11-10-disney-fastplay-and-custom-motion-menus.md).
 
 State of this document: 13.11.2026, after the timeline overhaul (command undo, Canvas timeline, waveform, external media, layer tracks, intro keyframes, template import).
 
