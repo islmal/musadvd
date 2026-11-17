@@ -1571,8 +1571,10 @@ mod tests {
 
     #[test]
     fn title_spec_cli() {
-        let t = TitleSpec::parse_cli(r"C:\vids\Movie One.mpg@0,10:00,1:02:03.5").unwrap();
-        assert_eq!(t.first_vob(), r"C:\vids\Movie One.mpg");
+        // Built with the platform's separator: a `C:\` path has no directory part on Linux.
+        let file = std::path::Path::new("vids").join("Movie One.mpg").to_string_lossy().into_owned();
+        let t = TitleSpec::parse_cli(&format!("{file}@0,10:00,1:02:03.5")).unwrap();
+        assert_eq!(t.first_vob(), file);
         assert_eq!(t.label, "Movie One");
         assert_eq!(t.vobs[0].chapters, vec!["0", "10:00", "1:02:03.5"]);
         assert_eq!(TitleSpec::parse_cli("a.mpg").unwrap().vobs[0].chapters, vec!["0"]);

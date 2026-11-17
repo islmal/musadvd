@@ -107,8 +107,10 @@ pub struct AppSettings {
     /// Decode the sources on the GPU (CUDA/D3D11VA/QSV) when available.
     pub hw_decode: bool,
     /// GPU vendor for Blu-ray/AVCHD H.264 encoding and GPU decoding (falls back to x264/CPU).
-    // shortcut: old bd_hw_encode=false is not migrated (NVENC back on), add a migration if users complain
     pub hw_accel_mode: HwAccelMode,
+    /// Pre-`hw_accel_mode` switch: `false` is migrated to `hw_accel_mode = none` on load and never written back.
+    #[serde(skip_serializing)]
+    pub bd_hw_encode: Option<bool>,
     /// Play the intro animations of template menus.
     pub menu_animations: bool,
     /// Draft encoding without trellis quantisation (about 40 % faster, slightly lower quality).
@@ -182,6 +184,7 @@ impl Default for AppSettings {
             process_priority: PROCESS_PRIORITIES[0].into(),
             hw_decode: true,
             hw_accel_mode: HwAccelMode::default(),
+            bd_hw_encode: None,
             menu_animations: true,
             fast_encode: false,
             auto_chapter_enabled: true,
@@ -655,6 +658,9 @@ fn language(value: &str) -> String {
 impl AppSettings {
     /// Clamps numbers into sensible ranges and normalises the string choices.
     pub fn sanitized(mut self) -> Self {
+        if self.bd_hw_encode.take() == Some(false) {
+            self.hw_accel_mode = HwAccelMode::None;
+        }
         let code = self.ui_language.trim().to_ascii_lowercase();
         self.ui_language = if available_languages().iter().any(|(c, _)| *c == code) { code } else { "en".into() };
         self.text_overflow_action = choice(&self.text_overflow_action, TEXT_OVERFLOW_ACTIONS);
@@ -1086,6 +1092,14 @@ mod burn_settings_tests {
             assert_eq!(p.hw_accel_mode, m);
             assert!(serde_json::to_string(&p).unwrap().contains(&format!(r#""hw_accel_mode":"{s}""#)));
         }
+        // The old on/off switch: off becomes "none" (and is not written back), on keeps the mode.
+        let off = serde_json::from_str::<AppSettings>(r#"{"bd_hw_encode":false}"#).unwrap().sanitized();
+        assert_eq!(off.hw_accel_mode, HwAccelMode::None);
+        assert!(!serde_json::to_string(&off).unwrap().contains("bd_hw_encode"));
+        let on = serde_json::from_str::<AppSettings>(r#"{"bd_hw_encode":true,"hw_accel_mode":"amd"}"#).unwrap().sanitized();
+        assert_eq!(on.hw_accel_mode, HwAccelMode::Amd);
+        let both = serde_json::from_str::<AppSettings>(r#"{"bd_hw_encode":false,"hw_accel_mode":"intel"}"#).unwrap().sanitized();
+        assert_eq!(both.hw_accel_mode, HwAccelMode::None, "the old switch wins until the file is saved again");
         let bad: AppSettings = serde_json::from_str(r#"{"hw_accel_mode":"foo","tv_standard":"NTSC"}"#).unwrap();
         assert_eq!((bad.hw_accel_mode, bad.tv_standard.as_str()), (HwAccelMode::Nvidia, "NTSC"));
         assert!(old.menu_animations && opts.menu_animations, "menu intros are on by default");

@@ -36,9 +36,11 @@ use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
 use crate::subpic;
 use crate::tools::{ToolError, Toolchain};
 
-/// Parallel hardware encodes. GeForce drivers limit concurrent NVENC sessions; the CPU-side scaling
-/// is the real limit anyway. shortcut: not measured yet (QSV/AMF not at all), set after the real-GPU run.
-const HW_MAX_JOBS: usize = 4;
+/// Parallel hardware encodes. Measured 2026-11-17 (RTX 4070 SUPER, 1080p25 NVENC p5 `-multipass
+/// fullres`, 1000 frames per job): 1 job 206 fps, 2 jobs 212, 4 jobs 216, 8 jobs 218 in total, so
+/// the encoder is saturated by one job; the second only overlaps the CPU side (decode, filters,
+/// audio). shortcut: NVENC only, QSV/AMF not measured; raise if one of them scales with jobs.
+const HW_MAX_JOBS: usize = 2;
 
 /// Encoder per title: `fake_interlaced` (1080i) rates cannot be flagged by the hardware
 /// encoders and always use x264.
@@ -46,7 +48,10 @@ fn title_encoders(hw: Option<BdEncoder>, rates: impl Iterator<Item = BdRate>) ->
     rates.map(|r| if r.fake_interlaced { BdEncoder::X264 } else { hw.unwrap_or(BdEncoder::X264) }).collect()
 }
 
-/// Parallel encodes of moving menus. shortcut: not measured, raise once RAM use per menu is known.
+/// Parallel encodes of moving menus. Measured 2026-11-17 (Ryzen 7 8845HS, six 1080p slot clips
+/// overlaid, x264 medium, 500 frames per job): 1 job 53 fps, 2 jobs 55, 4 jobs 53 in total, at
+/// 2.0 GB of RAM per job. x264 already uses every core, so more jobs only cost memory; two keep
+/// the cores busy while the other waits on the piped intro compositing.
 const MOTION_MENU_MAX_JOBS: usize = 2;
 
 /// Frame rate of one Blu-ray title.

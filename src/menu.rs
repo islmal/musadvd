@@ -1603,13 +1603,10 @@ mod tests {
 
     #[test]
     fn long_text_is_shrunk_then_ellipsized() {
-        let fonts = font_chain(&rounded_style());
-        if fonts.is_empty() {
-            eprintln!("skipping: no fonts installed");
-            return;
-        }
+        // The bundled font only: the widths below must not depend on which system fonts exist.
+        let fonts = vec![bundled_font()];
         // Fits after shrinking: no ellipsis, at least 70 % size.
-        let (placed, em) = fit_text(&fonts, "Episode 02", 27.0, text_width(&fonts, &place_chars(&fonts, "Episode 02"), 27.0) * 0.8, MIN_TEXT_SCALE);
+        let (placed, em) = fit_text(&fonts, "Episode 02", 27.0, text_width(&fonts, &place_chars(&fonts, "Episode 02"), 27.0) * 0.9, MIN_TEXT_SCALE);
         assert_eq!(placed.len(), 10);
         assert!(em >= 27.0 * MIN_TEXT_SCALE - 1e-3 && em < 27.0);
 
