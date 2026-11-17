@@ -32,6 +32,29 @@ fn tools() -> Option<(tokio::runtime::Runtime, Toolchain)> {
     }
 }
 
+/// `field value` lines of the H.264 headers of the first pictures of `file` (ffmpeg's
+/// `trace_headers`, whitespace collapsed; SEI payload types as `payload_type N`).
+fn headers(tools: &Toolchain, file: &Path) -> String {
+    let out = Command::new(&tools.ffmpeg)
+        .args(["-hide_banner", "-loglevel", "trace", "-i"])
+        .arg(file)
+        .args(["-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-frames:v", "3", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.starts_with("[trace_headers"))
+        .filter_map(|l| {
+            // "[trace_headers @ 0x..] 167   nal_hrd_parameters_present_flag   0 = 0"
+            let mut parts = l.splitn(2, ']').nth(1)?.split_whitespace().skip(1);
+            let name = parts.next()?;
+            let value = l.rsplit('=').next()?.trim();
+            let name = if name.starts_with("last_payload_type_byte") { "payload_type" } else { name };
+            Some(format!("{name} {value}\n"))
+        })
+        .collect()
+}
+
 fn ffmpeg(tools: &Toolchain, args: &[&str]) {
     let st = Command::new(&tools.ffmpeg).args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).status().unwrap();
     assert!(st.success(), "ffmpeg {args:?}");
@@ -798,7 +821,7 @@ fn compliant_video_is_copied_and_titles_keep_their_own_format() {
         &tools,
         &[
             "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=24000/1001:d=8", "-f", "lavfi", "-i", "sine=f=440:d=8", "-c:v", "libx264",
-            "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-bluray-compat", "1", "-b:v", "6M",
+            "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-bluray-compat", "1", "-g", "24", "-b:v", "6M",
             "-c:a", "ac3", film.to_str().unwrap(),
         ],
     );
@@ -831,6 +854,15 @@ fn compliant_video_is_copied_and_titles_keep_their_own_format() {
     // The copied stream decodes cleanly after the BDAV mux.
     let decode = Command::new(&tools.ffmpeg).args(["-v", "error", "-i"]).arg(stream(0)).args(["-f", "null", "-"]).output().unwrap();
     assert!(decode.status.success() && decode.stderr.is_empty(), "{}", String::from_utf8_lossy(&decode.stderr));
+    // The source had no HRD and no timing SEI (x264 without --nal-hrd); the muxer added both,
+    // and ffmpeg's own header parser reads them back.
+    let source = headers(&tools, &film);
+    assert!(source.contains("nal_hrd_parameters_present_flag 0") && !source.contains("payload_type 1"), "{source}");
+    let muxed = headers(&tools, &stream(0));
+    for want in ["nal_hrd_parameters_present_flag 1", "time_scale 48000", "num_units_in_tick 1001", "bit_rate_value_minus1[0] 624999", "payload_type 0", "payload_type 1"] {
+        assert!(muxed.contains(want), "{want} in {muxed}");
+    }
+    assert!(!muxed.to_lowercase().contains("error"), "{muxed}");
     let encoded = probe(&tools, &stream(1), "v:0", "stream=width,height,r_frame_rate");
     for want in ["width=1280", "height=720", "r_frame_rate=50/1"] {
         assert!(encoded.contains(want), "{want} in {encoded}");
@@ -841,5 +873,50 @@ fn compliant_video_is_copied_and_titles_keep_their_own_format() {
     let strict = BuildOptions { inputs: vec![a], output: dir.join("strict"), bd_video: musadvd::encoder::BdVideoMode::Strict, selections: vec![one()], ..opts };
     let err = build(&rt, &strict).unwrap_err().to_string();
     assert!(err.contains("cannot be copied"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Copy candidates that pass the format checks but not the stream scan are re-encoded: a
+/// 0.6 s bitrate burst overflows the disc's video buffer, a 10 s GOP has too few seek points.
+#[test]
+fn burst_and_long_gop_sources_fall_back_to_encoding() {
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_scan_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = |name: &str, filter: &str, extra: &[&str]| {
+        let path = dir.join(name);
+        let mut args = vec!["-f", "lavfi", "-i", filter, "-f", "lavfi", "-i", "sine=f=440:d=12", "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p"];
+        args.extend_from_slice(extra);
+        args.extend(["-c:a", "ac3", "-shortest", path.to_str().unwrap()]);
+        ffmpeg(&tools, &args);
+        path
+    };
+    let burst = clip(
+        "burst.mkv",
+        "color=c=gray:s=1920x1080:r=24000/1001:d=12,noise=alls=60:allf=t+u:enable='between(t,5,5.6)'",
+        &["-x264-params", "keyint=24:min-keyint=24", "-qp", "14"],
+    );
+    let long_gop = clip("gop.mkv", "testsrc2=s=1920x1080:r=24000/1001:d=12", &["-x264-params", "keyint=240:min-keyint=240:scenecut=0", "-b:v", "6M"]);
+    let one = || StreamSelection { audio: Some(vec![1]), subtitles: Some(vec![]), ..StreamSelection::default() };
+    let opts = BuildOptions {
+        inputs: vec![burst, long_gop],
+        disc: DiscType::Bd25,
+        output: dir.join("out"),
+        resolution: Resolution::Hd1080,
+        fast_encode: true,
+        bd_video: musadvd::encoder::BdVideoMode::Auto,
+        selections: vec![one(), one()],
+        ..BuildOptions::default()
+    };
+    let mut warnings = Vec::new();
+    rt.block_on(dvd::build_dvd(&opts, &mut |e| {
+        if let dvd::Event::Warning(w) = e {
+            warnings.push(w)
+        }
+    }))
+    .unwrap_or_else(|e| panic!("build failed: {e}"));
+    assert!(warnings.iter().any(|w| w.starts_with("burst:") && w.contains("exceeds the disc's video buffer")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.starts_with("gop:") && w.contains("keyframes up to 240 pictures apart")), "{warnings:?}");
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -10,6 +10,7 @@ pub mod bd_template;
 pub mod burner;
 pub mod calculator;
 pub mod config;
+pub mod h264;
 pub mod dvd;
 pub mod dvd_mux;
 pub mod dvdvm;

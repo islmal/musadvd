@@ -1156,5 +1156,6 @@
  "main.bdNoFormat": "kein Blu-ray-Format",
  "main.bdFormatChanged": "Auflösung oder Bildrate weicht von der Quelle ab",
  "main.bdReencodeReason": "Wird neu kodiert, weil: {reason}",
- "main.bdMenuRateNote": "Die Menüs verwenden die Bildrate dieses ersten Titels."
+ "main.bdMenuRateNote": "Die Menüs verwenden die Bildrate dieses ersten Titels.",
+ "engine.bd_video_scan": "{label}: Videospur wird für die Kopie geprüft"
 }

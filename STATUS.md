@@ -1,6 +1,6 @@
 # STATUS — MusaDVD
 
-> State as of **2026-11-16**. Architecture/context only; facts: `SYSTEM_STATE.txt`; build rules: `CLAUDE.md`; module docs: `handbook/`.
+> State as of **2026-11-17**. Architecture/context only; facts: `SYSTEM_STATE.txt`; build rules: `CLAUDE.md`; module docs: `handbook/`.
 
 ## 1. Mission & Out-of-Scope
 
@@ -13,7 +13,8 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 ## 2. System Architecture & Data Flow
 
 - **DVD job (5 phases):** probe (`ffprobe`) → plan titles (merge groups) → **[1] menus** (`template.rs`/`menu.rs` or `layout.rs` → native `spumux.rs`) → bitrate from real menu size → **[2] videos** (parallel `ffmpeg` → MPEG-2 + AC-3 piped through native `spumux`) → **[3] authoring** (`author::author_dvd` → `dvdvm`/`dvd_mux`/`ifo` → `VIDEO_TS`) → **[4] ISO** (native UDF 1.02 + ISO 9660 bridge, layer break) → **[5] burn** (Windows IMAPI2 / Linux `growisofs`+`xorriso`).
-- **Blu-ray / AVCHD:** `x264` or GPU H.264 (`nvenc`/`qsv`/`amf`, 1080i always `x264`) → MKV → native `bd_mux::mux_title` + `bd_clip` (CLPI/MPLS) → `hdmv.rs`/`bd_menu.rs` + IGS (`igs.rs`) + PGS (`pgs.rs`) → native UDF 2.50 (`udf250.rs`).
+- **Blu-ray / AVCHD:** `x264` or GPU H.264 (`nvenc`/`qsv`/`amf`, 1080i always `x264`) → MKV → native `bd_mux::mux_title` + `bd_clip` (CLPI/MPLS) → `hdmv.rs`/`bd_menu.rs` + IGS (`igs.rs`) + PGS (`pgs.rs`) → native UDF 2.50 (`udf250.rs`). Each title has its own size and frame rate (per-title overrides in the GUI's Video tab; menus follow title 1's rate, made valid for the menu size).
+- **Blu-ray video copy (`BdVideoMode`: encode default / auto / strict, per-title override):** `encoder::bd_video_copy` checks codec/profile/level/pixel format/HDR/native BD format/trim/crop/average bitrate; at build time `bd_mux::scan_video` streams the video through the disc's buffer model (`h264::Vbv` at `limits().vbv_*`) and checks the IDR distance (≤ `BdRate::keyint`, 1 s). Copied titles are a fixed size in `bitrate_plan`; the encoded ones share the rest. Streams without Blu-ray timing get it from `bd_mux::TimingRepair` (rewritten SPS VUI timing + NAL HRD via `h264.rs`, buffering-period SEI at IDRs, picture-timing SEI on every picture, delays from the same buffer model), like tsMuxeR's `--insertSEI`.
 - **Burn Studio (`burn_studio.rs` / `studio.rs`):** Windows IMAPI2 or direct MMC/SPTI (`mmcwrite.rs`), Discovery blank-media testing, Read, Verify, and `.ibg` graph telemetry (`graph.rs`). All MMC goes through the `ScsiTransport` trait (`spti.rs`): IMAPI `IDiscRecorder2Ex` / SPTI on Windows, `SgIoTransport` (`SG_IO` on `/dev/srN`, opened `O_NONBLOCK`, needs the `cdrom`/`optical` group) on Linux. On Linux every Burn Studio write (images, Discovery zeros, streamed builds) uses `mmcwrite::burn_direct_with`, because `CliBurner` has no `burn_source`; Read/Verify read the block device, sized by READ CAPACITY.
 - **Live player (`preview.rs`):** Loopback HTTP fMP4 proxy from `ffmpeg` (480p ultrafast, shared `source_chain` with deinterlace → HDR tonemap → crop).
 - **i18n & config:** Single locale JSONs (`frontend/src/locales/*.json`, `en.json` master and default language) shared by GUI and engine. Settings at `%APPDATA%\musadvd\settings.json` (Windows) or `$XDG_CONFIG_HOME/musadvd/settings.json` (Linux); work dir `<project>.musadvd-work`.
@@ -23,6 +24,8 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 - `ffmpeg` `-ss` + stream-copied audio fails to cut start → trimmed titles always re-encode audio.
 - `dvd` muxer LPCM causes PTS discontinuities → `lpcm` mode writes AC-3 on DVD.
 - `growisofs` reports `%` on `stdout` (not `stderr`) and may leave `/dev/sr0` settling (`ENOMEDIUM` = 123) right after closing session → `unix.rs` drains both pipes and retries `open_for_verify`.
+- Most web rips cannot be copied: x264's default GOP (`keyint` 250) breaks the 1 s IDR rule, and `ultrafast` x264 is Constrained Baseline even with `-profile high`.
+- Interlaced (field-coded) H.264 is copied only when it already carries Blu-ray timing; its buffer and GOP are not scanned.
 - `tauri.windows.conf.json` holds `../bin/*.exe` and `nsis` targets; `tauri.linux.conf.json` holds `deb`/`appimage` targets so Linux builds do not fail on missing `.exe` globs.
 
 ## 3. Roadmap & Known Issues
@@ -35,12 +38,14 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 1. Hardware test the 6 DVD-RW discs in Windows **Burn Studio** (Discovery + Verify, Erase + Rewrite) and on Linux (`CliBurner`).
 2. Fix the 2 Linux unit-test assumptions (`author::tests::title_spec_cli`, `menu::tests::long_text_is_shrunk_then_ellipsized`).
 3. Hardware-test Linux Burn Studio over `SG_IO` (drive details, Discovery on a DVD-RW, Read, Verify, graph CPU column); then tray eject/lock via START STOP UNIT / PREVENT ALLOW over the transport.
-4. Manual checks: QSV/AMF BD encoding on real Intel/AMD hardware, Burn Studio `io.backend = direct`, standalone player for BD/AVCHD/native subtitles.
+4. Manual checks: QSV/AMF BD encoding on real Intel/AMD hardware, Burn Studio `io.backend = direct`, standalone player for BD/AVCHD/native subtitles and **copied titles with added timing** (decide afterwards whether `auto` can become the default).
 5. Verify the 0.1.1 Linux AppImage/.deb on real hardware (trim tab, locales) and decide how `.deb` users get updates (the updater only replaces AppImages).
 
-**Known issues:** 4K HDR live-player proxy and BD menus unverified on standalone players; slim manual-latch drives cannot auto-close via `eject -t` if popped open before verify.
+**Known issues:** 4K HDR live-player proxy, BD menus and copied BD video unverified on standalone players; slim manual-latch drives cannot auto-close via `eject -t` if popped open before verify; the GUI's Copy/Re-encode badges use the settings from when a file was added and cannot show the build-time scan (buffer peaks, GOP); no "fit to disc" fallback when copies alone overflow (the build fails with DoesNotFit).
 
 ## 4. Milestone Changelog (last 10)
+- **2026-11-17 – Blu-ray timing repair + copy scan:** `h264.rs` (RBSP escaping, SPS parse/VUI+HRD rewrite, BP/PT SEI, `Vbv` leaky bucket), `bd_mux::scan_video` (build-time buffer and IDR-gap check of copy candidates) and `bd_mux::TimingRepair` (adds Blu-ray timing to copied streams without it). Verified: `h264` unit tests; `tests/bluray.rs` copies an x264 stream without HRD and ffmpeg's `trace_headers` reads back NAL HRD (40 Mbit/s, 30 Mbit), 24-bit delays and both SEI, the stream decodes cleanly; a 0.6 s bitrate burst and a 10 s GOP fall back to encoding; `tsmuxer_native` fixtures unchanged; not tested on a standalone player.
+- **2026-11-16 – Blu-ray video copy, per-title Video tab, version label:** `BdVideoMode` (GUI footer, `--bd-video`), per-title resolution/frame rate/copy override (`StreamSelection::bd_*`, `BdTitleFiles::resolution`), fixed-size copies in `bitrate_plan`, Copy/Re-encode badges, `v<version>` next to the logo, motion-menu switch only for DVD ConvertX template menus. Verified: `cargo test --workspace`, `npm run build`, `tests/bluray.rs` (copied 1080p23.976 decodes after the mux, 720p25 → 720p50 override, strict mode refuses); GUI not checked by hand.
 - **2026-11-17 – Linux Burn Studio over SG_IO:** `spti::SgIoTransport` (one `ioctl(SG_IO)`; host/driver timeouts are delivery errors, check conditions return sense like SPTI) backs `studio::transport` on Linux, so drive details, CSS check, Discovery (direct MMC writer), Read and Verify work there; graphs get CPU load from `/proc/stat`. Verified: `cargo check --workspace`, `cargo check --lib --tests --target x86_64-unknown-linux-gnu`, `cargo test --lib burner::` (fake transports for the SG_IO result mapping, the Read/Verify open path and Discovery zeros), `burn_flow` + `process_hygiene`; not run on Linux hardware.
 - **2026-11-16 – 0.1.1 (Linux fixes, menu editor):** Linux AppImage froze in the trim tab: the web view had no GStreamer plugins (`bundleMediaFramework` in `tauri.linux.conf.json`, GStreamer deps in the `.deb` and `PKGBUILD`); the tab now shows a poster frame instead of loading the `<video>` and `preview_stop` is async. Locale files are also searched in `../lib/MusaDVD/locales` and `../share/musadvd/locales`. Menu editor: a project video follows its button's title/chapter/menu and vice versa (`followAction`/`retargetAction`). Verified: mock editor in the browser pane, Windows app by hand (the user confirmed the button controls work), `cargo test --lib`, `npm run build`; release `v0.1.1` built for Windows and Linux, the Linux packages are not tested on hardware yet.
 - **2026-11-16 – Repo recreated:** `islmal/musadvd` was deleted and recreated (public) from `main` + `native-authoring` so `refs/pull/*` of the pre-rewrite history are gone; PRs, issues, release `v0.1.0` and Actions history were not kept. Actions is disabled at repo level to prevent release runs. Verified: `git ls-remote origin` shows only the two branches.
@@ -48,9 +53,6 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 - **2026-11-16 – Handbook consolidation:** `handbook/` holds English developer docs for every module, the CLI, settings/i18n and testing (index: `handbook/README.md`); the old German menu editor HTML/PDF guides were removed. All Markdown files are English by rule (`CLAUDE.md`, global rules). Docs only; no code verification needed.
 - **2026-11-16 – MusaDVD rename, Linux hardware validation & multi-platform CI:** Renamed project to **MusaDVD** (`musadvd` / `musadvd-gui`, `de.musadvd.app`, `.musadvd-work`). Verified on Linux Mint 22.3 (i5-1235U + USB BU40N): `vaapi` decode, full DVD-Video authoring + DVD+R burn playable in Linux VLC and PS4. Fixed `unix.rs` stdout+stderr draining & `ENOMEDIUM` verify retry, Linux `$HOME`/`$XDG_CONFIG_HOME` paths, `hw_decode: true` default + cross-vendor fallback, `tauri.{windows,linux}.conf.json` split, `release.yml` (Win `.exe`+`.zip`, Linux `.deb`+`.AppImage`+`.tar.gz` on pushes/tags), and `packaging/aur/PKGBUILD`.
 - **2026-10-28 – Public-release prep:** GPL-3.0-or-later (`LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`), history rewritten with `git-filter-repo`.
-- **2026-10-28 – Project-prefixed work dir:** `<project>.musadvd-work` (was `.convertx-work`).
-- **2026-10-28 – DVD closed GOPs + continuous audio PTS:** `-flags +cgop -sc_threshold 1000000000` and `DVD_AUDIO_SYNC` `aresample`.
-- **2026-10-28 – GPU vendor selection:** `HwAccelMode` (`none`/`nvidia`/`intel`/`amd`), `BdEncoder::{Qsv,Amf}`, `probe_hw_encoder`.
 
 ## 5. Dead Ends & Anti-Patterns
 - Old e-mail in rewritten history: ✗ mailmap covers it → ✓ needs `git filter-repo --replace-text`.
@@ -58,4 +60,5 @@ Principles: **clean room w.r.t. ConvertX** (only external `.ini` template files 
 - Linux burn progress stuck at 15%: ✗ `growisofs` writes `%` to `stderr` → ✓ `growisofs` writes `%` to `stdout`; drain both `stdout` and `stderr`.
 - Tauri Linux build fails on `../bin/*.exe`: ✗ shared `tauri.conf.json` resources → ✓ move `.exe` glob to `tauri.windows.conf.json`.
 - Linux AppImage freezes when the trim tab opens: ✗ ffmpeg preview child / UI-thread kill → ✓ missing GStreamer plugins in the bundled web view (`appsink`/`autoaudiosink` not found); bundle the media framework.
+- Copy test reads odd HRD values (15/5-bit delays, 4-byte picture timing): ✗ wrong SPS writer → ✓ a stale `cx_bluray_vcopy_*` folder of an earlier run (re-encoded by x264) was inspected; pick test folders by time (`ls -dt`) and clear them.
 - Locale keys instead of text on Linux: ✗ broken locale JSON → ✓ package layout puts resources in `<prefix>/lib/<productName>`, not next to the exe; add the package paths to `i18n::locales_dirs`.

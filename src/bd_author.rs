@@ -47,6 +47,8 @@ pub struct BdTitleFiles {
     pub audio_kinds: Vec<AudioKind>,
     /// Frame size of this title (titles may differ from each other and from the menus).
     pub resolution: Resolution,
+    /// Stream-copied video: the disc's video buffer (bit/s, bits) the muxer's timing uses.
+    pub copy_vbv: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,7 +96,7 @@ impl BdProject {
         let (width, _) = t.resolution.frame_size(crate::author::TvStandard::Pal);
         MuxJob {
             mkv: work.join(&t.mkv),
-            video: VideoSpec { fps: t.rate.fps, width, interlaced: t.rate.fake_interlaced },
+            video: VideoSpec { fps: t.rate.fps, width, interlaced: t.rate.fake_interlaced, copy_vbv: t.copy_vbv },
             audio: self
                 .audio_langs
                 .iter()
@@ -128,7 +130,7 @@ pub fn menu_job(mkv: PathBuf, sup: Option<PathBuf>, number: usize, intro_secs: O
     let chapters = intro_secs.map_or_else(Vec::new, |t| vec![0.0, (t * 1000.0 - 1e-6).ceil() / 1000.0]);
     MuxJob {
         mkv,
-        video: VideoSpec { fps: rate.fps, width, interlaced: rate.fake_interlaced },
+        video: VideoSpec { fps: rate.fps, width, interlaced: rate.fake_interlaced, copy_vbv: None },
         audio: vec![(Codec::Ac3, *b"und")],
         subs: sup.into_iter().map(|sup| SubSpec { sup, lang: *b"und", ig: true }).collect(),
         chapters,
@@ -155,6 +157,7 @@ mod tests {
                     rate,
                     audio_kinds: vec![AudioKind::Ac3, AudioKind::Dts],
                     resolution: Resolution::Hd1080,
+                    copy_vbv: None,
                 },
                 BdTitleFiles {
                     mkv: "title_02.mkv".into(),
@@ -164,6 +167,7 @@ mod tests {
                     rate: BdRate { fps: (25, 1), fake_interlaced: true },
                     audio_kinds: vec![AudioKind::Lpcm, AudioKind::Ac3],
                     resolution: Resolution::Hd1080,
+                    copy_vbv: None,
                 },
             ],
             audio_langs: vec![Some("ger".into()), None],

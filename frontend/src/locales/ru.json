@@ -1156,5 +1156,6 @@
  "main.bdNoFormat": "не формат Blu-ray",
  "main.bdFormatChanged": "разрешение или частота кадров отличаются от источника",
  "main.bdReencodeReason": "Перекодируется, потому что: {reason}",
- "main.bdMenuRateNote": "Меню используют частоту кадров этого первого титула."
+ "main.bdMenuRateNote": "Меню используют частоту кадров этого первого титула.",
+ "engine.bd_video_scan": "{label}: проверка видеопотока для копирования"
 }

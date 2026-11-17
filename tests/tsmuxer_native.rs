@@ -90,7 +90,7 @@ fn job(c: &Case, dir: &Path) -> MuxJob {
     create_skeleton(&bdmv).unwrap();
     MuxJob {
         mkv: input.join("in.mkv"),
-        video: VideoSpec { fps: c.fps, width: c.width, interlaced: c.interlaced },
+        video: VideoSpec { fps: c.fps, width: c.width, interlaced: c.interlaced, copy_vbv: None },
         audio: c.audio.iter().map(|&(codec, l)| (codec, lang(l))).collect(),
         subs: c.subs.iter().map(|&(f, l)| SubSpec { sup: input.join(f), lang: lang(l), ig: false }).collect(),
         chapters: c.chapters.to_vec(),

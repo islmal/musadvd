@@ -1156,5 +1156,6 @@
  "main.bdNoFormat": "not a Blu-ray format",
  "main.bdFormatChanged": "resolution or frame rate differs from the source",
  "main.bdReencodeReason": "Re-encoded because: {reason}",
- "main.bdMenuRateNote": "The menus use this first title's frame rate."
+ "main.bdMenuRateNote": "The menus use this first title's frame rate.",
+ "engine.bd_video_scan": "{label}: checking the video stream for a copy"
 }

@@ -871,8 +871,8 @@ impl BdVideoMode {
 }
 
 /// Average video bitrate of the (untrimmed) source in kbit/s: the stream's own, else the file
-/// size minus the audio tracks. shortcut: average only, peaks above the disc's VBV limit are
-/// not detected (that needs a full bitstream scan).
+/// size minus the audio tracks. Peaks are checked by the build's stream scan
+/// ([`crate::bd_mux::scan_video`]), which the GUI's probe does not run.
 pub fn source_video_kbps(info: &MediaInfo) -> Option<u32> {
     let v = info.video.as_ref()?;
     if let Some(b) = v.bit_rate {
@@ -910,9 +910,10 @@ pub fn not_bd_format(v: &VideoStream) -> String {
     format!("{}×{} {:.3} fps {scan} is not a Blu-ray video format", v.width, v.height, v.fps)
 }
 
-/// Everything about a stream copy except the picture format (see [`bd_video_copy`]).
-/// shortcut: HRD/VBV parameters and GOP structure of the stream are not checked; a picky player
-/// may still reject an in-spec web rip, which is what the "encode" mode is for.
+/// Everything about a stream copy except the picture format and what needs a scan of the whole
+/// stream (buffer peaks, keyframe distance: [`crate::bd_mux::scan_video`], at build time). Missing
+/// Blu-ray timing (HRD, SEI) is added by the muxer. Copies stay opt-in: they are untested on
+/// standalone players.
 pub fn bd_stream_copy(info: &MediaInfo, vp: VideoProcessing, max_kbps: u32) -> Result<u32, String> {
     let v = info.video.as_ref().ok_or("no video stream")?;
     if v.codec != "h264" {

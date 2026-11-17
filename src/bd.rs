@@ -712,9 +712,25 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let tv = opts.tv_standard;
     let resolution = opts.resolution;
     let limits = opts.disc.limits();
+    // The disc's video buffer: the copy check and the muxer's added timing use the same model.
+    let copy_vbv = (u64::from(limits.vbv_maxrate_kbps) * 1000, u64::from(limits.vbv_bufsize_kbit) * 1000);
     for t in titles.iter_mut().filter(|t| t.video_mode != BdVideoMode::Encode) {
         let max = limits.max_video_kbps.min(limits.max_total_kbps.saturating_sub(t.audio_kbps(&layout)));
-        match encoder::bd_video_copy(&t.info, t.rate, t.resolution, t.video, max) {
+        let mut verdict = encoder::bd_video_copy(&t.info, t.rate, t.resolution, t.video, max);
+        if verdict.is_ok() {
+            log(Event::Step(tf!(opts.ui_lang, "bd_video_scan", label = t.label)));
+            let v = t.info.video.as_ref().expect("probed file has video");
+            let (fps, keyint) = (t.rate.fps, t.rate.keyint());
+            let args = crate::bd_mux::scan_args(t.info.input_args(), v.index);
+            let scan = cancellable(cancel, tools.ffmpeg_sink(&args, t.info.duration_secs, |_| {}, move |pipe| {
+                crate::bd_mux::scan_video(std::io::BufReader::with_capacity(1 << 20, pipe), fps, copy_vbv)
+            }))
+            .await?;
+            if let Some(why) = scan.and_then(|s| s.issue(keyint).map_or(Ok(()), Err)).err() {
+                verdict = Err(why);
+            }
+        }
+        match verdict {
             Ok(kbps) => {
                 t.copy_kbps = Some(kbps);
                 log(Event::Step(tf!(opts.ui_lang, "bd_video_copy", label = t.label, kbps = kbps)));
@@ -946,6 +962,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 rate: t.rate,
                 audio_kinds: t.audio_outs(&layout).iter().map(|o| o.kind()).collect(),
                 resolution: t.resolution,
+                copy_vbv: t.copy_kbps.map(|_| copy_vbv),
             })
             .collect(),
         audio_langs: layout.audio_langs.clone(),
