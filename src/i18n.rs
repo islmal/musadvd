@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 /// Language for the template's fixed UI texts ("Chapters", "Back", ...) and generated texts: a locale
 /// code (`de`, `en`, ...) whose file is loaded on demand. Missing texts fall back to English, then to the key.
@@ -112,43 +112,42 @@ pub fn available_languages() -> Vec<(String, String)> {
     locales_dir().map(|d| languages_in(&d)).unwrap_or_default()
 }
 
-static CATALOGS: LazyLock<RwLock<HashMap<String, &'static Catalog>>> = LazyLock::new(Default::default);
+static CATALOGS: LazyLock<RwLock<HashMap<String, Arc<Catalog>>>> = LazyLock::new(Default::default);
 
-/// Cached catalog of `code`, loaded on first use. `tr` hands out `&'static str`, hence the leak.
-fn catalog(code: &str) -> Option<&'static Catalog> {
-    if let Some(&cat) = CATALOGS.read().unwrap().get(code) {
-        return Some(cat);
+/// Cached catalog of `code`, loaded on first use; [`reload`] drops it and the last user frees it.
+fn catalog(code: &str) -> Option<Arc<Catalog>> {
+    if let Some(cat) = CATALOGS.read().unwrap().get(code) {
+        return Some(cat.clone());
     }
-    let cat: &'static Catalog = Box::leak(Box::new(load(code).ok()?));
-    CATALOGS.write().unwrap().insert(code.to_string(), cat);
+    let cat = Arc::new(load(code).ok()?);
+    CATALOGS.write().unwrap().insert(code.to_string(), cat.clone());
     Some(cat)
 }
 
 /// Drops the cache so edited or added locale files are picked up on the next lookup.
-// shortcut: each reload leaks the old catalogs (~few hundred KB per language switch), fine for a desktop app; switch to Arc<Catalog> + owned Strings if reloads become frequent.
 pub fn reload() {
     CATALOGS.write().unwrap().clear();
 }
 
 /// `full` in the language's catalog, then in English.
-fn lookup<'a>(cat: Option<&'a Catalog>, en: Option<&'a Catalog>, full: &str) -> Option<&'a str> {
-    cat.and_then(|c| c.get(full)).or_else(|| en.and_then(|c| c.get(full))).map(String::as_str)
+fn lookup(cat: Option<Arc<Catalog>>, en: Option<Arc<Catalog>>, full: &str) -> Option<String> {
+    cat.and_then(|c| c.get(full).cloned()).or_else(|| en.and_then(|c| c.get(full).cloned()))
 }
 
 /// Text of the engine key `key` (`engine.<key>` in the locale file) in `ui`; falls back to English
 /// (the master file), then to the key itself.
-pub fn tr(ui: UiLang, key: &'static str) -> &'static str {
-    tr_key(ui, &format!("engine.{key}")).unwrap_or(key)
+pub fn tr(ui: UiLang, key: &'static str) -> String {
+    tr_key(ui, &format!("engine.{key}")).unwrap_or_else(|| key.to_string())
 }
 
 /// Text of an arbitrary locale key (current language, then English), e.g. `lang.de`.
-pub fn tr_key(ui: UiLang, full_key: &str) -> Option<&'static str> {
+pub fn tr_key(ui: UiLang, full_key: &str) -> Option<String> {
     lookup(catalog(ui.0), catalog("en"), full_key)
 }
 
 /// [`tr`] with `{name}` placeholders replaced.
 pub fn trf(ui: UiLang, key: &'static str, args: &[(&str, String)]) -> String {
-    args.iter().fold(tr(ui, key).to_string(), |s, (k, v)| s.replace(&format!("{{{k}}}"), v))
+    args.iter().fold(tr(ui, key), |s, (k, v)| s.replace(&format!("{{{k}}}"), v))
 }
 
 /// `tf!(ui, "key", name = value, ...)`: [`trf`] with `Display` values.
@@ -169,8 +168,8 @@ mod tests {
         v
     }
 
-    fn engine_keys() -> Vec<&'static str> {
-        catalog("en").unwrap().keys().filter_map(|k| k.strip_prefix("engine.")).collect()
+    fn engine_keys() -> Vec<String> {
+        catalog("en").unwrap().keys().filter_map(|k| k.strip_prefix("engine.").map(String::from)).collect()
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -191,7 +190,7 @@ mod tests {
                 let full = format!("engine.{key}");
                 let text = tr_key(ui, &full).unwrap();
                 assert!(catalog(code).unwrap().contains_key(&full), "{code} lacks {key}");
-                assert_eq!(placeholders(text), placeholders(tr_key(UiLang::EN, &full).unwrap()), "placeholders of {key} in {code}");
+                assert_eq!(placeholders(&text), placeholders(&tr_key(UiLang::EN, &full).unwrap()), "placeholders of {key} in {code}");
             }
         }
     }
@@ -217,7 +216,7 @@ mod tests {
                     let after = rest[comma + 1..].trim_start();
                     if let Some(lit) = after.strip_prefix('"') {
                         let key = lit.split('"').next().unwrap();
-                        assert!(known.contains(&key), "{}: unknown engine key {key:?}", path.display());
+                        assert!(known.iter().any(|k| k == key), "{}: unknown engine key {key:?}", path.display());
                         used += 1;
                     }
                 }
@@ -240,9 +239,9 @@ mod tests {
         std::fs::write(dir.join("xx.json"), r#"{"_meta.name":"Testisch","engine.a":"AX"}"#).unwrap();
         assert!(languages_in(&dir).contains(&("xx".to_string(), "Testisch".to_string())));
         let (en, xx) = (load_from(&dir, "en").unwrap(), load_from(&dir, "xx").unwrap());
-        assert_eq!(lookup(Some(&xx), Some(&en), "engine.a"), Some("AX"));
-        assert_eq!(lookup(Some(&xx), Some(&en), "engine.b"), Some("B"));
-        assert_eq!(lookup(Some(&xx), Some(&en), "engine.c"), None);
+        assert_eq!(lookup(Some(xx.clone().into()), Some(en.clone().into()), "engine.a").as_deref(), Some("AX"));
+        assert_eq!(lookup(Some(xx.clone().into()), Some(en.clone().into()), "engine.b").as_deref(), Some("B"));
+        assert_eq!(lookup(Some(xx.clone().into()), Some(en.clone().into()), "engine.c"), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

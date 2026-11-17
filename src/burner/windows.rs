@@ -251,8 +251,23 @@ fn erase(rec: &IDiscRecorder2) -> Result<(), BurnError> {
 fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnError> {
     unsafe {
         let ex: IDiscRecorder2Ex = rec.cast().map_err(|e| step("IDiscRecorder2Ex", e))?;
-        // shortcut: some drives refuse exclusive access here ("feature not current"); the command is sent anyway, upgrade if that corrupts anything.
-        let exclusive = rec.AcquireExclusiveAccess(VARIANT_FALSE, &BSTR::from(CLIENT_NAME)).is_ok();
+        // Another process (autoplay, an indexer) may hold the drive for a moment, so retry briefly.
+        // Some drives refuse for good ("feature not current"); the command is then still tried and
+        // its own result decides, but a failure says that exclusive access was missing.
+        let mut refused = None;
+        for attempt in 0..3 {
+            match rec.AcquireExclusiveAccess(VARIANT_FALSE, &BSTR::from(CLIENT_NAME)) {
+                Ok(()) => {
+                    refused = None;
+                    break;
+                }
+                Err(e) => refused = Some(e),
+            }
+            if attempt < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+        let exclusive = refused.is_none();
         let cdb = [0xBF, 0, 0, 0, 0, 0, 0, 0x20, 0, 12, 0, 0];
         let mut data = [0u8; 12];
         data[1] = 10; // data length (excluding the length field)
@@ -262,7 +277,10 @@ fn set_layer_break(rec: &IDiscRecorder2, l0_sectors: u32) -> Result<(), BurnErro
         if exclusive {
             let _ = rec.ReleaseExclusiveAccess();
         }
-        r.map_err(|e| BurnError::Backend(format!("The layer break could not be set: {e} (sense {:02X?})", &sense[..14])))
+        r.map_err(|e| {
+            let note = refused.map_or(String::new(), |x| format!("; exclusive drive access was refused: {x}"));
+            BurnError::Backend(format!("The layer break could not be set: {e} (sense {:02X?}){note}", &sense[..14]))
+        })
     }
 }
 

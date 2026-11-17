@@ -465,6 +465,9 @@ pub struct StreamSelection {
     pub bd_rate: Option<String>,
     #[serde(default)]
     pub bd_video: Option<String>,
+    /// Blu-ray only: quality weight of the encoded video (`low` / `high`, else normal), see [`quality_weight`].
+    #[serde(default)]
+    pub bd_quality: Option<String>,
 }
 
 /// Index ranges of the menu entries: an input plus all directly following inputs that are merged
@@ -562,6 +565,35 @@ pub struct TitleLoad {
     /// taken off the disc before the encoded titles share the rest.
     #[serde(default)]
     pub copy_video_kbps: Option<u32>,
+    /// Quality weight of an encoded title: its video bitrate relative to the disc's base bitrate
+    /// ([`QUALITY_LOW`] / 1.0 / [`QUALITY_HIGH`]).
+    #[serde(default = "one")]
+    pub weight: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// Per-title quality weights of the Video tab.
+pub const QUALITY_LOW: f64 = 0.75;
+pub const QUALITY_HIGH: f64 = 1.25;
+
+/// Weight of a Video-tab quality choice (`low` / `high`, anything else is normal).
+pub fn quality_weight(name: Option<&str>) -> f64 {
+    match name {
+        Some("low") => QUALITY_LOW,
+        Some("high") => QUALITY_HIGH,
+        _ => 1.0,
+    }
+}
+
+/// Video bitrate of an encoded title: the plan's base bitrate times the title's weight, kept inside
+/// the disc's limits beside the title's audio.
+pub fn weighted_video_kbps(disc: DiscType, base_kbps: u32, weight: f64, audio_kbps: u32) -> u32 {
+    let l = disc.limits();
+    let top = l.max_video_kbps.min(l.max_total_kbps.saturating_sub(audio_kbps));
+    ((base_kbps as f64 * weight).round() as u32).min(top).max(l.min_video_kbps.min(top))
 }
 
 /// Video bitrate for `titles` on `disc`, with `menu_mb` of menus already on the disc, limited by
@@ -587,8 +619,12 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
             estimated_mb,
         });
     }
-    let total_secs: f64 = encoded.iter().map(|t| t.duration_secs).sum();
-    calculator::calculate_capped(disc, total_secs, avg_audio_kbps(&encoded), overhead, profile.max_video_kbps_for(disc))
+    // Weighted titles share the video budget in proportion to weight × duration: the calculator
+    // sees the weighted duration, with the audio average scaled so the audio size stays exact.
+    let weighted_secs: f64 = encoded.iter().map(|t| t.duration_secs * t.weight).sum();
+    let audio_kbit: f64 = encoded.iter().map(|t| t.audio_kbps as f64 * t.duration_secs).sum();
+    let audio_kbps = (audio_kbit / weighted_secs.max(1.0)).ceil() as u32;
+    calculator::calculate_capped(disc, weighted_secs, audio_kbps, overhead, profile.max_video_kbps_for(disc))
 }
 
 /// Title frame size actually used: the chosen one, except that LP turns Full D1 into Half D1
@@ -1548,7 +1584,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     "episodes",
                     &work,
                     &RenderOptions {
-                        heading: Some(tr(ui, "episodes")),
+                        heading: Some(&tr(ui, "episodes")),
                         ui_lang: ui,
                         motion,
                         motion_duration: opts.motion_duration,
@@ -1713,7 +1749,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     // 6. Bitrate ----------------------------------------------------------------------------------
     let loads: Vec<TitleLoad> = titles
         .iter()
-        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(), subtitle_streams: t.subtitles.len(), copy_video_kbps: None })
+        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(), subtitle_streams: t.subtitles.len(), copy_video_kbps: None, weight: 1.0 })
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = avg_audio_kbps(&loads);
@@ -2080,8 +2116,8 @@ mod tests {
     #[test]
     fn bitrate_plan_matches_calculator() {
         let loads = [
-            TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None },
-            TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None },
+            TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, weight: 1.0 },
+            TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 },
         ];
         assert_eq!(avg_audio_kbps(&loads), 491); // (640*3600 + 192*1800) / 5400
         let plan = bitrate_plan(DiscType::Dvd5, &loads, 1.0, EncodingProfile::Auto).unwrap();
@@ -2092,8 +2128,25 @@ mod tests {
     }
 
     #[test]
+    fn quality_weight_shifts_the_bitrate_share_and_still_fits() {
+        let normal = TitleLoad { duration_secs: 7200.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 };
+        let (low, high) = (TitleLoad { weight: QUALITY_LOW, ..normal }, TitleLoad { weight: QUALITY_HIGH, ..normal });
+        let flat = bitrate_plan(DiscType::Bd25, &[normal, normal], 0.0, EncodingProfile::Auto).unwrap();
+        let plan = bitrate_plan(DiscType::Bd25, &[low, high], 0.0, EncodingProfile::Auto).unwrap();
+        // Equal weights on both sides average out to 1.0, so the base bitrate stays the same.
+        assert!(plan.video_kbps.abs_diff(flat.video_kbps) <= 1, "{} vs {}", plan.video_kbps, flat.video_kbps);
+        let (lo, hi) = (weighted_video_kbps(DiscType::Bd25, plan.video_kbps, low.weight, 448), weighted_video_kbps(DiscType::Bd25, plan.video_kbps, high.weight, 448));
+        assert!(hi > lo && hi as f64 / lo as f64 > 1.6);
+        let used_mb = (((lo + hi) as f64 + 2.0 * 448.0) * 7200.0 + plan.mux_overhead_kbit) / 8192.0;
+        assert!(used_mb <= DiscType::Bd25.target_mb() as f64 + 1.0, "{used_mb} MB");
+        // A heavier title takes more of the disc, so the others get less.
+        let heavy = bitrate_plan(DiscType::Bd25, &[high, high], 0.0, EncodingProfile::Auto).unwrap();
+        assert!(heavy.video_kbps < flat.video_kbps);
+    }
+
+    #[test]
     fn copied_titles_take_a_fixed_share_first() {
-        let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 640, subtitle_streams: 0, copy_video_kbps: None };
+        let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 640, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 };
         let copy = TitleLoad { copy_video_kbps: Some(20_000), ..enc };
         let alone = bitrate_plan(DiscType::Bd25, &[enc], 0.0, EncodingProfile::Auto).unwrap();
         let mixed = bitrate_plan(DiscType::Bd25, &[enc, copy], 0.0, EncodingProfile::Auto).unwrap();

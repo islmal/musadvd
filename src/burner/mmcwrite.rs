@@ -223,6 +223,38 @@ impl Drive<'_> {
         (len > 0).then(|| (len.saturating_sub(free) as u64 * 100 / len as u64) as u32)
     }
 
+    /// Before the verify: a drive that ejected the disc after finalizing is asked to close the tray;
+    /// slim drives cannot, so the user is told to push it in. Gives up after 3 minutes and lets the
+    /// read report the problem.
+    fn wait_for_closed_tray(&self, tx: &Sender<BurnProgress>) -> Result<(), BurnError> {
+        let start = Instant::now();
+        let (mut asked, mut warned) = (false, false);
+        loop {
+            let r = self.t.exec(&spti::test_unit_ready(), DataDir::None, &mut [], 30)?;
+            let Some(s) = r.sense.filter(|_| !r.ok()) else { return Ok(()) };
+            let absent = s.key == 0x02 && s.asc == 0x3A;
+            if !absent && !s.recoverable() {
+                return Ok(());
+            }
+            if absent {
+                if !asked {
+                    asked = true;
+                    let _ = self.run("Closing the tray", &spti::start_stop_unit(false));
+                } else if !warned && start.elapsed() > Duration::from_secs(5) {
+                    warned = true;
+                    progress(tx, BurnPhase::Verifying, 0.0, "The drive cannot close its tray itself - push the tray in to verify the disc …");
+                }
+                if start.elapsed() > Duration::from_secs(180) {
+                    return Ok(());
+                }
+            }
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err(BurnError::Cancelled);
+            }
+            sleep(Duration::from_secs(1));
+        }
+    }
+
     /// Waits until the drive is ready again (after FORMAT UNIT).
     fn wait_ready(&self) -> Result<(), BurnError> {
         let start = Instant::now();
@@ -486,6 +518,7 @@ fn write_disc(
     }
     if verify {
         let src = feed.finish()?;
+        drive.wait_for_closed_tray(tx)?;
         verify_disc(drive, src, sectors, tx)?;
     }
     Ok(())
@@ -599,6 +632,8 @@ mod tests {
         format_list: RefCell<Vec<u8>>,
         layer_param: RefCell<Vec<u8>>,
         corrupt_read: Option<usize>,
+        /// TEST UNIT READY answers "tray open" this many more times.
+        tray_open_polls: std::cell::Cell<u32>,
     }
 
     impl<'a> Fake<'a> {
@@ -616,6 +651,7 @@ mod tests {
                 format_list: RefCell::new(vec![]),
                 layer_param: RefCell::new(vec![]),
                 corrupt_read: None,
+                tray_open_polls: Default::default(),
             }
         }
 
@@ -635,6 +671,10 @@ mod tests {
     impl ScsiTransport for Fake<'_> {
         fn exec(&self, cdb: &[u8], _dir: DataDir, buf: &mut [u8], _t: u32) -> Result<ScsiResult, BurnError> {
             self.sent.borrow_mut().push(cdb.to_vec());
+            if cdb[0] == 0x00 && self.tray_open_polls.get() > 0 {
+                self.tray_open_polls.set(self.tray_open_polls.get() - 1);
+                return Ok(check(Sense { key: 0x02, asc: 0x3A, ascq: 0x02 }));
+            }
             let data: Vec<u8> = match cdb[0] {
                 0x46 => {
                     let mut b = vec![0u8; 8];
@@ -914,6 +954,19 @@ mod tests {
         let f = Fake::new(0x11);
         burn(&f, 10, &b, &DirectOptions { test_mode: true, ..d }, &AtomicBool::new(false)).unwrap();
         assert!(!f.ops().contains(&0x28));
+    }
+
+    #[test]
+    fn verify_waits_for_the_tray_to_close() {
+        let (b, d) = opts();
+        let b = BurnOptions { verify: true, ..b };
+        let f = Fake::new(0x1B);
+        f.tray_open_polls.set(2);
+        burn(&f, 10, &b, &d, &AtomicBool::new(false)).unwrap();
+        let ops = f.ops();
+        let load = ops.iter().position(|&o| o == 0x1B).expect("the drive is asked to load");
+        assert!(ops[..load].contains(&0x2A) && ops[load..].contains(&0x28), "load after the write, verify after the load");
+        assert_eq!(f.sent.borrow().iter().filter(|c| c[0] == 0x1B && c[4] == 0x03).count(), 1, "asked once");
     }
 
     #[test]

@@ -72,6 +72,8 @@ interface Title {
   bdResolution: BdRes | null;
   bdRate: string | null;
   bdVideo: "encode" | "copy" | null;
+  /** Share of the disc bitrate (null = normal). */
+  bdQuality: "low" | "high" | null;
 }
 
 type BdRes = "1080" | "720";
@@ -327,6 +329,23 @@ function audioKbps(t: Title): number {
   return t.meta.audio.filter((a) => t.audio.has(a.index)).reduce((sum, a) => sum + audioChoice(t, a).kbps, 0);
 }
 
+const RELEASES = "https://github.com/islmal/musadvd/releases/latest";
+
+/** Linux (.deb) has no in-app installer, so it only gets a notice: one anonymous GET of the latest GitHub release, shown in the status bar when newer. Silent on any failure. */
+async function notifyNewRelease(current: string) {
+  try {
+    const r = await fetch("https://api.github.com/repos/islmal/musadvd/releases/latest", { headers: { Accept: "application/vnd.github+json" } });
+    if (!r.ok) return;
+    const latest = String((await r.json()).tag_name ?? "").replace(/^v/, "");
+    const num = (s: string) => s.split(".").map((n) => parseInt(n, 10) || 0);
+    const [a, b] = [num(latest), num(current)];
+    const newer = a.some((n, i) => n !== (b[i] ?? 0) && n > (b[i] ?? 0) && a.slice(0, i).every((m, j) => m === (b[j] ?? 0)));
+    if (latest && newer) status(tr("main.updateAvailable", { version: latest, url: RELEASES }));
+  } catch {
+    /* offline or rate-limited: no notice */
+  }
+}
+
 function status(text: string, kind: "info" | "error" = "info") {
   const bar = $("status-bar");
   bar.textContent = text;
@@ -365,6 +384,7 @@ async function addFiles(paths: string[]) {
         bdResolution: null,
         bdRate: null,
         bdVideo: null,
+        bdQuality: null,
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
@@ -520,6 +540,7 @@ async function splitByChapters(t: Title) {
     bdResolution: t.bdResolution,
     bdRate: t.bdRate,
     bdVideo: t.bdVideo,
+    bdQuality: t.bdQuality,
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
@@ -631,21 +652,53 @@ function scheduleCalc() {
   calcTimer = window.setTimeout(runCalc, 150);
 }
 
+const QUALITY_WEIGHT = { low: 0.75, high: 1.25 }; // keep in sync with dvd::QUALITY_LOW / QUALITY_HIGH
+
+function calcInput() {
+  return {
+    disc: currentDisc(),
+    titles: state.titles.map((t) => ({
+      durationSecs: effDuration(t),
+      audioKbps: audioKbps(t),
+      subtitleStreams: t.subs.size,
+      copyVideoKbps: bdCopy(t)?.kbps ?? null,
+      weight: isBluray() && t.bdQuality ? QUALITY_WEIGHT[t.bdQuality] : 1,
+    })),
+    motionMenu: usesMotion(),
+    motionDuration: null,
+    bdMenuSecs: isBluray() && state.menuMode === "custom" && state.customLayout ? menuClipSecs(state.customLayout, 20) : [],
+  };
+}
+
+/** "Fit to disc": switch the copied titles with the largest copy to re-encode, one at a time,
+ * until the project fits; if it never does, the titles are put back. */
+async function fitToDisc() {
+  const copies = state.titles
+    .filter((t) => bdCopy(t)?.kbps != null)
+    .sort((a, b) => (bdCopy(b)!.kbps! * effDuration(b)) - (bdCopy(a)!.kbps! * effDuration(a)));
+  const switched: Title[] = [];
+  try {
+    for (const t of copies) {
+      t.bdVideo = "encode";
+      switched.push(t);
+      if ((await calculateProject(calcInput())).fits) break;
+    }
+    if (!(await calculateProject(calcInput())).fits) {
+      for (const t of switched) t.bdVideo = null;
+      status(tr("main.fitFailed"), "error");
+    }
+  } catch (e) {
+    for (const t of switched) t.bdVideo = null;
+    status(tr("main.berechnungFehlgeschlagen", { e }), "error");
+  }
+  renderAll();
+  scheduleCalc();
+}
+
 async function runCalc() {
   const seq = ++calcSeq;
   try {
-    const result = await calculateProject({
-      disc: currentDisc(),
-      titles: state.titles.map((t) => ({
-        durationSecs: effDuration(t),
-        audioKbps: audioKbps(t),
-        subtitleStreams: t.subs.size,
-        copyVideoKbps: bdCopy(t)?.kbps ?? null,
-      })),
-      motionMenu: usesMotion(),
-      motionDuration: null,
-      bdMenuSecs: isBluray() && state.menuMode === "custom" && state.customLayout ? menuClipSecs(state.customLayout, 20) : [],
-    });
+    const result = await calculateProject(calcInput());
     if (seq !== calcSeq) return; // a newer calculation is on its way
     state.calc = result;
   } catch (e) {
@@ -677,13 +730,17 @@ function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: 
   const v = t.meta.video;
   const mode = t.bdVideo ?? state.bdVideo;
   if (!isBluray() || mode === "encode" || !v) return null;
-  const f = v.bdFormat;
-  const changed = !!f && ((t.bdResolution ?? projectBdRes()) !== f.resolution || (!!t.bdRate && t.bdRate !== f.rate));
+  const f = isAvchd() ? v.avchdFormat : v.bdFormat;
+  const [copyKbps, copyIssue] = isAvchd() ? [v.avchdCopyKbps, v.avchdCopyIssue] : [v.bdCopyKbps, v.bdCopyIssue];
+  const res = t.bdResolution ?? projectBdRes();
+  // An unset rate follows the TV standard and resolution settings, as in the build.
+  const rate = t.bdRate || v.bdDefaultRates[`${state.settings?.tv_standard ?? "PAL"}${res}`];
+  const changed = !!f && (res !== f.resolution || rate !== f.rate);
   const issue =
-    v.bdCopyIssue ??
+    copyIssue ??
     (changed ? tr("main.bdFormatChanged") : isTrimmed(t) ? tr("main.trimActive") : t.crop ? tr("main.cropActive") : null);
   const strict = mode !== "auto";
-  return issue ? { kbps: null, issue, strict } : { kbps: v.bdCopyKbps, issue: null, strict };
+  return issue ? { kbps: null, issue, strict } : { kbps: copyKbps, issue: null, strict };
 }
 
 function renderVideoTab(t: Title) {
@@ -704,6 +761,7 @@ function renderVideoTab(t: Title) {
   const label = (r: string) => (r.endsWith("i") ? r : `${r}p`);
   const projectMode = tr(state.bdVideo === "encode" ? "app.bdVideoEncode" : state.bdVideo === "auto" ? "app.bdVideoAuto" : "app.bdVideoStrict");
   const c = bdCopy(t);
+  const f = isAvchd() ? v?.avchdFormat : v?.bdFormat;
   const index = state.titles.indexOf(t);
   return h(
     "div",
@@ -714,7 +772,7 @@ function renderVideoTab(t: Title) {
           { class: "hint" },
           tr("main.bdSource", { codec: v.codec.toUpperCase(), w: v.width, h: v.height, fps: v.fps.toFixed(3), scan: v.interlaced ? "i" : "p" }),
           " · ",
-          v.bdFormat ? tr("main.bdSourceFormat", { format: `${v.bdFormat.resolution} ${label(v.bdFormat.rate)}` }) : tr("main.bdNoFormat"),
+          f ? tr("main.bdSourceFormat", { format: `${f.resolution} ${label(f.rate)}` }) : tr("main.bdNoFormat"),
         )
       : "",
     h(
@@ -756,6 +814,20 @@ function renderVideoTab(t: Title) {
         },
       ),
       copyBadge(t),
+    ),
+    h(
+      "div",
+      { class: "row" },
+      h("label", { for: "bd-quality" }, tr("main.bdQuality")),
+      select(
+        "bd-quality",
+        t.bdQuality ?? "",
+        [["", tr("main.bdQualityNormal")], ["low", tr("main.bdQualityLow")], ["high", tr("main.bdQualityHigh")]],
+        (val) => {
+          t.bdQuality = (val || null) as Title["bdQuality"];
+          changed();
+        },
+      ),
     ),
     c?.issue ? h("p", { class: "hint" }, tr("main.bdReencodeReason", { reason: c.issue })) : "",
     index === 0 ? h("p", { class: "hint" }, tr("main.bdMenuRateNote")) : "",
@@ -905,6 +977,7 @@ function renderFooter() {
   $("bd-video-row").hidden = !isBluray();
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
+  ($("btn-fit") as HTMLButtonElement).hidden = !(calc && !calc.fits) || state.converting || !state.titles.some((t) => bdCopy(t)?.kbps != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1298,7 @@ function editorTitles(): EditorTitle[] {
       durationSecs: offset,
       chapterNames: names,
       chapterStarts: starts,
+      clipStartSecs: (t.trimStart ?? 0) + Math.min(effDuration(t) * 0.1, 300, Math.max(effDuration(t) - 1, 0)),
       // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
         .filter((a) => t.audio.has(a.index))
@@ -1763,6 +1837,7 @@ async function convert() {
         bdResolution: isBluray() ? t.bdResolution : null,
         bdRate: isBluray() ? t.bdRate : null,
         bdVideo: isBluray() ? t.bdVideo : null,
+        bdQuality: isBluray() ? t.bdQuality : null,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
@@ -1790,6 +1865,7 @@ async function init() {
   $("dropzone").addEventListener("click", () => void addViaDialog());
   $("btn-remove").addEventListener("click", removeSelected);
   $("btn-split-undo").addEventListener("click", undoSplit);
+  $("btn-fit").addEventListener("click", () => void fitToDisc());
   $("btn-up").addEventListener("click", () => moveSelected(-1));
   $("btn-down").addEventListener("click", () => moveSelected(1));
   initTitleDrag();
@@ -1856,7 +1932,12 @@ async function init() {
     scheduleCalc();
     renderAll();
   });
-  void getVersion().then((v) => ($("app-version").textContent = `v${v}`)).catch(() => {});
+  void getVersion()
+    .then((v) => {
+      $("app-version").textContent = `v${v}`;
+      if (navigator.userAgent.includes("Linux")) void notifyNewRelease(v);
+    })
+    .catch(() => {});
   const motion = $("motion-menu") as HTMLInputElement;
   motion.checked = state.motion;
   motion.addEventListener("change", () => {

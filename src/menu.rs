@@ -808,8 +808,8 @@ pub use crate::i18n::UiLang;
 
 /// Translates the fixed texts of the ConvertX templates (keys `engine.tpl.<English text>`); unknown
 /// texts stay as they are.
-pub fn localize(text: &str, lang: UiLang) -> &str {
-    crate::i18n::tr_key(lang, &format!("engine.tpl.{}", text.trim())).unwrap_or(text)
+pub fn localize(text: &str, lang: UiLang) -> String {
+    crate::i18n::tr_key(lang, &format!("engine.tpl.{}", text.trim())).unwrap_or_else(|| text.to_string())
 }
 
 pub struct RenderOptions<'a> {
@@ -1007,12 +1007,13 @@ pub fn render_page(
             }
             "GT_TEXT" => {
                 let text = match (visible_button.and_then(|b| b.label.as_deref()), g.location.as_str()) {
-                    (Some(label), _) => label,
+                    (Some(label), _) => label.to_string(),
                     (None, loc) if loc.eq_ignore_ascii_case("ML_PAGE_TITLE") => {
-                        opts.heading.unwrap_or(&g.value)
+                        opts.heading.unwrap_or(&g.value).to_string()
                     }
                     (None, _) => localize(&g.value, opts.ui_lang),
                 };
+                let text = text.as_str();
                 if text.trim().is_empty() {
                     continue;
                 }

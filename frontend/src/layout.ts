@@ -151,6 +151,8 @@ export interface EditorTitle {
   chapterNames?: (string | null)[];
   /** Chapter start times in seconds (same order as `chapterNames`). */
   chapterStarts?: number[];
+  /** Source time of the menu clips: where the build starts them (trim start + 10 %, at most 5 min). */
+  clipStartSecs?: number;
   /** Audio tracks that go onto the disc. */
   audioTracks?: TrackRef[];
   /** Text subtitles that go onto the disc. */

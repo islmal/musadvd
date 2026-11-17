@@ -330,7 +330,7 @@ fn copy_plan(a: &AudioStream, target: AudioTarget) -> Option<AudioOut> {
             let kbps = kbps.unwrap_or(1536);
             (kbps <= 1536).then_some(AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps, ch: a.channels })
         }
-        // shortcut: DTS-HD MA bitrate is often reported as the core's; estimate 5 Mbit/s when absent.
+        // The probe measures the real DTS-HD MA rate; 5 Mbit/s is only the fallback when that failed.
         ("dts", AudioTarget::Bluray) => Some(AudioOut::Copy {
             kind: AudioKind::Dts,
             bsf: None,
@@ -890,10 +890,10 @@ pub fn source_video_kbps(info: &MediaInfo) -> Option<u32> {
 /// Whether the video stream of `info` can go onto a Blu-ray/AVCHD title with `rate` and
 /// `resolution` unchanged: its average kbit/s, or why it has to be re-encoded (English, shown
 /// in logs and the GUI). `max_kbps`: the disc's video limit beside this title's audio.
-pub fn bd_video_copy(info: &MediaInfo, rate: BdRate, resolution: Resolution, vp: VideoProcessing, max_kbps: u32) -> Result<u32, String> {
+pub fn bd_video_copy(info: &MediaInfo, rate: BdRate, resolution: Resolution, vp: VideoProcessing, max_kbps: u32, avchd: bool) -> Result<u32, String> {
     let kbps = bd_stream_copy(info, vp, max_kbps)?;
     let v = info.video.as_ref().ok_or("no video stream")?;
-    match crate::bd::bd_native_format(v) {
+    match crate::bd::bd_native_format(v, avchd) {
         None => Err(not_bd_format(v)),
         Some((r, _)) if r != resolution => {
             let (w, h) = resolution.frame_size(TvStandard::Pal);
@@ -2227,7 +2227,7 @@ mod tests {
         let mut info = bd_info();
         let v = info.video.as_mut().unwrap();
         (v.profile, v.level, v.pix_fmt, v.bit_rate) = (Some("High".into()), Some(41), "yuv420p".into(), Some(15_000_000));
-        let ok = |i: &MediaInfo, r| bd_video_copy(i, r, Resolution::Hd1080, VideoProcessing::default(), 30_000);
+        let ok = |i: &MediaInfo, r| bd_video_copy(i, r, Resolution::Hd1080, VideoProcessing::default(), 30_000, false);
         assert_eq!(ok(&info, film), Ok(15_000));
         let bad = |f: &dyn Fn(&mut MediaInfo)| {
             let mut i = info.clone();
@@ -2241,6 +2241,11 @@ mod tests {
         assert!(bad(&|i| i.video.as_mut().unwrap().fps = 60.0).contains("fps"));
         assert!(bad(&|i| i.trim = Some(crate::probe::Trim { start: 1.0, end: 9.0 })).contains("trim"));
         assert!(bad(&|i| i.video.as_mut().unwrap().bit_rate = Some(40_000_000)).contains("limit"));
+        // 1440×1080 is an AVCHD-only size.
+        let mut narrow = info.clone();
+        narrow.video.as_mut().unwrap().width = 1440;
+        assert!(ok(&narrow, film).unwrap_err().contains("1440"));
+        assert_eq!(bd_video_copy(&narrow, film, Resolution::Hd1080, VideoProcessing::default(), 30_000, true), Ok(15_000));
         // 1080p25 does not exist on a BD; real 1080i25 is copied.
         let pal = BdRate { fps: (25, 1), fake_interlaced: true };
         let mut i = info.clone();
@@ -2249,7 +2254,7 @@ mod tests {
         i.video.as_mut().unwrap().field_order = "tt".into();
         assert!(ok(&i, pal).is_ok());
         // A compliant film source on a 720 title, or forced to another rate, is re-encoded.
-        assert!(bd_video_copy(&info, film, Resolution::Hd720, VideoProcessing::default(), 30_000).unwrap_err().contains("title is 1280×720"));
+        assert!(bd_video_copy(&info, film, Resolution::Hd720, VideoProcessing::default(), 30_000, false).unwrap_err().contains("title is 1280×720"));
         let f24 = BdRate { fps: (24, 1), fake_interlaced: false };
         assert!(ok(&info, f24).unwrap_err().contains("title runs at 24"));
     }

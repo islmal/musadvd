@@ -20,6 +20,12 @@ export interface VideoInfo {
   bdCopyIssue: string | null;
   /** The Blu-ray format the file already has; a copy needs the title to keep it. */
   bdFormat: { resolution: "1080" | "720"; rate: string } | null;
+  /** Rate an unset title gets, keyed `<PAL|NTSC><1080|720>`. */
+  bdDefaultRates: Record<string, string>;
+  /** Same verdict for AVCHD discs (which also accept 1440×1080). */
+  avchdCopyKbps: number | null;
+  avchdCopyIssue: string | null;
+  avchdFormat: { resolution: "1080" | "720"; rate: string } | null;
 }
 
 export interface AudioTrack {
@@ -113,6 +119,8 @@ export interface TitleLoad {
   subtitleStreams: number;
   /** Video copied at this kbit/s (fixed size on the disc). */
   copyVideoKbps?: number | null;
+  /** Quality weight of an encoded title (1 = normal). */
+  weight?: number;
 }
 
 export interface ProjectSettings {
@@ -156,6 +164,7 @@ export interface InputConfig {
   bdResolution?: string | null;
   bdRate?: string | null;
   bdVideo?: string | null;
+  bdQuality?: string | null;
 }
 
 export interface ConversionConfig {

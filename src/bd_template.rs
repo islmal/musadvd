@@ -293,9 +293,9 @@ impl Nav<'_> {
             .filter_map(|b| self.map_action(ctx, page, b, warnings).map(|m| (b, m)))
             .collect();
         let heading = match ctx.kind {
-            Kind::Bonus => "Bonus",
+            Kind::Bonus => "Bonus".to_string(),
             Kind::Episodes => tr(self.ui, "episodes"),
-            _ => &self.titles[ctx.title.max(1) as usize - 1].label,
+            _ => self.titles[ctx.title.max(1) as usize - 1].label.clone(),
         };
         let image_file = |value: &str, warnings: &mut Vec<String>| {
             let path = resolve_resource(src.dir, value);

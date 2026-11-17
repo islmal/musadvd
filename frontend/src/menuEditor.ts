@@ -262,10 +262,12 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     return p;
   }
+  /** Where the build starts a title's menu clips (the engine's rule when the project did not say). */
+  const clipStart = (t: EditorTitle | undefined) => t?.clipStartSecs ?? Math.min((t?.durationSecs ?? 0) * 0.1, 300);
   const frameOf = (title: number, start?: number | null) => {
     const t = titles[title - 1];
     if (!t) return Promise.reject(new Error(tr("menuEditor.titelFehlt")));
-    const at = start ?? Math.min(t.durationSecs * 0.1, 300);
+    const at = start ?? clipStart(t);
     return preview("frame", `${t.path}@${at.toFixed(1)}`, () => titleFrame(t.path, at));
   };
   const imageOf = (path: string) => preview("image", path, () => imagePreview(path));
@@ -281,7 +283,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** Name of a video source for badges and the layer list. */
   const videoLabel = (v: VideoSource) => (v.path ? fileName(v.path) : (titles[v.title - 1]?.label ?? tr("menuEditor.titelFehlt2", { title: v.title })));
   /** Start shown for a video without an explicit one (the engine: 10 % of a title, max. 5 min; a file: 0). */
-  const defaultStart = (v: VideoSource) => (v.path ? 0 : Math.round(Math.min((titles[v.title - 1]?.durationSecs ?? 0) * 0.1, 300)));
+  const defaultStart = (v: VideoSource) => (v.path ? 0 : Math.round(clipStart(titles[v.title - 1])));
 
   /** Line breaks of wrapped texts, computed by the engine (same fonts and metrics as the build). */
   const lineCache = new Map<string, Promise<string[]>>();
@@ -815,8 +817,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   const tlWaves = new Map<string, number[] | null>();
   function tlWave(s: CustomMenu["audio"]): number[] | null {
     const t = s.type === "title" ? titles[s.title - 1] : undefined;
-    // shortcut: a title without startSecs uses the editor's preview start, not the build's clip start; pass the real one from the backend if they differ.
-    const src = s.type === "file" ? { path: s.path, start: 0 } : t && s.type === "title" ? { path: t.path, start: s.startSecs ?? Math.min(t.durationSecs * 0.1, 300) } : null;
+    const src = s.type === "file" ? { path: s.path, start: 0 } : t && s.type === "title" ? { path: t.path, start: s.startSecs ?? clipStart(t) } : null;
     if (!src) return null;
     const k = `${src.path}@${src.start}`;
     if (!tlWaves.has(k)) {

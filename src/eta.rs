@@ -72,11 +72,11 @@ impl JobPhase {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         self.label_in(UiLang::DE)
     }
 
-    pub fn label_in(self, ui: UiLang) -> &'static str {
+    pub fn label_in(self, ui: UiLang) -> String {
         tr(
             ui,
             match self {

@@ -104,10 +104,12 @@ impl BdRate {
     }
 }
 
-/// The Blu-ray format (frame size and rate) a source already has, if it is one.
-pub fn bd_native_format(v: &probe::VideoStream) -> Option<(Resolution, BdRate)> {
+/// The Blu-ray format (frame size and rate) a source already has, if it is one. `avchd` also
+/// accepts 1440×1080, which AVCHD allows beside 1920×1080: it is the same 1080 clip format, the
+/// 16:9 shape comes from the stream's own pixel aspect ratio and the muxer only needs the 1080 class.
+pub fn bd_native_format(v: &probe::VideoStream, avchd: bool) -> Option<(Resolution, BdRate)> {
     let res = match (v.width, v.height) {
-        (1920, 1080) => Resolution::Hd1080,
+        (1920 | 1440, 1080) if v.width == 1920 || avchd => Resolution::Hd1080,
         (1280, 720) => Resolution::Hd720,
         _ => return None,
     };
@@ -191,6 +193,8 @@ struct BdTitle {
     video_mode: BdVideoMode,
     /// Video is stream-copied at this average kbit/s ([`encoder::bd_video_copy`]).
     copy_kbps: Option<u32>,
+    /// Quality weight of the encoded video ([`crate::dvd::quality_weight`]).
+    weight: f64,
 }
 
 impl BdTitle {
@@ -680,6 +684,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
             loudnorm: opts.loudnorm,
             copy_kbps: None,
+            weight: crate::dvd::quality_weight(sel.bd_quality.as_deref()),
             info,
         });
     }
@@ -716,7 +721,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let copy_vbv = (u64::from(limits.vbv_maxrate_kbps) * 1000, u64::from(limits.vbv_bufsize_kbit) * 1000);
     for t in titles.iter_mut().filter(|t| t.video_mode != BdVideoMode::Encode) {
         let max = limits.max_video_kbps.min(limits.max_total_kbps.saturating_sub(t.audio_kbps(&layout)));
-        let mut verdict = encoder::bd_video_copy(&t.info, t.rate, t.resolution, t.video, max);
+        let mut verdict = encoder::bd_video_copy(&t.info, t.rate, t.resolution, t.video, max, opts.disc.is_avchd());
         if verdict.is_ok() {
             log(Event::Step(tf!(opts.ui_lang, "bd_video_scan", label = t.label)));
             let v = t.info.video.as_ref().expect("probed file has video");
@@ -761,7 +766,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             "bd_title_fps",
             title = t.label,
             fps = format!("{:.3}", t.rate.fps_f64()),
-            suffix = if t.rate.fake_interlaced { tr(opts.ui_lang, "bd_fake_interlaced") } else { "" }
+            suffix = if t.rate.fake_interlaced { tr(opts.ui_lang, "bd_fake_interlaced") } else { String::new() }
         )));
     }
 
@@ -815,7 +820,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // 4. Bitrate -----------------------------------------------------------------------------
     let loads: Vec<TitleLoad> = titles
         .iter()
-        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(&layout), subtitle_streams: layout.subs.len(), copy_video_kbps: t.copy_kbps })
+        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(&layout), subtitle_streams: layout.subs.len(), copy_video_kbps: t.copy_kbps, weight: t.weight })
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = crate::dvd::avg_audio_kbps(&loads);
@@ -865,7 +870,6 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     log(Event::Step(tf!(opts.ui_lang, "bd_encode_titles", count = count, passes = passes, jobs = encode_jobs, kbps = plan.video_kbps)));
     log(Event::Phase(BuildPhase::Encoding { index: 0, count }));
     let limits = opts.disc.limits();
-    let max_total = limits.max_total_kbps;
     let vbv = (limits.vbv_maxrate_kbps, limits.vbv_bufsize_kbit);
     let layout = Arc::new(layout);
     let titles: Vec<Arc<BdTitle>> = titles.into_iter().map(Arc::new).collect();
@@ -874,7 +878,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         .zip(&encoders)
         .map(|(t, &encoder)| {
             let (t, tools, work, layout) = (t.clone(), tools.clone(), work.clone(), layout.clone());
-            let video_kbps = t.copy_kbps.unwrap_or_else(|| plan.video_kbps.min(max_total.saturating_sub(t.audio_kbps(&layout))));
+            let video_kbps = t.copy_kbps.unwrap_or_else(|| crate::dvd::weighted_video_kbps(opts.disc, plan.video_kbps, t.weight, t.audio_kbps(&layout)));
             let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
                 encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, progress).await

@@ -32,6 +32,12 @@ pub struct EditorTitle {
     pub path: String,
     pub chapters: usize,
     pub duration_secs: f64,
+    /// Chapter start times in seconds as the build uses them (empty = an even grid).
+    #[serde(default)]
+    pub chapter_starts: Vec<f64>,
+    /// Source time the build takes a menu clip from; absent = 10 % into the title.
+    #[serde(default)]
+    pub clip_start_secs: Option<f64>,
     #[serde(default)]
     pub audio_tracks: Vec<TrackRef>,
     #[serde(default)]
@@ -45,7 +51,7 @@ fn layout_titles(titles: &[EditorTitle]) -> Vec<LayoutTitle> {
             label: t.label.clone(),
             chapters: t.chapters,
             duration_secs: t.duration_secs,
-            clip: ClipSource { path: t.path.clone().into(), start_secs: (t.duration_secs * 0.1).min(300.0), has_audio: true },
+            clip: ClipSource { path: t.path.clone().into(), start_secs: t.clip_start_secs.unwrap_or_else(|| (t.duration_secs * 0.1).min(300.0)), has_audio: true },
             audio_sources: t.audio_tracks.iter().map(|a| a.source).collect(),
             subtitle_sources: t.subtitle_tracks.iter().map(|s| s.source).collect(),
             audio_labels: t.audio_tracks.iter().map(|a| a.label.clone()).collect(),
@@ -113,9 +119,16 @@ pub async fn import_convertx_template(path: String, titles: Vec<EditorTitle>, la
             return Err("The template contains no menu pages.".to_string());
         }
         let layout_titles = layout_titles(&titles);
-        // shortcut: chapter sample frames are spread evenly; the editor has no chapter times. Pass them in if the stills matter.
-        let chapter_starts: Vec<Vec<f64>> =
-            titles.iter().map(|t| (0..t.chapters.max(1)).map(|c| t.duration_secs * c as f64 / t.chapters.max(1) as f64).collect()).collect();
+        let chapter_starts: Vec<Vec<f64>> = titles
+            .iter()
+            .map(|t| {
+                if t.chapter_starts.is_empty() {
+                    (0..t.chapters.max(1)).map(|c| t.duration_secs * c as f64 / t.chapters.max(1) as f64).collect()
+                } else {
+                    t.chapter_starts.clone()
+                }
+            })
+            .collect();
         let (layout, warnings) = layout_from_template(
             &template,
             Path::new(&path),
@@ -195,6 +208,8 @@ mod tests {
                 path: "a.mkv".into(),
                 chapters,
                 duration_secs: 60.0,
+                chapter_starts: vec![],
+                clip_start_secs: None,
                 audio_tracks: vec![],
                 subtitle_tracks: vec![],
             }]

@@ -437,11 +437,39 @@ pub async fn probe(ffprobe: &Path, path: &Path) -> Result<MediaInfo, ProbeError>
     if !out.status.success() {
         return Err(ProbeError::Failed { path: path.to_path_buf(), status: out.status.to_string() });
     }
-    let info = parse_ffprobe_json(path, &String::from_utf8_lossy(&out.stdout))?;
+    let mut info = parse_ffprobe_json(path, &String::from_utf8_lossy(&out.stdout))?;
     if info.video.is_none() {
         return Err(ProbeError::NoVideo(path.to_path_buf()));
     }
+    // ffprobe reports the lossy core's rate for DTS-HD MA; the disc budget needs the real one.
+    let duration = info.duration_secs;
+    for a in info.audio.iter_mut().filter(|a| a.codec == "dts" && a.profile.as_deref().is_some_and(|p| p.contains("MA"))) {
+        if let Some(bps) = measure_audio_bps(ffprobe, path, a.index, duration).await {
+            a.bit_rate = Some(bps);
+        }
+    }
     Ok(info)
+}
+
+/// Average bit/s of audio stream `index` from the sizes of its packets (demuxes the whole file,
+/// no decoding); `None` if ffprobe fails or the file has no usable duration.
+async fn measure_audio_bps(ffprobe: &Path, path: &Path, index: u32, duration_secs: f64) -> Option<u32> {
+    if duration_secs <= 0.0 {
+        return None;
+    }
+    let out = crate::tools::tool_command(ffprobe, crate::tools::ProcessPriority::Normal)
+        .args(["-v", "quiet", "-select_streams", &index.to_string(), "-show_entries", "packet=size", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    out.status.success().then(|| packet_bps(&String::from_utf8_lossy(&out.stdout), duration_secs)).flatten()
+}
+
+/// Bit/s of `duration_secs` of packets from `ffprobe -show_entries packet=size -of csv=p=0` output.
+fn packet_bps(csv: &str, duration_secs: f64) -> Option<u32> {
+    let bytes: u64 = csv.lines().filter_map(|l| l.trim().trim_end_matches(',').parse::<u64>().ok()).sum();
+    (bytes > 0).then(|| (bytes as f64 * 8.0 / duration_secs).round() as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +526,7 @@ pub fn language_name(tag: Option<&str>, ui: UiLang) -> String {
     match tag {
         Some(t) => lookup(t).map_or_else(
             || t.to_string(),
-            |l| crate::i18n::tr_key(ui, &format!("lang.{}", l.2)).unwrap_or(l.4).to_string(),
+            |l| crate::i18n::tr_key(ui, &format!("lang.{}", l.2)).unwrap_or_else(|| l.4.to_string()),
         ),
         None => tr(ui, "unknown").to_string(),
     }
@@ -549,7 +577,7 @@ fn track_labels<'a>(tracks: impl Iterator<Item = (Option<&'a str>, Option<&'a st
 
 /// Labels of `info.audio`, without the channel suffix (see [`with_layout`]).
 pub fn audio_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
-    let generated = track_labels(info.audio.iter().map(|a| (a.language.as_deref(), a.title.as_deref())), tr(ui, "audio_track"), mode, ui);
+    let generated = track_labels(info.audio.iter().map(|a| (a.language.as_deref(), a.title.as_deref())), &tr(ui, "audio_track"), mode, ui);
     generated
         .into_iter()
         .zip(&info.audio)
@@ -559,7 +587,7 @@ pub fn audio_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<S
 
 /// Labels of `info.subtitles`, forced tracks marked.
 pub fn subtitle_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
-    track_labels(info.subtitles.iter().map(|s| (s.language.as_deref(), s.title.as_deref())), tr(ui, "subtitle"), mode, ui)
+    track_labels(info.subtitles.iter().map(|s| (s.language.as_deref(), s.title.as_deref())), &tr(ui, "subtitle"), mode, ui)
         .into_iter()
         .zip(&info.subtitles)
         .map(|(l, s)| if s.forced { format!("{l} (forced)") } else { l })
@@ -618,6 +646,16 @@ mod tests {
             parse_ffprobe_json(Path::new("x.mkv"), &json).unwrap().video.unwrap().hdr
         };
         assert_eq!((hdr("smpte2084"), hdr("arib-std-b67"), hdr("bt709")), (true, true, false));
+    }
+
+    #[test]
+    fn packet_sizes_give_the_average_bitrate() {
+        // 2 × 1,000,000 bytes over 10 s = 1.6 Mbit/s; trailing commas and blank lines are ignored.
+        assert_eq!(packet_bps("1000000,
+1000000,
+
+", 10.0), Some(1_600_000));
+        assert_eq!(packet_bps("", 10.0), None);
     }
 
     #[test]
