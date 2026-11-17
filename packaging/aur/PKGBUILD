@@ -1,6 +1,6 @@
 # Maintainer: islmal <https://github.com/islmal/musadvd>
 pkgname=musadvd-bin
-pkgver=0.1.3
+pkgver=0.1.4
 pkgrel=1
 pkgdesc="DVD, Blu-ray and AVCHD authoring engine, desktop GUI, and Burn Studio"
 arch=('x86_64')
