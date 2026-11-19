@@ -39,20 +39,27 @@ jobs:
           Copy-Item ffmpeg-extract\*\bin\ffprobe.exe bin\
 
       - run: npm ci
+
+      - name: Build CLI binary
+        run: cargo build --release --bin musadvd
+
+      - name: Configure Windows installer to bundle CLI binary
+        shell: pwsh
+        run: |
+          '{"bundle":{"resources":{"../target/release/musadvd.exe":"musadvd.exe"}}}' | Set-Content -NoNewline -Encoding Ascii src-tauri/tauri.windows.ci.conf.json
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          args: --config src-tauri/tauri.windows.ci.conf.json
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}
           releaseName: MusaDVD ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'Nightly' }}
           releaseBody: Automated Windows & Linux builds (installer, AppImage, .deb, and portable archives).
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           releaseDraft: false
-
-      - name: Build CLI binary
-        run: cargo build --release --bin musadvd
 
       - name: Package and upload portable ZIP
         shell: pwsh

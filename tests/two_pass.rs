@@ -50,6 +50,7 @@ fn fake_info() -> MediaInfo {
             bit_rate: None,
             sample_rate: None,
             profile: None,
+            bits_per_raw_sample: None,
         }],
         subtitles: vec![],
         chapters: vec![],

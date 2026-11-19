@@ -21,7 +21,7 @@ GPL-2.0, **tsMuxer** ports are Apache-2.0 (see `THIRD_PARTY_NOTICES.md`).
 | Module | Purpose |
 |---|---|
 | `probe.rs` | `ffprobe` JSON to `MediaInfo`: streams, chapters, HDR flag, track labels (`audio_labels`, `subtitle_labels`, `clean_tag`). |
-| `encoder.rs` | ffmpeg wrapper: source to DVD-compliant MPEG-2 + AC-3 program stream. Video processing (`VideoProcessing`, `fit_chain`, `source_chain`), audio planning (`plan_audio`), trim/crop, loudnorm, two-pass, live-player filter (`preview_filter`). |
+| `encoder.rs` | ffmpeg wrapper: source to DVD-compliant MPEG-2 + AC-3 program stream. Video processing (`VideoProcessing`, `fit_chain`, `source_chain`), audio planning (`plan_audio`, Blu-ray copy rules `bd_audio_copy` / `plan_audio_bd` with `BdAudioMode`), video copy (`bd_video_copy`, `BdVideoMode`), trim/crop, loudnorm, two-pass, live-player filter (`preview_filter`). |
 
 ## DVD authoring (native replacement of dvdauthor / spumux)
 
@@ -39,12 +39,12 @@ GPL-2.0, **tsMuxer** ports are Apache-2.0 (see `THIRD_PARTY_NOTICES.md`).
 |---|---|
 | `template.rs` | Parser for ConvertX Delphi-style INIs (BOM, CRLF, comma decimals, nested collections, colour syntax). |
 | `menu.rs` | Template page renderer: background PNG plus highlight/select masks; `render_page` for intro sprites. |
-| `layout.rs` | `CustomLayout` model (menus, elements, actions), `validate` with the DVD limits, canvas geometry. |
+| `layout.rs` | `CustomLayout` model (menus, elements: text/image/video/rect, actions), `validate` / `validate_bd`, the DVD renderer `render_custom_page`, shared helpers (`rect_image`, `frame_box`, `fit_image`). |
 | `menu_anim.rs` | Intro keyframe interpolation and `Sprite` compositing for DVD and BD menu intros. |
 | `bd_template.rs` | ConvertX templates on Blu-ray: `layout_from_template` scales pages to 1920x1080 and translates `ML_*` buttons to actions. |
-| `bd_menu.rs` | HDMV navigation (`plan`, `plan_without_menus`) and rendering of each menu to a clip description plus IGS. |
+| `bd_menu.rs` | HDMV navigation (`plan`, `plan_without_menus`; movie titles never `JumpObject`, return menu in `GPR8`, per-title stream choices applied before `PlayPL`) and rendering of each menu to a clip description plus IGS. |
 | `igs.rs` | Interactive Graphics segment writer (ICS, PDS, ODS, END) in `.sup` layout. |
-| `hdmv.rs` | HDMV command encoding, `index.bdmv`, `MovieObject.bdmv`. |
+| `hdmv.rs` | HDMV command encoding (incl. register-form `set_stream_regs`), `index.bdmv`, `MovieObject.bdmv`. |
 
 ## Subtitles
 

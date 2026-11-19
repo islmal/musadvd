@@ -124,6 +124,8 @@ pub struct AudioStream {
     pub sample_rate: Option<u32>,
     /// ffprobe `profile` (`DTS`, `DTS-HD MA`, `LC`, ...).
     pub profile: Option<String>,
+    /// Bit depth of the samples (`bits_per_raw_sample`, else `bits_per_sample`); `None` when unknown.
+    pub bits_per_raw_sample: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -214,6 +216,9 @@ struct RawStream {
     bit_rate: Option<String>,
     sample_rate: Option<String>,
     profile: Option<String>,
+    /// ffprobe prints this as a string, some builds as a number.
+    bits_per_raw_sample: Option<serde_json::Value>,
+    bits_per_sample: Option<serde_json::Value>,
     level: Option<i32>,
     pix_fmt: Option<String>,
     #[serde(default)]
@@ -317,6 +322,11 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaInfo, ProbeErr
                 default: s.disposition.default == 1,
                 bit_rate: s.bit_rate.as_deref().and_then(|b| b.trim().parse().ok()),
                 sample_rate: s.sample_rate.as_deref().and_then(|b| b.trim().parse().ok()),
+                bits_per_raw_sample: [&s.bits_per_raw_sample, &s.bits_per_sample].into_iter().find_map(|v| match v.as_ref()? {
+                    serde_json::Value::String(t) => t.trim().parse().ok().filter(|b| *b > 0),
+                    serde_json::Value::Number(n) => n.as_u64().map(|b| b as u32).filter(|b| *b > 0),
+                    _ => None,
+                }),
                 profile: s.profile.filter(|p| !p.is_empty()),
             }),
             Some("subtitle") => info.subtitles.push(SubtitleStream {

@@ -329,8 +329,9 @@ pub fn mpls(p: &Playlist) -> Vec<u8> {
         be32(v, p.end);
         v.extend([0u8; 8]); // UO mask
         v.push(0); // PlayItem_random_access_flag
-        v.push(u8::from(p.still));
-        be16(v, 0);
+        // still_mode 2 = infinite (1 = timed, where still_time 0 is illegal and the PS4 ends the item).
+        v.push(if p.still { 2 } else { 0 });
+        be16(v, 0); // still_time
         // STN table
         let stn = v.len();
         be16(v, 0);
@@ -422,7 +423,7 @@ mod tests {
 
     /// A menu clip (video, AC-3 "eng", IG) with the item waiting forever: tsMuxeR 2.7.0's playlist
     /// of the clip with a PGS stream, with the PG entry turned into an IG entry and the still
-    /// mode set (what the removed `bd_patch` did).
+    /// mode set to infinite (`still_mode` 2, `still_time` 0).
     #[test]
     fn menu_playlist_with_ig_and_still() {
         let streams = [
@@ -431,7 +432,7 @@ mod tests {
             Stream { pid: IG_PID, codec: Codec::Ig, lang: *b"eng", attr: 0, es_info: vec![] },
         ];
         let p = Playlist { clip: 0, start: 27_000_000, end: 27_090_090, marks: &[], still: true, streams: &streams };
-        let want = unhex("4d504c53303230300000003a000000a60000000000000000000000000000000000000000000000000000000e000100000000000000000000400000000068000000010000006030303030304d325453000100019bfcc0019d5caa000000000000000000010000003e000001010001000000000000000009011011000000000000051b5100000009011100000000000000058131656e67090114000000000000000591656e670000000010000100010000019bfcc0ffff00000000");
+        let want = unhex("4d504c53303230300000003a000000a60000000000000000000000000000000000000000000000000000000e000100000000000000000000400000000068000000010000006030303030304d325453000100019bfcc0019d5caa000000000000000000020000003e000001010001000000000000000009011011000000000000051b5100000009011100000000000000058131656e67090114000000000000000591656e670000000010000100010000019bfcc0ffff00000000");
         assert_eq!(hex(&mpls(&p)), hex(&want));
     }
 

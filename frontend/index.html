@@ -57,6 +57,14 @@
                 <option value="strict" data-i18n="app.bdVideoStrict">Copy only (strict)</option>
               </select>
             </div>
+            <div class="row" id="bd-audio-row" hidden>
+              <label for="bd-audio" data-i18n="app.bdAudio" data-i18n-title="app.bdAudioTip" title="">Audio</label>
+              <select id="bd-audio" data-i18n-title="app.bdAudioTip">
+                <option value="auto" data-i18n="app.bdAudioAuto">Copy when compliant</option>
+                <option value="encode" data-i18n="app.bdAudioEncode">Re-encode</option>
+                <option value="strict" data-i18n="app.bdAudioStrict">Copy only (strict)</option>
+              </select>
+            </div>
             <div class="row output-row">
               <input id="output" type="text" data-i18n-placeholder="app.outputPlaceholder" placeholder="Output folder" spellcheck="false" />
               <button id="btn-output" class="btn icon" data-i18n-title="app.chooseFolder" title="Choose folder">…</button>

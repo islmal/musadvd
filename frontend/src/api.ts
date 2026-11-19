@@ -180,6 +180,8 @@ export interface ConversionConfig {
   customLayout?: CustomLayout | null;
   /** Blu-ray/AVCHD video: re-encode, copy compliant streams, or copy all. */
   bdVideo?: "encode" | "auto" | "strict";
+  /** Blu-ray/AVCHD audio: copy compliant tracks, always re-encode, or copy all. */
+  bdAudio?: "auto" | "encode" | "strict";
 }
 
 export type BuildPhase =

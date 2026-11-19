@@ -414,6 +414,8 @@ pub struct BuildOptions {
     pub bd_single_video: bool,
     /// Blu-ray / AVCHD: re-encode the video, copy compliant streams, or copy all of them.
     pub bd_video: crate::encoder::BdVideoMode,
+    /// Blu-ray / AVCHD: encode every audio track, copy compliant ones, or copy all of them.
+    pub bd_audio: crate::encoder::BdAudioMode,
     /// Lets another thread cancel the build.
     pub cancel: CancelToken,
     /// Menus from the menu editor instead of the ConvertX template (`template` is unused then).
@@ -2351,6 +2353,7 @@ mod tests {
             bit_rate: None,
             sample_rate: None,
             profile: None,
+            bits_per_raw_sample: None,
         };
         let s = |index: u32, codec: &str, kind: SubtitleKind| SubtitleStream {
             index,
@@ -2407,6 +2410,7 @@ mod tests {
                 bit_rate: Some(192_000),
                 sample_rate: Some(48_000),
                 profile: None,
+                bits_per_raw_sample: None,
             },
             AudioStream {
                 index: 2,
@@ -2419,6 +2423,7 @@ mod tests {
                 bit_rate: Some(768_000),
                 sample_rate: Some(48_000),
                 profile: None,
+                bits_per_raw_sample: None,
             },
         ];
         let mut info2 = info(60.0, vec![]);
@@ -2434,6 +2439,7 @@ mod tests {
                 bit_rate: Some(192_000),
                 sample_rate: Some(48_000),
                 profile: None,
+                bits_per_raw_sample: None,
             },
             AudioStream {
                 index: 2,
@@ -2446,6 +2452,7 @@ mod tests {
                 bit_rate: Some(128_000),
                 sample_rate: Some(48_000),
                 profile: None,
+                bits_per_raw_sample: None,
             },
         ];
 

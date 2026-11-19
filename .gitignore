@@ -19,7 +19,15 @@ bin/*.iso
 # Disc images and build leftovers
 *.iso
 *.iso.part
+*.img
+*.ibg
 .musadvd-work/
+*.musadvd-work/
+VIDEO_TS/
+AUDIO_TS/
+BDMV/
+CERTIFICATE/
+bd_stress_test/
 output_menu/
 
 # Temporary patch scripts and scratch files

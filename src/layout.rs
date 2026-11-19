@@ -341,6 +341,44 @@ pub enum Content {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
     },
+    /// Filled rectangle with an optional border (canvas units); a button when it has an action.
+    Rect {
+        #[serde(default = "white")]
+        color: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        border_color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        border_width: Option<f32>,
+    },
+}
+
+/// Pixels of a `Rect` element (shared by the DVD and Blu-ray renderers): `fill`, with the
+/// outer `border.1` pixels painted in `border.0`; `alpha` is the fill opacity.
+pub(crate) fn rect_image(fill: [u8; 3], border: Option<([u8; 3], u32)>, w: u32, h: u32, alpha: u8) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(w, h, image::Rgba([fill[0], fill[1], fill[2], alpha]));
+    if let Some((c, bpx)) = border {
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            if x < bpx || y < bpx || x >= w.saturating_sub(bpx) || y >= h.saturating_sub(bpx) {
+                *p = image::Rgba([c[0], c[1], c[2], alpha]);
+            }
+        }
+    }
+    img
+}
+
+/// Border of a `Rect` in frame pixels: scaled like font sizes, at least 1 px, at most half the smaller side.
+pub(crate) fn rect_border(
+    border_color: &Option<String>,
+    border_width: &Option<f32>,
+    canvas: Canvas,
+    frame: impl Into<MenuFrame>,
+    bw: u32,
+    bh: u32,
+) -> Option<([u8; 3], u32)> {
+    let width = border_width.filter(|w| *w > 0.0)?;
+    let c = parse_color(border_color.as_deref()?)?;
+    let bpx = (frame_font_size(width, canvas, frame).round() as u32).max(1).min(bw.min(bh) / 2);
+    Some((c, bpx))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -476,6 +514,7 @@ pub(crate) fn element_name(e: &Element, n: usize) -> String {
         Content::Text { text, .. } => format!("Text '{}'", text.lines().next().unwrap_or("").chars().take(24).collect::<String>()),
         Content::Image { .. } => "Image".into(),
         Content::Video { .. } => "Video".into(),
+        Content::Rect { .. } => "Rectangle".into(),
     };
     format!("Element {} ({kind})", n + 1)
 }
@@ -616,6 +655,17 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 Content::Image { src, .. } => {
                     if !Path::new(src).is_file() {
                         errs.push(el(&format!("Image not found: {src}")));
+                    }
+                }
+                Content::Rect { color, border_color, border_width } => {
+                    if parse_color(color).is_none() {
+                        errs.push(el(&format!("Rectangle colour '{color}' is not a colour")));
+                    }
+                    if let Some(bc) = border_color.as_deref().filter(|bc| parse_color(bc).is_none()) {
+                        errs.push(el(&format!("Border colour '{bc}' is not a colour")));
+                    }
+                    if border_width.is_some_and(|w| !(0.0..=100.0).contains(&w)) {
+                        errs.push(el("Border width must be between 0 and 100"));
                     }
                 }
                 Content::Video { path: Some(p), .. } => {
@@ -1306,6 +1356,14 @@ fn render_custom_page(
             Content::Image { src, fit } => {
                 let src_img = image::open(src).map_err(|err| io(Path::new(src), &err))?.to_rgba8();
                 let img = rotate(fit_image(&src_img, bw, bh, *fit, tv.menu_pixel_aspect(), e.rotation % 180 == 90), e.rotation);
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                if has_intro && visible {
+                    sprites.push(sprite(menu_anim::Pixels::Image(img)));
+                }
+            }
+            Content::Rect { color, border_color, border_width } => {
+                let fill = parse_color(color).unwrap_or([255, 255, 255]);
+                let img = rotate(rect_image(fill, rect_border(border_color, border_width, canvas, tv, bw, bh), bw, bh, 255), e.rotation);
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
                 if has_intro && visible {
                     sprites.push(sprite(menu_anim::Pixels::Image(img)));
@@ -2246,5 +2304,77 @@ mod tests {
         let plain: Element = serde_json::from_str(&json.replace(r#","group":"g1""#, "")).unwrap();
         assert_eq!(plain.group, None);
         assert!(!serde_json::to_string(&plain).unwrap().contains("group"));
+    }
+
+    fn rect(x: f64, y: f64, color: &str, border: Option<(&str, f32)>, action: Option<Action>) -> Element {
+        let mut e = text(x, y, "", action);
+        e.w = 100.0;
+        e.h = 50.0;
+        e.content = Content::Rect { color: color.into(), border_color: border.map(|b| b.0.into()), border_width: border.map(|b| b.1) };
+        e
+    }
+
+    #[test]
+    fn rect_content_roundtrips_and_border_is_optional() {
+        let c: Content = serde_json::from_str(r##"{"type":"rect","color":"#112233"}"##).unwrap();
+        assert_eq!(c, Content::Rect { color: "#112233".into(), border_color: None, border_width: None });
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains(r#""type":"rect""#) && !s.contains("border"), "{s}");
+        let c: Content = serde_json::from_str(r##"{"type":"rect","borderColor":"#fff","borderWidth":3}"##).unwrap();
+        assert_eq!(c, Content::Rect { color: "#FFFFFF".into(), border_color: Some("#fff".into()), border_width: Some(3.0) });
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains(r#""borderColor":"#) && s.contains(r#""borderWidth":3"#), "{s}");
+    }
+
+    #[test]
+    fn rect_validation_rejects_bad_colours_and_width() {
+        let l = layout(vec![menu("m", MenuRole::Title, None, vec![
+            rect(10.0, 10.0, "red", None, None),
+            rect(10.0, 100.0, "#000", Some(("nope", 2.0)), None),
+            rect(10.0, 200.0, "#000", Some(("#fff", 500.0)), None),
+        ])]);
+        let err = validate(&l, &titles(1), TvStandard::Pal).unwrap_err().0.join("\n");
+        assert!(err.contains("Rectangle colour 'red'"), "{err}");
+        assert!(err.contains("Border colour 'nope'"), "{err}");
+        assert!(err.contains("Border width"), "{err}");
+        assert!(err.contains("Element 1 (Rectangle)"), "{err}");
+    }
+
+    #[test]
+    fn rect_image_paints_fill_and_border() {
+        let img = rect_image([1, 2, 3], Some(([9, 8, 7], 2)), 20, 10, 255);
+        assert_eq!(img.get_pixel(10, 5).0, [1, 2, 3, 255]);
+        assert_eq!(img.get_pixel(0, 0).0, [9, 8, 7, 255]);
+        assert_eq!(img.get_pixel(19, 9).0, [9, 8, 7, 255]);
+        assert_eq!(img.get_pixel(2, 2).0, [1, 2, 3, 255]);
+        let plain = rect_image([1, 2, 3], None, 20, 10, 128);
+        assert!(plain.pixels().all(|p| p.0 == [1, 2, 3, 128]));
+        // Border clamps to half the smaller side and to at least 1 px.
+        let c = Canvas::default();
+        assert_eq!(rect_border(&Some("#fff".into()), &Some(100.0), c, TvStandard::Pal, 40, 10).map(|b| b.1), Some(5));
+        assert_eq!(rect_border(&Some("#fff".into()), &Some(0.01), c, TvStandard::Pal, 40, 10).map(|b| b.1), Some(1));
+        assert_eq!(rect_border(&Some("#fff".into()), &Some(0.0), c, TvStandard::Pal, 40, 10), None);
+    }
+
+    #[test]
+    fn renders_a_rect_into_the_background_layer() {
+        let dir = std::env::temp_dir().join(format!("cx_layout_rect_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let panel = rect(100.0, 100.0, "#112233", Some(("#FF0000", 2.0)), None);
+        let button = rect(300.0, 100.0, "#445566", None, Some(Action::PlayTitle { title: 1 }));
+        let l = layout(vec![menu("main", MenuRole::Title, None, vec![panel, button])]);
+        validate(&l, &titles(1), TvStandard::Pal).unwrap();
+        let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
+        let (spec, files) = &out.pages[0];
+        let MenuLayer::Image(under) = &files.custom.as_ref().unwrap().layers[0] else { panic!() };
+        let under = image::open(under).unwrap().to_rgba8();
+        assert_eq!(under.get_pixel(150, 120).0, [17, 34, 51, 255], "fill drawn");
+        assert_eq!(under.get_pixel(100, 100).0, [255, 0, 0, 255], "border drawn");
+        assert_eq!(under.get_pixel(350, 120).0, [68, 85, 102, 255]);
+        assert_eq!(spec.buttons.len(), 1, "a Rect with an action is a button");
+        let hl = image::open(&files.highlight).unwrap().to_rgba8();
+        assert_eq!(hl.get_pixel(301, 120).0[3], 204, "frame highlight around the rect button");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

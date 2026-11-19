@@ -24,6 +24,12 @@ with Ctrl+C (child processes are killed).
   `--no-menu-animations`. Blu-rays have no ConvertX templates: without `--layout` they get no menu.
 - **Tracks and chapters**: `--audio-lang`, `--sub-lang`, `--no-subs`, `--chapter-minutes`,
   `--audio auto|ac3|lpcm`, `--track-labels smart|language|generic`, `--loudnorm`.
+- **Blu-ray/AVCHD stream copy**: `--bd-video encode|auto|strict` (default `encode`) copies H.264
+  that already meets the disc spec; `--bd-audio auto|encode|strict` (default `auto`) copies
+  compliant audio: AC-3 (48 kHz, <= 6 ch, <= 640 kbit/s), DTS (48/96/192 kHz, <= 8 ch; DTS-HD
+  keeps only its core), integer PCM / FLAC <= 24 bit as lossless LPCM (source rate kept). With
+  `auto` an explicit `--audio ac3` / `lpcm` copies only tracks already in that format; `strict`
+  fails before encoding if any track cannot be copied. Trimmed or loudnormed titles never copy.
 - **Video processing**: `--scale letterbox|panscan|stretch`, `--scale-filter
   bilinear|bicubic|lanczos`, `--deinterlace auto|yadif|off`.
 - **Structure**: `--merge 2,3` joins inputs behind one menu entry; `--single-video` (Blu-ray);

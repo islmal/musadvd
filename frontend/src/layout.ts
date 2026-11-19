@@ -89,7 +89,16 @@ export interface VideoElement extends ElementBase {
   path?: string;
 }
 
-export type LayoutElement = TextElement | ImageElement | VideoElement;
+/** A filled box, optionally framed; a decoration unless it has an action. */
+export interface RectElement extends ElementBase {
+  type: "rect";
+  color: string;
+  borderColor?: string;
+  /** Canvas units, 0..100; 0 / omitted = no border. */
+  borderWidth?: number;
+}
+
+export type LayoutElement = TextElement | ImageElement | VideoElement | RectElement;
 
 export type MenuSound = { type: "none" } | { type: "title"; title: number; startSecs?: number | null } | { type: "file"; path: string };
 
@@ -328,6 +337,10 @@ export function text(x: number, y: number, w: number, h: number, value: string, 
   };
 }
 
+export function rect(x: number, y: number, w: number, h: number, color: string, extra: Partial<RectElement> = {}): RectElement {
+  return { id: newId("r"), type: "rect", color, x, y, w, h, rotation: 0, opacity: 1, action: null, ...extra };
+}
+
 function video(x: number, y: number, w: number, h: number, title: number, startSecs: number | null, action: Action | null): VideoElement {
   return { id: newId("v"), type: "video", title, startSecs, fit: "cover", x, y, w, h, rotation: 0, opacity: 1, action };
 }
@@ -364,8 +377,8 @@ export function isMoving(m: CustomMenu): boolean {
  * - per title with several audio tracks or subtitles: an "Einstellungen" menu with one button
  *   per track and subtitle (plus "Aus"), linked from the title's root menu.
  */
-export function draftLayout(titles: EditorTitle[], tv: string, heading: string): CustomLayout {
-  if (isBdFrame(tv)) return toBluray(draftLayout(titles, "PAL", heading), canvasSize(tv));
+export function draftLayout(titles: EditorTitle[], tv: string, heading: string, preset?: MenuPreset): CustomLayout {
+  if (isBdFrame(tv)) return toBluray(draftLayout(titles, "PAL", heading, preset), canvasSize(tv));
   const canvas = canvasSize(tv);
   const { width: W, height: H } = canvas;
   const sy = H / 576;
@@ -484,7 +497,89 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string):
     }
   });
 
-  return { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, menus };
+  const layout: CustomLayout = { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, menus };
+  if (preset) applyPreset(layout, preset);
+  return layout;
+}
+
+export type MenuPreset = "swiss" | "cinema" | "midnight";
+export const MENU_PRESETS: MenuPreset[] = ["swiss", "cinema", "midnight"];
+
+interface PresetStyle {
+  bg: string;
+  text: string;
+  accent: string;
+  font: string;
+  bold: boolean;
+  /** null = keep each text's own alignment. */
+  align: Align | null;
+  shadow: boolean;
+  highlight: { color: string; selectColor: string; opacity: number };
+  /** Decorative rects drawn behind the texts, for a canvas of `W` wide and `H` high. */
+  decor: (W: number, H: number) => RectElement[];
+}
+
+const PRESET_STYLES: Record<MenuPreset, PresetStyle> = {
+  swiss: {
+    bg: "#F2F2F0",
+    text: "#111111",
+    accent: "#E4002B",
+    font: "Arial",
+    bold: true,
+    align: "left",
+    shadow: false,
+    highlight: { color: "#E4002B", selectColor: "#111111", opacity: 0.8 },
+    decor: (_W, H) => [rect(60, Math.round(H * 0.038), 90, Math.round(H * 0.014), "#E4002B")],
+  },
+  cinema: {
+    bg: "#0B0B0D",
+    text: "#E8C872",
+    accent: "#D4AF37",
+    font: "Georgia",
+    bold: false,
+    align: "center",
+    shadow: true,
+    highlight: { color: "#D4AF37", selectColor: "#FFF1B8", opacity: 0.8 },
+    decor: (W, H) => {
+      const bar = Math.round(H * 0.049);
+      return [
+        rect(0, 0, W, bar, "#000000"),
+        rect(0, H - bar, W, bar, "#000000"),
+        rect(0, bar, W, 2, "#D4AF37"),
+        rect(0, H - bar - 2, W, 2, "#D4AF37"),
+      ];
+    },
+  },
+  midnight: {
+    bg: "#0A1030",
+    text: "#E8F1FF",
+    accent: "#5CE1FF",
+    font: "Segoe UI",
+    bold: false,
+    align: null,
+    shadow: true,
+    highlight: { color: "#00E5FF", selectColor: "#FFFFFF", opacity: 0.8 },
+    decor: (W, H) => [rect(40, Math.round(H * 0.174), W - 80, Math.round(H * 0.66), "#1B2A5C", { opacity: 0.55, borderColor: "#5CE1FF", borderWidth: 2 })],
+  },
+};
+
+/** Restyles a default draft in place: flat background, recoloured texts, decorative rects behind. */
+function applyPreset(layout: CustomLayout, preset: MenuPreset): void {
+  const st = PRESET_STYLES[preset];
+  layout.highlight = { ...st.highlight };
+  for (const m of layout.menus) {
+    m.background = { color: st.bg, image: null, video: null, blur: 0, gradientOverlay: "none" };
+    for (const e of m.elements) {
+      if (e.type !== "text") continue;
+      // The default's yellow marks the settings column headings.
+      e.color = e.color === "#FFD200" ? st.accent : st.text;
+      e.font = st.font;
+      e.bold = e.bold || st.bold;
+      e.shadow = st.shadow;
+      if (st.align) e.align = st.align;
+    }
+    m.elements.unshift(...st.decor(layout.canvas.width, layout.canvas.height));
+  }
 }
 
 /**
@@ -502,6 +597,7 @@ function toBluray(draft: CustomLayout, canvas: { width: number; height: number }
       e.h = Math.round(e.h * sy);
       if (e.type === "text") e.size = Math.round(e.size * sy);
       if (e.type === "video") [e.w, e.h] = [400, 225];
+      if (e.type === "rect" && e.borderWidth) e.borderWidth = Math.round(e.borderWidth * sy);
     }
     m.elements.forEach((e, i) => {
       const caption = m.elements[i + 1];

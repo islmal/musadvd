@@ -28,7 +28,7 @@ use crate::dvd::{
     run_limited, safe_folder_name, select_streams, unique_dir, AtPath, BuildError, BuildOptions, BuildPhase, BuildReport,
     Event, Job, JobEvent, JobProgress, TitleLoad, TitleReport, WORK_DIR,
 };
-use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, BdEncodeJob, BdEncoder, BdVideoMode, EncodePhase, VideoProcessing, SILENCE_OUT};
+use crate::encoder::{self, bd_audio_copy, plan_audio_bd, Aspect, AudioMode, AudioOut, AudioTarget, BdAudioMode, BdEncodeJob, BdEncoder, BdVideoMode, EncodePhase, VideoProcessing, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
 use crate::i18n::{tr, UiLang};
 use crate::tf;
@@ -188,6 +188,7 @@ struct BdTitle {
     stem: String,
     rate: BdRate,
     audio_mode: AudioMode,
+    bd_audio: BdAudioMode,
     track_label_mode: probe::TrackLabelMode,
     ui_lang: UiLang,
     video: VideoProcessing,
@@ -216,7 +217,7 @@ impl BdTitle {
     fn audio_outs(&self, layout: &Layout) -> Vec<AudioOut> {
         self.audio_streams(layout)
             .into_iter()
-            .map(|a| a.map_or(SILENCE_OUT, |a| plan_audio(a, self.audio_target, self.audio_mode, self.loudnorm || self.info.trim.is_some())))
+            .map(|a| a.map_or(SILENCE_OUT, |a| plan_audio_bd(a, self.audio_target, self.audio_mode, self.bd_audio, self.loudnorm || self.info.trim.is_some())))
             .collect()
     }
 
@@ -287,7 +288,7 @@ async fn encode_bd_title(
             None => {
                 let path = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
                 let (w, h) = resolution.frame_size(TvStandard::Pal);
-                std::fs::write(&path, subpic::empty_pgs(w as u16, h as u16)).at(&path)?;
+                std::fs::write(&path, subpic::empty_pgs(w as u16, h as u16, t.rate.fps)).at(&path)?;
             }
         }
     }
@@ -356,6 +357,7 @@ async fn encode_bd_title(
         hwaccel,
         encoder,
         audio_mode: t.audio_mode,
+        bd_audio: t.bd_audio,
         video: t.video,
         audio_target: t.audio_target,
         audio_filters,
@@ -683,6 +685,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             resolution,
             video_mode,
             audio_mode: opts.audio_mode,
+            bd_audio: opts.bd_audio,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
             video: opts.video,
@@ -722,6 +725,22 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let tv = opts.tv_standard;
     let resolution = opts.resolution;
     let limits = opts.disc.limits();
+    // Audio copy policy, checked before any bitrate planning or encoding.
+    for t in titles.iter().filter(|t| t.bd_audio != BdAudioMode::Encode) {
+        let filtered = t.loudnorm || t.info.trim.is_some();
+        for (n, &i) in t.audio.iter().enumerate() {
+            let a = &t.info.audio[i];
+            if filtered && t.bd_audio == BdAudioMode::Auto {
+                continue;
+            }
+            let verdict = if filtered { Err("loudness normalisation or trimming re-encodes the audio".to_string()) } else { bd_audio_copy(a, t.audio_target).map(|_| ()) };
+            let Err(why) = verdict else { continue };
+            if t.bd_audio == BdAudioMode::Strict {
+                return Err(BuildError::Template(format!("{}: audio track {} ({}) cannot be copied – {why}", t.label, n + 1, a.codec)));
+            }
+            warn(log, tf!(opts.ui_lang, "bd_audio_copy_fallback", label = t.label, track = n + 1, codec = a.codec, reason = why));
+        }
+    }
     // The disc's video buffer: the copy check and the muxer's added timing use the same model.
     let copy_vbv = (u64::from(limits.vbv_maxrate_kbps) * 1000, u64::from(limits.vbv_bufsize_kbit) * 1000);
     for t in titles.iter_mut().filter(|t| t.video_mode != BdVideoMode::Encode) {

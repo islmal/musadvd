@@ -29,8 +29,8 @@ pub fn supported(codec: &str) -> bool {
 }
 
 /// A `.sup` stream with one empty display set (presentation composition with no objects, then
-/// END) for a canvas of `width`×`height`: a Blu-ray subtitle track without any picture.
-pub fn empty_pgs(width: u16, height: u16) -> Vec<u8> {
+/// END) for a canvas of `width`×`height` at `fps`: a Blu-ray subtitle track without any picture.
+pub fn empty_pgs(width: u16, height: u16, fps: (u32, u32)) -> Vec<u8> {
     let seg = |kind: u8, payload: &[u8]| {
         let mut s = b"PG".to_vec();
         s.extend([0u8; 8]); // PTS and DTS 0
@@ -42,9 +42,9 @@ pub fn empty_pgs(width: u16, height: u16) -> Vec<u8> {
     let mut pcs = Vec::new();
     pcs.extend(width.to_be_bytes());
     pcs.extend(height.to_be_bytes());
-    // Frame rate code 0x10 (24 fps), composition number 1, epoch start, no palette update,
+    // Frame rate code of the title, composition number 1, epoch start, no palette update,
     // palette 0, zero objects.
-    pcs.extend([0x10, 0, 1, 0x80, 0, 0, 0]);
+    pcs.extend([crate::pgs::frame_rate_code(fps) << 4, 0, 1, 0x80, 0, 0, 0]);
     let mut out = seg(0x16, &pcs);
     out.extend(seg(0x80, &[]));
     out
@@ -878,8 +878,9 @@ mod tests {
 
     #[test]
     fn empty_pgs_has_no_pictures() {
-        let sup = empty_pgs(1920, 1080);
+        let sup = empty_pgs(1920, 1080, (30000, 1001));
         assert_eq!(sup.len(), 13 + 11 + 13);
+        assert_eq!(sup[13 + 4], crate::pgs::frame_rate_code((30000, 1001)) << 4);
         let d = decode_pgs(&sup).unwrap();
         assert_eq!((d.canvas, d.pictures.len()), ((1920, 1080), 0));
     }

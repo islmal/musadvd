@@ -154,14 +154,19 @@ enum Command {
         /// Skip the intro animations of template menus.
         #[arg(long)]
         no_menu_animations: bool,
-        /// Audio: auto copies compliant AC-3/DTS tracks, ac3 always re-encodes, lpcm writes
-        /// uncompressed audio (Blu-ray/AVCHD; DVD falls back to AC-3).
+        /// Audio: auto copies compliant AC-3/DTS tracks, ac3 writes AC-3, lpcm writes uncompressed
+        /// audio (Blu-ray/AVCHD; DVD falls back to AC-3). On Blu-ray --bd-audio decides copying.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
         /// Blu-ray/AVCHD video: encode always re-encodes, auto copies H.264 streams that already
         /// meet the disc spec (untrimmed, uncropped), strict copies every title or fails.
         #[arg(long, value_enum, default_value = "encode")]
         bd_video: BdVideoArg,
+        /// Blu-ray/AVCHD audio: auto copies compliant tracks (AC-3, DTS core, lossless PCM/FLAC as
+        /// LPCM; with --audio ac3/lpcm only that format), encode always re-encodes, strict copies
+        /// every track or fails.
+        #[arg(long, value_enum, default_value = "auto")]
+        bd_audio: BdAudioArg,
         /// Track names on menu buttons: smart (language + file title), language only, or generic (Tonspur 1).
         #[arg(long, value_enum, default_value = "smart")]
         track_labels: TrackLabelsArg,
@@ -327,6 +332,13 @@ impl From<HwAccelArg> for musadvd::config::HwAccelMode {
 enum BdVideoArg {
     Encode,
     Auto,
+    Strict,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BdAudioArg {
+    Auto,
+    Encode,
     Strict,
 }
 
@@ -852,6 +864,7 @@ fn main() -> ExitCode {
             no_menu_animations,
             audio,
             bd_video,
+            bd_audio,
             track_labels,
             loudnorm,
             scale,
@@ -933,6 +946,11 @@ fn main() -> ExitCode {
                     BdVideoArg::Encode => musadvd::encoder::BdVideoMode::Encode,
                     BdVideoArg::Auto => musadvd::encoder::BdVideoMode::Auto,
                     BdVideoArg::Strict => musadvd::encoder::BdVideoMode::Strict,
+                },
+                bd_audio: match bd_audio {
+                    BdAudioArg::Auto => musadvd::encoder::BdAudioMode::Auto,
+                    BdAudioArg::Encode => musadvd::encoder::BdAudioMode::Encode,
+                    BdAudioArg::Strict => musadvd::encoder::BdAudioMode::Strict,
                 },
                 track_label_mode: track_labels.into(),
                 loudnorm,

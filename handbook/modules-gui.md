@@ -28,11 +28,11 @@ embedded `dist/`.
 | File | Purpose |
 |---|---|
 | `api.ts` | Typed wrappers of the Tauri commands; mirrors Rust types (`DiscType`, `AudioChoice`, settings). |
-| `main.ts` | Main window: title list, drag reorder, merge, project settings, size estimate, conversion. |
+| `main.ts` | Main window: title list, drag reorder, merge, project settings, size estimate, conversion; Blu-ray footer modes (`bdVideo`, `bdAudio`), Copy/Re-encode badges per title and audio track, strict start gates. |
 | `order.ts` | Pure title-list helpers (`moveItem`); also run by `scripts/check-order.mjs`. |
 | `edit.ts` | "Schnitt & Bild" tab: trimmer with live player, crop inspector, chapter marks. |
-| `menuEditor.ts` | WYSIWYG menu editor: menu manager, stage with drag/resize, properties, Canvas timeline with intro keyframes, template import. |
-| `layout.ts` | `CustomLayout` types (same JSON as `src/layout.rs`) and a first-draft generator. |
+| `menuEditor.ts` | WYSIWYG menu editor: menu manager, stage with drag/resize, properties, Canvas timeline with intro keyframes, template import, rectangles, preset picker (one undo step). |
+| `layout.ts` | `CustomLayout` types (same JSON as `src/layout.rs`), the first-draft generator `draftLayout` and its presets (`swiss`, `cinema`, `midnight`). |
 | `editorWindow.ts` | Editor window entry: receives project data, reports applied layouts to the main window. |
 | `settings.ts` | General settings dialog (navigation tree + pages). |
 | `burn.ts` | "Burn to DVD" dialog: drive, disc check, label, speed, auto-start countdown, progress. |

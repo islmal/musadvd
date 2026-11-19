@@ -19,7 +19,7 @@ use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
-    bd_button_rect, button_colors, clip_of, element_name, video_clip, fit_image, frame_box, frame_font_size, parse_color, rotate, Action,
+    bd_button_rect, button_colors, clip_of, element_name, video_clip, fit_image, frame_box, frame_font_size, parse_color, rect_border, rect_image, rotate, Action,
     Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
 use crate::menu;
@@ -32,6 +32,52 @@ const NEXT_KIND: u32 = 4;
 const NEXT_INDEX: u32 = 5;
 const TMP: u32 = 6;
 const PAGE: u32 = 7;
+/// Menu object a title's end returns to through the Top Menu title (0 = the first title menu):
+/// movie titles may not use JumpObject, so they leave with JumpTitle 0 and Top Menu dispatches.
+const RETURN_MENU: u32 = 8;
+
+/// Audio / subtitle choice of a settings menu for entry `t`, applied by the title's objects right
+/// before PlayPL: a SetStream in the menu is ignored by the PS4, whose check runs against the menu
+/// playlist (one audio stream, no PG). 0 = no choice, else the stream number; subtitle "off" is
+/// `SUB_OFF`.
+fn audio_reg(t: u32) -> u32 {
+    16 + 2 * (t - 1)
+}
+fn sub_reg(t: u32) -> u32 {
+    audio_reg(t) + 1
+}
+const SUB_OFF: u32 = 0xFFFF;
+
+/// Commands that apply the stored audio / subtitle choice of entry `t` (start of a title object).
+fn apply_stream_choice(t: u32, audio: bool, sub: bool) -> Vec<Command> {
+    let mut c = Vec::new();
+    if audio {
+        // The PG display flag is rewritten by SetStream: keep the player's current state.
+        let a = Some(audio_reg(t));
+        c.extend([
+            hdmv::compare(Op::Gpr(audio_reg(t)), Cmp::Eq, Op::Imm(0)),
+            hdmv::goto(8),
+            hdmv::mov(TMP, Op::Psr(2)),
+            hdmv::and(TMP, Op::Imm(0x8000_0000)),
+            hdmv::compare(Op::Gpr(TMP), Cmp::Ne, Op::Imm(0)),
+            hdmv::set_stream_regs(a, None, true),
+            hdmv::compare(Op::Gpr(TMP), Cmp::Eq, Op::Imm(0)),
+            hdmv::set_stream_regs(a, None, false),
+        ]);
+    }
+    if sub {
+        let at = c.len() as u32;
+        c.extend([
+            hdmv::compare(Op::Gpr(sub_reg(t)), Cmp::Eq, Op::Imm(SUB_OFF)),
+            hdmv::set_stream(0),
+            hdmv::compare(Op::Gpr(sub_reg(t)), Cmp::Eq, Op::Imm(0)),
+            hdmv::goto(at + 6),
+            hdmv::compare(Op::Gpr(sub_reg(t)), Cmp::Ne, Op::Imm(SUB_OFF)),
+            hdmv::set_stream_regs(None, Some(sub_reg(t)), true),
+        ]);
+    }
+    c
+}
 
 /// Targets of the dispatcher (`GPR4`).
 const KIND_TITLE: u32 = 1;
@@ -214,22 +260,15 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 Action::SetAudio { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
                     let n = lt.and_then(|lt| lt.audio_sources.iter().position(|s| s == source)).unwrap_or(0) as u32 + 1;
-                    // The display flag is rewritten by SetStream: keep the player's current state.
-                    vec![
-                        hdmv::mov(TMP, Op::Psr(2)),
-                        hdmv::and(TMP, Op::Imm(0x8000_0000)),
-                        hdmv::compare(Op::Gpr(TMP), Cmp::Ne, Op::Imm(0)),
-                        hdmv::set_stream(hdmv::audio_stream(n) | hdmv::PG_DISPLAY),
-                        hdmv::compare(Op::Gpr(TMP), Cmp::Eq, Op::Imm(0)),
-                        hdmv::set_stream(hdmv::audio_stream(n)),
-                    ]
+                    vec![hdmv::mov(audio_reg(m.title.unwrap_or(1)), Op::Imm(n))]
                 }
                 Action::SetSubtitle { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
-                    match source.and_then(|s| lt.and_then(|lt| lt.subtitle_sources.iter().position(|x| *x == s))) {
-                        Some(k) => vec![hdmv::set_stream(hdmv::pg_stream_on(k as u32 + 1))],
-                        None => vec![hdmv::set_stream(0)],
-                    }
+                    let pg = match source.and_then(|s| lt.and_then(|lt| lt.subtitle_sources.iter().position(|x| *x == s))) {
+                        Some(k) => k as u32 + 1,
+                        None => SUB_OFF,
+                    };
+                    vec![hdmv::mov(sub_reg(m.title.unwrap_or(1)), Op::Imm(pg))]
                 }
                 Action::CustomVm { .. } => vec![],
             };
@@ -240,17 +279,26 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
 
     let mut objects = Vec::new();
     // First Play.
-    let start = if opts.auto_start { hdmv::jump_title(1) } else { hdmv::jump_object(menu_obj(first_title_menu)) };
-    objects.push(MovieObject { commands: go(vec![start], 0, 0), resume: false });
-    // Top Menu: always a fresh entry.
+    let start = if opts.auto_start { hdmv::jump_title(1) } else { hdmv::jump_title(0) };
+    objects.push(MovieObject { commands: [vec![hdmv::mov(RETURN_MENU, Op::Imm(0))], go(vec![start], 0, 0)].concat(), resume: false });
+    // Top Menu: always a fresh entry; a title's end may have left the menu to return to.
     let mut top = Vec::new();
     if intro {
         top.push(hdmv::mov(ENTRY, Op::Imm(0)));
     }
-    top.push(hdmv::jump_object(menu_obj(first_title_menu)));
+    let at = top.len() as u32;
+    top.extend([
+        hdmv::compare(Op::Gpr(RETURN_MENU), Cmp::Eq, Op::Imm(0)),
+        hdmv::goto(at + 5),
+        hdmv::mov(TMP, Op::Gpr(RETURN_MENU)),
+        hdmv::mov(RETURN_MENU, Op::Imm(0)),
+        hdmv::jump_object_op(Op::Gpr(TMP)),
+        hdmv::jump_object(menu_obj(first_title_menu)),
+    ]);
     objects.push(MovieObject { commands: top, resume: false });
-    // Menus: a still shows its single clip forever; a motion menu restarts its clip (the selected
-    // button lives in PSR10, so it survives the loop) after selecting the first button once.
+    // Menus restart their clip if it ever ends (a still waits forever, but the player may still
+    // end the item); the selected button lives in PSR10, so it survives the loop after the first
+    // button was selected once.
     for (i, t) in traits.iter().enumerate() {
         let pl = i as u32;
         let cmds = if t.intro {
@@ -271,12 +319,10 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 hdmv::goto(at + 5),
             ]);
             c
-        } else if t.moving {
+        } else {
             let first = if t.has_buttons { vec![hdmv::set_button_page(1)] } else { vec![] };
             let at = first.len() as u32;
             [first, vec![hdmv::play_pl(pl), hdmv::goto(at)]].concat()
-        } else {
-            vec![hdmv::play_pl(pl)]
         };
         objects.push(MovieObject { commands: cmds, resume: false });
     }
@@ -288,7 +334,15 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
         for k in 0..members.len() {
             t += 1;
             let pl = title_playlist(m_count, t as u32);
-            let mut c = vec![hdmv::play_pl_at_mark(Op::Imm(pl), Op::Gpr(MARK)), hdmv::mov(MARK, Op::Imm(0))];
+            let used = |audio: bool| {
+                layout.menus.iter().filter(|m| m.title.unwrap_or(1) == g as u32).flat_map(|m| &m.elements).any(|e| match e.action {
+                    Some(Action::SetAudio { .. }) => audio,
+                    Some(Action::SetSubtitle { .. }) => !audio,
+                    _ => false,
+                })
+            };
+            let mut c = apply_stream_choice(g as u32, used(true), used(false));
+            c.extend([hdmv::play_pl_at_mark(Op::Imm(pl), Op::Gpr(MARK)), hdmv::mov(MARK, Op::Imm(0))]);
             if k + 1 < members.len() {
                 c.push(hdmv::jump_title(t as u32 + 1));
                 objects.push(MovieObject { commands: c, resume: false });
@@ -302,17 +356,27 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 None
             };
             let to_menu_idx = if !opts.return_to_title_menu { own_menu(g as u32) } else { None }.unwrap_or_else(|| main_menu(g as u32));
-            let to_menu = hdmv::jump_object(menu_obj(to_menu_idx));
+            // Back to a menu through the Top Menu title (see RETURN_MENU).
+            let to_menu = if to_menu_idx == first_title_menu {
+                vec![hdmv::jump_title(0)]
+            } else {
+                vec![hdmv::mov(RETURN_MENU, Op::Imm(menu_obj(to_menu_idx))), hdmv::jump_title(0)]
+            };
             if opts.play_sequentially {
                 match next {
                     Some(n) => c.push(hdmv::jump_title(n)),
-                    None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), to_menu]),
+                    None => c.extend([vec![hdmv::mov(FLAG, Op::Imm(0))], to_menu].concat()),
                 }
             } else {
-                let single_end = if opts.loop_playback { hdmv::jump_title(first_file(g as u32)) } else { to_menu };
+                let single_end = if opts.loop_playback { vec![hdmv::jump_title(first_file(g as u32))] } else { to_menu };
                 match next {
-                    Some(n) => c.extend([hdmv::compare(Op::Gpr(FLAG), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(n), single_end]),
-                    None => c.extend([hdmv::mov(FLAG, Op::Imm(0)), single_end]),
+                    // The compare guards one command only: skip over the whole single end with a Goto.
+                    Some(n) => {
+                        let at = c.len() as u32;
+                        c.extend([hdmv::compare(Op::Gpr(FLAG), Cmp::Ne, Op::Imm(1)), hdmv::goto(at + 3), hdmv::jump_title(n)]);
+                        c.extend(single_end);
+                    }
+                    None => c.extend([vec![hdmv::mov(FLAG, Op::Imm(0))], single_end].concat()),
                 }
             }
             objects.push(MovieObject { commands: c, resume: false });
@@ -629,6 +693,14 @@ fn render_page(
                     sprites.push(sprite(Pixels::Image(img)));
                 }
             }
+            Content::Rect { color, border_color, border_width } => {
+                let fill = parse_color(color).unwrap_or([255, 255, 255]);
+                let img = rotate(rect_image(fill, rect_border(border_color, border_width, canvas, frame, bw, bh), bw, bh, 255), e.rotation);
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                if d.intro && visible {
+                    sprites.push(sprite(Pixels::Image(img)));
+                }
+            }
             Content::Video { title, start_secs, fit, path } => {
                 flush(&mut current, &mut layers)?;
                 if d.intro && visible {
@@ -786,13 +858,9 @@ pub fn render_pages(
         .enumerate()
         .map(|(i, menu)| {
             let d = Draw { layout, menu, titles, frame, intro: has_intro(layout, menu) };
+            // Every menu selects its first button with SetButtonPage before its loop, so the ICS
+            // has no default and a restarted clip keeps the focus (PSR10).
             let mut page = render_page(&d, &nav.commands[i], true, rate, out_dir, &format!("bm{:02}", i + 1), default_secs)?;
-            // A still menu selects its first button through the ICS (no loop that could reset it).
-            if !page.moving {
-                if let Some(ig) = &mut page.igs {
-                    ig.default_selected = Some(1);
-                }
-            }
             page.warnings = page.warnings.into_iter().map(|w| format!("Menu '{}': {w}", menu.name)).collect();
             Ok(page)
         })
@@ -907,18 +975,18 @@ mod tests {
         assert_eq!(cmds(&n, 0, 0)[2], hdmv::jump_title(1));
         assert_eq!(cmds(&n, 0, 1), &[hdmv::mov(1, Op::Imm(2)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(3)]);
         // Member 1 ends with an unconditional jump to member 2 (mark reset as before).
-        assert_eq!(n.objects[4].commands[2..], [hdmv::jump_title(2)]);
+        assert_eq!(tail(&n, 4)[..], [hdmv::jump_title(2)]);
         // Last member of group 1: play-all continues with the first file of group 2.
-        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(3), hdmv::jump_object(2)]);
-        assert_eq!(n.objects[6].commands[2..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(2)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::compare(Op::Gpr(2), Cmp::Ne, Op::Imm(1)), hdmv::goto(19), hdmv::jump_title(3), hdmv::jump_title(0)]);
+        assert_eq!(tail(&n, 6)[..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
 
         let n = merged_nav(PlaybackOptions { play_sequentially: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[5].commands[2..], [hdmv::jump_title(3)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::jump_title(3)]);
         let n = merged_nav(PlaybackOptions { play_sequentially: true, loop_playback: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[6].commands[2..], [hdmv::jump_title(1)], "the loop starts at the first file of entry 1");
+        assert_eq!(tail(&n, 6)[..], [hdmv::jump_title(1)], "the loop starts at the first file of entry 1");
         // Single-title loop repeats the whole entry, not just its last file.
         let n = merged_nav(PlaybackOptions { loop_playback: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(3), hdmv::jump_title(1)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::compare(Op::Gpr(2), Cmp::Ne, Op::Imm(1)), hdmv::goto(19), hdmv::jump_title(3), hdmv::jump_title(1)]);
     }
 
     #[test]
@@ -936,6 +1004,58 @@ mod tests {
         assert_eq!(cmds(&n, 0, 0), &go(1, 1), "chapter 2 is the last mark of file 1");
         assert_eq!(cmds(&n, 0, 1), &go(0, 2), "chapter 3 is the first mark of file 2");
         assert_eq!(cmds(&n, 0, 2), &go(2, 2));
+    }
+
+    /// Top Menu object: `head`, then the return-menu dispatch, else menu object `first`.
+    fn top_menu(head: &[Command], first: u32) -> Vec<Command> {
+        let at = head.len() as u32;
+        [
+            head,
+            &[
+                hdmv::compare(Op::Gpr(8), Cmp::Eq, Op::Imm(0)),
+                hdmv::goto(at + 5),
+                hdmv::mov(6, Op::Gpr(8)),
+                hdmv::mov(8, Op::Imm(0)),
+                hdmv::jump_object_op(Op::Gpr(6)),
+                hdmv::jump_object(first),
+            ][..],
+        ]
+        .concat()
+    }
+
+    /// BD-ROM Part 3 forbids JumpObject in Movie titles (the PS4 crashes at the title's end): only
+    /// First Play, Top Menu, menus and the dispatcher (all run in interactive titles) may use it.
+    #[test]
+    fn movie_titles_never_jump_to_objects() {
+        let is_jump_object = |c: &Command| c[0] & 0x1F == 0x01 && c[1] & 0x0F == 0;
+        let check = |n: &BdNav, what: &str| {
+            for &o in &n.title_objects {
+                assert!(!n.objects[o as usize].commands.iter().any(is_jump_object), "{what}: title object {o}");
+            }
+        };
+        for bits in 0..16u8 {
+            let opts = PlaybackOptions {
+                return_to_title_menu: bits & 1 != 0,
+                play_sequentially: bits & 2 != 0,
+                loop_playback: bits & 4 != 0,
+                auto_start: bits & 8 != 0,
+            };
+            check(&nav(opts), &format!("{opts:?}"));
+            check(&merged_nav(opts), &format!("merged {opts:?}"));
+            let l = intro_layout();
+            let t = [title(5), title(5)];
+            let tr = traits(&l, &t, MenuFrame::square(1920, 1080));
+            check(&plan(&l, &t, &tr, opts, &[vec![5], vec![5]]), &format!("intro {opts:?}"));
+        }
+        check(&plan_without_menus(3), "no menus");
+        assert!(is_jump_object(&hdmv::jump_object(2)) && is_jump_object(&hdmv::jump_object_op(Op::Gpr(6))));
+        assert!(!is_jump_object(&hdmv::jump_title(0)) && !is_jump_object(&hdmv::goto(1)));
+    }
+
+    /// Commands of title object `o` after its PlayPLatMark and mark reset.
+    fn tail(n: &BdNav, o: usize) -> &[Command] {
+        let c = &n.objects[o].commands;
+        &c[c.iter().position(|x| *x == hdmv::mov(1, Op::Imm(0))).unwrap() + 1..]
     }
 
     fn cmds(n: &BdNav, menu: usize, el: usize) -> &[Command] {
@@ -958,14 +1078,12 @@ mod tests {
         // Play all: flag 1, title 1.
         assert_eq!(cmds(&n, 0, 2), &[hdmv::mov(1, Op::Imm(0)), hdmv::mov(2, Op::Imm(1)), hdmv::jump_title(1)]);
         assert_eq!(cmds(&n, 0, 3), &[hdmv::jump_object(3)]);
-        // Subtitle off / on.
-        assert_eq!(cmds(&n, 1, 2), &[hdmv::set_stream(0)]);
-        assert_eq!(cmds(&n, 1, 1), &[hdmv::set_stream(0xC001)]);
+        // Subtitle off / on: settings buttons only store the choice (GPR16 audio / GPR17 subtitle of title 1).
+        assert_eq!(cmds(&n, 1, 2), &[hdmv::mov(17, Op::Imm(0xFFFF))]);
+        assert_eq!(cmds(&n, 1, 1), &[hdmv::mov(17, Op::Imm(1))]);
         // Audio source 2 = second audio track; keeps the display flag.
         let a = cmds(&n, 1, 0);
-        assert_eq!(a.len(), 6);
-        assert_eq!(a[3], hdmv::set_stream(0x8002_0000 | 0x4000));
-        assert_eq!(a[5], hdmv::set_stream(0x8002_0000));
+        assert_eq!(a, &[hdmv::mov(16, Op::Imm(2))]);
     }
 
     #[test]
@@ -981,13 +1099,16 @@ mod tests {
     #[test]
     fn menus_still_and_motion() {
         let n = nav(PlaybackOptions::default());
-        assert_eq!(n.objects[2].commands, vec![hdmv::play_pl(0)]);
+        // A still menu loops like a motion menu, in case the player ends its infinite still.
+        assert_eq!(n.objects[2].commands, vec![hdmv::set_button_page(1), hdmv::play_pl(0), hdmv::goto(1)]);
         assert_eq!(n.objects[3].commands, vec![hdmv::set_button_page(1), hdmv::play_pl(1), hdmv::goto(1)]);
-        // Disc start: first title menu; Top menu likewise.
-        assert_eq!(n.objects[0].commands[2], hdmv::jump_object(2));
-        assert_eq!(n.objects[1].commands, vec![hdmv::jump_object(2)]);
+        // Disc start: the Top Menu title (never JumpObject out of First Play), with no menu to return to.
+        assert_eq!(n.objects[0].commands[0], hdmv::mov(8, Op::Imm(0)));
+        assert_eq!(n.objects[0].commands[3], hdmv::jump_title(0));
+        // Top Menu: a pending return menu is cleared and entered, else the first title menu.
+        assert_eq!(n.objects[1].commands, top_menu(&[], 2));
         let auto = nav(PlaybackOptions { auto_start: true, ..PlaybackOptions::default() });
-        assert_eq!(auto.objects[0].commands[2], hdmv::jump_title(1));
+        assert_eq!(auto.objects[0].commands[3], hdmv::jump_title(1));
     }
 
     #[test]
@@ -996,32 +1117,69 @@ mod tests {
         let clear = hdmv::mov(1, Op::Imm(0));
         // Default: title 1 -> if play-all flag, title 2; else back to the main menu.
         let n = nav(PlaybackOptions::default());
+        // Title 1 has a settings menu: its stored audio / subtitle choice is applied first (the
+        // PS4 ignores SetStream in the menu, whose playlist lacks the title's streams). Both
+        // skips land on the next part; title 2 has no settings menu and starts with PlayPL.
+        let pre = apply_stream_choice(1, true, true);
+        assert_eq!((pre.len(), pre[1], pre[11]), (14, hdmv::goto(8), hdmv::goto(14)));
+        assert_eq!((pre[0], pre[10]), (hdmv::compare(Op::Gpr(16), Cmp::Eq, Op::Imm(0)), hdmv::compare(Op::Gpr(17), Cmp::Eq, Op::Imm(0))));
+        // Register-form SetStream: GPR16 holds the audio number, GPR17 the PG number.
+        assert_eq!((pre[5], pre[7]), (hdmv::set_stream_regs(Some(16), None, true), hdmv::set_stream_regs(Some(16), None, false)));
+        assert_eq!((pre[8], pre[9], pre[13]), (hdmv::compare(Op::Gpr(17), Cmp::Eq, Op::Imm(0xFFFF)), hdmv::set_stream(0), hdmv::set_stream_regs(None, Some(17), true)));
+        assert_eq!(n.objects[5].commands[0], hdmv::play_pl_at_mark(Op::Imm(3), Op::Gpr(1)));
         assert_eq!(
             n.objects[4].commands,
-            vec![
-                hdmv::play_pl_at_mark(Op::Imm(2), Op::Gpr(1)),
-                clear,
-                hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)),
-                hdmv::jump_title(2),
-                hdmv::jump_object(2)
+            [
+                apply_stream_choice(1, true, true),
+                vec![
+                    hdmv::play_pl_at_mark(Op::Imm(2), Op::Gpr(1)),
+                    clear,
+                    hdmv::compare(Op::Gpr(2), Cmp::Ne, Op::Imm(1)),
+                    hdmv::goto(19),
+                    hdmv::jump_title(2),
+                    hdmv::jump_title(0)
+                ]
             ]
+            .concat()
         );
         // Last title: reset flag, menu.
-        assert_eq!(n.objects[5].commands[2..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(2)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
         let _ = play;
         // Loop, not sequential: repeat each title; play-all still advances.
         let n = nav(PlaybackOptions { loop_playback: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[5].commands[2..], [hdmv::compare(Op::Gpr(2), Cmp::Eq, Op::Imm(1)), hdmv::jump_title(1), hdmv::jump_title(2)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::compare(Op::Gpr(2), Cmp::Ne, Op::Imm(1)), hdmv::goto(5), hdmv::jump_title(1), hdmv::jump_title(2)]);
         // Sequential: next title; the last one returns to the menu (or loops).
         let n = nav(PlaybackOptions { play_sequentially: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[4].commands[2..], [hdmv::jump_title(2)]);
-        assert_eq!(n.objects[5].commands[2..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_object(2)]);
+        assert_eq!(tail(&n, 4)[..], [hdmv::jump_title(2)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
         let n = nav(PlaybackOptions { play_sequentially: true, loop_playback: true, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[5].commands[2..], [hdmv::jump_title(1)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::jump_title(1)]);
         // Return to the title's own menu (title 1 has the settings menu, title 2 none).
         let n = nav(PlaybackOptions { return_to_title_menu: false, ..PlaybackOptions::default() });
-        assert_eq!(n.objects[4].commands[4], hdmv::jump_object(3));
-        assert_eq!(n.objects[5].commands[3], hdmv::jump_object(2));
+        // Another menu than the first title menu goes through Top Menu with GPR8 = its object.
+        assert_eq!(tail(&n, 4)[3..], [hdmv::mov(8, Op::Imm(3)), hdmv::jump_title(0)]);
+        assert_eq!(tail(&n, 5)[..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
+    }
+
+    #[test]
+    fn rect_buttons_render_into_ig_objects() {
+        let mut l = layout();
+        let mut r = button(700.0, 500.0, Action::PlayTitle { title: 1 });
+        r.content = Content::Rect { color: "#112233".into(), border_color: Some("#ff0000".into()), border_width: Some(3.0) };
+        let before = l.menus[0].elements.len();
+        l.menus[0].elements.push(r);
+        let frame = MenuFrame::square(1920, 1080);
+        let t = [title(5), title(5)];
+        crate::layout::validate_bd(&l, &t, frame).unwrap();
+        let tr = traits(&l, &t, frame);
+        let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let dir = std::env::temp_dir().join(format!("bdmenu-rect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let pages = render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let ig = pages[0].igs.as_ref().unwrap();
+        assert_eq!(ig.buttons.len(), 4 + 1, "the Rect button joins the {before} existing elements");
     }
 
     #[test]
@@ -1041,7 +1199,7 @@ mod tests {
         let ig = pages[0].igs.as_ref().unwrap();
         assert_eq!(ig.buttons.len(), 4);
         assert_eq!(ig.objects.len(), 8);
-        assert_eq!(ig.default_selected, Some(1));
+        assert_eq!(ig.default_selected, None, "SetButtonPage selects the first button");
         assert_eq!(ig.frame_rate_code, 1);
         // Buttons are stacked vertically: down leads to the next, up from the first stays.
         assert_eq!((ig.buttons[0].up, ig.buttons[0].down), (1, 2));
@@ -1099,7 +1257,7 @@ mod tests {
         // Settings are another menu (fresh entry), the next page of the same menu is paged.
         assert_eq!(cmds(&n, 0, 3), &to(2, 3));
         assert_eq!(cmds(&n, 2, 0), &to(3, 2));
-        assert_eq!(n.objects[1].commands, vec![hdmv::mov(3, Op::Imm(0)), hdmv::jump_object(2)], "Top Menu always replays the intro");
+        assert_eq!(n.objects[1].commands, top_menu(&[hdmv::mov(3, Op::Imm(0))], 2), "Top Menu always replays the intro");
         assert_eq!(
             n.objects[7].commands,
             vec![
@@ -1127,8 +1285,8 @@ mod tests {
                 hdmv::goto(7),
             ]
         );
-        // A still page without intro keeps its commands.
-        assert_eq!(n.objects[3].commands, vec![hdmv::play_pl(1)]);
+        // A still page without intro loops its clip.
+        assert_eq!(n.objects[3].commands, vec![hdmv::set_button_page(1), hdmv::play_pl(1), hdmv::goto(1)]);
     }
 
     #[test]

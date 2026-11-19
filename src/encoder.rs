@@ -264,15 +264,17 @@ pub enum AudioOut {
     /// Stream copy (`bsf`: e.g. `dca_core` to strip DTS-HD extensions).
     Copy { kind: AudioKind, bsf: Option<&'static str>, kbps: u32, ch: u32 },
     Ac3 { kbps: u32, ch: u32 },
-    /// Uncompressed PCM written with ffmpeg codec `codec`.
-    Pcm { codec: &'static str, ch: u32 },
+    /// Uncompressed PCM written with ffmpeg codec `codec` at `rate` Hz (48 kHz when encoded, the
+    /// source's rate for a lossless repack).
+    Pcm { codec: &'static str, ch: u32, rate: u32 },
 }
 
 impl AudioOut {
     pub fn kbps(self) -> u32 {
         match self {
             AudioOut::Copy { kbps, .. } | AudioOut::Ac3 { kbps, .. } => kbps,
-            AudioOut::Pcm { codec, ch } => 48 * if codec == "pcm_s24le" { 24 } else { 16 } * ch,
+            // Blu-ray LPCM stores an odd channel count padded to even.
+            AudioOut::Pcm { codec, ch, rate } => rate / 1000 * if codec == "pcm_s24le" { 24 } else { 16 } * (ch + ch % 2),
         }
     }
 
@@ -297,7 +299,7 @@ impl AudioOut {
             2 => "Stereo",
             6 => "5.1",
             8 => "7.1",
-            _ => "Mehrkanal",
+            _ => "Multichannel",
         }
     }
 
@@ -311,7 +313,7 @@ impl AudioOut {
     }
 }
 
-/// Stream copy of `a` if it complies with `target` (`None` = must be re-encoded).
+/// Stream copy of `a` for a DVD (`None` = must be re-encoded); Blu-ray: [`bd_audio_copy`].
 fn copy_plan(a: &AudioStream, target: AudioTarget) -> Option<AudioOut> {
     let kbps = a.bit_rate.map(|b| b.div_ceil(1000));
     let rate_ok = a.sample_rate == Some(48_000);
@@ -330,14 +332,90 @@ fn copy_plan(a: &AudioStream, target: AudioTarget) -> Option<AudioOut> {
             let kbps = kbps.unwrap_or(1536);
             (kbps <= 1536).then_some(AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps, ch: a.channels })
         }
-        // The probe measures the real DTS-HD MA rate; 5 Mbit/s is only the fallback when that failed.
-        ("dts", AudioTarget::Bluray) => Some(AudioOut::Copy {
-            kind: AudioKind::Dts,
-            bsf: None,
-            kbps: kbps.unwrap_or(if profile.contains("MA") { 5000 } else { 1536 }),
-            ch: a.channels,
-        }),
         _ => None,
+    }
+}
+
+/// How Blu-ray / AVCHD audio tracks are written ("copy" = stream copy or lossless LPCM repack).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BdAudioMode {
+    /// Copy compliant tracks ([`bd_audio_copy`]), encode the rest.
+    #[default]
+    Auto,
+    /// Never copy.
+    Encode,
+    /// Copy every track; the build fails when one does not pass [`bd_audio_copy`].
+    Strict,
+}
+
+impl BdAudioMode {
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "encode" => BdAudioMode::Encode,
+            "strict" => BdAudioMode::Strict,
+            _ => BdAudioMode::Auto,
+        }
+    }
+}
+
+/// Copy of `a` onto a Blu-ray / AVCHD disc: AC-3, DTS (DTS-HD as its core), or a lossless LPCM
+/// repack of PCM/FLAC. `Err` is the English reason it cannot be copied.
+pub fn bd_audio_copy(a: &AudioStream, target: AudioTarget) -> Result<AudioOut, String> {
+    let avchd = match target {
+        AudioTarget::Dvd => return Err("not a Blu-ray target".into()),
+        t => t == AudioTarget::Avchd,
+    };
+    let rate = a.sample_rate.unwrap_or(0);
+    let kbps = a.bit_rate.map(|b| b.div_ceil(1000));
+    let profile = a.profile.as_deref().unwrap_or("");
+    let codec = a.codec.as_str();
+    match codec {
+        "ac3" => {
+            if rate != 48_000 || a.channels > 6 {
+                return Err(format!("AC-3 needs 48 kHz and at most 6 channels (is {rate} Hz, {} ch)", a.channels));
+            }
+            match kbps {
+                None => Err("the AC-3 bit rate is unknown".into()),
+                Some(k) if k > 640 => Err(format!("AC-3 at {k} kbit/s exceeds 640 kbit/s")),
+                Some(k) => Ok(AudioOut::Copy { kind: AudioKind::Ac3, bsf: None, kbps: k, ch: a.channels }),
+            }
+        }
+        "dts" if avchd => Err("DTS cannot be copied to AVCHD".into()),
+        "dts" => {
+            if ![48_000, 96_000, 192_000].contains(&rate) || a.channels > 8 {
+                return Err(format!("DTS needs 48/96/192 kHz and at most 8 channels (is {rate} Hz, {} ch)", a.channels));
+            }
+            if profile.contains("HD") || profile.contains("96/24") {
+                // The extension substream is not Blu-ray DTS-HD; the core alone is a valid DTS track.
+                let k = kbps.map_or(1536, |k| k.min(1536));
+                Ok(AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: k, ch: a.channels.min(6) })
+            } else {
+                Ok(AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps: kbps.unwrap_or(1536), ch: a.channels })
+            }
+        }
+        c if c == "flac" || c.starts_with("pcm_") => {
+            let bps = a.bits_per_raw_sample;
+            let bits = match c {
+                "flac" => bps.ok_or("the FLAC bit depth is unknown")?,
+                "pcm_s8" | "pcm_u8" => 8,
+                "pcm_s16le" | "pcm_s16be" | "pcm_u16le" | "pcm_u16be" => 16,
+                "pcm_s24le" | "pcm_s24be" | "pcm_u24le" | "pcm_u24be" => 24,
+                "pcm_s32le" | "pcm_s32be" => bps.ok_or("32-bit PCM is not lossless on Blu-ray")?,
+                "pcm_bluray" | "pcm_dvd" => bps.unwrap_or(24),
+                _ => return Err(format!("{c} cannot be copied to Blu-ray")),
+            };
+            if bits > 24 {
+                return Err(format!("{bits}-bit audio is not lossless as Blu-ray LPCM (24 bit maximum)"));
+            }
+            let ch = a.channels;
+            let rate_ok = if avchd { rate == 48_000 } else { [48_000, 96_000, 192_000].contains(&rate) };
+            if !rate_ok || ch == 0 || ch > if avchd { 2 } else { 8 } || (rate == 192_000 && ch > 6) || (avchd && bits > 16) {
+                let what = if avchd { "AVCHD LPCM needs 48 kHz, 16 bit and at most 2 channels" } else { "Blu-ray LPCM needs 48/96/192 kHz (192 kHz: at most 6 channels) and at most 8 channels" };
+                return Err(format!("{what} (is {rate} Hz, {bits} bit, {ch} ch)"));
+            }
+            Ok(AudioOut::Pcm { codec: if bits <= 16 { "pcm_s16le" } else { "pcm_s24le" }, ch, rate })
+        }
+        other => Err(format!("{other} cannot be copied to Blu-ray")),
     }
 }
 
@@ -345,18 +423,38 @@ fn copy_plan(a: &AudioStream, target: AudioTarget) -> Option<AudioOut> {
 /// title is trimmed, which rules out a stream copy (ffmpeg's input seeking does not cut copied
 /// audio at the start, it would drift against the re-encoded video).
 pub fn plan_audio(a: &AudioStream, target: AudioTarget, mode: AudioMode, filtered: bool) -> AudioOut {
-    match (mode, target) {
-        (AudioMode::Lpcm, AudioTarget::Bluray) => return AudioOut::Pcm { codec: "pcm_s24le", ch: a.channels.clamp(1, 8) },
-        (AudioMode::Lpcm, AudioTarget::Avchd) => return AudioOut::Pcm { codec: "pcm_s16le", ch: 2 },
-        _ => {}
-    }
-    if mode == AudioMode::Auto && !filtered {
-        if let Some(copy) = copy_plan(a, target) {
-            return copy;
+    plan_audio_bd(a, target, mode, BdAudioMode::Auto, filtered)
+}
+
+/// [`plan_audio`] with the Blu-ray / AVCHD copy policy `bd` (ignored on DVD).
+pub fn plan_audio_bd(a: &AudioStream, target: AudioTarget, mode: AudioMode, bd: BdAudioMode, filtered: bool) -> AudioOut {
+    if !filtered {
+        if target == AudioTarget::Dvd {
+            if mode == AudioMode::Auto {
+                if let Some(copy) = copy_plan(a, target) {
+                    return copy;
+                }
+            }
+        } else if bd != BdAudioMode::Encode {
+            // Auto keeps the disc format of an explicit --audio choice; Strict copies any format.
+            let keeps_format = |c: &AudioOut| bd == BdAudioMode::Strict || match mode {
+                AudioMode::Auto => true,
+                AudioMode::Ac3 => c.kind() == AudioKind::Ac3,
+                AudioMode::Lpcm => c.kind() == AudioKind::Lpcm,
+            };
+            if let Some(copy) = bd_audio_copy(a, target).ok().filter(keeps_format) {
+                return copy;
+            }
         }
     }
-    let (kbps, ch) = ac3_settings(a.channels);
-    AudioOut::Ac3 { kbps, ch }
+    match (mode, target) {
+        (AudioMode::Lpcm, AudioTarget::Bluray) => AudioOut::Pcm { codec: "pcm_s24le", ch: a.channels.clamp(1, 8), rate: 48_000 },
+        (AudioMode::Lpcm, AudioTarget::Avchd) => AudioOut::Pcm { codec: "pcm_s16le", ch: 2, rate: 48_000 },
+        _ => {
+            let (kbps, ch) = ac3_settings(a.channels);
+            AudioOut::Ac3 { kbps, ch }
+        }
+    }
 }
 
 /// Silent filler track of a Blu-ray title that has fewer tracks than the disc.
@@ -379,9 +477,9 @@ fn audio_track_args(n: usize, out: AudioOut, filter: Option<&str>) -> Vec<OsStri
             push(format!("-b:a:{n}"), format!("{kbps}k"));
             push(format!("-ac:a:{n}"), ch.to_string());
         }
-        AudioOut::Pcm { codec, ch } => {
+        AudioOut::Pcm { codec, ch, rate } => {
             push(format!("-c:a:{n}"), codec.into());
-            push(format!("-ar:a:{n}"), "48000".into());
+            push(format!("-ar:a:{n}"), rate.to_string());
             push(format!("-ac:a:{n}"), ch.to_string());
         }
     }
@@ -1015,6 +1113,7 @@ pub struct BdEncodeJob<'a> {
     pub hwaccel: Option<&'static str>,
     pub encoder: BdEncoder,
     pub audio_mode: AudioMode,
+    pub bd_audio: BdAudioMode,
     /// [`AudioTarget::Bluray`] or [`AudioTarget::Avchd`].
     pub audio_target: AudioTarget,
     pub audio_filters: Vec<Option<String>>,
@@ -1045,7 +1144,7 @@ impl BdEncodeJob<'_> {
             .iter()
             .enumerate()
             .map(|(n, a)| {
-                a.map_or(SILENCE_OUT, |a| plan_audio(a, self.audio_target, self.audio_mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
+                a.map_or(SILENCE_OUT, |a| plan_audio_bd(a, self.audio_target, self.audio_mode, self.bd_audio, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
             })
             .collect()
     }
@@ -1987,8 +2086,8 @@ mod tests {
             duration_secs: 60.0,
             video: Some(video(1920, 1080, 16.0 / 9.0, "progressive")),
             audio: vec![
-                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true, bit_rate: None, sample_rate: None, profile: None },
-                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false, bit_rate: None, sample_rate: None, profile: None },
+                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true, bit_rate: None, sample_rate: None, profile: None, bits_per_raw_sample: None },
+                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false, bit_rate: None, sample_rate: None, profile: None, bits_per_raw_sample: None },
             ],
             subtitles: vec![SubtitleStream { index: 3, codec: "subrip".into(), kind: SubtitleKind::Text, language: None, title: None, forced: false, width: None, height: None }],
             chapters: vec![],
@@ -2212,8 +2311,8 @@ mod tests {
             duration_secs: 60.0,
             video: Some(video(1920, 1080, 16.0 / 9.0, "progressive")),
             audio: vec![
-                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true, bit_rate: None, sample_rate: None, profile: None },
-                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false, bit_rate: None, sample_rate: None, profile: None },
+                AudioStream { index: 1, codec: "eac3".into(), channels: 6, channel_layout: "5.1".into(), language: Some("ger".into()), title: None, default: true, bit_rate: None, sample_rate: None, profile: None, bits_per_raw_sample: None },
+                AudioStream { index: 2, codec: "aac".into(), channels: 2, channel_layout: "stereo".into(), language: None, title: None, default: false, bit_rate: None, sample_rate: None, profile: None, bits_per_raw_sample: None },
             ],
             subtitles: vec![],
             chapters: vec![],
@@ -2283,6 +2382,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            bd_audio: BdAudioMode::Auto,
             audio_target: AudioTarget::Bluray,
             audio_filters: vec![],
             maxrate_kbps: BD_MAXRATE_KBPS,
@@ -2519,6 +2619,7 @@ mod tests {
             bit_rate: kbps.map(|k| k * 1000),
             sample_rate: rate,
             profile: profile.map(str::to_string),
+            bits_per_raw_sample: None,
         }
     }
 
@@ -2543,7 +2644,7 @@ mod tests {
         assert!(matches!(kind(&dts, Dvd, Auto, false), AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps: 1509, .. }));
         let hd = audio("dts", 8, Some(4000), Some(48_000), Some("DTS-HD MA"));
         assert!(matches!(kind(&hd, Dvd, Auto, false), AudioOut::Copy { bsf: Some("dca_core"), kbps: 1536, ch: 6, .. }));
-        assert!(matches!(kind(&hd, Bluray, Auto, false), AudioOut::Copy { bsf: None, kbps: 4000, ch: 8, .. }));
+        assert!(matches!(kind(&hd, Bluray, Auto, false), AudioOut::Copy { bsf: Some("dca_core"), kbps: 1536, ch: 6, .. }));
         assert!(matches!(kind(&dts, Avchd, Auto, false), AudioOut::Ac3 { kbps: 448, ch: 6 }));
         assert!(matches!(kind(&audio("eac3", 6, Some(640), Some(48_000), None), Bluray, Auto, false), AudioOut::Ac3 { .. }));
     }
@@ -2564,12 +2665,65 @@ mod tests {
         use AudioTarget::*;
         let a = audio("flac", 6, None, Some(96_000), None);
         let p = plan_audio(&a, Bluray, AudioMode::Lpcm, false);
-        assert_eq!(p, AudioOut::Pcm { codec: "pcm_s24le", ch: 6 });
+        assert_eq!(p, AudioOut::Pcm { codec: "pcm_s24le", ch: 6, rate: 48_000 });
         assert_eq!(p.kbps(), 48 * 24 * 6);
-        assert_eq!(plan_audio(&a, Avchd, AudioMode::Lpcm, false), AudioOut::Pcm { codec: "pcm_s16le", ch: 2 });
+        assert_eq!(plan_audio(&a, Avchd, AudioMode::Lpcm, false), AudioOut::Pcm { codec: "pcm_s16le", ch: 2, rate: 48_000 });
         // DVD: ffmpeg's muxer cannot write usable DVD LPCM, so LPCM mode means AC-3 there.
         assert!(matches!(plan_audio(&a, Dvd, AudioMode::Lpcm, false), AudioOut::Ac3 { .. }));
         assert_eq!(plan_audio(&a, Bluray, AudioMode::Lpcm, false).kind(), AudioKind::Lpcm);
+    }
+
+    #[test]
+    fn bd_audio_copy_rules() {
+        use AudioTarget::*;
+        let pcm = |codec: &str, ch, rate, bits| AudioStream { bits_per_raw_sample: bits, ..audio(codec, ch, None, Some(rate), None) };
+        let why = |a: &AudioStream, t| bd_audio_copy(a, t).unwrap_err();
+        // DTS: 48/96/192 kHz and at most 8 channels; HD is copied as its core.
+        assert!(why(&audio("dts", 6, Some(1509), Some(44_100), Some("DTS")), Bluray).contains("48/96/192"));
+        assert!(why(&audio("dts", 9, Some(1509), Some(48_000), Some("DTS")), Bluray).contains("at most 8"));
+        assert!(matches!(bd_audio_copy(&audio("dts", 6, Some(1509), Some(96_000), Some("DTS")), Bluray), Ok(AudioOut::Copy { bsf: None, kbps: 1509, .. })));
+        let ma = audio("dts", 8, Some(4000), Some(48_000), Some("DTS-HD MA"));
+        assert_eq!(bd_audio_copy(&ma, Bluray), Ok(AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: 1536, ch: 6 }));
+        assert!(why(&ma, Avchd).contains("AVCHD"));
+        // PCM / FLAC: lossless repack keeping the rate.
+        let p = bd_audio_copy(&pcm("pcm_s24le", 6, 96_000, None), Bluray).unwrap();
+        assert_eq!(p, AudioOut::Pcm { codec: "pcm_s24le", ch: 6, rate: 96_000 });
+        assert_eq!(p.kbps(), 96 * 24 * 6);
+        assert_eq!(bd_audio_copy(&pcm("pcm_s16be", 2, 48_000, None), Bluray), Ok(AudioOut::Pcm { codec: "pcm_s16le", ch: 2, rate: 48_000 }));
+        assert!(bd_audio_copy(&pcm("flac", 2, 44_100, Some(16)), Bluray).is_err(), "44.1 kHz is no BD LPCM rate");
+        assert!(bd_audio_copy(&pcm("flac", 2, 48_000, Some(20)), Bluray).is_ok());
+        assert_eq!(bd_audio_copy(&pcm("pcm_s24le", 5, 48_000, None), Bluray).unwrap().kbps(), 48 * 24 * 6, "odd channel counts are padded");
+        assert!(why(&pcm("pcm_f32le", 2, 48_000, None), Bluray).contains("cannot be copied"));
+        assert!(why(&pcm("pcm_s32le", 2, 48_000, Some(32)), Bluray).contains("24 bit"));
+        assert!(why(&pcm("flac", 2, 48_000, Some(32)), Bluray).contains("24 bit"));
+        assert!(why(&pcm("pcm_s24le", 6, 48_000, None), Avchd).contains("AVCHD"));
+        assert!(bd_audio_copy(&pcm("pcm_s16le", 2, 48_000, None), Avchd).is_ok());
+        assert!(why(&audio("eac3", 6, Some(640), Some(48_000), None), Bluray).contains("eac3 cannot be copied to Blu-ray"));
+    }
+
+    #[test]
+    fn bd_audio_mode_policy() {
+        use AudioTarget::*;
+        assert_eq!(BdAudioMode::from_setting("strict"), BdAudioMode::Strict);
+        assert_eq!(BdAudioMode::from_setting("encode"), BdAudioMode::Encode);
+        assert_eq!(BdAudioMode::from_setting(""), BdAudioMode::Auto);
+        let ac3 = audio("ac3", 6, Some(384), Some(48_000), None);
+        let plan = |m| plan_audio_bd(&ac3, Bluray, AudioMode::Auto, m, false);
+        assert!(matches!(plan(BdAudioMode::Auto), AudioOut::Copy { .. }));
+        assert!(matches!(plan(BdAudioMode::Strict), AudioOut::Copy { .. }));
+        assert!(matches!(plan(BdAudioMode::Encode), AudioOut::Ac3 { kbps: 448, ch: 6 }));
+        // Encode with LPCM wanted: always LPCM; Auto keeps a compliant AC-3 track.
+        assert_eq!(plan_audio_bd(&ac3, Bluray, AudioMode::Lpcm, BdAudioMode::Encode, false).kind(), AudioKind::Lpcm);
+        assert_eq!(plan_audio_bd(&ac3, Bluray, AudioMode::Lpcm, BdAudioMode::Auto, false).kind(), AudioKind::Lpcm, "explicit LPCM re-encodes AC-3");
+        assert_eq!(plan_audio_bd(&ac3, Bluray, AudioMode::Lpcm, BdAudioMode::Strict, false).kind(), AudioKind::Ac3);
+        assert!(matches!(plan_audio_bd(&ac3, Bluray, AudioMode::Ac3, BdAudioMode::Auto, false), AudioOut::Copy { .. }));
+        let dts = audio("dts", 6, Some(1509), Some(48_000), Some("DTS"));
+        let pcm = AudioStream { bits_per_raw_sample: Some(24), ..audio("pcm_s24le", 6, None, Some(96_000), None) };
+        assert!(matches!(plan_audio_bd(&dts, Bluray, AudioMode::Ac3, BdAudioMode::Auto, false), AudioOut::Ac3 { .. }));
+        assert!(matches!(plan_audio_bd(&dts, Bluray, AudioMode::Auto, BdAudioMode::Auto, false), AudioOut::Copy { .. }));
+        assert!(matches!(plan_audio_bd(&pcm, Bluray, AudioMode::Ac3, BdAudioMode::Auto, false), AudioOut::Ac3 { .. }));
+        assert_eq!(plan_audio_bd(&pcm, Bluray, AudioMode::Lpcm, BdAudioMode::Auto, false), AudioOut::Pcm { codec: "pcm_s24le", ch: 6, rate: 96_000 });
+        assert!(matches!(plan_audio_bd(&pcm, Bluray, AudioMode::Auto, BdAudioMode::Auto, false), AudioOut::Pcm { rate: 96_000, .. }));
     }
 
     #[test]
@@ -2578,14 +2732,14 @@ mod tests {
         let strings = |v: Vec<OsString>| v.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert_eq!(strings(audio_track_args(1, copy, Some("loudnorm"))), "-c:a:1 copy -bsf:a:1 dca_core", "no filter on copies");
         assert_eq!(
-            strings(audio_track_args(0, AudioOut::Pcm { codec: "pcm_s24le", ch: 6 }, None)),
+            strings(audio_track_args(0, AudioOut::Pcm { codec: "pcm_s24le", ch: 6, rate: 48_000 }, None)),
             "-c:a:0 pcm_s24le -ar:a:0 48000 -ac:a:0 6"
         );
         assert_eq!(
             strings(audio_track_args(2, AudioOut::Ac3 { kbps: 192, ch: 2 }, Some("aresample=48000"))),
             "-c:a:2 ac3 -ar:a:2 48000 -b:a:2 192k -ac:a:2 2 -filter:a:2 aresample=48000"
         );
-        assert_eq!(AudioOut::Pcm { codec: "pcm_s16le", ch: 2 }.dvdauthor_format(), "pcm");
+        assert_eq!(AudioOut::Pcm { codec: "pcm_s16le", ch: 2, rate: 48_000 }.dvdauthor_format(), "pcm");
     }
 
     #[test]

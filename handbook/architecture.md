@@ -73,6 +73,28 @@ per title: libx264 or hardware H.264 (h264_nvenc / h264_qsv / h264_amf) -> title
 AVCHD is the same pipeline on DVD-5/9 media with AVCHD limits (BDMV on DVD media, not the 8.3
 camcorder layout). Only HDMV is supported: no BD-J, no pop-up menus.
 
+**Audio copy (`BdAudioMode`)**: `encoder::bd_audio_copy` is the single rule set (returns the copy
+plan or an English reason); `plan_audio_bd` applies the mode, and `bd.rs` runs the strict check
+before `bitrate_plan`, where copied tracks count at their real size. LPCM is always sized at its
+wire rate: `rate_khz * bits * (ch + ch % 2)` (odd channel counts are padded). DTS-HD is copied
+through `dca_core` (stream type 0x82); the muxer has no DTS-HD (0x85/0x86) stream type.
+
+**HDMV navigation rules** (`bd_menu::plan`; found on a PS4, VLC/libbluray accepts all violations):
+- First Play and Top Menu are interactive titles; every disc title is a movie title. A movie
+  title never uses `JumpObject`: it ends with `JumpTitle 0` (Top Menu). To return to another menu
+  it first stores that menu's object in `GPR8`; Top Menu jumps there and clears it.
+- Still menus use `still_mode = 2` (infinite, `still_time` 0) and still loop
+  `SetButtonPage(1); PlayPL; Goto 1`, so the VM never falls off the object. The ICS has no
+  default button; `SetButtonPage` selects it and PSR10 keeps the focus over restarts.
+- Audio/subtitle buttons of a settings menu only store the choice (`GPR16 + 2*(t-1)` audio
+  number, `+1` PG number or `0xFFFF` off). The title object applies it right before `PlayPL`
+  with register-form `SetStream`, whose flags are immediate and whose number fields name the
+  GPRs. A `SetStream` inside the menu is ignored by players that check it against the menu
+  playlist (one audio stream, no PG).
+
+Register map: `GPR1` chapter mark, `GPR2` play-all flag, `GPR3`-`GPR5`/`GPR7` intro dispatcher,
+`GPR6` scratch, `GPR8` return menu, `GPR16+` per-title stream choices.
+
 ## Menus
 
 - **ConvertX templates**: `template.rs` parses the INIs, `menu.rs` renders a page into a 720x576
@@ -82,6 +104,13 @@ camcorder layout). Only HDMV is supported: no BD-J, no pop-up menus.
   36 per menu, no overlaps, at most 128 VM commands per PGC).
 - **Blu-ray**: the same `CustomLayout` on a 1920x1080 canvas; templates reach it through
   `bd_template.rs`, which scales pages and translates `ML_*` button locations to `layout::Action`s.
+- **Elements**: text, image, video and `rect` (fill, optional border in canvas units, scaled like
+  font sizes). Both renderers (DVD `render_custom_page`, Blu-ray `render_page`) draw a rect
+  through the shared `layout::rect_image`; a rect with an action is a button with the frame
+  highlight.
+- **Presets**: `draftLayout(titles, tv, heading, preset?)` in `frontend/src/layout.ts` restyles the
+  draft as `swiss`, `cinema` or `midnight` (flat backgrounds, rects, text, highlight colours; no
+  bundled image files). The editor's preset picker applies one as a single undo step.
 - **Intros / motion menus**: `menu_anim.rs` interpolates keyframes and composites sprites in
   memory (rayon); frames are piped to the encoder and never touch disk. A page is one clip
   `[intro | loop]` with marks;

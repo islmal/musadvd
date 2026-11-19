@@ -179,10 +179,13 @@ fn audio_choice(out: AudioOut, base: &str, mode: TrackLabelMode) -> AudioChoice 
 }
 
 fn audio_plans(a: &probe::AudioStream, base: &str, mode: TrackLabelMode) -> AudioPlans {
+    // `auto` is the copy candidate; `ac3` / `lpcm` are the pure re-encode targets the GUI falls
+    // back to (Blu-ray Auto with an explicit format copies only tracks already in that format).
+    let encode = musadvd::encoder::BdAudioMode::Encode;
     let modes = |t| AudioModes {
         auto: audio_choice(plan_audio(a, t, AudioMode::Auto, false), base, mode),
-        ac3: audio_choice(plan_audio(a, t, AudioMode::Ac3, false), base, mode),
-        lpcm: audio_choice(plan_audio(a, t, AudioMode::Lpcm, false), base, mode),
+        ac3: audio_choice(musadvd::encoder::plan_audio_bd(a, t, AudioMode::Ac3, encode, false), base, mode),
+        lpcm: audio_choice(musadvd::encoder::plan_audio_bd(a, t, AudioMode::Lpcm, encode, false), base, mode),
     };
     AudioPlans { dvd: modes(AudioTarget::Dvd), bluray: modes(AudioTarget::Bluray), avchd: modes(AudioTarget::Avchd) }
 }
@@ -739,6 +742,9 @@ struct ConversionConfig {
     /// Blu-ray/AVCHD video: `encode` (default), `auto` or `strict`.
     #[serde(default)]
     bd_video: String,
+    /// Blu-ray/AVCHD audio: `auto` (default), `encode` or `strict`.
+    #[serde(default)]
+    bd_audio: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -802,6 +808,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
     // Global settings: worker pool size, priority, menu/playback options, languages, ...
     state.settings().apply_to(&mut opts);
     opts.bd_video = musadvd::encoder::BdVideoMode::from_setting(&config.bd_video);
+    opts.bd_audio = musadvd::encoder::BdAudioMode::from_setting(&config.bd_audio);
     let token = CancelToken::new();
     opts.cancel = token.clone();
     *state.cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
@@ -1102,6 +1109,7 @@ mod tests {
             bit_rate: Some(640_000),
             sample_rate: Some(48_000),
             profile: None,
+            bits_per_raw_sample: None,
         };
         let p = audio_plans(&ac3, "Spanisch - Latino", TrackLabelMode::SmartMetadata);
         // The label carries the plan's own layout: the DVD plan is 5.1 AC-3 too, LPCM on AVCHD is stereo.

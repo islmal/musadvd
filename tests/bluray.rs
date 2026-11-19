@@ -330,6 +330,8 @@ fn audio_options(inputs: Vec<PathBuf>, out: PathBuf, disc: DiscType, mode: musad
     }
 }
 
+use musadvd::encoder::BdAudioMode;
+
 /// Compliant AC-3 is copied (Auto), DTS is copied on a Blu-ray but re-encoded for AVCHD.
 #[test]
 fn audio_is_copied_when_compliant() {
@@ -347,7 +349,7 @@ fn audio_is_copied_when_compliant() {
     assert!(a.contains("codec_name=ac3") && a.contains("channels=6"), "{a}");
     assert!(a.contains("bit_rate=384000"), "copied, not re-encoded at 448k: {a}");
     // "Always AC-3" re-encodes at the default 448 kbps.
-    let r = build(&rt, &audio_options(vec![ac3], dir.join("o2"), DiscType::Bd25, AudioMode::Ac3)).unwrap();
+    let r = build(&rt, &BuildOptions { bd_audio: BdAudioMode::Encode, ..audio_options(vec![ac3], dir.join("o2"), DiscType::Bd25, AudioMode::Ac3) }).unwrap();
     assert!(bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts")).contains("bit_rate=448000"));
 
     // DTS: copied on a Blu-ray, AC-3 on AVCHD.
@@ -355,6 +357,33 @@ fn audio_is_copied_when_compliant() {
     assert!(bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts")).contains("codec_name=dts"));
     let r = build(&rt, &audio_options(vec![dts], dir.join("o4"), DiscType::Avchd5, AudioMode::Auto)).unwrap();
     assert!(bitrate(&r.project_dir.join("BDMV/STREAM/00000.m2ts")).contains("codec_name=ac3"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Audio copy policy: PCM is repacked losslessly (Auto), Encode re-encodes AC-3, Strict refuses
+/// what cannot be copied before any work.
+#[test]
+fn bd_audio_modes() {
+    use musadvd::encoder::AudioMode;
+    let Some((rt, tools)) = tools() else { return };
+    let dir = std::env::temp_dir().join(format!("cx_bluray_bdaudio_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let pcm = make_audio_clip(&tools, &dir.join("clips"), "pcm.mkv", "pcm_s24le");
+    let ac3 = make_audio_clip(&tools, &dir.join("clips"), "ac3.mkv", "ac3");
+    let eac3 = make_audio_clip(&tools, &dir.join("clips"), "eac3.mkv", "eac3");
+    let m2ts = |r: &BuildReport| r.project_dir.join("BDMV/STREAM/00000.m2ts");
+
+    // Auto: PCM 5.1 is a lossless repack, not AC-3.
+    let r = build(&rt, &audio_options(vec![pcm], dir.join("o1"), DiscType::Bd25, AudioMode::Auto)).unwrap();
+    let a = probe(&tools, &m2ts(&r), "a", "stream=codec_name,channels,sample_rate");
+    assert!(a.contains("codec_name=pcm_bluray") && a.contains("channels=6") && a.contains("sample_rate=48000"), "{a}");
+    // Encode: the 384 kbit/s AC-3 is re-encoded at the default rate.
+    let r = build(&rt, &BuildOptions { bd_audio: BdAudioMode::Encode, ..audio_options(vec![ac3], dir.join("o2"), DiscType::Bd25, AudioMode::Auto) }).unwrap();
+    let a = probe(&tools, &m2ts(&r), "a", "stream=codec_name,bit_rate");
+    assert!(a.contains("codec_name=ac3") && !a.contains("bit_rate=384000"), "{a}");
+    // Strict: E-AC-3 cannot be copied and the build stops.
+    let err = build(&rt, &BuildOptions { bd_audio: BdAudioMode::Strict, ..audio_options(vec![eac3], dir.join("o3"), DiscType::Bd25, AudioMode::Auto) }).unwrap_err();
+    assert!(err.to_string().contains("cannot be copied"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -731,7 +760,8 @@ mod menus {
                 assert!(clpi.windows(4).any(|w| w == [0x14, 0x00, 0x15, 0x91]) && !clpi.windows(4).any(|w| w == [0x12, 0x00, 0x15, 0x90]));
                 let mpls = std::fs::read(bd.join(dir).join(format!("PLAYLIST/{n:05}.mpls"))).unwrap();
                 let item = u32::from_be_bytes(mpls[8..12].try_into().unwrap()) as usize + 10;
-                assert_eq!(mpls[item + 31], 1, "still mode of a still menu");
+                // still_mode 2 (infinite), still_time 0: mode 1 with time 0 ends the item on a PS4.
+                assert_eq!(mpls[item + 31..item + 34], [2, 0, 0], "still mode of a still menu");
                 let stn = item + 34;
                 assert_eq!((mpls[stn + 6], mpls[stn + 7]), (0, 1), "no PG, one IG");
             }
@@ -845,7 +875,7 @@ fn compliant_video_is_copied_and_titles_keep_their_own_format() {
         }))
         .unwrap_or_else(|e| panic!("build failed: {e}"));
     assert!(warnings.iter().any(|w| w.starts_with("a:") && w.contains("re-encoded")), "{warnings:?}");
-    assert!(!warnings.iter().any(|w| w.starts_with("film:")), "the film title is copied: {warnings:?}");
+    assert!(!warnings.iter().any(|w| w.starts_with("film:") && w.contains("video is re-encoded")), "the film title is copied: {warnings:?}");
     let stream = |n: usize| report.project_dir.join(format!("BDMV/STREAM/{n:05}.m2ts"));
     let copied = probe(&tools, &stream(0), "v:0", "stream=width,height,r_frame_rate,profile,level");
     for want in ["width=1920", "height=1080", "r_frame_rate=24000/1001", "profile=High", "level=41"] {

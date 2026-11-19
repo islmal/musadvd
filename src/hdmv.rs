@@ -112,6 +112,15 @@ pub fn set_stream(dst: u32) -> Command {
     cmd(2, 1, 1, Some(Op::Imm(dst)), Some(Op::Imm(0)))
 }
 
+/// `SetStream` in register form: the flags (31 audio, 15 PG, 14 PG display) stay immediate and the
+/// 12-bit number fields name the GPRs holding the audio / PG stream numbers (libbluray
+/// `_fetch_operand` with `setstream`), so the operand is not one register's value.
+pub fn set_stream_regs(audio: Option<u32>, pg: Option<u32>, display: bool) -> Command {
+    let a = audio.map_or(0, |r| 0x8000_0000 | (r & 0xFFF) << 16);
+    let p = pg.map_or(0, |r| 0x8000 | r & 0xFFF);
+    cmd(2, 1, 1, Some(Op::Gpr(a | p | if display { PG_DISPLAY } else { 0 })), Some(Op::Imm(0)))
+}
+
 /// `SetStream` operand selecting audio stream `n` (1-based).
 pub fn audio_stream(n: u32) -> u32 {
     0x8000_0000 | (n & 0xFFF) << 16
@@ -189,6 +198,8 @@ mod tests {
         assert_eq!(jump_title_op(Op::Gpr(5)), [0x21, 0x01, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0]);
         assert_eq!(jump_object_op(Op::Imm(7)), jump_object(7));
         assert_eq!(jump_title_op(Op::Imm(3)), jump_title(3));
+        // SetStream audio = GPR16, PG = GPR17 shown: imm_op1 clear, flags + register numbers.
+        assert_eq!(set_stream_regs(Some(16), Some(17), true), [0x51, 0x40, 0, 1, 0x80, 0x10, 0xC0, 0x11, 0, 0, 0, 0]);
         // Same operand form as the register mark of PlayPLatMark (in use since the BD menus).
         assert_eq!(play_pl_at_mark(Op::Imm(0), Op::Gpr(1))[1] & 0xC0, 0x80);
     }

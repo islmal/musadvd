@@ -58,6 +58,38 @@ tools are not part of the product.
 `npm ci`, and builds the signed NSIS installer with `tauri-action`, plus the portable ZIP. The tag
 must match `version` in `src-tauri/tauri.conf.json` because the updater compares it.
 
+## Blu-ray hardware test (PS4)
+
+VLC/libbluray accepts HDMV and playlist errors that real players reject, so Blu-ray navigation
+changes need a standalone player. The reference player is a **PS4 on firmware 10.50**.
+
+1. `scripts/make_bd_stress_test.ps1` writes `bd_stress_test/` (git-ignored): three clips
+   (re-encode + PGS + chapters, copy + timing repair, 720p59.94) and a 1920x1080
+   `stress_layout.json` (motion main menu with intro, still chapter and audio/subtitle menus).
+2. Build from the repository root:
+
+   ```powershell
+   .\target\release\musadvd.exe build-dvd --disc bd25 --tv ntsc --bd-video auto --no-hw-encode --project-name BD_STRESS --layout ".\bd_stress_test\stress_layout.json" --output ".\bd_stress_test\out" --input ".\bd_stress_test\01_reencode_pgs_chapters.mkv" ".\bd_stress_test\02_copy_timing_repair.mkv" ".\bd_stress_test\03_secondary_720p5994.mkv"
+   .\target\release\musadvd.exe build-iso ".\bd_stress_test\out\BD_STRESS" --as-disc --label BD_STRESS --output ".\bd_stress_test\BD_STRESS.iso"
+   ```
+
+   `build-iso` fails with "access denied" while the old ISO is mounted; eject it first.
+3. Capture the PS4 kernel log during the test (klog server on the console, port 3232). Use an
+   absolute path: .NET resolves relative paths against the process directory (`system32` in an
+   admin shell), and never append to a file Windows PowerShell wrote (UTF-16) with UTF-8:
+
+   ```powershell
+   $f = "C:\convertx-rust\bd_stress_test\ps4_klog_$(Get-Date -Format HHmmss).txt"; $c = [Net.Sockets.TcpClient]::new('<ps4-ip>', 3232); $r = [IO.StreamReader]::new($c.GetStream()); $w = [IO.StreamWriter]::new($f, $false, [Text.UTF8Encoding]::new($false)); $w.AutoFlush = $true; while ($null -ne ($l = $r.ReadLine())) { $w.WriteLine("$(Get-Date -Format HH:mm:ss.fff) $l") }
+   ```
+
+   The log shows the player app (`BdmvPlayerCore.elf`, `NPXS20113`) starting and being killed,
+   not HDMV commands.
+4. Checklist: still menus stay up (> 30 s, focus kept), every title end returns to the right
+   menu (also with the Options overlay open), Play All, the Top Menu key mid-title, settings-menu
+   audio/subtitle choices take effect when the title starts.
+5. VLC comparison without burning: `vlc -vvv --file-logging --logfile <log> "bluray:///C:/convertx-rust/bd_stress_test/out/BD_STRESS"`
+   (libbluray's own debug output does not reach VLC's log).
+
 ## Manual checks that automation cannot cover
 
 Playback on a standalone player or VLC (menus, chapters, intros, subtitles), Burn Studio on real

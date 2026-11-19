@@ -746,30 +746,43 @@ enum Dir {
     Right,
 }
 
-/// Spatial remote-control navigation: for each direction pick the nearest button whose centre
-/// lies within a 45° cone in that direction, falling back to the whole half-plane. Without any
+/// Spatial remote-control navigation: for each direction pick the nearest button whose
+/// perpendicular edge gap lies within a 45° cone in that direction, falling back to the whole
+/// half-plane. Buttons that overlap on the perpendicular axis have gap 0 so mixed-width
+/// left/right-aligned stacks navigate row-by-row; center distance breaks ties. Without any
 /// candidate the button points to itself.
 pub fn compute_navigation(buttons: &mut [MenuButton]) {
     let centers: Vec<(f64, f64)> = buttons.iter().map(|b| b.rect.center()).collect();
+    let axis_gap = |a0: u32, a1: u32, b0: u32, b1: u32| -> f64 {
+        if b0 >= a1 {
+            (b0 - a1) as f64
+        } else if a0 >= b1 {
+            (a0 - b1) as f64
+        } else {
+            0.0
+        }
+    };
     let target = |from: usize, dir: Dir| -> usize {
         let (ax, ay) = centers[from];
+        let ar = buttons[from].rect;
         let mut best_cone: Option<(f64, usize)> = None;
         let mut best_half: Option<(f64, usize)> = None;
         for (i, &(bx, by)) in centers.iter().enumerate() {
             if i == from {
                 continue;
             }
-            let (primary, secondary) = match dir {
-                Dir::Up => (ay - by, (bx - ax).abs()),
-                Dir::Down => (by - ay, (bx - ax).abs()),
-                Dir::Left => (ax - bx, (by - ay).abs()),
-                Dir::Right => (bx - ax, (by - ay).abs()),
+            let br = buttons[i].rect;
+            let (primary, gap, center_secondary) = match dir {
+                Dir::Up => (ay - by, axis_gap(ar.x0, ar.x1, br.x0, br.x1), (bx - ax).abs()),
+                Dir::Down => (by - ay, axis_gap(ar.x0, ar.x1, br.x0, br.x1), (bx - ax).abs()),
+                Dir::Left => (ax - bx, axis_gap(ar.y0, ar.y1, br.y0, br.y1), (by - ay).abs()),
+                Dir::Right => (bx - ax, axis_gap(ar.y0, ar.y1, br.y0, br.y1), (by - ay).abs()),
             };
             if primary <= 0.0 {
                 continue;
             }
-            let score = primary + 2.0 * secondary;
-            let slot = if secondary <= primary { &mut best_cone } else { &mut best_half };
+            let score = primary + 2.0 * gap + 0.01 * center_secondary;
+            let slot = if gap <= primary { &mut best_cone } else { &mut best_half };
             if slot.is_none_or(|(s, _)| score < s) {
                 *slot = Some((score, i));
             }
@@ -860,7 +873,7 @@ pub struct TitlesetSpec {
     pub main_menu_page: u32,
 }
 
-/// What happens when the disc starts and when a title ends ("Menü Optionen").
+/// What happens when the disc starts and when a title ends (menu options).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PlaybackOptions {
     /// Start title 1 when the disc is inserted instead of showing the main menu.
@@ -1567,6 +1580,34 @@ mod tests {
         assert_eq!(nav(3).left.as_deref(), Some("b3"));
         assert_eq!(nav(4).right.as_deref(), Some("b5"));
         assert_eq!(nav(3).up.as_deref(), Some("b2"));
+    }
+
+    #[test]
+    fn navigation_mixed_width_left_aligned_stack() {
+        // Wide title buttons (x=160, w=1350) above narrower action buttons (x=160, w=700).
+        let mut bs = vec![
+            button("title1", 160, 280, 1510, 360),
+            button("title2", 160, 390, 1510, 470),
+            button("title3", 160, 500, 1510, 580),
+            button("play_all", 160, 640, 860, 720),
+            button("chapters", 160, 750, 860, 830),
+            button("settings", 160, 860, 860, 940),
+        ];
+        compute_navigation(&mut bs);
+        let nav = |i: usize| &bs[i].nav;
+        assert_eq!(nav(0).down.as_deref(), Some("title2"));
+        assert_eq!(nav(1).down.as_deref(), Some("title3"));
+        assert_eq!(nav(2).down.as_deref(), Some("play_all"));
+        assert_eq!(nav(3).down.as_deref(), Some("chapters"));
+        assert_eq!(nav(4).down.as_deref(), Some("settings"));
+        assert_eq!(nav(5).down.as_deref(), Some("settings"));
+
+        assert_eq!(nav(5).up.as_deref(), Some("chapters"));
+        assert_eq!(nav(4).up.as_deref(), Some("play_all"));
+        assert_eq!(nav(3).up.as_deref(), Some("title3"));
+        assert_eq!(nav(2).up.as_deref(), Some("title2"));
+        assert_eq!(nav(1).up.as_deref(), Some("title1"));
+        assert_eq!(nav(0).up.as_deref(), Some("title1"));
     }
 
     #[test]

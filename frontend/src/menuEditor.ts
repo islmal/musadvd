@@ -13,6 +13,9 @@ import {
   type GradientOverlay,
   chapterLabel,
   draftLayout,
+  MENU_PRESETS,
+  type MenuPreset,
+  rect as newRect,
   madeForOtherTitles,
   remapLayoutByPaths,
   emptyMenu,
@@ -413,6 +416,12 @@ export function mountMenuEditor(opts: EditorOptions) {
   function renderHeader() {
     headerButtons.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
+      el(
+        "select",
+        { class: "btn", title: tr("menuEditor.presetTitle"), onchange: (ev: Event) => void applyPresetFromSelect(ev.target as HTMLSelectElement) },
+        el("option", { value: "" }, tr("menuEditor.presetPick")),
+        ...MENU_PRESETS.map((p) => el("option", { value: p }, tr(`menuEditor.preset_${p}`))),
+      ),
       el("button", { class: "btn", type: "button", onclick: () => void loadFile() }, tr("menuEditor.laden")),
       el("button", { class: "btn", type: "button", onclick: () => void importTemplate() }, tr("menuEditor.ausVorlage")),
       el("button", { class: "btn", type: "button", onclick: () => void saveFile() }, tr("menuEditor.speichern")),
@@ -523,6 +532,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     const buttons = menu()?.elements.filter(isButton).length ?? 0;
     toolbar.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: addText }, tr("menuEditor.text")),
+      el("button", { class: "btn", type: "button", onclick: addRect }, tr("menuEditor.rectangle")),
       el("button", { class: "btn", type: "button", onclick: () => void addImage() }, tr("menuEditor.bild")),
       el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addVideo() }, tr("menuEditor.video")),
       el("button", { class: "btn", type: "button", onclick: () => void addExternalVideo() }, tr("menuEditor.externesVideo")),
@@ -617,6 +627,12 @@ export function mountMenuEditor(opts: EditorOptions) {
         fontStyle: e.italic ? "italic" : "normal",
         textAlign: e.align,
         textShadow: e.shadow ? "2px 2px 0 rgba(0,0,0,0.67)" : "none",
+      });
+    } else if (e.type === "rect") {
+      Object.assign(inner.style, {
+        backgroundColor: e.color,
+        boxSizing: "border-box",
+        border: e.borderWidth ? `${e.borderWidth}px solid ${e.borderColor ?? "#FFFFFF"}` : "none",
       });
     } else {
       const img = el("img", { class: `ed-media fit-${e.fit}`, alt: "", draggable: false }) as HTMLImageElement;
@@ -967,7 +983,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     // NLE order: the top row is the frontmost layer (last in `elements`)
     for (const e of [...m.elements].reverse()) {
       const name =
-        e.type === "text" ? e.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlText") : e.type === "image" ? tr("menuEditor.bild2") : videoLabel(e);
+        e.type === "text" ? e.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlText") : e.type === "image" ? tr("menuEditor.bild2") : e.type === "rect" ? tr("menuEditor.rectangle2") : videoLabel(e);
       rows.push({
         label: e.type !== "text" && isButton(e) ? actionLabel(e.action) : name,
         h: TL_BTN_H,
@@ -1655,6 +1671,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       return first.length > 28 ? `${first.slice(0, 27)}…` : first || tr("menuEditor.leererText");
     }
     if (e.type === "image") return fileName(e.src);
+    if (e.type === "rect") return tr("menuEditor.rectangle2");
     return videoLabel(e);
   }
 
@@ -1697,7 +1714,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           onpointerenter: () => hoverStage([e.id], true),
           onpointerleave: () => hoverStage([e.id], false),
         },
-        el("span", { class: "ed-layer-icon", "aria-hidden": "true" }, e.type === "text" ? "T" : e.type === "image" ? "🖼" : "▶"),
+        el("span", { class: "ed-layer-icon", "aria-hidden": "true" }, e.type === "text" ? "T" : e.type === "image" ? "🖼" : e.type === "rect" ? "▭" : "▶"),
         el("span", { class: "ed-layer-name" }, layerName(e)),
         isButton(e) ? el("span", { class: "ed-layer-action" }, actionLabel(e.action)) : null,
       );
@@ -2269,7 +2286,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function elementProps(m: CustomMenu, e: LayoutElement): HTMLElement[] {
-    const kind = e.type === "text" ? tr("menuEditor.text2") : e.type === "image" ? tr("menuEditor.bild2") : tr("menuEditor.video2");
+    const kind = e.type === "text" ? tr("menuEditor.text2") : e.type === "image" ? tr("menuEditor.bild2") : e.type === "rect" ? tr("menuEditor.rectangle2") : tr("menuEditor.video2");
     const typeGroup: Child[] = [];
     if (e.type === "text") {
       const t = e;
@@ -2350,6 +2367,16 @@ export function mountMenuEditor(opts: EditorOptions) {
             tr("menuEditor.anderesBild"),
           ),
           row(tr("menuEditor.anpassung"), select(FIT_LABELS, img.fit, (v) => (img.fit = v as Fit))),
+        ),
+      );
+    } else if (e.type === "rect") {
+      const r = e;
+      typeGroup.push(
+        group(
+          tr("menuEditor.rectangle2"),
+          row(tr("menuEditor.rectFill"), bind(el("input", { type: "color", value: r.color }) as HTMLInputElement, (v) => (r.color = v.toUpperCase()), { live: true })),
+          row(tr("menuEditor.rectBorderColor"), bind(el("input", { type: "color", value: r.borderColor ?? "#FFFFFF" }) as HTMLInputElement, (v) => (r.borderColor = v.toUpperCase()), { live: true })),
+          row(tr("menuEditor.rectBorderWidth"), num(r.borderWidth ?? 0, (v) => (r.borderWidth = Math.max(0, Math.min(100, v))), { min: "0", max: "100", step: "1" })),
         ),
       );
     } else {
@@ -2520,6 +2547,9 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
   function addText() {
     addElement(newText(Math.round(W() / 2 - 120), Math.round(H() / 2 - 25), 240, 50, tr("menuEditor.neuerText"), { size: 28, wrap: true }));
+  }
+  function addRect() {
+    addElement(newRect(Math.round(W() / 2 - 100), Math.round(H() / 2 - 60), 200, 120, "#FFFFFF"));
   }
   async function addImage() {
     const p = await chooseFile(IMAGE_FILTER);
@@ -2694,6 +2724,26 @@ export function mountMenuEditor(opts: EditorOptions) {
   async function newDraft() {
     remember();
     L = draftLayout(titles, tv, opts.heading);
+    menuIdx = 0;
+    selIds = [];
+    renderAll();
+  }
+  /** Rebuilds the draft in a zero-asset preset style; one undo step restores the previous layout. */
+  async function applyPresetFromSelect(sel: HTMLSelectElement) {
+    const preset = sel.value as MenuPreset;
+    sel.value = "";
+    if (!MENU_PRESETS.includes(preset)) return;
+    if (L.menus.some((m) => m.elements.length > 0)) {
+      let go = false;
+      try {
+        go = await ask(tr("menuEditor.presetOverwrites"), { title: tr(`menuEditor.preset_${preset}`), kind: "warning" });
+      } catch (e) {
+        flash(tr("menuEditor.dateiauswahlFehlgeschlagen", { e }), "error");
+      }
+      if (!go) return;
+    }
+    remember();
+    L = draftLayout(titles, tv, opts.heading, preset);
     menuIdx = 0;
     selIds = [];
     renderAll();

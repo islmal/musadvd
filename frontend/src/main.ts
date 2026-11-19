@@ -94,6 +94,8 @@ const state = {
   motion: false,
   /** Blu-ray/AVCHD video: re-encode, copy compliant streams, or copy all (engine `BdVideoMode`). */
   bdVideo: "encode" as BdVideo,
+  /** Blu-ray/AVCHD audio: copy compliant tracks and encode the rest, always encode, or copy all. */
+  bdAudio: "auto" as BdAudio,
   templates: [] as TemplateInfo[],
   template: "",
   /** Menus from a ConvertX template or from the menu editor (the editor is the default; templates need ConvertXToDVD). */
@@ -117,6 +119,7 @@ const state = {
 let nextId = 1;
 
 type BdVideo = "encode" | "auto" | "strict";
+type BdAudio = "auto" | "encode" | "strict";
 const SETTINGS_KEY = "musadvd-gui-settings";
 const LAYOUT_KEY = "musadvd-menu-layout";
 
@@ -149,6 +152,7 @@ function loadSettings() {
     state.twoPass = !!s.twoPass;
     state.motion = !!s.motion;
     if (["encode", "auto", "strict"].includes(s.bdVideo)) state.bdVideo = s.bdVideo;
+    if (["encode", "auto", "strict"].includes(s.bdAudio)) state.bdAudio = s.bdAudio;
     if (typeof s.template === "string") state.template = s.template;
     if (typeof s.output === "string") state.output = s.output;
     slots.dvd.mode = s.menuMode === "template" ? "template" : "custom";
@@ -168,11 +172,11 @@ function loadSettings() {
 function saveSettings() {
   try {
     // The heading is project-specific and therefore not remembered between sessions.
-    const { disc, twoPass, motion, bdVideo, template, output } = state;
+    const { disc, twoPass, motion, bdVideo, bdAudio, template, output } = state;
     slots[mediumOf(disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
     localStorage.setItem(
       SETTINGS_KEY,
-      JSON.stringify({ disc, twoPass, motion, bdVideo, template, output, menuMode: slots.dvd.mode, menuModeBd: slots.bd.mode }),
+      JSON.stringify({ disc, twoPass, motion, bdVideo, bdAudio, template, output, menuMode: slots.dvd.mode, menuModeBd: slots.bd.mode }),
     );
     for (const m of ["dvd", "bd"] as const) {
       const { layout, key } = slots[m];
@@ -269,9 +273,28 @@ function effChapters(t: Title): number[] {
 /** What happens to an audio track with the current disc and settings (copy, AC-3 or LPCM). */
 function audioChoice(t: Title, a: AudioTrack): AudioChoice {
   const mode = state.settings?.audio_mode ?? "auto";
+  if (isBluray()) {
+    const plans = a.plans[planKey()];
+    // Strict keeps the copy plan so the start gate can flag what cannot be copied.
+    if (state.bdAudio === "strict" && !bdAudioForced(t)) return plans.auto;
+    return audioCopies(t, a) ? plans.auto : mode === "lpcm" ? plans.lpcm : plans.ac3;
+  }
   // Normalised and trimmed tracks are always re-encoded (the engine does the same).
   const forced = mode === "auto" && (!!state.settings?.loudnorm || isTrimmed(t));
   return a.plans[planKey()][forced ? "ac3" : mode];
+}
+
+/** Blu-ray: normalised and trimmed titles never copy audio, whatever the audio setting. */
+const bdAudioForced = (t: Title) => !!state.settings?.loudnorm || isTrimmed(t);
+
+/** Blu-ray/AVCHD: is this track copied (losslessly repacked) rather than encoded? */
+function audioCopies(t: Title, a: AudioTrack): boolean {
+  if (!isBluray()) return audioChoice(t, a).copy;
+  const auto = a.plans[planKey()].auto;
+  if (state.bdAudio === "encode" || bdAudioForced(t) || !auto.copy) return false;
+  // An explicit AC-3 / LPCM setting keeps its format; only strict copies any compliant codec.
+  const mode = state.settings?.audio_mode ?? "auto";
+  return state.bdAudio === "strict" || mode === "auto" || auto.codec === mode;
 }
 
 /** Menu/GUI label of an audio track: the user's own name (plus channel layout) or the engine's label. */
@@ -721,7 +744,19 @@ function copyBadge(t: Title) {
     : h("span", { class: "badge copy-badge copy", title: tr("main.bdCopyTip", { kbps: c.kbps ?? 0 }) }, tr("main.bdCopyBadge"));
 }
 
-const projectBdRes = (): BdRes => (state.settings?.bd_resolution === "720p" ? "720" : "1080");
+/** Copy / Re-encode badge of one audio track on a Blu-ray (nothing on DVD). */
+function audioBadge(t: Title, a: AudioTrack) {
+  if (!isBluray()) return null;
+  return audioCopies(t, a)
+    ? h("span", { class: "badge copy-badge copy", title: tr("main.bdAudioCopyTip") }, tr("main.bdCopyBadge"))
+    : h(
+        "span",
+        { class: "badge copy-badge encode", title: tr("main.bdAudioEncodeTip", { codec: CODEC_NAMES[audioChoice(t, a).codec] }) },
+        tr("main.bdEncodeBadge"),
+      );
+}
+
+const projectBdRes =(): BdRes => (state.settings?.bd_resolution === "720p" ? "720" : "1080");
 
 /** Blu-ray/AVCHD video copy verdict of a title (null = the video is encoded anyway). Mirrors
  * the build: the title must keep the source's own format, trim and crop always force a
@@ -922,6 +957,12 @@ function renderTitleList() {
   ($("btn-down") as HTMLButtonElement).disabled = idx < 0 || idx >= state.titles.length - 1;
 }
 
+/** First Blu-ray title with a selected audio track that strict mode could not copy (null = none). */
+const bdAudioBlocked = () =>
+  (isBluray() && state.bdAudio === "strict" &&
+    state.titles.find((t) => t.meta.audio.some((a) => t.audio.has(a.index) && !audioCopies(t, a)))) ||
+  null;
+
 function renderFooter() {
   const calc = state.calc;
   const fill = $("fill-value");
@@ -945,6 +986,8 @@ function renderFooter() {
     const counts = getMenuAndVideoCounts();
     text.textContent = singleVideoViolated()
       ? tr("main.nurEinVideoPro")
+      : bdAudioBlocked()
+        ? tr("main.bdAudioStrictBlocked", { title: bdAudioBlocked()!.label || bdAudioBlocked()!.meta.fileName })
       : counts.overLimit
         ? tr("main.dvdMenuLimitFooter", {
             videos: counts.videos,
@@ -968,6 +1011,7 @@ function renderFooter() {
     !singleVideoViolated() &&
     !counts.overLimit &&
     !state.titles.some((t) => bdCopy(t)?.strict && bdCopy(t)?.issue) &&
+    !bdAudioBlocked() &&
     mergeMismatches().size === 0 &&
     !!state.output.trim() &&
     !!calc?.fits;
@@ -975,6 +1019,7 @@ function renderFooter() {
   const motionSwitch = document.getElementById("motion-menu")?.closest("label");
   if (motionSwitch) motionSwitch.hidden = state.menuMode !== "template" || isBluray();
   $("bd-video-row").hidden = !isBluray();
+  $("bd-audio-row").hidden = !isBluray();
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
   ($("btn-fit") as HTMLButtonElement).hidden = !(calc && !calc.fits) || state.converting || !state.titles.some((t) => bdCopy(t)?.kbps != null);
@@ -1109,6 +1154,7 @@ function renderAudioTab(t: Title) {
             },
           }),
           a.default ? h("span", { class: "badge" }, tr("main.standard")) : null,
+          audioBadge(t, a),
         ),
         h("span", { class: "track-detail" }, audioDetail(t, a)),
       );
@@ -1133,7 +1179,7 @@ async function relabelTitles() {
 function audioDetail(t: Title, a: AudioTrack): string {
   const c = audioChoice(t, a);
   const target = `${CODEC_NAMES[c.codec]} ${c.layout} ${fmtNum(c.kbps)} kbps`;
-  return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${c.copy ? tr("main.unveraendertKopiert", { target }) : target}`;
+  return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${audioCopies(t, a) ? tr("main.unveraendertKopiert", { target }) : target}`;
 }
 
 function renderSubtitleTab(t: Title) {
@@ -1848,6 +1894,7 @@ async function convert() {
       menuTitle: state.menuTitle.trim() || null,
       customLayout: state.menuMode === "custom" ? state.customLayout : null,
       bdVideo: isBluray() ? state.bdVideo : "encode",
+      bdAudio: isBluray() ? state.bdAudio : "auto",
     });
   } catch (e) {
     onDone({ ok: false, message: String(e), videoTs: null, projectName: null, sizeMb: null, targetMb: 0, warnings: [] });
@@ -1928,6 +1975,14 @@ async function init() {
   bdVideo.value = state.bdVideo;
   bdVideo.addEventListener("change", () => {
     state.bdVideo = bdVideo.value as BdVideo;
+    saveSettings();
+    scheduleCalc();
+    renderAll();
+  });
+  const bdAudio = $("bd-audio") as HTMLSelectElement;
+  bdAudio.value = state.bdAudio;
+  bdAudio.addEventListener("change", () => {
+    state.bdAudio = bdAudio.value as BdAudio;
     saveSettings();
     scheduleCalc();
     renderAll();
