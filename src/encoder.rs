@@ -227,13 +227,23 @@ fn tonemap_filter(v: &VideoStream) -> Option<&'static str> {
     v.hdr.then_some("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
 }
 
-/// Head shared by encode and preview: deinterlacer, tonemap (HDR only), user crop, picture filters.
-fn source_chain(v: &VideoStream, vp: VideoProcessing) -> Vec<String> {
+/// Head shared by encode and preview: deinterlacer, tonemap (HDR only), user crop and, with
+/// `picture`, the picture filters.
+fn source_chain(v: &VideoStream, vp: VideoProcessing, picture: bool) -> Vec<String> {
     let mut f: Vec<String> = deint_filter(v, vp).into_iter().collect();
     f.extend(tonemap_filter(v).map(String::from));
     f.extend(crop_filter(v));
-    f.extend(picture_filters(vp));
+    if picture {
+        f.extend(picture_filters(vp));
+    }
     f
+}
+
+/// Whether the picture filters run before the scale to `w`×`h`: they cost per pixel (`hqdn3d`
+/// was 4× slower at 1080p than after a DVD downscale), so they run on the smaller picture.
+fn picture_before_scale(v: &VideoStream, w: u32, h: u32) -> bool {
+    let (sw, sh) = v.crop.map_or((v.width, v.height), |c| (c.w, c.h));
+    u64::from(w) * u64::from(h) >= u64::from(sw) * u64::from(sh)
 }
 
 /// Filter chain of the live player: 8-bit 480p square-pixel picture of the cut/cropped source.
@@ -250,8 +260,12 @@ pub fn preview_filter(v: &VideoStream, vp: VideoProcessing, height: u32) -> Stri
         f.extend(picture_filters(vp));
         f
     } else {
-        let mut f = source_chain(v, vp);
+        let early = picture_before_scale(v, w, height);
+        let mut f = source_chain(v, vp, early);
         f.push(scale);
+        if !early {
+            f.extend(picture_filters(vp));
+        }
         f
     };
     f.push("setsar=1".to_string());
@@ -263,26 +277,25 @@ pub fn preview_filter(v: &VideoStream, vp: VideoProcessing, height: u32) -> Stri
 /// Returns the filters before the aspect tag (`setdar`/`setsar`) and `format`.
 fn fit_chain(v: &VideoStream, aspect: Aspect, frame: (u32, u32), fps: &str, matrix: &str, vp: VideoProcessing) -> Vec<String> {
     let (fw, fh) = frame;
-    let mut f = source_chain(v, vp);
-    f.push(format!("fps={fps}"));
-    let flags = format!("flags={}:out_color_matrix={matrix}:out_range=tv", vp.filter.flag());
-    match vp.scale {
+    let ((w, h), fit) = match vp.scale {
         ScaleMode::Letterbox => {
-            let (w, h) = active_size(v.display_aspect, aspect, frame);
-            f.push(format!("scale={w}:{h}:{flags}"));
-            if (w, h) != (fw, fh) {
-                f.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:black"));
-            }
+            let s = active_size(v.display_aspect, aspect, frame);
+            (s, (s != frame).then(|| format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:black")))
         }
         ScaleMode::PanScan => {
-            let (w, h) = cover_size(v.display_aspect, aspect, frame);
-            f.push(format!("scale={w}:{h}:{flags}"));
-            if (w, h) != (fw, fh) {
-                f.push(format!("crop={fw}:{fh}"));
-            }
+            let s = cover_size(v.display_aspect, aspect, frame);
+            (s, (s != frame).then(|| format!("crop={fw}:{fh}")))
         }
-        ScaleMode::Stretch => f.push(format!("scale={fw}:{fh}:{flags}")),
+        ScaleMode::Stretch => (frame, None),
+    };
+    let early = picture_before_scale(v, w, h);
+    let mut f = source_chain(v, vp, early);
+    f.push(format!("fps={fps}"));
+    f.push(format!("scale={w}:{h}:flags={}:out_color_matrix={matrix}:out_range=tv", vp.filter.flag()));
+    if !early {
+        f.extend(picture_filters(vp));
     }
+    f.extend(fit);
     f
 }
 
@@ -3320,16 +3333,24 @@ mod tests {
         sdr.crop = Some(crate::probe::CropRect { x: 0, y: 100, w: 1920, h: 800 });
         sdr.display_aspect = 2.4;
 
+        // DVD downscale: picture filters run on the scaled picture, before the letterbox bars.
         let dvd_vf = video_filter(&sdr, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, overlaid);
-        assert!(dvd_vf.starts_with(&format!("bwdif=mode=send_frame,crop=1920:800:0:100,{expected_pic},fps=25,")), "{dvd_vf}");
+        assert!(dvd_vf.starts_with("bwdif=mode=send_frame,crop=1920:800:0:100,fps=25,scale="), "{dvd_vf}");
+        assert!(dvd_vf.contains(&format!(":out_range=tv,{expected_pic},pad=")), "{dvd_vf}");
 
+        // Same size on Blu-ray (1920 wide letterboxed): no downscale, filters stay in front.
         let bd_vf = bd_video_filter(&sdr, BdRate { fps: (25, 1), fake_interlaced: false }, Resolution::Hd1080, overlaid);
         assert!(bd_vf.starts_with(&format!("bwdif=mode=send_frame,crop=1920:800:0:100,{expected_pic},fps=25,")), "{bd_vf}");
+
+        // Upscale 720p -> 1080p: filters run before the scale, on the smaller source.
+        let small = video(1280, 720, 16.0 / 9.0, "progressive");
+        let up_vf = bd_video_filter(&small, BdRate { fps: (25, 1), fake_interlaced: false }, Resolution::Hd1080, overlaid);
+        assert!(up_vf.starts_with(&format!("{expected_pic},fps=25,scale=1920:1080")), "{up_vf}");
 
         let sdr_prev = preview_filter(&sdr, overlaid, 480);
         assert_eq!(
             sdr_prev,
-            format!("bwdif=mode=send_frame,crop=1920:800:0:100,{expected_pic},scale=1152:480:flags=bicubic,setsar=1,format=yuv420p")
+            format!("bwdif=mode=send_frame,crop=1920:800:0:100,scale=1152:480:flags=bicubic,{expected_pic},setsar=1,format=yuv420p")
         );
 
         let mut hdr = video(3840, 2160, 16.0 / 9.0, "progressive");
@@ -3377,7 +3398,7 @@ mod tests {
         };
         let clamped_vf = preview_filter(&video(1280, 720, 16.0 / 9.0, "progressive"), clamped, 480);
         assert!(
-            clamped_vf.starts_with("hqdn3d=12.00:9.00:18.00:13.50,eq=brightness=-1.00:contrast=2.00:saturation=3.00,scale="),
+            clamped_vf.contains(",hqdn3d=12.00:9.00:18.00:13.50,eq=brightness=-1.00:contrast=2.00:saturation=3.00,"),
             "{clamped_vf}"
         );
     }

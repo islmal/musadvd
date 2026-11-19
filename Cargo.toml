@@ -7,7 +7,7 @@ resolver = "2"
 
 [package]
 name = "musadvd"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "DVD, Blu-ray and AVCHD authoring engine and CLI with Burn Studio"
 license = "GPL-3.0-or-later"

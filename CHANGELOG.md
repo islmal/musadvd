@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-19
+
+### Changed
+
+- **Faster denoise and picture filters**: when the picture is scaled down (e.g. 1080p to DVD), denoise and brightness/contrast/saturation now run after the scale instead of on the full-size source; denoising was about 4x cheaper in a 1080p-to-DVD test. Upscales keep them in front of the scale, and the live preview follows the same rule.
+
 ## [1.0.0] - 2026-11-19
 
 First stable release: the project file format, settings and CLI are now kept compatible within 1.x.
@@ -128,7 +134,8 @@ First stable release: the project file format, settings and CLI are now kept com
 - **Burn Studio**: disc image Read, Build, Verify, and Write (Windows IMAPI2 / direct SPTI fallback), Discovery blank-media testing, `.ibg` telemetry graphs, layer-break tools, CSS detection, and safe 4x auto write speed.
 - GPU-accelerated decoding/encoding (`HwAccelMode`), live preview proxy with frame stepping, smart track labels, drag-and-drop title reordering, merge groups, and automated Windows (NSIS installer with in-app updater + portable ZIP) and Linux (`.deb`, `.AppImage`, portable `.tar.gz`) release builds.
 
-[Unreleased]: https://github.com/islmal/musadvd/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/islmal/musadvd/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/islmal/musadvd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/islmal/musadvd/compare/v0.1.5...v1.0.0
 [0.1.5]: https://github.com/islmal/musadvd/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/islmal/musadvd/compare/v0.1.3...v0.1.4
