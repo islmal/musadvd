@@ -1,4 +1,7 @@
-//! Linux/Unix burner using the command line tools growisofs (dvd+rw-tools) or xorriso.
+//! Linux/Unix burner. On Linux it probes and writes natively over SG_IO with MusaDVD's own MMC
+//! writer (the engine Burn Studio uses); growisofs (dvd+rw-tools) or xorriso are only a fallback
+//! when the drive cannot be opened that way, or to erase a used DVD-RW, which the native writer
+//! does not do yet.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -17,7 +20,7 @@ fn which(tool: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|p| p.join(tool)).find(|p| p.is_file()))
 }
 
-/// Burner backed by growisofs (preferred: supports the DVD+R DL layer break) or xorriso.
+/// Native SG_IO burner (Linux) with growisofs (preferred: DVD+R DL layer break) or xorriso as fallback.
 pub struct CliBurner {
     growisofs: Option<PathBuf>,
     xorriso: Option<PathBuf>,
@@ -115,12 +118,67 @@ impl OpticalBurner for CliBurner {
     }
 
     fn probe_media(&self, drive_id: &str) -> Result<MediaInfo, BurnError> {
+        #[cfg(target_os = "linux")]
+        match native::probe(drive_id) {
+            Ok(m) => return Ok(m),
+            Err(e) if self.xorriso.is_none() => return Err(e),
+            Err(_) => {} // e.g. no permission for SG_IO: ask xorriso
+        }
+        self.probe_media_cli(drive_id)
+    }
+
+    fn burn_iso(
+        &self,
+        drive_id: &str,
+        iso_path: &Path,
+        speed: WriteSpeed,
+        options: &BurnOptions,
+        cancel: &AtomicBool,
+        progress_tx: Sender<BurnProgress>,
+    ) -> Result<(), BurnError> {
+        #[cfg(target_os = "linux")]
+        {
+            let has_tools = self.growisofs.is_some() || self.xorriso.is_some();
+            match super::spti::SgIoTransport::open(drive_id) {
+                Ok(t) => {
+                    let media = native::probe_with(&t);
+                    // Erasing a sequential DVD-RW is the one job left to the tools.
+                    let erase_rw = options.erase && !media.blank && media.physical == "DVD-RW";
+                    if !(erase_rw && self.xorriso.is_some()) {
+                        let source = Box::new(super::source::FileSource::open(iso_path)?);
+                        return native::burn(&t, source, speed, options, cancel, &progress_tx);
+                    }
+                }
+                Err(e) if !has_tools => return Err(e),
+                Err(_) => {} // the drive cannot be opened for SG_IO: the tools may still reach it
+            }
+        }
+        self.burn_iso_cli(drive_id, iso_path, speed, options, cancel, progress_tx)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn burn_source(
+        &self,
+        drive_id: &str,
+        source: Box<dyn super::source::SectorSource>,
+        speed: WriteSpeed,
+        options: &BurnOptions,
+        cancel: &AtomicBool,
+        progress_tx: Sender<BurnProgress>,
+    ) -> Result<(), BurnError> {
+        let t = super::spti::SgIoTransport::open(drive_id)?;
+        native::burn(&t, source, speed, options, cancel, &progress_tx)
+    }
+}
+
+impl CliBurner {
+    fn probe_media_cli(&self, drive_id: &str) -> Result<MediaInfo, BurnError> {
         let out = blocking_tool_command(self.xorriso()?).args(["-outdev", drive_id, "-list_speeds", "-toc"]).output()?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         Ok(parse_media(&text))
     }
 
-    fn burn_iso(
+    fn burn_iso_cli(
         &self,
         drive_id: &str,
         iso_path: &Path,
@@ -261,6 +319,80 @@ fn open_for_verify(drive_id: &str) -> std::io::Result<std::fs::File> {
     std::fs::File::open(drive_id)
 }
 
+/// MMC over SG_IO: media probe from GET CONFIGURATION / READ DISC INFORMATION / GET PERFORMANCE
+/// and writing through `mmcwrite` with Burn Studio's default write options.
+#[cfg(target_os = "linux")]
+mod native {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::Sender;
+
+    use super::super::mmcwrite::{burn_direct_with, DirectOptions};
+    use super::super::source::SectorSource;
+    use super::super::spti::{self, ScsiTransport, SgIoTransport};
+    use super::super::{BurnError, BurnOptions, BurnProgress, MediaInfo, WriteSpeed};
+
+    pub fn probe(drive_id: &str) -> Result<MediaInfo, BurnError> {
+        Ok(probe_with(&SgIoTransport::open(drive_id)?))
+    }
+
+    pub fn probe_with(t: &dyn ScsiTransport) -> MediaInfo {
+        let d = spti::drive_info(t);
+        // Free blocks of the first track: the whole capacity of a blank disc.
+        let free = spti::query(t, "READ TRACK INFORMATION", &spti::read_track_information(1, 1, 48), 48)
+            .ok()
+            .and_then(|b| b.get(16..20).map(|f| u32::from_be_bytes([f[0], f[1], f[2], f[3]]) as u64));
+        super::media_from_mmc(&d, free)
+    }
+
+    pub fn burn(
+        t: &dyn ScsiTransport,
+        source: Box<dyn SectorSource>,
+        speed: WriteSpeed,
+        options: &BurnOptions,
+        cancel: &AtomicBool,
+        tx: &Sender<BurnProgress>,
+    ) -> Result<(), BurnError> {
+        let s = crate::config::BurnStudioSettings::default();
+        let direct = DirectOptions::from_settings(&s.write, &s.io).with_speed(speed);
+        burn_direct_with(t, source, options, &direct, cancel, tx)
+    }
+}
+
+/// [`MediaInfo`] from an MMC drive probe; `free_blocks` from READ TRACK INFORMATION.
+fn media_from_mmc(d: &super::spti::DriveDetails, free_blocks: Option<u64>) -> MediaInfo {
+    let profile = d.current_profile.unwrap_or(0);
+    let mut m = MediaInfo::none();
+    m.present = d.ready && profile != 0;
+    if !m.present {
+        return m;
+    }
+    // "DVD-RW (Restricted Overwrite)" is still a DVD-RW for the user.
+    m.physical = d.current_profile_name.split(" (").next().unwrap_or_default().to_string();
+    let bd = (0x40..=0x43).contains(&profile);
+    let dvd_dl = matches!(profile, 0x15 | 0x16 | 0x2A | 0x2B);
+    m.rewritable = matches!(profile, 0x12 | 0x13 | 0x14 | 0x1A | 0x2A | 0x43) || d.erasable == Some(true);
+    m.blank = d.disc_status.as_deref() == Some("blank");
+    m.writable = matches!(profile, 0x11 | 0x13..=0x16 | 0x1A | 0x1B | 0x2A | 0x2B | 0x41..=0x43);
+    let capacity = free_blocks.filter(|&f| f > 0).or(d.capacity_sectors).unwrap_or(0);
+    m.total_sectors = capacity.max(d.capacity_sectors.unwrap_or(0));
+    m.free_sectors = if m.blank || matches!(profile, 0x13 | 0x1A | 0x43) { capacity } else { 0 };
+    m.media_type = if bd {
+        // BD-25 holds 12,219,392 sectors; anything clearly larger is dual layer.
+        if m.total_sectors > 13_000_000 { MediaType::Bd50 } else { MediaType::Bd25 }
+    } else if (0x10..=0x2B).contains(&profile) {
+        if dvd_dl { MediaType::Dvd9 } else { MediaType::Dvd5 }
+    } else {
+        MediaType::Unknown
+    };
+    m.writable &= m.media_type != MediaType::Unknown;
+    m.layer_break_supported = profile == 0x2B;
+    // GET PERFORMANCE reports kB/s (1000 bytes); MediaInfo counts sectors per second.
+    m.speeds = d.write_speeds_kbps.iter().map(|&k| (k as f64 * 1000.0 / 2048.0).round() as u32).collect();
+    m.speeds.sort_unstable_by(|a, b| b.cmp(a));
+    m.speeds.dedup();
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +413,48 @@ mod tests {
     fn percent() {
         assert_eq!(parse_percent(" 1234/5678 ( 27.0%) @3.9x, remaining 4:00"), Some(0.27));
         assert_eq!(parse_percent("no progress"), None);
+    }
+
+    #[test]
+    fn media_from_mmc_probe() {
+        use super::super::spti::DriveDetails;
+        let blank_dvdr = DriveDetails {
+            ready: true,
+            current_profile: Some(0x1B),
+            current_profile_name: "DVD+R".into(),
+            disc_status: Some("blank".into()),
+            erasable: Some(false),
+            write_speeds_kbps: vec![22_160, 11_080, 5_540],
+            ..Default::default()
+        };
+        let m = media_from_mmc(&blank_dvdr, Some(2_295_104));
+        assert!(m.present && m.blank && m.writable && !m.rewritable);
+        assert_eq!((m.media_type, m.free_sectors, m.total_sectors), (MediaType::Dvd5, 2_295_104, 2_295_104));
+        assert_eq!(m.speeds, vec![10_820, 5_410, 2_705], "kB/s to sectors/s: 16x, 8x, 4x");
+        assert!(!m.layer_break_supported);
+
+        let dl = DriveDetails { current_profile: Some(0x2B), current_profile_name: "DVD+R DL".into(), ..blank_dvdr.clone() };
+        let m = media_from_mmc(&dl, Some(4_173_824));
+        assert_eq!(m.media_type, MediaType::Dvd9);
+        assert!(m.layer_break_supported);
+
+        let used_rw = DriveDetails {
+            current_profile: Some(0x13),
+            current_profile_name: "DVD-RW (Restricted Overwrite)".into(),
+            disc_status: Some("finalized".into()),
+            erasable: Some(true),
+            capacity_sectors: Some(2_297_888),
+            ..blank_dvdr.clone()
+        };
+        let m = media_from_mmc(&used_rw, None);
+        assert_eq!(m.physical, "DVD-RW");
+        assert!(m.rewritable && !m.blank && m.free_sectors == 2_297_888, "overwritable in place");
+
+        let bd = DriveDetails { current_profile: Some(0x41), current_profile_name: "BD-R (SRM)".into(), ..blank_dvdr.clone() };
+        assert_eq!(media_from_mmc(&bd, Some(12_219_392)).media_type, MediaType::Bd25);
+        assert_eq!(media_from_mmc(&bd, Some(24_438_784)).media_type, MediaType::Bd50);
+
+        let empty = DriveDetails { ready: false, current_profile: Some(0), ..Default::default() };
+        assert!(!media_from_mmc(&empty, None).present);
     }
 }

@@ -176,7 +176,7 @@ pub fn tray(drive: &DriveInfo, action: &str) -> Result<(), BurnError> {
     match action {
         "eject" => h.eject(),
         "load" => h.load(),
-        other => Err(BurnError::Unsupported(format!("Tray-Aktion '{other}'"))),
+        other => Err(BurnError::Unsupported(format!("tray action '{other}'"))),
     }
 }
 
@@ -460,7 +460,7 @@ fn one_x_for(sectors: u64) -> f64 {
 #[derive(Debug, Clone)]
 pub struct WriteJob {
     pub drive: DriveInfo,
-    /// `auto` (rules from the settings, then safe 4x), `max`, or a speed in x.
+    /// `auto` (rules from the settings, then 8x DVD / 4x DVD-9 and Blu-ray), `max`, or a speed in x.
     pub speed: String,
     /// A rewritable disc with old content may be erased/overwritten.
     pub erase: bool,
@@ -470,8 +470,9 @@ pub struct WriteJob {
     pub image: String,
 }
 
-/// Default speed cap for Burn Studio's "Auto" mode: safe 4x burn speed across all media types.
-pub const STUDIO_AUTO_SPEED: &str = "4";
+/// Burn Studio's "Auto" without a matching rule: the same `auto` as the main burn step
+/// (8x DVD, 4x DVD-9/Blu-ray, see [`super::default_speed`]).
+pub const STUDIO_AUTO_SPEED: &str = "auto";
 
 /// The speed wish after the auto-speed rules (first match on media ID and drive wins).
 pub fn resolve_speed(settings: &BurnStudioSettings, drive: &DriveInfo, media_id: &str, wish: &str) -> String {
@@ -934,32 +935,32 @@ mod tests {
     }
 
     #[test]
-    fn studio_auto_is_capped_at_4x() {
+    fn studio_auto_is_the_main_auto() {
         let x = |v: f64| (v * MediaType::Dvd5.sectors_per_sec_1x()).round() as u32;
         let s = BurnStudioSettings::default();
         let d = drive("DRIVE");
-        // DVD [16, 8, 6, 4, 2.4] -> 4x
-        let speeds = [x(16.0), x(8.0), x(6.0), x(4.0), x(2.4)];
         let wish = resolve_speed(&s, &d, "ID", "auto");
-        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish), WriteSpeed::Specific(x(4.0)));
-        // DVD [16, 12, 8] -> 8x (nearest below 4x doesn't exist, so slowest offered: 8x)
-        let speeds_fast = [x(16.0), x(12.0), x(8.0)];
-        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds_fast, &wish), WriteSpeed::Specific(x(8.0)));
-        // Empty list -> Specific(4x)
-        assert_eq!(preferred_speed(MediaType::Dvd5, &[], &wish), WriteSpeed::Specific(x(4.0)));
+        // DVD [16, 8, 6, 4, 2.4] -> 8x
+        let speeds = [x(16.0), x(8.0), x(6.0), x(4.0), x(2.4)];
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish), WriteSpeed::Specific(x(8.0)));
+        assert_eq!(preferred_speed(MediaType::Dvd9, &speeds, &wish), WriteSpeed::Specific(x(4.0)));
+        // DVD [16, 12] -> 12x (nothing up to 8x, so the slowest offered)
+        assert_eq!(preferred_speed(MediaType::Dvd5, &[x(16.0), x(12.0)], &wish), WriteSpeed::Specific(x(12.0)));
+        // Empty list -> the 8x target
+        assert_eq!(preferred_speed(MediaType::Dvd5, &[], &wish), WriteSpeed::Specific(x(8.0)));
         // BD [12, 6, 4] -> 4x
         let bd_speeds = [26_341, 13_170, 8_780];
         assert_eq!(preferred_speed(MediaType::Bd25, &bd_speeds, &wish), WriteSpeed::Specific(8_780));
         // Wish max -> Max
         let wish_max = resolve_speed(&s, &d, "ID", "max");
         assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish_max), WriteSpeed::Max);
-        // Matching rule wins
+        // A matching rule wins
         let rule_s = BurnStudioSettings {
-            auto_speed: vec![SpeedRule { media_id: "ID".into(), drive: "".into(), speed: "8".into() }],
+            auto_speed: vec![SpeedRule { media_id: "ID".into(), drive: "".into(), speed: "4".into() }],
             ..Default::default()
         };
         let wish_rule = resolve_speed(&rule_s, &d, "ID", "auto");
-        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish_rule), WriteSpeed::Specific(x(8.0)));
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, &wish_rule), WriteSpeed::Specific(x(4.0)));
     }
 
     #[test]

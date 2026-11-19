@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-20
+
+### Changed
+
+- **Native burning on Linux**: the main window's burn step (and the CLI `burn`) now probe and write the disc with MusaDVD's own MMC writer over `SG_IO`, the engine Burn Studio uses. `growisofs`/`xorriso` are only a fallback when the drive cannot be opened that way, and to erase a used DVD-RW; the `.deb` now only recommends them, the AUR package lists them as optional. Blu-ray media are now recognised on Linux too.
+- **Auto write speed** is the same in the main window and Burn Studio: 8x for DVD (instead of the drive maximum, or 4x in Burn Studio), 4x for DVD-9 and Blu-ray; the fastest offered speed up to that, otherwise the slowest offered. Burn time estimates use the same speeds.
+
+### Fixed
+
+- Burn Studio graphs on Linux carry local time instead of UTC and are saved in `~/.local/share/musadvd/graph` instead of the temp folder (wiped on reboot).
+- Remaining German texts in the burner ("Maximal" speed label, drive probe notes, book type part).
+
 ## [1.0.1] - 2026-11-19
 
 ### Changed
@@ -134,7 +146,8 @@ First stable release: the project file format, settings and CLI are now kept com
 - **Burn Studio**: disc image Read, Build, Verify, and Write (Windows IMAPI2 / direct SPTI fallback), Discovery blank-media testing, `.ibg` telemetry graphs, layer-break tools, CSS detection, and safe 4x auto write speed.
 - GPU-accelerated decoding/encoding (`HwAccelMode`), live preview proxy with frame stepping, smart track labels, drag-and-drop title reordering, merge groups, and automated Windows (NSIS installer with in-app updater + portable ZIP) and Linux (`.deb`, `.AppImage`, portable `.tar.gz`) release builds.
 
-[Unreleased]: https://github.com/islmal/musadvd/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/islmal/musadvd/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/islmal/musadvd/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/islmal/musadvd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/islmal/musadvd/compare/v0.1.5...v1.0.0
 [0.1.5]: https://github.com/islmal/musadvd/compare/v0.1.4...v0.1.5

@@ -109,9 +109,9 @@ Prebuilt packages are published automatically on [GitHub Releases](https://githu
 ### Linux (Any Distro — AppImage or Portable)
 
 1. Install runtime dependencies:
-   - **Debian/Ubuntu/Mint:** `sudo apt install ffmpeg xorriso dvd+rw-tools`
-   - **Fedora:** `sudo dnf install ffmpeg xorriso dvd+rw-tools` *(with RPM Fusion enabled for `ffmpeg`)*
-   - **Arch Linux:** `sudo pacman -S ffmpeg libisoburn dvd+rw-tools`
+   - **Debian/Ubuntu/Mint:** `sudo apt install ffmpeg` (optional fallback burners: `xorriso dvd+rw-tools`)
+   - **Fedora:** `sudo dnf install ffmpeg` *(with RPM Fusion enabled)*
+   - **Arch Linux:** `sudo pacman -S ffmpeg`
 2. Add your user to the optical drive group (`cdrom` on Debian/Ubuntu/Fedora, `optical` on Arch) and re-login.
 3. Download either:
    - **`MusaDVD_<version>_amd64.AppImage`:** `chmod +x MusaDVD_*.AppImage && ./MusaDVD_*.AppImage`
@@ -123,9 +123,10 @@ Prebuilt packages are published automatically on [GitHub Releases](https://githu
    ```
    The self-updater replaces the AppImage in place, so the symlink keeps working.
 
-`xorriso`/`dvd+rw-tools` are only used by the main window's burn step. **Burn Studio** talks to the drive
-directly over Linux `SG_IO` (`/dev/srN`, needs the optical drive group from step 2), so it works without them
-(not hardware-tested yet).
+Burning is native on Linux too: the main window's burn step and **Burn Studio** talk to the drive
+directly over `SG_IO` (`/dev/srN`, needs the optical drive group from step 2). `xorriso` /
+`dvd+rw-tools` are only a fallback when the drive cannot be opened that way, and to erase a used
+DVD-RW.
 
 ### Arch Linux (AUR / PKGBUILD)
 
@@ -157,7 +158,7 @@ sudo apt install -y \
   build-essential curl wget file git patchelf \
   libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
   libayatana-appindicator3-dev libssl-dev libxdo-dev \
-  ffmpeg xorriso dvd+rw-tools
+  ffmpeg
 sudo usermod -aG cdrom "$USER"
 
 npm install

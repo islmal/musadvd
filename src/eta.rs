@@ -232,13 +232,12 @@ pub fn burn_secs(medium: Medium, bytes: f64, speed_x: f64, verify: bool, dual_la
     write + fixed + read
 }
 
-/// Default speed in x for the job estimate before a drive is known: DVD-5 at max (16x),
-/// DVD-9 at 4x; BD-25 at 6x, BD-50 at 4x.
+/// Default speed in x for the job estimate before a drive is known, the `auto` write speed:
+/// DVD-5 at 8x, DVD-9 and Blu-ray at 4x (see `burner::auto_speed_x`).
 pub fn default_speed_x(medium: Medium, dual_layer: bool) -> f64 {
     match (medium, dual_layer) {
-        (_, true) => 4.0,
-        (Medium::Dvd, false) => 16.0,
-        (Medium::Bd, false) => 6.0,
+        (Medium::Dvd, false) => 8.0,
+        _ => 4.0,
     }
 }
 
@@ -296,12 +295,12 @@ mod tests {
         assert!((1530.0..1560.0).contains(&t), "{t}");
         // Verification adds a full read.
         assert!(burn_secs(Medium::Dvd, dvd5, 8.0, true, false) > burn_secs(Medium::Dvd, dvd5, 8.0, false, false) + 300.0);
-        assert_eq!(default_speed_x(Medium::Dvd, false), 16.0);
+        assert_eq!(default_speed_x(Medium::Dvd, false), 8.0);
         assert_eq!(default_speed_x(Medium::Dvd, true), 4.0);
         // A full BD-25 (23.3 GB) at 6x ≈ 27 MB/s: ~14 min writing + 45 s fixed.
         let bd = burn_secs(Medium::Bd, 23.3e9, 6.0, false, false);
         assert!((bd - (23.3e9 / (6.0 * 4_495_500.0) + 45.0)).abs() < 1.0, "{bd}");
-        assert_eq!(default_speed_x(Medium::Bd, false), 6.0);
+        assert_eq!(default_speed_x(Medium::Bd, false), 4.0);
     }
 
     #[test]

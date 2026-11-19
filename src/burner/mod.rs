@@ -288,19 +288,29 @@ pub fn speed_label(sectors_per_sec: u32, media: MediaType) -> String {
     }
 }
 
-/// Default speed: maximum for DVD-5; for DVD-9 about 4x (the slowest supported speed that is
-/// at least 2.4x and at most 4x, otherwise the slowest offered).
-pub fn default_speed(media: MediaType, speeds: &[u32]) -> WriteSpeed {
-    if media != MediaType::Dvd9 || speeds.is_empty() {
-        return WriteSpeed::Max;
+/// Target of the `auto` speed in x: 8x for single-layer DVD, 4x for DVD-9 and Blu-ray. Burning
+/// 16x DVD media at 8x gives the best write quality on current drives without taking long
+/// (the BU40N wrote a 4.3 GB DVD+R at 3.4x→7.8x in 20 min with full buffers).
+pub fn auto_speed_x(media: MediaType) -> f64 {
+    match media {
+        MediaType::Dvd5 | MediaType::Unknown => 8.0,
+        MediaType::Dvd9 | MediaType::Bd25 | MediaType::Bd50 => 4.0,
     }
-    let x = |s: u32| s as f64 / DVD_1X_SECTORS_PER_SEC;
-    let in_range: Vec<u32> = speeds.iter().copied().filter(|&s| (2.3..=4.1).contains(&x(s))).collect();
-    let pick = in_range.into_iter().max().or_else(|| speeds.iter().copied().min()).unwrap();
+}
+
+/// `auto` speed: the fastest offered speed up to [`auto_speed_x`] (with the usual reporting
+/// tolerance), the slowest offered one when all are faster, the target itself when the drive
+/// lists none.
+pub fn default_speed(media: MediaType, speeds: &[u32]) -> WriteSpeed {
+    let want = auto_speed_x(media) * media.sectors_per_sec_1x();
+    if speeds.is_empty() {
+        return WriteSpeed::Specific(want.round() as u32);
+    }
+    let pick = speeds.iter().copied().filter(|&s| s as f64 <= want * 1.03).max().or_else(|| speeds.iter().copied().min()).unwrap();
     WriteSpeed::Specific(pick)
 }
 
-/// Speed from the "write speed" setting: `auto` (DVD-5 maximum, DVD-9 about 4x),
+/// Speed from the "write speed" setting: `auto` (8x DVD, 4x DVD-9/Blu-ray, see [`default_speed`]),
 /// `max`, or a speed in x (`8`, `2.4`), mapped to the nearest supported speed not above it
 /// (the slowest supported one when all are faster).
 pub fn preferred_speed(media: MediaType, speeds: &[u32], pref: &str) -> WriteSpeed {
@@ -730,17 +740,20 @@ mod tests {
     #[test]
     fn default_speeds() {
         let speeds = [x(16.0), x(8.0), x(6.0), x(4.0), x(2.4)];
-        assert_eq!(default_speed(MediaType::Dvd5, &speeds), WriteSpeed::Max);
+        assert_eq!(default_speed(MediaType::Dvd5, &speeds), WriteSpeed::Specific(x(8.0)), "16x media at 8x");
+        assert_eq!(default_speed(MediaType::Dvd5, &[x(6.0), x(4.0)]), WriteSpeed::Specific(x(6.0)), "fastest up to 8x");
+        assert_eq!(default_speed(MediaType::Dvd5, &[5540, 2770]), WriteSpeed::Specific(5540), "8x reported as 5540");
         assert_eq!(default_speed(MediaType::Dvd9, &speeds), WriteSpeed::Specific(x(4.0)));
         assert_eq!(default_speed(MediaType::Dvd9, &[x(8.0), x(2.4)]), WriteSpeed::Specific(x(2.4)));
         assert_eq!(default_speed(MediaType::Dvd9, &[x(12.0), x(8.0)]), WriteSpeed::Specific(x(8.0)), "slowest offered");
-        assert_eq!(default_speed(MediaType::Dvd9, &[]), WriteSpeed::Max);
+        assert_eq!(default_speed(MediaType::Dvd9, &[]), WriteSpeed::Specific(x(4.0)), "target without a list");
+        assert_eq!(default_speed(MediaType::Bd25, &[26_341, 13_170, 8_780]), WriteSpeed::Specific(8_780), "BD at 4x");
     }
 
     #[test]
     fn speed_preferences() {
         let speeds = [x(16.0), x(8.0), x(4.0), x(2.4)];
-        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "auto"), WriteSpeed::Max);
+        assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "auto"), WriteSpeed::Specific(x(8.0)));
         assert_eq!(preferred_speed(MediaType::Dvd9, &speeds, "auto"), WriteSpeed::Specific(x(4.0)));
         assert_eq!(preferred_speed(MediaType::Dvd9, &speeds, "max"), WriteSpeed::Max);
         assert_eq!(preferred_speed(MediaType::Dvd5, &speeds, "8"), WriteSpeed::Specific(x(8.0)));
@@ -758,7 +771,7 @@ mod tests {
         let bd_speeds = [26_341, 13_170, 8_780];
         assert!((speed_x(WriteSpeed::Max, &bd_speeds, MediaType::Bd25) - 12.0).abs() < 0.01);
         assert_eq!(speed_x(WriteSpeed::Max, &[], MediaType::Bd25), 6.0);
-        assert_eq!(preferred_speed(MediaType::Bd25, &bd_speeds, "auto"), WriteSpeed::Max);
+        assert_eq!(preferred_speed(MediaType::Bd25, &bd_speeds, "auto"), WriteSpeed::Specific(8_780));
         assert_eq!(preferred_speed(MediaType::Bd50, &bd_speeds, "8"), WriteSpeed::Specific(13_170), "nearest below");
         assert_eq!(preferred_speed(MediaType::Bd50, &bd_speeds, "4x"), WriteSpeed::Specific(8_780));
         assert_eq!(preferred_speed(MediaType::Bd50, &bd_speeds, "1"), WriteSpeed::Specific(8_780), "slowest offered");

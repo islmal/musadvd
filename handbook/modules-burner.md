@@ -36,7 +36,7 @@ compile-checked only (`cargo check --lib --tests --target x86_64-unknown-linux-g
 | `spti.rs` | MMC command layer: CDB builders and response parsers (byte-level unit tests), `ScsiTransport` with two Windows implementations (IMAPI `IDiscRecorder2Ex`, default and admin-free; SPTI pass-through), read-only `drive_info`. Writes nothing to a disc. |
 | `mmcwrite.rs` | Direct write engine (`io.backend = direct`): lock tray, profile, capacity, optional format, mode page 05, set streaming, layer break, WRITE(10) loop from the ring buffer, sync cache, close, optional verify. Generic over the transport and tested with a scripted fake drive; not yet exercised on real hardware. |
 | `windows.rs` | IMAPI2 burner (`IDiscMaster2`, `IDiscRecorder2`, `IDiscFormat2Data`). |
-| `unix.rs` | growisofs / xorriso burner. |
+| `unix.rs` | Linux burner: native MMC over SG_IO (`media_from_mmc` probe, `mmcwrite` with Burn Studio's default write options); growisofs / xorriso only as fallback (no SG_IO access, erasing a used DVD-RW). |
 | `power.rs` | Keep-awake while writing; tray and medium-removal control through storage IOCTLs. Windows only. |
 
 ## Orchestration

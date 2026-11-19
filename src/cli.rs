@@ -214,7 +214,7 @@ enum Command {
         /// Drive: id, drive letter ("F:") or part of the name. Default: the only DVD writer.
         #[arg(long)]
         drive: Option<String>,
-        /// Write speed: auto (DVD-5 maximum, DVD-9 about 4x), max, or a speed in x (8, 2.4);
+        /// Write speed: auto (DVD 8x, DVD-9 and Blu-ray 4x), max, or a speed in x (8, 2.4);
         /// mapped to the nearest speed the drive offers.
         #[arg(long, default_value = "auto", value_parser = parse_burn_speed)]
         speed: String,

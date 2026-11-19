@@ -203,7 +203,7 @@ impl DateTime {
         DateTime { year, month, day, hour: rem / 3600, minute: rem / 60 % 60, second: rem % 60 }
     }
 
-    /// Local time on Windows, UTC elsewhere.
+    /// Local time (UTC only on Unix systems other than Linux).
     pub fn now() -> DateTime {
         #[cfg(windows)]
         {
@@ -220,6 +220,22 @@ impl DateTime {
         #[cfg(not(windows))]
         {
             let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            #[cfg(target_os = "linux")]
+            {
+                let t = secs as libc::time_t;
+                // SAFETY: localtime_r only writes the caller-owned `tm`.
+                let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+                if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+                    return DateTime {
+                        year: tm.tm_year + 1900,
+                        month: (tm.tm_mon + 1) as u32,
+                        day: tm.tm_mday as u32,
+                        hour: tm.tm_hour as u32,
+                        minute: tm.tm_min as u32,
+                        second: tm.tm_sec as u32,
+                    };
+                }
+            }
             DateTime::from_unix(secs)
         }
     }
@@ -287,12 +303,18 @@ pub fn file_name(template: &str, c: &TemplateContext) -> String {
     format!("{}.ibg", format_template(template, c))
 }
 
-/// The configured graph folder, or `%APPDATA%\musadvd\graph` when empty.
+/// The configured graph folder, or `%APPDATA%\musadvd\graph` (Windows) /
+/// `$XDG_DATA_HOME/musadvd/graph` (`~/.local/share/musadvd/graph`) when empty; the temp folder
+/// only when neither exists (it is wiped on reboot).
 pub fn folder(configured: &str) -> PathBuf {
     if !configured.trim().is_empty() {
         return PathBuf::from(configured.trim());
     }
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+        .unwrap_or_else(std::env::temp_dir);
     base.join("musadvd").join("graph")
 }
 

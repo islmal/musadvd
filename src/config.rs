@@ -36,7 +36,7 @@ pub const TRACK_LABEL_MODES: &[&str] = &["smart", "language", "generic"];
 pub const SCALE_MODES: &[&str] = &["letterbox", "panscan", "stretch"];
 pub const SCALE_FILTERS: &[&str] = &["bicubic", "bilinear", "lanczos"];
 pub const DEINTERLACE_MODES: &[&str] = &["auto", "yadif", "off"];
-/// Write speed: `auto` = DVD-5 maximum, DVD-9 4x; otherwise maximum or a speed in x (mapped to
+/// Write speed: `auto` = DVD 8x, DVD-9 and Blu-ray 4x; otherwise maximum or a speed in x (mapped to
 /// the nearest speed the drive offers).
 pub const BURN_SPEEDS: &[&str] = &["auto", "max", "16", "12", "8", "6", "4", "2.4"];
 

@@ -49,7 +49,7 @@ probe (ffprobe JSON, probe.rs)
                     piped through one native subtitle stage per stream (textsub/subpic -> spumux)
   -> [3] authoring  author.rs -> dvdvm.rs / dvd_mux.rs / ifo.rs -> VIDEO_TS
   -> [4] ISO        burner::create_disc_image (UDF 1.02 + ISO 9660 bridge, layer break)
-  -> [5] burn       IMAPI2 (Windows) / growisofs or xorriso (Unix)
+  -> [5] burn       IMAPI2 or direct MMC (Windows) / native MMC over SG_IO, growisofs/xorriso fallback (Linux)
 ```
 
 Output layout: `<output>/<project>/VIDEO_TS/`; temporary files in `<output>/<project>.musadvd-work/`

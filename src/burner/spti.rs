@@ -648,7 +648,7 @@ pub struct Profile {
 pub fn profile_name(code: u16) -> &'static str {
     match code {
         0x0000 => "no disc",
-        0x0001 => "Festplatte",
+        0x0001 => "hard disk",
         0x0002 => "removable medium",
         0x0008 => "CD-ROM",
         0x0009 => "CD-R",
@@ -844,7 +844,7 @@ pub fn drive_info(t: &dyn ScsiTransport) -> DriveDetails {
     let mut d = DriveDetails::default();
     match query(t, "INQUIRY", &inquiry(36), 36).map(|b| parse_inquiry(&b)) {
         Ok(Some((v, m, f))) => (d.vendor, d.model, d.firmware) = (v, m, f),
-        Ok(None) => d.notes.push("INQUIRY: Antwort zu kurz".into()),
+        Ok(None) => d.notes.push("INQUIRY: answer too short".into()),
         Err(e) => d.notes.push(e.to_string()),
     }
     match query(t, "GET CONFIGURATION", &get_configuration(0, 0, 1024), 1024).map(|b| parse_configuration(&b)) {
@@ -853,7 +853,7 @@ pub fn drive_info(t: &dyn ScsiTransport) -> DriveDetails {
             d.current_profile_name = profile_name(cur).to_string();
             d.profiles = profiles;
         }
-        Ok(None) => d.notes.push("GET CONFIGURATION: Antwort zu kurz".into()),
+        Ok(None) => d.notes.push("GET CONFIGURATION: answer too short".into()),
         Err(e) => d.notes.push(e.to_string()),
     }
     d.ready = t.exec(&test_unit_ready(), DataDir::None, &mut [], 10).map(|r| r.ok()).unwrap_or(false);
@@ -873,10 +873,10 @@ pub fn drive_info(t: &dyn ScsiTransport) -> DriveDetails {
     if dvd {
         match query(t, "READ DISC STRUCTURE", &read_disc_structure(false, 0, 0, 0x00, 2052 + 4), 2056).map(|b| parse_dvd_physical(&b)) {
             Ok(Some(p)) => {
-                d.book_type = Some(format!("{} (Teil {})", book_type_name(p.book_type), p.part_version));
+                d.book_type = Some(format!("{} (part {})", book_type_name(p.book_type), p.part_version));
                 d.layer_break = p.layer_break;
             }
-            Ok(None) => d.notes.push("Physikalisches Format: Antwort zu kurz".into()),
+            Ok(None) => d.notes.push("Physical format: answer too short".into()),
             Err(e) => d.notes.push(e.to_string()),
         }
         if matches!(profile, 0x1A | 0x1B | 0x2A | 0x2B) {
@@ -1165,7 +1165,7 @@ mod tests {
         assert_eq!(d.profiles.len(), 3);
         assert_eq!(d.capacity_sectors, Some(0x224000));
         assert_eq!(d.disc_status.as_deref(), Some("incomplete (appendable)"));
-        assert_eq!(d.book_type.as_deref(), Some("DVD+R DL (Teil 1)"));
+        assert_eq!(d.book_type.as_deref(), Some("DVD+R DL (part 1)"));
         assert_eq!(d.layer_break, Some(1_800_000));
         assert_eq!(d.media_id.as_deref(), Some("RITEK-S04-66"));
         assert_eq!(d.write_speeds_kbps, [11080]);

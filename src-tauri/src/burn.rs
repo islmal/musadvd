@@ -126,7 +126,7 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
             secs_verify: eta::image_and_burn_secs(medium, needs.bytes(), x, true, dual),
         }
     };
-    let mut speeds = vec![option(WriteSpeed::Max, "Maximal".into())];
+    let mut speeds = vec![option(WriteSpeed::Max, "Maximum".into())];
     speeds.extend(media.speeds.iter().map(|&s| option(WriteSpeed::Specific(s), speed_label(s, media.media_type))));
     let default = preferred_speed(media.media_type, &media.speeds, speed_pref);
     let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
@@ -373,8 +373,8 @@ mod tests {
         let small = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false, fits_dvd: true };
         let v = media_view(media(true, false, MediaType::Dvd5, 2_295_104), &small, "auto", false);
         assert!(v.problem.is_none() && v.auto_ok && !v.needs_erase);
-        assert_eq!(v.default_speed, WriteSpeed::Max);
-        assert_eq!(v.speeds[0].label, "Maximal");
+        assert_eq!(v.default_speed, WriteSpeed::Specific(5_410), "auto: DVD-5 at 8x");
+        assert_eq!(v.speeds[0].label, "Maximum");
         assert_eq!(v.speeds[1].label, "16x");
         // Estimates: slower speeds take longer, verification adds time.
         assert!(v.speeds[3].secs > v.speeds[1].secs && v.speeds[1].secs_verify > v.speeds[1].secs);
@@ -412,9 +412,9 @@ mod tests {
         };
         let v = media_view(bd_media(MediaType::Bd25, 12_219_392), &bd25, "auto", false);
         assert!(v.problem.is_none() && v.auto_ok && v.warning.is_none(), "{:?}", v.problem);
-        assert_eq!(v.default_speed, WriteSpeed::Max);
+        assert_eq!(v.default_speed, WriteSpeed::Specific(8_780), "auto: BD at 4x");
         // Labels count in BD x (4.5 MB/s), not DVD x.
-        assert_eq!(v.speeds.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Maximal", "12x", "6x", "4x"]);
+        assert_eq!(v.speeds.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Maximum", "12x", "6x", "4x"]);
         assert!(v.speeds[3].secs > v.speeds[1].secs && v.speeds[1].secs_verify > v.speeds[1].secs);
         // Burning 20 GB at BD 6x takes a quarter of an hour, not the 100 minutes a DVD 6x would.
         assert!((600.0..1500.0).contains(&v.speeds[2].secs), "{}", v.speeds[2].secs);
