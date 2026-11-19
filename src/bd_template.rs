@@ -298,7 +298,10 @@ impl Nav<'_> {
             _ => self.titles[ctx.title.max(1) as usize - 1].label.clone(),
         };
         let image_file = |value: &str, warnings: &mut Vec<String>| {
-            let path = resolve_resource(src.dir, value);
+            let Some(path) = resolve_resource(src.dir, value) else {
+                warnings.push(format!("Invalid image path: {value}"));
+                return None;
+            };
             if path.is_file() {
                 Some(path.to_string_lossy().into_owned())
             } else {
@@ -400,7 +403,7 @@ impl Nav<'_> {
                         .into_iter()
                         .flatten()
                         .chain(page.backgrounds.iter().map(String::as_str));
-                    match candidates.map(|v| resolve_resource(src.dir, v)).find(|p| p.is_file()) {
+                    match candidates.filter_map(|v| resolve_resource(src.dir, v)).find(|p| p.is_file()) {
                         Some(p) => Content::Image { src: p.to_string_lossy().into_owned(), fit },
                         None => {
                             warnings.push(format!("Button '{}' has no image file for the highlight and was skipped", b.name));

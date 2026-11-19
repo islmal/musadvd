@@ -5,6 +5,7 @@
 //! ignored). `shortcut:` UDF-only images (our Blu-ray images have no ISO 9660 side) are rejected;
 //! add a UDF reader if one is ever needed.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -63,6 +64,7 @@ pub struct IsoImage<R: Read + Seek> {
     r: R,
     ucs: bool,
     root: IsoEntry,
+    file_len: u64,
     pub label: String,
     pub total_sectors: u32,
 }
@@ -129,12 +131,23 @@ impl<R: Read + Seek> IsoImage<R> {
         }
         let label = if joliet { ucs2(&sector[40..72]) } else { String::from_utf8_lossy(&sector[40..72]).into_owned() };
         let (root, _, _) = record(&sector[156..190], false)?.ok_or(IsoError::Corrupt("root directory missing"))?;
-        Ok(IsoImage { r, ucs: joliet, root, label: label.trim_end().to_string(), total_sectors: le32(&sector, 80) })
+        Ok(IsoImage {
+            r,
+            ucs: joliet,
+            root,
+            file_len: end,
+            label: label.trim_end().to_string(),
+            total_sectors: le32(&sector, 80),
+        })
     }
 
     fn read_bytes(&mut self, lba: u32, len: u64) -> Result<Vec<u8>, IsoError> {
+        let start = lba as u64 * SECTOR;
+        if start.checked_add(len).is_none_or(|e| e > self.file_len) {
+            return Err(IsoError::Corrupt("extent past end of image"));
+        }
         let mut buf = vec![0u8; len as usize];
-        self.r.seek(SeekFrom::Start(lba as u64 * SECTOR))?;
+        self.r.seek(SeekFrom::Start(start))?;
         self.r.read_exact(&mut buf)?;
         Ok(buf)
     }
@@ -206,19 +219,31 @@ impl<R: Read + Seek> IsoImage<R> {
     pub fn extent_map(&mut self) -> Result<Vec<(u64, u64, String)>, IsoError> {
         let mut out = Vec::new();
         let root = self.root.clone();
-        self.walk(&root, "", 0, &mut out)?;
+        let mut visited = HashSet::new();
+        self.walk(&root, "", 0, &mut visited, &mut out)?;
         out.sort();
         Ok(out)
     }
 
-    fn walk(&mut self, dir: &IsoEntry, prefix: &str, depth: usize, out: &mut Vec<(u64, u64, String)>) -> Result<(), IsoError> {
+    fn walk(
+        &mut self,
+        dir: &IsoEntry,
+        prefix: &str,
+        depth: usize,
+        visited: &mut HashSet<u32>,
+        out: &mut Vec<(u64, u64, String)>,
+    ) -> Result<(), IsoError> {
         if depth > MAX_DEPTH {
             return Err(IsoError::Corrupt("directories nested too deeply"));
+        }
+        let lba = dir.first_sector().ok_or(IsoError::Corrupt("directory without extent"))?;
+        if !visited.insert(lba) {
+            return Err(IsoError::Corrupt("self-referencing or cyclic directory"));
         }
         for e in self.list_entry(dir)? {
             let path = if prefix.is_empty() { e.name.clone() } else { format!("{prefix}/{}", e.name) };
             if e.dir {
-                self.walk(&e, &path, depth + 1, out)?;
+                self.walk(&e, &path, depth + 1, visited, out)?;
             } else {
                 for (lba, len) in &e.extents {
                     if *len > 0 {
@@ -289,35 +314,135 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[test]
-    fn multi_extent_files_are_merged() {
-        // Hand-made directory: file "BIG.BIN;1" in two extents (flag 0x80 on the first).
-        let mut img = vec![0u8; 20 * SECTOR as usize];
+    fn mk_record(lba: u32, size: u32, flags: u8, name: &[u8]) -> Vec<u8> {
+        let len = 33 + name.len() + (33 + name.len()) % 2;
+        let mut r = vec![0u8; len];
+        r[0] = len as u8;
+        r[2..6].copy_from_slice(&lba.to_le_bytes());
+        r[10..14].copy_from_slice(&size.to_le_bytes());
+        r[25] = flags;
+        r[32] = name.len() as u8;
+        r[33..33 + name.len()].copy_from_slice(name);
+        r
+    }
+
+    fn mk_dir_sector(self_lba: u32, parent_lba: u32, entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut dir = mk_record(self_lba, SECTOR as u32, 2, &[0]);
+        dir.extend(mk_record(parent_lba, SECTOR as u32, 2, &[1]));
+        for e in entries {
+            dir.extend_from_slice(e);
+        }
+        dir
+    }
+
+    fn minimal_iso(sectors: usize, root_size: u32, dirs: &[(usize, Vec<u8>)]) -> Vec<u8> {
+        let mut img = vec![0u8; sectors * SECTOR as usize];
         let pvd = 16 * SECTOR as usize;
         img[pvd] = 1;
         img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
-        let mk = |lba: u32, size: u32, flags: u8, name: &[u8]| {
-            let len = 33 + name.len() + (33 + name.len()) % 2;
-            let mut r = vec![0u8; len];
-            r[0] = len as u8;
-            r[2..6].copy_from_slice(&lba.to_le_bytes());
-            r[10..14].copy_from_slice(&size.to_le_bytes());
-            r[25] = flags;
-            r[32] = name.len() as u8;
-            r[33..33 + name.len()].copy_from_slice(name);
-            r
-        };
-        let root = mk(18, 2048, 2, &[0]);
+        let root = mk_record(18, root_size, 2, &[0]);
         img[pvd + 156..pvd + 156 + root.len()].copy_from_slice(&root);
-        let mut dir = mk(18, 2048, 2, &[0]);
-        dir.extend(mk(18, 2048, 2, &[1]));
-        dir.extend(mk(100, 0xFFFF_F800, 0x80, b"BIG.BIN;1"));
-        dir.extend(mk(300, 4096, 0, b"BIG.BIN;1"));
-        img[18 * SECTOR as usize..18 * SECTOR as usize + dir.len()].copy_from_slice(&dir);
+        for (lba, data) in dirs {
+            let off = *lba * SECTOR as usize;
+            img[off..off + data.len()].copy_from_slice(data);
+        }
+        img
+    }
+
+    #[test]
+    fn multi_extent_files_are_merged() {
+        // Hand-made directory: file "BIG.BIN;1" in two extents (flag 0x80 on the first).
+        let dir = mk_dir_sector(
+            18,
+            18,
+            &[
+                mk_record(100, 0xFFFF_F800, 0x80, b"BIG.BIN;1"),
+                mk_record(300, 4096, 0, b"BIG.BIN;1"),
+            ],
+        );
+        let img = minimal_iso(20, SECTOR as u32, &[(18, dir)]);
         let mut iso = IsoImage::open(Cursor::new(img)).unwrap();
         let e = iso.find("BIG.BIN").unwrap();
         assert_eq!(e.extents, [(100, 0xFFFF_F800), (300, 4096)]);
         assert_eq!(e.size, 0xFFFF_F800 + 4096);
+    }
+
+    #[test]
+    fn direct_self_referencing_directory_rejected() {
+        let dir18 = mk_dir_sector(18, 18, &[mk_record(18, SECTOR as u32, 2, b"LOOP")]);
+        let img = minimal_iso(20, SECTOR as u32, &[(18, dir18)]);
+        let mut iso = IsoImage::open(Cursor::new(img)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
+    }
+
+    #[test]
+    fn two_node_directory_cycle_rejected() {
+        let dir18 = mk_dir_sector(18, 18, &[mk_record(19, SECTOR as u32, 2, b"A")]);
+        let dir19 = mk_dir_sector(19, 18, &[mk_record(20, SECTOR as u32, 2, b"B")]);
+        let dir20 = mk_dir_sector(20, 19, &[mk_record(19, SECTOR as u32, 2, b"A")]);
+        let img = minimal_iso(22, SECTOR as u32, &[(18, dir18), (19, dir19), (20, dir20)]);
+        let mut iso = IsoImage::open(Cursor::new(img)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
+    }
+
+    #[test]
+    fn branching_shared_directory_dag_rejected() {
+        // Shared DAG: root 18 has multiple entries pointing to the same directory LBA 19.
+        let dir18 = mk_dir_sector(
+            18,
+            18,
+            &[
+                mk_record(19, SECTOR as u32, 2, b"D1"),
+                mk_record(19, SECTOR as u32, 2, b"D2"),
+            ],
+        );
+        let dir19 = mk_dir_sector(19, 18, &[]);
+        let img = minimal_iso(21, SECTOR as u32, &[(18, dir18), (19, dir19)]);
+        let mut iso = IsoImage::open(Cursor::new(img)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
+
+        // Branching cyclic DAG (would trigger exponential reads without visited set).
+        let cyclic18 = mk_dir_sector(
+            18,
+            18,
+            &[
+                mk_record(19, SECTOR as u32, 2, b"B1"),
+                mk_record(19, SECTOR as u32, 2, b"B2"),
+                mk_record(19, SECTOR as u32, 2, b"B3"),
+                mk_record(19, SECTOR as u32, 2, b"B4"),
+            ],
+        );
+        let cyclic19 = mk_dir_sector(
+            19,
+            18,
+            &[
+                mk_record(18, SECTOR as u32, 2, b"R1"),
+                mk_record(18, SECTOR as u32, 2, b"R2"),
+                mk_record(18, SECTOR as u32, 2, b"R3"),
+                mk_record(18, SECTOR as u32, 2, b"R4"),
+            ],
+        );
+        let img = minimal_iso(21, SECTOR as u32, &[(18, cyclic18), (19, cyclic19)]);
+        let mut iso = IsoImage::open(Cursor::new(img)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
+    }
+
+    #[test]
+    fn out_of_bounds_directory_extent_rejected_without_oom() {
+        let dir18 = mk_dir_sector(18, 18, &[]);
+        let img_huge_root = minimal_iso(20, u32::MAX, &[(18, dir18)]);
+        let mut iso = IsoImage::open(Cursor::new(img_huge_root)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
+
+        let dir18_huge_sub = mk_dir_sector(18, 18, &[mk_record(19, u32::MAX, 2, b"HUGE")]);
+        let img_huge_sub = minimal_iso(20, SECTOR as u32, &[(18, dir18_huge_sub)]);
+        let mut iso = IsoImage::open(Cursor::new(img_huge_sub)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
+
+        let dir18_oob_lba = mk_dir_sector(18, 18, &[mk_record(999, SECTOR as u32, 2, b"OOB")]);
+        let img_oob_lba = minimal_iso(20, SECTOR as u32, &[(18, dir18_oob_lba)]);
+        let mut iso = IsoImage::open(Cursor::new(img_oob_lba)).unwrap();
+        assert!(matches!(iso.extent_map(), Err(IsoError::Corrupt(_))));
     }
 
     #[test]

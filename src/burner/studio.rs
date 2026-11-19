@@ -205,18 +205,55 @@ pub fn disc_css(drive: &DriveInfo, io: &StudioIo) -> Option<bool> {
     super::spti::parse_copyright_info(&resp)
 }
 
+/// Resolves a relative image target referenced by a sidecar (`.cue`, `.dvd`, `.mds`), confining it
+/// to `sidecar_dir` and rejecting UNC/device, absolute, drive-letter, and traversal paths.
+fn resolve_sidecar_path(sidecar_dir: &Path, target: &str) -> Result<PathBuf, String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err("sidecar target path is empty".into());
+    }
+    if crate::menu::is_unc_or_device_path(trimmed) || crate::menu::has_windows_drive_prefix(trimmed) {
+        return Err(format!("sidecar target path must be relative: {trimmed}"));
+    }
+    let normalized = crate::menu::normalize_separators(trimmed);
+    let mut rel = PathBuf::new();
+    for comp in Path::new(&normalized).components() {
+        match comp {
+            std::path::Component::Prefix(_)
+            | std::path::Component::RootDir
+            | std::path::Component::ParentDir => {
+                return Err(format!("sidecar target path escapes sidecar directory: {trimmed}"));
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(s) => rel.push(s),
+        }
+    }
+    if rel.as_os_str().is_empty() {
+        return Err(format!("sidecar target path is empty: {trimmed}"));
+    }
+    let canon_dir = std::fs::canonicalize(sidecar_dir)
+        .map_err(|e| format!("{}: {e}", sidecar_dir.display()))?;
+    let candidate = canon_dir.join(&rel);
+    let canon_target = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("{}: {e}", candidate.display()))?;
+    if !canon_target.starts_with(&canon_dir) {
+        return Err(format!("sidecar target escapes sidecar directory: {trimmed}"));
+    }
+    Ok(canon_target)
+}
+
 /// An image to burn or compare with: `.iso`, a `.cue` (single data track, 2048 or 2352 bytes
 /// per sector), or a `.dvd` / `.mds` layout file. Also returns the layer break found in a layout
 /// file next to the image.
 pub fn open_image(path: &Path) -> Result<(Box<dyn SectorSource>, Option<u32>), String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let open = |p: &Path| FileSource::open(p).map_err(|e| format!("{}: {e}", p.display()));
     let text = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
     match ext.as_str() {
         "cue" => {
             let cue = sidecar::parse_cue(&text(path)?).map_err(|e| e.0)?;
-            let bin = dir.join(&cue.file);
+            let bin = resolve_sidecar_path(dir, &cue.file)?;
             let src: Box<dyn SectorSource> = match cue.mode {
                 sidecar::CueMode::Mode1_2048 => Box::new(open(&bin)?),
                 sidecar::CueMode::Mode1_2352 => Box::new(Bin2352Source::open(&bin).map_err(|e| format!("{}: {e}", bin.display()))?),
@@ -225,12 +262,14 @@ pub fn open_image(path: &Path) -> Result<(Box<dyn SectorSource>, Option<u32>), S
         }
         "dvd" => {
             let l = sidecar::parse_dvd(&text(path)?).map_err(|e| e.0)?;
-            Ok((Box::new(open(&dir.join(&l.image))?), Some(l.layer_break).filter(|&b| b > 0)))
+            let img = resolve_sidecar_path(dir, &l.image)?;
+            Ok((Box::new(open(&img)?), Some(l.layer_break).filter(|&b| b > 0)))
         }
         "mds" => {
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let m = sidecar::parse_mds(&bytes).map_err(|e| e.0)?;
-            Ok((Box::new(open(&dir.join(&m.image))?), m.layer_break))
+            let img = resolve_sidecar_path(dir, &m.image)?;
+            Ok((Box::new(open(&img)?), m.layer_break))
         }
         _ => {
             let dvd = path.with_extension("dvd");
@@ -940,6 +979,64 @@ mod tests {
         assert_eq!(open_image(&dir.join("a.cue")).unwrap().0.sectors(), 10);
         assert!(open_image(&dir.join("fehlt.iso")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidecars_reject_unsafe_paths_and_allow_local_and_subfolders() {
+        let base = std::env::temp_dir().join(format!("cx_studio_sidecar_sec_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        let sub = work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let outside = base.join("outside.iso");
+        let sibling = work.join("sibling.iso");
+        let nested = sub.join("nested.iso");
+        for p in [&outside, &sibling, &nested] {
+            std::fs::write(p, vec![0u8; 2048 * 10]).unwrap();
+        }
+        let abs_outside = outside.to_string_lossy().into_owned();
+        let bad_targets = [
+            r"\\server\share\outside.iso",
+            "//server/share/outside.iso",
+            "../outside.iso",
+            r"..\outside.iso",
+            &abs_outside,
+        ];
+
+        // .cue
+        sidecar::write_cue(&work.join("ok_sib.cue"), "sibling.iso", sidecar::CueMode::Mode1_2048).unwrap();
+        sidecar::write_cue(&work.join("ok_sub.cue"), "sub/nested.iso", sidecar::CueMode::Mode1_2048).unwrap();
+        assert_eq!(open_image(&work.join("ok_sib.cue")).unwrap().0.sectors(), 10);
+        assert_eq!(open_image(&work.join("ok_sub.cue")).unwrap().0.sectors(), 10);
+        for (i, target) in bad_targets.iter().enumerate() {
+            let p = work.join(format!("bad_{i}.cue"));
+            sidecar::write_cue(&p, target, sidecar::CueMode::Mode1_2048).unwrap();
+            assert!(open_image(&p).is_err(), ".cue should reject {target:?}");
+        }
+
+        // .dvd
+        sidecar::write_dvd(&work.join("ok_sib.dvd"), &sidecar::DvdLayout { layer_break: 5, image: "sibling.iso".into() }).unwrap();
+        sidecar::write_dvd(&work.join("ok_sub.dvd"), &sidecar::DvdLayout { layer_break: 5, image: r"sub\nested.iso".into() }).unwrap();
+        assert_eq!(open_image(&work.join("ok_sib.dvd")).unwrap().1, Some(5));
+        assert_eq!(open_image(&work.join("ok_sub.dvd")).unwrap().1, Some(5));
+        for (i, target) in bad_targets.iter().enumerate() {
+            let p = work.join(format!("bad_{i}.dvd"));
+            sidecar::write_dvd(&p, &sidecar::DvdLayout { layer_break: 5, image: (*target).into() }).unwrap();
+            assert!(open_image(&p).is_err(), ".dvd should reject {target:?}");
+        }
+
+        // .mds
+        sidecar::write_mds(&work.join("ok_sib.mds"), &sidecar::Mds { sectors: 10, layer_break: Some(5), image: "sibling.iso".into() }).unwrap();
+        sidecar::write_mds(&work.join("ok_sub.mds"), &sidecar::Mds { sectors: 10, layer_break: Some(5), image: "sub/nested.iso".into() }).unwrap();
+        assert_eq!(open_image(&work.join("ok_sib.mds")).unwrap().1, Some(5));
+        assert_eq!(open_image(&work.join("ok_sub.mds")).unwrap().1, Some(5));
+        for (i, target) in bad_targets.iter().enumerate() {
+            let p = work.join(format!("bad_{i}.mds"));
+            sidecar::write_mds(&p, &sidecar::Mds { sectors: 10, layer_break: Some(5), image: (*target).into() }).unwrap();
+            assert!(open_image(&p).is_err(), ".mds should reject {target:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

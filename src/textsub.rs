@@ -193,8 +193,9 @@ pub fn extract_alignment(lines: &[String]) -> (SubAlignment, Vec<String>) {
                     continue;
                 }
             }
-            cur.push(bytes[i] as char);
-            i += 1;
+            let ch = line[i..].chars().next().unwrap();
+            cur.push(ch);
+            i += ch.len_utf8();
         }
         out_lines.push(cur);
     }
@@ -902,5 +903,23 @@ mod tests {
         // Renders onto the frame with visible ink
         let (img, _, _) = render_cue(TvStandard::Pal, &[mixed.into(), arabic.into()]).unwrap();
         assert!(img.pixels().filter(|p| **p == FILL).count() > 100);
+    }
+
+    #[test]
+    fn extract_alignment_preserves_utf8() {
+        let cases = [
+            ("äöüßÄÖÜ", SubAlignment::BottomCenter, "äöüßÄÖÜ"),
+            ("Привет, мир!", SubAlignment::BottomCenter, "Привет, мир!"),
+            ("Café résumé naïve", SubAlignment::BottomCenter, "Café résumé naïve"),
+            ("你好", SubAlignment::BottomCenter, "你好"),
+            ("שלום", SubAlignment::BottomCenter, "שלום"),
+            ("{\\an8\\i1}Über Café — Привет!", SubAlignment::TopCenter, "{\\i1}Über Café — Привет!"),
+            ("Unclosed {äöüß Привет 你好 שלום", SubAlignment::BottomCenter, "Unclosed {äöüß Привет 你好 שלום"),
+        ];
+        for (input, expected_align, expected_text) in cases {
+            let (align, lines) = extract_alignment(&[input.to_string()]);
+            assert_eq!(align, expected_align, "alignment for {input:?}");
+            assert_eq!(lines, vec![expected_text.to_string()], "text for {input:?}");
+        }
     }
 }

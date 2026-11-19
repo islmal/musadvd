@@ -4,7 +4,7 @@
 //!
 //! Lookup order for every tool:
 //! 1. `bin/` next to the running executable (all-in-one distribution),
-//! 2. `bin/` in the current directory (`cargo run` / `cargo test` from the project root),
+//! 2. `bin/` in the current directory (debug builds only, e.g. `cargo run` / `cargo test` from the project root),
 //! 3. the system `PATH`.
 //!
 
@@ -192,12 +192,13 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The application's `bin/` directories: next to the executable, then in the current directory.
+/// The application's `bin/` directories: next to the executable, and (in debug builds only) in the current directory.
 pub fn bundled_bin_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
         dirs.push(dir.join("bin"));
     }
+    #[cfg(debug_assertions)]
     if let Ok(cwd) = std::env::current_dir() {
         let bin = cwd.join("bin");
         if !dirs.contains(&bin) {
@@ -737,11 +738,17 @@ mod tests {
     #[test]
     fn bundled_bin_comes_first() {
         let dirs = bundled_bin_dirs();
-        let cwd_bin = std::env::current_dir().unwrap().join("bin");
-        assert!(dirs.contains(&cwd_bin), "{dirs:?}");
-        // `cargo test` runs in the project root, where bin/ holds ffmpeg.
-        if cwd_bin.join(exe_name("ffmpeg")).is_file() {
-            assert_eq!(find_tool("ffmpeg"), Some(cwd_bin.join(exe_name("ffmpeg"))));
+        let exe_bin = std::env::current_exe().unwrap().parent().unwrap().join("bin");
+        assert_eq!(dirs.first(), Some(&exe_bin), "{dirs:?}");
+        if cfg!(debug_assertions) {
+            let cwd_bin = std::env::current_dir().unwrap().join("bin");
+            assert!(dirs.contains(&cwd_bin), "{dirs:?}");
+            // `cargo test` runs in the project root, where bin/ holds ffmpeg.
+            if cwd_bin.join(exe_name("ffmpeg")).is_file() {
+                assert_eq!(find_tool("ffmpeg"), Some(cwd_bin.join(exe_name("ffmpeg"))));
+            }
+        } else {
+            assert_eq!(dirs, vec![exe_bin]);
         }
         assert_eq!(find_tool("definitely-not-a-tool-xyz"), None);
     }

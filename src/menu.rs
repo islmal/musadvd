@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use std::fmt;
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use rayon::prelude::*;
 use ab_glyph::{point, Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont};
@@ -173,6 +173,91 @@ fn font_dirs() -> &'static [PathBuf] {
     })
 }
 
+/// Returns `true` if `raw` starts with a UNC prefix (`\\`, `//`, `\/`, `/\`) or a Windows
+/// device/verbatim namespace prefix (`\\?\...`, `\\.\...`).
+///
+/// Checked lexically before any filesystem call so Windows never triggers an SMB lookup.
+pub fn is_unc_or_device_path(raw: &str) -> bool {
+    let s = raw.trim_start();
+    let b = s.as_bytes();
+    if b.len() >= 2 && matches!(b[0], b'\\' | b'/') && matches!(b[1], b'\\' | b'/') {
+        return true;
+    }
+    matches!(
+        Path::new(s).components().next(),
+        Some(Component::Prefix(p))
+            if matches!(
+                p.kind(),
+                Prefix::UNC(..)
+                    | Prefix::VerbatimUNC(..)
+                    | Prefix::DeviceNS(..)
+                    | Prefix::Verbatim(..)
+                    | Prefix::VerbatimDisk(..)
+            )
+    )
+}
+
+/// Returns `true` if `raw` begins with a Windows drive-letter prefix (e.g. `C:`), so drive paths
+/// are rejected consistently even on non-Windows hosts.
+pub fn has_windows_drive_prefix(raw: &str) -> bool {
+    let b = raw.trim_start().as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+pub(crate) fn normalize_separators(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c == '\\' || c == '/' { std::path::MAIN_SEPARATOR } else { c })
+        .collect()
+}
+
+/// Resolves an explicit template `font_file` inside `dirs`, rejecting UNC/device paths, parent
+/// traversal (`..`), and paths outside `dirs`.
+fn font_file_candidates_in(font_file: &str, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let f = font_file.trim();
+    if f.is_empty() || is_unc_or_device_path(f) {
+        return Vec::new();
+    }
+    let normalized = normalize_separators(f);
+    let p = Path::new(&normalized);
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Vec::new();
+    }
+    let has_root_or_prefix = has_windows_drive_prefix(f)
+        || p.components().any(|c| matches!(c, Component::Prefix(_) | Component::RootDir));
+    let mut out = Vec::new();
+    if !has_root_or_prefix {
+        let mut rel = PathBuf::new();
+        for c in p.components() {
+            if let Component::Normal(s) = c {
+                rel.push(s);
+            }
+        }
+        if rel.as_os_str().is_empty() {
+            return out;
+        }
+        for dir in dirs {
+            if let (Ok(canon_dir), Ok(canon_cand)) =
+                (std::fs::canonicalize(dir), std::fs::canonicalize(dir.join(&rel)))
+            {
+                if canon_cand.starts_with(&canon_dir) {
+                    out.push(canon_cand);
+                }
+            }
+        }
+    } else if p.is_absolute() {
+        if let Ok(canon_p) = std::fs::canonicalize(p) {
+            let confined = dirs
+                .iter()
+                .filter_map(|dir| std::fs::canonicalize(dir).ok())
+                .any(|canon_dir| canon_p.starts_with(&canon_dir));
+            if confined {
+                out.push(canon_p);
+            }
+        }
+    }
+    out
+}
+
 /// Candidate font files for a family (regular, bold, italic, bold italic) in system font directories.
 fn font_candidates(style: &TextStyle) -> Vec<PathBuf> {
     let family = style.font_name.trim().to_ascii_lowercase();
@@ -196,10 +281,7 @@ fn font_candidates(style: &TextStyle) -> Vec<PathBuf> {
     let dirs = font_dirs();
     let mut out = Vec::new();
     if let Some(f) = &style.font_file {
-        out.push(PathBuf::from(f));
-        for dir in dirs {
-            out.push(dir.join(f));
-        }
+        out.extend(font_file_candidates_in(f, dirs));
     }
     for dir in dirs {
         if let Some(v) = variants {
@@ -731,18 +813,57 @@ fn blend_pixel(dst: &mut Rgba<u8>, src: [u8; 3], a: f32) {
 // Bitmaps
 // ---------------------------------------------------------------------------
 
-/// Resolves a template-relative path such as `..\Resources\Backgrounds\bg.jpg`.
-pub fn resolve_resource(template_dir: &Path, value: &str) -> PathBuf {
-    let normalized: String = value
-        .chars()
-        .map(|c| if c == '\\' || c == '/' { std::path::MAIN_SEPARATOR } else { c })
-        .collect();
-    let p = Path::new(&normalized);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        template_dir.join(p)
+/// Resolves a template-relative path such as `..\Resources\Backgrounds\bg.jpg`, confined to
+/// `template_dir` or the shared sibling `Resources` directory.
+pub fn resolve_resource(template_dir: &Path, value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || is_unc_or_device_path(trimmed) || has_windows_drive_prefix(trimmed) {
+        return None;
     }
+    let normalized = normalize_separators(trimmed);
+    let mut rel: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut up: usize = 0;
+    for comp in Path::new(&normalized).components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => return None,
+            Component::CurDir => {}
+            Component::Normal(s) => rel.push(s),
+            Component::ParentDir => {
+                if rel.pop().is_none() {
+                    up += 1;
+                }
+            }
+        }
+    }
+    let (allowed_root, candidate) = if up == 0 && !rel.is_empty() {
+        let mut rel_path = PathBuf::new();
+        for s in rel {
+            rel_path.push(s);
+        }
+        (template_dir.to_path_buf(), template_dir.join(rel_path))
+    } else if up == 1 && rel.len() >= 2 && rel[0].to_string_lossy().eq_ignore_ascii_case("Resources") {
+        let root = match template_dir.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.join("Resources"),
+            Some(_) => template_dir.join("..").join("Resources"),
+            None => return None,
+        };
+        let mut rest = PathBuf::new();
+        for s in &rel[1..] {
+            rest.push(s);
+        }
+        (root.clone(), root.join(rest))
+    } else {
+        return None;
+    };
+    // Canonicalize internally to catch symlink escapes while returning a clean non-verbatim path.
+    if let (Ok(canon_root), Ok(canon_cand)) =
+        (std::fs::canonicalize(&allowed_root), std::fs::canonicalize(&candidate))
+    {
+        if !canon_cand.starts_with(&canon_root) {
+            return None;
+        }
+    }
+    Some(candidate)
 }
 
 /// Loads an image and fits it into `w`x`h` (`stretch` or `letterbox`).
@@ -993,7 +1114,10 @@ pub fn render_page(
                 }
             }
             "GT_BITMAP" if !g.value.is_empty() => {
-                let path = resolve_resource(opts.template_dir, &g.value);
+                let Some(path) = resolve_resource(opts.template_dir, &g.value) else {
+                    warnings.push(format!("invalid bitmap path: {}", g.value));
+                    continue;
+                };
                 match load_fitted(&path, g.width, g.height, &g.padding) {
                     Ok((img, ox, oy)) => {
                         let (x, y) = (g.x as i64 + ox as i64, g.y as i64 + oy as i64);
@@ -1099,7 +1223,7 @@ pub fn render_page(
         // Image button: overlay GIF (template `value`) > bitmap alpha > full rectangle.
         let overlay = Some(tb.value.as_str())
             .filter(|v| !v.eq_ignore_ascii_case("TEXT") && v.contains('.'))
-            .map(|v| resolve_resource(opts.template_dir, v))
+            .and_then(|v| resolve_resource(opts.template_dir, v))
             .filter(|p| p.is_file());
         let padding = page
             .graphics
@@ -1569,8 +1693,125 @@ mod tests {
 
     #[test]
     fn resource_paths() {
-        let p = resolve_resource(Path::new("T"), r"..\Resources\bg.jpg");
-        assert_eq!(p, Path::new("T").join("..").join("Resources").join("bg.jpg"));
+        assert_eq!(
+            resolve_resource(Path::new("T"), r"..\Resources\bg.jpg"),
+            Some(Path::new("T").join("..").join("Resources").join("bg.jpg"))
+        );
+        assert_eq!(resolve_resource(Path::new("T"), "bg.jpg"), Some(Path::new("T").join("bg.jpg")));
+        assert_eq!(
+            resolve_resource(Path::new("T"), r"sub\bg.jpg"),
+            Some(Path::new("T").join("sub").join("bg.jpg"))
+        );
+
+        // UNC, device, drive-letter, absolute, and traversal paths must be rejected.
+        for bad in [
+            "",
+            "   ",
+            r"\\server\share\x",
+            "//server/share/x",
+            r"\/server\share\x",
+            r"/\server/share/x",
+            "  //server/share/x",
+            r"\\?\C:\bg.jpg",
+            r"\\.\pipe\bg.jpg",
+            r"C:\Windows\win.ini",
+            "c:bg.jpg",
+            "/etc/passwd",
+            r"\etc\passwd",
+            r"..\secret.jpg",
+            r"a\..\..\secret.jpg",
+            r"..\Other\x",
+            r"..\Resources\..\..\x",
+            r"..\Resources",
+        ] {
+            assert_eq!(resolve_resource(Path::new("T"), bad), None, "expected None for {bad:?}");
+        }
+        assert_eq!(resolve_resource(Path::new("/"), r"..\Resources\bg.jpg"), None);
+        #[cfg(windows)]
+        assert_eq!(resolve_resource(Path::new(r"C:\"), r"..\Resources\bg.jpg"), None);
+
+        // Real tempdir canonicalization: no `\\?\` returned, valid siblings/Resources accepted, escapes rejected.
+        let base = std::env::temp_dir().join(format!("cx_menu_res_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let style = base.join("Style");
+        let resources = base.join("Resources");
+        std::fs::create_dir_all(&style).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(style.join("local.png"), b"png").unwrap();
+        std::fs::write(resources.join("bg.jpg"), b"jpg").unwrap();
+        std::fs::write(base.join("secret.jpg"), b"secret").unwrap();
+
+        let local = resolve_resource(&style, "local.png").unwrap();
+        assert_eq!(local, style.join("local.png"));
+        assert!(!local.to_string_lossy().starts_with(r"\\?\"));
+
+        let res_bg = resolve_resource(&style, r"..\Resources\bg.jpg").unwrap();
+        assert_eq!(res_bg, resources.join("bg.jpg"));
+        assert!(!res_bg.to_string_lossy().starts_with(r"\\?\"));
+
+        assert_eq!(resolve_resource(&style, r"..\secret.jpg"), None);
+        assert_eq!(resolve_resource(&style, r"a\..\..\secret.jpg"), None);
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("secret.jpg"), style.join("escape.jpg")).unwrap();
+            assert_eq!(resolve_resource(&style, "escape.jpg"), None);
+        }
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_file(base.join("secret.jpg"), style.join("escape.jpg")).is_ok() {
+                assert_eq!(resolve_resource(&style, "escape.jpg"), None);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn font_file_candidates_confined_to_dirs() {
+        let base = std::env::temp_dir().join(format!("cx_menu_fonts_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let fonts = base.join("fonts");
+        let sub = fonts.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let valid = fonts.join("custom.ttf");
+        let nested = sub.join("nested.ttf");
+        let outside = base.join("outside.ttf");
+        std::fs::write(&valid, b"ttf").unwrap();
+        std::fs::write(&nested, b"ttf").unwrap();
+        std::fs::write(&outside, b"ttf").unwrap();
+
+        let dirs = vec![fonts.clone()];
+        let canon_valid = std::fs::canonicalize(&valid).unwrap();
+        let canon_nested = std::fs::canonicalize(&nested).unwrap();
+
+        assert_eq!(font_file_candidates_in("custom.ttf", &dirs), vec![canon_valid.clone()]);
+        assert_eq!(font_file_candidates_in(r"sub\nested.ttf", &dirs), vec![canon_nested]);
+        assert_eq!(
+            font_file_candidates_in(&valid.to_string_lossy(), &dirs),
+            vec![canon_valid]
+        );
+
+        for bad in [
+            "",
+            "   ",
+            ".",
+            r"\\server\share\evil.ttf",
+            "//server/share/evil.ttf",
+            r"\/server\share\evil.ttf",
+            r"\\?\C:\evil.ttf",
+            r"..\outside.ttf",
+            r"sub\..\..\outside.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            "/etc/passwd",
+        ] {
+            assert!(
+                font_file_candidates_in(bad, &dirs).is_empty(),
+                "expected empty for {bad:?}"
+            );
+        }
+        assert!(font_file_candidates_in(&outside.to_string_lossy(), &dirs).is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn rounded_style() -> TextStyle {

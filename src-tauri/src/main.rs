@@ -392,7 +392,7 @@ fn list_templates(state: State<'_, AppState>) -> Result<Vec<TemplateInfo>, Strin
                 name: t.name.clone().unwrap_or_else(|| ini.file_stem().unwrap_or_default().to_string_lossy().into_owned()),
                 description: t.description.clone(),
                 folder: folder_name.clone(),
-                thumbnail: t.thumbnail.as_ref().map(|th| folder.join(th).to_string_lossy().into_owned()),
+                thumbnail: t.thumbnail.as_ref().and_then(|th| musadvd::menu::resolve_resource(&folder, th)).map(|p| p.to_string_lossy().into_owned()),
                 titles_per_page: t.titles_per_page,
                 has_video_slots: t.pages.iter().flat_map(|p| &p.graphics).any(|g| g.gfx_type.eq_ignore_ascii_case("GT_VIDEO")),
                 page_styles: styles,
@@ -411,13 +411,24 @@ fn template_preview(state: State<'_, AppState>, path: String) -> Result<String, 
 }
 
 fn preview_data_url(root: Option<PathBuf>, path: &str) -> Result<String, String> {
-    let p = Path::new(path);
-    // Only serve images from the template folders.
-    if !root.is_some_and(|root| p.starts_with(root)) {
+    if musadvd::menu::is_unc_or_device_path(path) {
         return Err("preview outside the template folder".into());
     }
-    let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
-    let mime = match p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    let p = Path::new(path);
+    if path.trim().is_empty() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("preview outside the template folder".into());
+    }
+    let Some(root) = root else {
+        return Err("preview outside the template folder".into());
+    };
+    let canon_root = std::fs::canonicalize(&root).map_err(|_| "preview outside the template folder".to_string())?;
+    let canon_path = std::fs::canonicalize(p).map_err(|e| e.to_string())?;
+    // Only serve images from the canonicalized template folders.
+    if !canon_path.starts_with(&canon_root) {
+        return Err("preview outside the template folder".into());
+    }
+    let bytes = std::fs::read(&canon_path).map_err(|e| e.to_string())?;
+    let mime = match canon_path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
         Some("png") => "image/png",
         _ => "image/jpeg",
     };
@@ -1169,5 +1180,40 @@ mod tests {
     #[test]
     fn preview_is_confined_to_templates() {
         assert!(preview_data_url(Some(PathBuf::from(DEFAULT_TEMPLATE_ROOT)), r"C:\Windows\win.ini").is_err());
+
+        let base = std::env::temp_dir().join(format!("cx_gui_preview_sec_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("Templates");
+        let style = root.join("Style");
+        let resources = root.join("Resources");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&style).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let thumb = style.join("thumb.png");
+        let res_bg = resources.join("bg.jpg");
+        let secret = base.join("secret.jpg");
+        let outside_img = outside.join("other.png");
+        for p in [&thumb, &res_bg, &secret, &outside_img] {
+            std::fs::write(p, b"img").unwrap();
+        }
+
+        let valid = preview_data_url(Some(root.clone()), &thumb.to_string_lossy()).unwrap();
+        assert!(valid.starts_with("data:image/png;base64,"));
+
+        // Resolved ..\Resources thumbnail from list_templates must remain previewable without `\\?\` or `..`.
+        let resolved = musadvd::menu::resolve_resource(&style, r"..\Resources\bg.jpg").unwrap();
+        let res_url = preview_data_url(Some(root.clone()), &resolved.to_string_lossy()).unwrap();
+        assert!(res_url.starts_with("data:image/jpeg;base64,"));
+
+        assert!(preview_data_url(Some(root.clone()), &outside_img.to_string_lossy()).is_err());
+        assert!(preview_data_url(Some(root.clone()), r"\\server\share\thumb.png").is_err());
+        assert!(preview_data_url(Some(root.clone()), "//server/share/thumb.png").is_err());
+        assert!(preview_data_url(Some(root.clone()), &format!("{}/../secret.jpg", root.display())).is_err());
+        assert!(preview_data_url(Some(root), &format!("{}\\..\\secret.jpg", base.join("Templates").display())).is_err());
+        assert!(preview_data_url(None, &thumb.to_string_lossy()).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
