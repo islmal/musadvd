@@ -1,6 +1,6 @@
 //! Keeping the machine awake while a disc is written, and tray / medium-removal control through
 //! the documented storage IOCTLs (no raw START STOP UNIT). Windows only; on other systems the
-//! guards do nothing and the drive operations report "nicht unterstützt".
+//! guards do nothing and the drive operations report "not supported".
 
 use super::BurnError;
 

@@ -76,12 +76,16 @@ select {
   font-size: 15px;
 }
 
-.disc {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: radial-gradient(circle, var(--panel) 18%, #8fb4f5 20%, #c9d9f7 45%, #7aa0e8 70%, #4f7fd8 100%);
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+.ui-lang {
+  font-weight: normal;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.brand-logo {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
 }
 
 .toolbar-actions {
@@ -1393,6 +1397,10 @@ input.time {
   font-weight: 600;
 }
 
+.ed-viewport.ed-drop {
+  outline: 3px dashed var(--accent, #4da3ff);
+  outline-offset: -6px;
+}
 .ed-viewport {
   position: relative;
   min-height: 0;
@@ -2828,3 +2836,104 @@ input.time {
 
 /* Timeline: video thumbnails and per-button rows */
 
+
+/* Update dialog ------------------------------------------------------------ */
+
+.update-card .update-text {
+  margin: 0;
+}
+
+.update-notes {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12px;
+  white-space: pre-wrap;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.update-log-wrap summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.update-log {
+  margin: 6px 0 0;
+  height: 120px;
+  overflow: auto;
+  padding: 8px 10px;
+  font: 12px/1.4 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.update-error {
+  margin: 0;
+  color: var(--bad);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.progress-value.indeterminate {
+  animation: update-pulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes update-pulse {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Subtitle styling, project dialogs, pre-flight list --------------------- */
+
+.sub-style {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 14px;
+  align-items: end;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.sub-style h3,
+.sub-style .hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.sub-style-field {
+  display: grid;
+  gap: 3px;
+  font-size: 12.5px;
+}
+
+.sub-style-field input,
+.sub-style-field select {
+  min-width: 0;
+}
+
+.missing-list,
+.preflight-list {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.missing-list {
+  font-family: monospace;
+  font-size: 12px;
+}

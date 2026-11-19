@@ -554,7 +554,7 @@ pub fn write(ctx: &Ctx, job: &WriteJob, make_source: &(dyn Fn() -> Result<Box<dy
             return Ok(Outcome::cancelled());
         }
         if copies > 1 {
-            ctx.log(format!("Kopie {copy} von {copies}"));
+            ctx.log(format!("Copy {copy} of {copies}"));
         }
         let media = burner.probe_media(&job.drive.id).map_err(|e| e.to_string())?;
         if !media.present {
@@ -876,7 +876,7 @@ pub fn build(ctx: &Ctx, plan: &BuildPlan, out: &Path) -> Result<Outcome, String>
     }
 }
 
-/// The settings' "wenn fertig" action (`shutdown`, `standby`, `hibernate`; `close` is the
+/// The settings' "when done" action (`shutdown`, `standby`, `hibernate`; `close` is the
 /// window's business). Shutdown waits 60 s, `shutdown /a` takes it back.
 pub fn on_complete(action: &str) {
     #[cfg(windows)]

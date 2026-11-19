@@ -7,21 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-MusaDVD is pre-1.0 (`0.x`): features and settings may still change between releases. Nothing below is tagged or released yet.
+## [1.0.0] - 2026-11-19
+
+First stable release: the project file format, settings and CLI are now kept compatible within 1.x.
 
 ### Added
 
+- **Menu presets with music**: Swiss, Cinema and Midnight now also set bundled background music on every menu without its own sound (`assets/menu-audio/`, Opus 96 kbps, levelled to about -18 LUFS): "Sunlight on the Floorboards" (Swiss), "Porcelain Hours" (Cinema) and "View From The Berth" (Midnight, sci-fi). Shipped in the installer, AppImage/.deb, portable archives and the AUR package.
+- **README screenshots** generated from the real app with placeholder videos (`docs/screenshots/`).
+
 - **DVD-Video MPEG-2 smart stream copy** (`encode` default / `auto` / `strict`, CLI `--dvd-video`, `AppSettings::dvd_video`): `encoder::dvd_video_copy` stream-copies sources that are already DVD-compliant MPEG-2 (720x480/704x480 at 29.97/23.976 fps or 720x576/704x576 at 25 fps, `yuv420p`, SDR, <= 9800 kbit/s, no trim/crop/deinterlace/scale/picture-filter overrides). Copied titles still pipe through the native `spumux` stage; their exact byte size is reserved in the bitrate budget (`TitleLoad::copy_bytes`, `calculator::bytes_to_kbit`) and re-encoded titles share the rest. `strict` fails before menus and encoding if any title cannot be copied.
-- **Denoise and picture EQ** in `VideoProcessing` / `StreamSelection` (`denoise` via `hqdn3d`; `brightness`, `contrast`, `saturation` via `eq`, all optional and `#[serde(default)]`). They are part of `source_chain`, so the live preview (`preview_filter`) and the final encode use the identical filtergraph. Sliders with Reset in the "Schnitt & Bild" tab; titles with active picture filters are never stream-copied.
+- **Denoise and picture EQ** in `VideoProcessing` / `StreamSelection` (`denoise` via `hqdn3d`; `brightness`, `contrast`, `saturation` via `eq`, all optional and `#[serde(default)]`). They are part of `source_chain`, so the live preview (`preview_filter`) and the final encode use the identical filtergraph. Sliders with Reset in the "Trim & picture" tab; titles with active picture filters are never stream-copied.
 - **10-second quality test** (`test_title_quality` Tauri command, "Test Quality (10s)" button): encodes a 10 s sample (at 25 % of the trimmed duration or a chosen timestamp) with the title's planned bitrate and processing, measures PSNR against the source slice (`quality_psnr_args`, `parse_psnr_average`) and shows a verdict (`psnr_verdict`: excellent / good / fair / poor) with a playable sample.
 - **Scene-change auto-chapters** (`probe::detect_scene_chapters`, Tauri command `detect_scene_chapters`, "Detect Scenes" button): `select='gt(scene,0.35)',showinfo` inside the title's trim range, cuts closer than 15 s are dropped, capped at the DVD chapter limit.
 - **Test Remote mode in the menu editor**: arrow keys, Enter, Backspace and Esc (plus an on-screen D-pad) move focus across buttons using the same links as `author::compute_navigation` (`layout::menu_button_navigation`, Tauri command `menu_navigation`), follow menu actions with back history and preview title/chapter/play-all targets, audio/subtitle choices and VM commands.
 - New UI strings in `en`, `de` and `ru` for all of the above.
+- **Panda mascot logo**: new app icon set (`src-tauri/icons/`, regenerated from the transparent master `logo/logo.png`, vector trace `logo/logo.svg`), header logo and window favicons.
+- **Language picker in the main window header** next to the logo; it changes the same setting as Settings → Language and applies immediately.
+- **Verbose updater modal** (`updateDialog.ts`): download progress in %, a step log, and SHA-256 verification (release asset `digest` or `<asset>.sha256`; unverified downloads are refused). NSIS installs go through the updater plugin; AppImage and portable builds are replaced by `self_update.rs`; `.deb` installs only get a hint.
+- **AppImage/deb CLI dual mode**: the GUI binary runs the CLI (`musadvd::cli::run`) when started as `musadvd` (argv0 or symlink), with `--cli`, a subcommand, `--help` or `--version`, before GTK starts; the `.deb` ships `/usr/bin/musadvd`.
+- **Project files** (`.musadvd` JSON, versioned): Open project (Ctrl+O), Save project (Ctrl+S, Ctrl+Shift+S = save as) in the main window header. A project holds medium, TV standard, copy modes, every title with its tracks, trim/crop, picture filters, chapters, quality weight, merge flags and subtitle style, and the custom menu layouts. Opening re-probes the videos and lists missing files instead of failing. A recovery autosave next to the settings file is offered after an unexpected exit.
+- **Subtitle styling and sync** (Subtitles tab, per title): font family, size (%), outline (px), bottom margin (%) and timing offset (ms) for text subtitles, applied to DVD subpictures and Blu-ray PGS alike. Defaults render exactly as before.
+- **System fonts**: the menu editor and the subtitle style list every installed font family (`fontdb`) below the curated ones, and the engine resolves them directly.
+- **Pre-flight check** before Convert: one dialog lists warnings (disc fill above 99 %, minimum bitrate, stream copies that will fall back to re-encoding, forced deinterlacing with copy, poor quality) and lets you cancel.
+- Custom (menu editor) menus use the global menu sound file from Settings for every menu without its own sound, and the layout check verifies with `ffprobe` that menu sound and video files really contain audio/video.
 
 ### Changed
 
+- **Clean title captions**: default title labels derived from file names drop ids and rip tags (`cleanTitle`), and draft menu layouts shrink long captions to fit (down to 55 %); labels edited by the user are never touched.
+
 - **Faster two-pass MPEG-2 encoding**: pass 1 is now a statistics-only analysis pass (`-mbd simple -trellis 0 -dia_size 1 -subq 1` with SAD comparisons) while keeping `-passlogfile`, GOP, frame rate, filters and rate control identical to pass 2.
 - **Sharper line art on tight DVD bitrates**: pass 2 and single-pass encodes use `-mbd rd` and, unless `--fast` is set, `-trellis 1 -intra_vlc 1`.
+- **Strict capacity with quality weights**: a Low-weight title raised to the minimum bitrate can no longer push the disc past 100 %; the shared bitrate is re-solved against the real per-title sizes, and a project that cannot fit even at the minimum is reported as not fitting.
+- Integration tests only use the `bin/ffmpeg` built for the current platform, so Linux/WSL runs in a checkout with `bin/ffmpeg.exe` no longer try to start the Windows binary.
 - MPEG-2 sources reporting the VBR bitrate sentinel (`104857200` bit/s) now fall back to the file-size bitrate.
 
 ## [0.1.5] - 2026-11-19
@@ -110,7 +128,8 @@ MusaDVD is pre-1.0 (`0.x`): features and settings may still change between relea
 - **Burn Studio**: disc image Read, Build, Verify, and Write (Windows IMAPI2 / direct SPTI fallback), Discovery blank-media testing, `.ibg` telemetry graphs, layer-break tools, CSS detection, and safe 4x auto write speed.
 - GPU-accelerated decoding/encoding (`HwAccelMode`), live preview proxy with frame stepping, smart track labels, drag-and-drop title reordering, merge groups, and automated Windows (NSIS installer with in-app updater + portable ZIP) and Linux (`.deb`, `.AppImage`, portable `.tar.gz`) release builds.
 
-[Unreleased]: https://github.com/islmal/musadvd/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/islmal/musadvd/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/islmal/musadvd/compare/v0.1.5...v1.0.0
 [0.1.5]: https://github.com/islmal/musadvd/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/islmal/musadvd/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/islmal/musadvd/compare/v0.1.2...v0.1.3

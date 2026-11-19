@@ -757,7 +757,7 @@ impl AudioClock {
     }
 
     fn au(&mut self, pes: Pes, pid: u16) -> io::Result<Vec<Au>> {
-        let bad = || io::Error::new(io::ErrorKind::InvalidData, format!("Audiospur 0x{pid:x}: unerwartetes Frame-Format"));
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, format!("Audiospur 0x{pid:x}: unexpected frame format"));
         if self.codec == Codec::Lpcm {
             let (info, _) = lpcm_info(&pes.payload).ok_or_else(bad)?;
             self.info.get_or_insert(info);

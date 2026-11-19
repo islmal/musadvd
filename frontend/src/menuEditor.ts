@@ -4,8 +4,9 @@
 // The stage is the TV frame in storage pixels (720x576 PAL / 720x480 NTSC) shown at 4:3, so
 // texts and pictures look as they will on the TV. Buttons are axis-aligned rectangles (no
 // rotation, at most 36 per menu, no overlaps) – the DVD subpicture only knows `x0 y0 x1 y1`.
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import { audioWaveform, checkLayout, imagePreview, importConvertxTemplate, loadLayout, menuNavigation, saveLayout, textLines, titleFrame, type ButtonNav } from "./api";
+import { audioWaveform, bundledMenuSound, checkLayout, listSystemFonts, imagePreview, importConvertxTemplate, loadLayout, menuNavigation, saveLayout, textLines, titleFrame, type ButtonNav } from "./api";
 import {
   FONTS,
   computeNavigationFallback,
@@ -15,6 +16,7 @@ import {
   chapterLabel,
   draftLayout,
   MENU_PRESETS,
+  PRESET_SOUNDS,
   type MenuPreset,
   rect as newRect,
   madeForOtherTitles,
@@ -83,8 +85,24 @@ export interface EditorOptions extends EditorInit {
 }
 
 const IMAGE_FILTER = [{ name: tr("menuEditor.bilder"), extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }];
-const AUDIO_FILTER = [{ name: tr("menuEditor.audio"), extensions: ["mp3", "wav", "flac", "m4a", "aac", "ac3", "ogg", "opus"] }];
+const AUDIO_FILTER = [{ name: tr("menuEditor.audio"), extensions: ["mp3", "wav", "flac", "ogg", "ac3", "m4a", "aac", "opus"] }];
 const VIDEO_FILTER = [{ name: "Videos", extensions: ["mp4", "mkv", "avi", "mov", "mpg", "mpeg", "ts", "m2ts"] }];
+const FONT_DIVIDER = "--divider";
+let systemFonts: string[] = [];
+void listSystemFonts().then((l) => {
+  systemFonts = [...new Set(l.map((f) => f.family))].sort((a, b) => a.localeCompare(b));
+});
+
+/** Curated fonts, a disabled divider, then every installed family; the current font is never dropped. */
+function fontOptions(current: string): [string, string][] {
+  const curated = new Set<string>(FONTS);
+  const rest = systemFonts.filter((f) => !curated.has(f));
+  const opts: [string, string][] = FONTS.map((f) => [f, f]);
+  if (current && !curated.has(current) && !rest.includes(current)) opts.push([current, current]);
+  if (rest.length) opts.push([FONT_DIVIDER, "------"], ...rest.map((f): [string, string] => [f, f]));
+  return opts;
+}
+
 const LAYOUT_FILTER = [{ name: tr("menuEditor.menueLayout"), extensions: ["json"] }];
 const TEMPLATE_FILTER = [{ name: tr("menuEditor.convertxVorlage"), extensions: ["ini"] }];
 const FIT_LABELS: [Fit, string][] = [
@@ -454,7 +472,7 @@ export function mountMenuEditor(opts: EditorOptions) {
               renderAll();
             },
           },
-          "Einfach",
+          tr("menuEditor.modeSimple"),
         ),
         el(
           "button",
@@ -467,7 +485,7 @@ export function mountMenuEditor(opts: EditorOptions) {
               renderAll();
             },
           },
-          "Erweitert (Timeline)",
+          tr("menuEditor.modeTimeline"),
         ),
       ),
       el(
@@ -618,14 +636,14 @@ export function mountMenuEditor(opts: EditorOptions) {
         {
           class: `btn${isDrawingAabb ? " active" : ""}`,
           type: "button",
-          title: "Zeichnet einen 2-Pixel-gerasterten Button-Bereich (AABB)",
+          title: tr("menuEditor.drawAabbTip"),
           onclick: () => {
             isDrawingAabb = !isDrawingAabb;
             stage.style.cursor = isDrawingAabb ? "crosshair" : "";
             renderToolbar();
           },
         },
-        "+ Button-Bereich",
+        tr("menuEditor.addButtonArea"),
       ),
       el("span", { class: "ed-spacer" }),
       el(
@@ -993,7 +1011,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       inner,
     );
     if (isCell1) {
-      node.append(el("span", { class: "ed-hli-badge" }, "Subpicture Inaktiv (Cell 1: hli_ss == 0)"));
+      node.append(el("span", { class: "ed-hli-badge" }, tr("menuEditor.subpictureInactive")));
     }
     if (e.easterEgg) {
       node.append(el("span", { class: "ed-easter-egg-badge" }, "🥚 Easter Egg"));
@@ -1665,27 +1683,27 @@ export function mountMenuEditor(opts: EditorOptions) {
     const T = m.introSecs ?? 0.0;
     playheadTime = Math.min(playheadTime, timelineTotal());
 
-    const timecodeDisplay = el("span", { class: "ed-timeline-timecode", title: "Position des roten Playheads (Std:Min:Sek:Frame)" }, formatTimecode(playheadTime));
+    const timecodeDisplay = el("span", { class: "ed-timeline-timecode", title: tr("menuEditor.playheadPosTip") }, formatTimecode(playheadTime));
     const gopPill = el(
       "span",
-      { class: "ed-gop-pill", title: "Schnitte rasten auf Closed-GOP-Grenzen ein (DVD-Pflicht f\u00fcr nahtlose Schleifen)" },
+      { class: "ed-gop-pill", title: tr("menuEditor.gopSnapTip") },
       `Raster: ${isPal ? "0,6 s (PAL)" : "0,6 s (NTSC)"}`,
     );
 
-    const playBtn = el("button", { class: `btn${isPlaying ? " active" : ""}`, type: "button", title: "Vorschau abspielen/pausieren (Leertaste)", onclick: togglePlay }, isPlaying ? "⏸ Pause" : "▶ Vorschau");
+    const playBtn = el("button", { class: `btn${isPlaying ? " active" : ""}`, type: "button", title: tr("menuEditor.previewToggleTip"), onclick: togglePlay }, isPlaying ? tr("menuEditor.pauseBtn") : tr("menuEditor.previewBtn"));
     const setTBtn = el(
       "button",
       {
         class: "btn",
         type: "button",
-        title: "Das Intro endet an der Position des roten Playheads",
+        title: tr("menuEditor.introEndsHereTip"),
         onclick: () => {
           remember();
           m.introSecs = snapToClosedGop(playheadTime);
           renderAll();
         },
       },
-      "Intro endet hier",
+      tr("menuEditor.introEndsHere"),
     );
     const noIntroBtn =
       T > 0
@@ -1694,14 +1712,14 @@ export function mountMenuEditor(opts: EditorOptions) {
             {
               class: "btn",
               type: "button",
-              title: "Kein Intro: Buttons sind von Anfang an aktiv",
+              title: tr("menuEditor.noIntroTip"),
               onclick: () => {
                 remember();
                 m.introSecs = 0;
                 renderAll();
               },
             },
-            "Kein Intro",
+            tr("menuEditor.noIntro"),
           )
         : null;
 
@@ -1721,7 +1739,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       title: "Zoom",
       oninput: (e: Event) => setZoom(Number((e.target as HTMLInputElement).value)),
     }) as HTMLInputElement;
-    const fitBtn = el("button", { class: "btn", type: "button", title: "Zoom so w\u00e4hlen, dass alles sichtbar ist", onclick: () => setZoom(fitZoom()) }, "Einpassen");
+    const fitBtn = el("button", { class: "btn", type: "button", title: tr("menuEditor.zoomFitTip"), onclick: () => setZoom(fitZoom()) }, tr("menuEditor.zoomFit"));
 
     const timelineHeader = el(
       "div",
@@ -1740,8 +1758,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       "div",
       { class: "ed-timeline-hint" },
       T > 0
-        ? `Das Men\u00fc spielt zuerst das Intro (blau, ${T.toFixed(1)} s) einmal ab und wiederholt dann die Schleife (gr\u00fcn). Buttons sind erst nach dem Intro anklickbar. Blauen Marker ziehen = Introl\u00e4nge, gr\u00fcnen Marker ziehen = Schleifenende, ins Lineal klicken = Playhead setzen.`
-        : `Das Men\u00fc l\u00e4uft als Schleife (gr\u00fcn) und alle Buttons sind sofort aktiv. F\u00fcr ein Intro, das nur einmal abgespielt wird: Playhead an die gew\u00fcnschte Stelle setzen und „Intro endet hier“ klicken – oder den blauen Marker ziehen.`,
+        ? tr("menuEditor.timelineHintIntro", { secs: T.toFixed(1) })
+        : tr("menuEditor.timelineHintLoop"),
     );
 
     tlBar.replaceChildren(timelineHeader, hint);
@@ -2202,7 +2220,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   const select = (options: [string, string][], value: string, set: (v: string) => void, attrs: Record<string, unknown> = {}) =>
     bind(
-      el("select", attrs, ...options.map(([v, label]) => el("option", { value: v, selected: v === value }, label))) as HTMLSelectElement,
+      el("select", attrs, ...options.map(([v, label]) => el("option", { value: v, selected: v === value, disabled: v === FONT_DIVIDER }, label))) as HTMLSelectElement,
       set,
       { rerender: true },
     );
@@ -2319,7 +2337,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           num(m.durationSecs ?? 20, (v) => (m.durationSecs = Math.max(1, Math.min(600, v))), { min: "1", max: "600", step: "1" }),
         ),
         row(
-          "Intro-Dauer (T)",
+          tr("menuEditor.introDuration"),
           num(
             m.introSecs ?? 0,
             (v) => {
@@ -2426,6 +2444,7 @@ export function mountMenuEditor(opts: EditorOptions) {
             },
           ),
         ),
+        el("p", { class: "ed-hint" }, tr("menuEditor.soundLoopHint")),
         sound.type === "file" ? row(tr("menuEditor.datei"), el("span", { class: "ed-path", title: sound.path }, sound.path.split(/[\\/]/).pop() ?? "")) : null,
       ),
       group(
@@ -2521,7 +2540,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           "VM-Befehle",
           bind(el("input", { type: "text", value: a.script }) as HTMLInputElement, (v) => setAction({ type: "customVm", script: v }), { live: true }),
         ),
-        el("p", { class: "ed-hint" }, "Direkte DVD-VM-Anweisungen (z.B. „if (g4 == 1) link button 2; else jump menu 3;“)."),
+        el("p", { class: "ed-hint" }, tr("menuEditor.vmCommandsHint")),
       );
     }
     if (a?.type === "setAudio" && streamTitle) {
@@ -2627,7 +2646,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       if (a.transition) {
         out.push(
           row(
-            "Dauer (s)",
+            tr("menuEditor.dauerS"),
             num(
               a.transition.durationSecs,
               (v) => {
@@ -2681,7 +2700,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         group(
           tr("menuEditor.text2"),
           bind(el("textarea", { rows: 3, class: "ed-textarea" }, t.text) as HTMLTextAreaElement, (v) => (t.text = v), { live: true }),
-          row(tr("menuEditor.schrift"), select(FONTS.map((f): [string, string] => [f, f]), t.font, (v) => (t.font = v))),
+          row(tr("menuEditor.schrift"), select(fontOptions(t.font), t.font, (v) => (t.font = v))),
           row(tr("menuEditor.groessePx"), num(t.size, (v) => (t.size = Math.max(4, Math.min(300, v))), { min: "4", max: "300", step: "1" })),
           row(tr("menuEditor.farbe"), bind(el("input", { type: "color", value: t.color }) as HTMLInputElement, (v) => (t.color = v.toUpperCase()), { live: true })),
           el(
@@ -2820,7 +2839,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       ...(isButton(e)
         ? [
             group(
-              "Easter Egg (Versteckter Button)",
+              tr("menuEditor.easterEggTitle"),
               el(
                 "label",
                 { class: "ed-check" },
@@ -2834,9 +2853,9 @@ export function mountMenuEditor(opts: EditorOptions) {
                     renderProps();
                   },
                 }),
-                "Als Easter Egg markieren",
+                tr("menuEditor.easterEggMark"),
               ),
-              el("p", { class: "ed-hint" }, "Navigation per Fernbedienung aktiv, aber die Button-Markierung ist zu 100% unsichtbar."),
+              el("p", { class: "ed-hint" }, tr("menuEditor.easterEggHint")),
             ),
           ]
         : []),
@@ -3130,8 +3149,11 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
       if (!go) return;
     }
+    const sound = await bundledMenuSound(PRESET_SOUNDS[preset]).catch(() => null);
     remember();
     L = draftLayout(titles, tv, opts.heading, preset);
+    // The preset's bundled music for every menu that has no sound of its own.
+    if (sound) for (const m of L.menus) if (m.audio.type === "none") m.audio = { type: "file", path: sound };
     menuIdx = 0;
     selIds = [];
     if (remoteMode) resetRemoteSession();
@@ -3228,6 +3250,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     ro.disconnect();
     window.removeEventListener("keydown", onKey, true);
+    unlistenDrop?.();
     window.clearTimeout(checkTimer);
     window.clearTimeout(noticeTimer);
     window.clearTimeout(remoteActivateTimer);
@@ -3307,6 +3330,43 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   }
   window.addEventListener("keydown", onKey, true);
+
+  // Native drag & drop delivers file paths (HTML5 drop events do not); first file of each kind wins.
+  let unlistenDrop: (() => void) | null = null;
+  const extOf = (p: string) => (p.split(".").pop() ?? "").toLowerCase();
+  const matches = (f: { extensions: string[] }[], p: string) => f[0].extensions.includes(extOf(p));
+  function applyDroppedFiles(paths: string[]) {
+    const audio = paths.find((p) => matches(AUDIO_FILTER, p));
+    const image = paths.find((p) => matches(IMAGE_FILTER, p));
+    const video = paths.find((p) => matches(VIDEO_FILTER, p));
+    if (!audio && !image && !video) {
+      flash(tr("menuEditor.dropUnsupported"), "error");
+      return;
+    }
+    remember();
+    const m = menu();
+    if (audio) m.audio = { type: "file", path: audio };
+    // A background is either an image or a video; the video wins when both were dropped.
+    if (video) {
+      m.background.image = null;
+      m.background.video = { title: 0, startSecs: null, path: video };
+    } else if (image) {
+      m.background.video = null;
+      m.background.image = image;
+    }
+    if (audio && !image && !video) flash(tr("menuEditor.dropApplied"), "ok");
+    else if (paths.length > [audio, image, video].filter(Boolean).length) flash(tr("menuEditor.dropSomeIgnored"), "error");
+    renderAll();
+  }
+  void getCurrentWebview()
+    .onDragDropEvent((e) => {
+      const p = e.payload;
+      if (p.type === "enter" || p.type === "over") viewport.classList.add("ed-drop");
+      else viewport.classList.remove("ed-drop");
+      if (p.type === "drop" && !closed) applyDroppedFiles(p.paths);
+    })
+    .then((u) => (closed ? u() : (unlistenDrop = u)))
+    .catch((err) => console.warn("menu editor drag-drop unavailable", err));
 
   renderAll();
 }

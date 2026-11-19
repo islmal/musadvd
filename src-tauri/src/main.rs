@@ -19,6 +19,7 @@ mod burn;
 mod burn_studio;
 mod menu_editor;
 mod preview;
+mod self_update;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -893,6 +894,20 @@ struct SettingsInfo {
     cpu_count: usize,
 }
 
+/// Absolute path of a bundled menu sound (`assets/menu-audio/<name>`), `None` if not shipped.
+#[tauri::command]
+fn bundled_menu_sound(name: String) -> Option<String> {
+    // Plain file names only, so the frontend cannot reach outside the folder.
+    if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+        return None;
+    }
+    musadvd::i18n::resource_dirs("menu-audio", "assets/menu-audio")
+        .into_iter()
+        .map(|d| d.join(&name))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn settings_info(state: State<'_, AppState>) -> SettingsInfo {
     SettingsInfo {
@@ -901,6 +916,49 @@ fn settings_info(state: State<'_, AppState>) -> SettingsInfo {
         unsupported: UNSUPPORTED_CHOICES.iter().map(|c| c.to_string()).collect(),
         cpu_count: dvd::available_cpus(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Projects (.musadvd JSON) and system fonts
+// ---------------------------------------------------------------------------
+
+/// Writes a project file atomically (temp file + rename), so a failed save never leaves a
+/// truncated project behind. The JSON shape and its version are owned by the frontend.
+#[tauri::command]
+fn save_project(path: String, project: serde_json::Value) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    let json = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
+    let tmp = target.with_extension("musadvd.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("{path}: {e}"))?;
+    std::fs::rename(&tmp, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{path}: {e}")
+    })
+}
+
+#[tauri::command]
+fn load_project(path: String) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The subset of `paths` that is not an existing file.
+#[tauri::command]
+fn missing_paths(paths: Vec<String>) -> Vec<String> {
+    paths.into_iter().filter(|p| !Path::new(p).is_file()).collect()
+}
+
+/// Recovery autosave next to the settings file.
+#[tauri::command]
+fn autosave_path(state: State<'_, AppState>) -> String {
+    let dir = state.settings_path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    dir.join("autosave.musadvd").to_string_lossy().into_owned()
+}
+
+/// Installed OS font families (sorted, deduplicated) with their font files.
+#[tauri::command]
+async fn list_system_fonts() -> Vec<musadvd::fonts::SystemFont> {
+    tauri::async_runtime::spawn_blocking(|| musadvd::fonts::system_fonts().to_vec()).await.unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1071,6 +1129,9 @@ struct InputConfig {
     contrast: Option<f32>,
     #[serde(default)]
     saturation: Option<f32>,
+    /// Styling and timing offset of the title's text subtitles.
+    #[serde(default)]
+    subtitle_style: musadvd::textsub::SubtitleStyle,
 }
 
 #[derive(Deserialize)]
@@ -1154,6 +1215,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 brightness: i.brightness,
                 contrast: i.contrast,
                 saturation: i.saturation,
+                subtitle_style: i.subtitle_style.clone(),
             })
             .collect(),
         ..BuildOptions::default()
@@ -1233,7 +1295,30 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
     Ok(())
 }
 
-fn main() {
+/// CLI dual mode (AppImage symlink named `musadvd`, `--cli`, or a CLI subcommand/flag as first
+/// argument): returns the argv to hand to the CLI so GTK/WebKit are never initialised.
+/// Windows ships `musadvd.exe` separately and the GUI exe has no console, so this is Unix-only.
+#[cfg(unix)]
+fn cli_invocation() -> Option<Vec<OsString>> {
+    let mut args: Vec<OsString> = std::env::args_os().collect();
+    // Inside an AppImage argv[0] is the mounted binary; the runtime exposes the invoked name as $ARGV0.
+    let invoked = std::env::var_os("ARGV0").or_else(|| args.first().cloned()).map(PathBuf::from);
+    let as_cli = invoked.as_deref().and_then(Path::file_name).is_some_and(|n| n == "musadvd");
+    let first = args.get(1).and_then(|a| a.to_str()).unwrap_or("").to_owned();
+    if first == "--cli" {
+        args.remove(1);
+        return Some(args);
+    }
+    let cli_flag = matches!(first.as_str(), "--help" | "-h" | "--version" | "-V");
+    (as_cli || cli_flag || musadvd::cli::is_subcommand(&first)).then_some(args)
+}
+
+fn main() -> std::process::ExitCode {
+    #[cfg(unix)]
+    if let Some(args) = cli_invocation() {
+        return musadvd::cli::run(args);
+    }
+    self_update::cleanup_leftovers();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1277,6 +1362,11 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            save_project,
+            load_project,
+            missing_paths,
+            autosave_path,
+            list_system_fonts,
             get_available_languages,
             get_locale_data,
             probe_file,
@@ -1290,6 +1380,7 @@ fn main() {
             save_settings,
             default_settings,
             settings_info,
+            bundled_menu_sound,
             cancel_conversion,
             burn::list_drives,
             burn::disc_needs,
@@ -1298,6 +1389,8 @@ fn main() {
             burn::cancel_burn,
             burn::startup_burn,
             burn::open_folder,
+            self_update::update_install_mode,
+            self_update::self_update,
             title_frame,
             audio_waveform,
             preview::preview_stream,
@@ -1338,6 +1431,7 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the MusaDVD GUI");
+    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(test)]

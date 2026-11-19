@@ -5,7 +5,7 @@ import { t } from "../i18n";
 
 /**
  * Lists the candidates of `source` (an `.iso` or a folder with `VIDEO_TS`). With `onPick` a row can
- * be chosen ("Übernehmen"); without it the dialog only inspects.
+ * be chosen ("Apply"); without it the dialog only inspects.
  */
 export async function openLayerBreak(source: string, onPick?: (c: api.Candidate) => void) {
   let showAll = false;

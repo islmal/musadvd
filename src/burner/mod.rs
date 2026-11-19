@@ -300,7 +300,7 @@ pub fn default_speed(media: MediaType, speeds: &[u32]) -> WriteSpeed {
     WriteSpeed::Specific(pick)
 }
 
-/// Speed from the "Schreibgeschwindigkeit" setting: `auto` (DVD-5 maximum, DVD-9 about 4x),
+/// Speed from the "write speed" setting: `auto` (DVD-5 maximum, DVD-9 about 4x),
 /// `max`, or a speed in x (`8`, `2.4`), mapped to the nearest supported speed not above it
 /// (the slowest supported one when all are faster).
 pub fn preferred_speed(media: MediaType, speeds: &[u32], pref: &str) -> WriteSpeed {
@@ -515,7 +515,7 @@ pub trait OpticalBurner: Send + Sync {
 
     /// Burns the sectors of `source` (an image that is built on the fly, zeros, a `.bin`) through
     /// a ring buffer of `options.ring_mib`. Verification re-reads the source, so it needs a
-    /// rewindable one. Backends that can only burn files report "nicht unterstützt".
+    /// rewindable one. Backends that can only burn files report "not supported".
     fn burn_source(
         &self,
         _drive_id: &str,

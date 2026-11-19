@@ -6,10 +6,13 @@ import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
-import { isButton, isMoving, madeForOtherTitles, menuClipSecs, remapLayoutByPaths, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
+import { FONTS, cleanTitle, isButton, isMoving, madeForOtherTitles, menuClipSecs, remapLayoutByPaths, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectFile, type ProjectTitle } from "./project";
+import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
 import { moveItem, shapeMismatch } from "./order";
+import { openUpdateDialog } from "./updateDialog";
 import {
   checkLayout,
   calculateProject,
@@ -20,10 +23,13 @@ import {
   onBuildDone,
   onBuildEvent,
   probeFile,
+  listSystemFonts,
+  missingPaths,
   startConversion,
   getSettings,
   settingsInfo,
   availableLanguages,
+  saveSettings as storeSettings,
   startupFiles,
   startupBurn,
   templatePreview,
@@ -37,6 +43,8 @@ import {
   type Eta,
   formatRemaining,
   type Disc,
+  type SubtitleStyle,
+  type SystemFont,
   type TemplateInfo,
   type VideoMetadata,
 } from "./api";
@@ -79,6 +87,8 @@ interface Title {
   brightness: number | null;
   contrast: number | null;
   saturation: number | null;
+  /** Look and timing of this title's text subtitles (empty = defaults). */
+  subtitleStyle: SubtitleStyle;
 }
 
 type BdRes = "1080" | "720";
@@ -402,7 +412,7 @@ async function addFiles(paths: string[]) {
         meta,
         audio: new Set(meta.audio.slice(0, MAX_AUDIO).map((a) => a.index)),
         subs: new Set(meta.subtitles.filter((s) => s.supported).map((s) => s.index)),
-        label: meta.fileName.replace(/\.[^.]+$/, ""),
+        label: cleanTitle(meta.fileName),
         chapters: meta.chapters.map((c) => c.startSecs),
         trimStart: null,
         trimEnd: null,
@@ -417,6 +427,7 @@ async function addFiles(paths: string[]) {
         brightness: null,
         contrast: null,
         saturation: null,
+        subtitleStyle: {},
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
@@ -577,6 +588,7 @@ async function splitByChapters(t: Title) {
     brightness: t.brightness,
     contrast: t.contrast,
     saturation: t.saturation,
+    subtitleStyle: { ...t.subtitleStyle },
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
@@ -684,6 +696,7 @@ let calcTimer: number | undefined;
 let calcSeq = 0;
 
 function scheduleCalc() {
+  touchAutosave();
   window.clearTimeout(calcTimer);
   calcTimer = window.setTimeout(runCalc, 150);
 }
@@ -1108,7 +1121,7 @@ function renderTabs() {
   if (state.tab === "video") body.append(renderVideoTab(t));
 }
 
-/** Connects the "Schnitt & Bild" tab to the title list and the size estimate. */
+/** Connects the "Trim & picture" tab to the title list and the size estimate. */
 const editHooks = {
   changed: () => {
     renderTitleList();
@@ -1220,12 +1233,92 @@ function audioDetail(t: Title, a: AudioTrack): string {
   return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${audioCopies(t, a) ? tr("main.unveraendertKopiert", { target }) : target}`;
 }
 
+let fontsLoaded: Promise<SystemFont[]> | null = null;
+const systemFonts = () => (fontsLoaded ??= listSystemFonts());
+
+/** Font family choices: default, curated menu fonts, a divider, then every installed family (loaded once). */
+function fontSelect(current: string | null, on: (family: string | null) => void) {
+  const sel = h("select", { id: "sub-font", onchange: () => on(sel.value || null) }) as HTMLSelectElement;
+  const add = (family: string) => sel.append(h("option", { value: family, selected: family === current }, family));
+  sel.append(h("option", { value: "", selected: !current }, tr("main.subStyleFontDefault")));
+  FONTS.forEach(add);
+  // A font from another machine's project stays selectable.
+  if (current && !FONTS.includes(current)) add(current);
+  void systemFonts().then((all) => {
+    const rest = all.map((f) => f.family).filter((f) => !FONTS.includes(f) && f !== current);
+    if (rest.length === 0) return;
+    sel.append(h("option", { disabled: true }, "------"));
+    rest.forEach(add);
+  });
+  return sel;
+}
+
+/** Per-title styling of text subtitles; an empty field keeps the default. */
+function subtitleStyleControls(t: Title) {
+  const st = t.subtitleStyle;
+  const field = (key: "fontSizePct" | "outlinePx" | "bottomMarginPct" | "offsetMs", label: string, min: number, max: number, step: number) =>
+    h(
+      "label",
+      { class: "sub-style-field" },
+      h("span", {}, label),
+      h("input", {
+        type: "number",
+        min,
+        max,
+        step,
+        value: st[key] ?? "",
+        onchange: (e: Event) => {
+          const raw = (e.target as HTMLInputElement).value.trim();
+          const n = Number(raw);
+          if (raw === "" || !Number.isFinite(n)) delete st[key];
+          else st[key] = Math.min(max, Math.max(min, n));
+          renderTabs();
+          touchAutosave();
+        },
+      }),
+    );
+  return h(
+    "div",
+    { class: "sub-style" },
+    h("h3", {}, tr("main.subStyleTitle")),
+    h(
+      "label",
+      { class: "sub-style-field" },
+      h("span", {}, tr("main.subStyleFont")),
+      fontSelect(st.fontFamily ?? null, (family) => {
+        if (family) st.fontFamily = family;
+        else delete st.fontFamily;
+        touchAutosave();
+      }),
+    ),
+    field("fontSizePct", tr("main.subStyleSize"), 50, 200, 5),
+    field("outlinePx", tr("main.subStyleOutline"), 0, 6, 1),
+    field("bottomMarginPct", tr("main.subStyleMargin"), 0, 30, 1),
+    field("offsetMs", tr("main.subStyleOffset"), -60000, 60000, 50),
+    h(
+      "button",
+      {
+        class: "btn small",
+        type: "button",
+        onclick: () => {
+          t.subtitleStyle = {};
+          renderTabs();
+          touchAutosave();
+        },
+      },
+      tr("main.subStyleReset"),
+    ),
+    h("p", { class: "hint" }, tr("main.subStyleHint")),
+  );
+}
+
 function renderSubtitleTab(t: Title) {
   if (t.meta.subtitles.length === 0) return h("div", { class: "empty" }, tr("main.diesesVideoHatKeine2"));
   return h(
     "div",
     { class: "track-list" },
     h("p", { class: "hint" }, tr("main.textUntertitelSrtAss")),
+    subtitleStyleControls(t),
     ...t.meta.subtitles.map((s) =>
       h(
         "label",
@@ -1376,7 +1469,7 @@ function editorTitles(): EditorTitle[] {
     }
     return {
       index: i + 1,
-      label: t.label.trim() || t.meta.fileName.replace(/\.[^.]+$/, ""),
+      label: t.label.trim() || cleanTitle(t.meta.fileName),
       path: t.meta.path,
       chapters: Math.max(1, starts.length),
       durationSecs: offset,
@@ -1886,8 +1979,26 @@ async function requestCancel() {
   }
 }
 
+/** Warnings shown before a conversion starts (see preflight.ts). */
+function preflightInput() {
+  return {
+    fillPercent: state.calc?.fillPercent ?? null,
+    clamp: state.calc?.clamp ?? null,
+    titles: state.titles.map((t, i) => {
+      const c = bdCopy(t);
+      return {
+        label: t.label.trim() || t.meta.fileName,
+        copyFallback: c?.issue ?? null,
+        copyWithDeinterlace: !!c && !c.issue && state.settings?.deinterlace === "yadif",
+        quality: state.calc?.titles[i]?.quality ?? null,
+      };
+    }),
+  };
+}
+
 async function convert() {
   if (state.converting) return;
+  if (!(await confirmPreflight(preflightInput()))) return;
   const overlayEl = $("overlay");
   $("overlay-title").textContent = tr("main.konvertierungLaeuft");
   $("log").replaceChildren();
@@ -1926,6 +2037,7 @@ async function convert() {
         brightness: t.brightness,
         contrast: t.contrast,
         saturation: t.saturation,
+        subtitleStyle: t.subtitleStyle,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
@@ -1940,6 +2052,230 @@ async function convert() {
     });
   } catch (e) {
     onDone({ ok: false, message: String(e), videoTs: null, projectName: null, sizeMb: null, targetMb: 0, warnings: [] });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Projects (.musadvd): save, open, recovery autosave
+// ---------------------------------------------------------------------------
+
+let projectPath: string | null = null;
+/** Fingerprint of the last saved/opened state; the autosave skips a state that equals it. */
+let savedPrint = "";
+let projectBusy = false;
+
+const touchAutosave = createAutosave(
+  () => (state.converting || projectBusy || state.titles.length === 0 ? null : snapshotProject()),
+  () => savedPrint,
+);
+
+function snapshotProject(): ProjectFile {
+  slots[mediumOf(state.disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
+  const { disc, twoPass, motion, bdVideo, bdAudio, template, menuTitle, menuTitleAuto, output } = state;
+  return {
+    format: PROJECT_FORMAT,
+    version: PROJECT_VERSION,
+    savedAt: new Date().toISOString(),
+    disc,
+    tvStandard: state.settings?.tv_standard ?? null,
+    twoPass,
+    motion,
+    bdVideo,
+    bdAudio,
+    template,
+    menuMode: slots.dvd.mode,
+    menuModeBd: slots.bd.mode,
+    customLayout: slots.dvd.layout,
+    customLayoutBd: slots.bd.layout,
+    layoutKey: slots.dvd.key,
+    layoutKeyBd: slots.bd.key,
+    menuTitle,
+    menuTitleAuto,
+    output,
+    titles: state.titles.map((t) => ({
+      path: t.meta.path,
+      audio: [...t.audio],
+      subs: [...t.subs],
+      label: t.label,
+      chapters: [...t.chapters],
+      trimStart: t.trimStart,
+      trimEnd: t.trimEnd,
+      crop: t.crop ? { ...t.crop } : null,
+      mergeWithPrevious: t.mergeWithPrevious,
+      audioNames: { ...t.audioNames },
+      bdResolution: t.bdResolution,
+      bdRate: t.bdRate,
+      bdVideo: t.bdVideo,
+      bdQuality: t.bdQuality,
+      denoise: t.denoise,
+      brightness: t.brightness,
+      contrast: t.contrast,
+      saturation: t.saturation,
+      subtitleStyle: { ...t.subtitleStyle },
+    })),
+  };
+}
+
+/** A saved title on a freshly probed file: selections survive only for streams that still exist. */
+function titleFromProject(p: ProjectTitle, meta: VideoMetadata, afterSkipped: boolean): Title {
+  const audioIdx = new Set(meta.audio.map((a) => a.index));
+  let audio = p.audio.filter((i) => audioIdx.has(i)).slice(0, MAX_AUDIO);
+  if (audio.length === 0) audio = meta.audio.slice(0, MAX_AUDIO).map((a) => a.index);
+  const subsOk = new Set(meta.subtitles.filter((s) => s.supported).map((s) => s.index));
+  const dur = meta.durationSecs;
+  const chapters = p.chapters.filter((c) => c < dur);
+  return {
+    ...p,
+    id: nextId++,
+    meta,
+    audio: new Set(audio),
+    subs: new Set(p.subs.filter((i) => subsOk.has(i))),
+    label: p.label || cleanTitle(meta.fileName),
+    chapters: chapters.length > 0 ? chapters : meta.chapters.map((c) => c.startSecs),
+    // A changed source can be shorter than the saved section: use the whole file then.
+    trimStart: p.trimStart !== null && p.trimStart < dur ? p.trimStart : null,
+    trimEnd: p.trimEnd !== null && p.trimEnd <= dur ? p.trimEnd : null,
+    mergeWithPrevious: p.mergeWithPrevious && !afterSkipped,
+    audioNames: Object.fromEntries(Object.entries(p.audioNames).filter(([k]) => audioIdx.has(Number(k)))),
+  };
+}
+
+/** Pushes the restored state into the footer controls. */
+function syncControls() {
+  ($("disc") as HTMLSelectElement).value = state.disc;
+  ($("two-pass") as HTMLInputElement).checked = state.twoPass;
+  ($("motion-menu") as HTMLInputElement).checked = state.motion;
+  ($("bd-video") as HTMLSelectElement).value = state.bdVideo;
+  ($("bd-audio") as HTMLSelectElement).value = state.bdAudio;
+  ($("output") as HTMLInputElement).value = state.output;
+}
+
+/** Replaces the current project with `data`; missing files are listed, never fatal. */
+async function applyProject(data: ProjectFile, path: string | null) {
+  projectBusy = true;
+  try {
+    const gone = new Set(
+      await missingPaths([...data.titles.map((t) => t.path), ...layoutFiles(data.customLayout), ...layoutFiles(data.customLayoutBd)]).catch(() => [] as string[]),
+    );
+    const loaded: Title[] = [];
+    const lostTitles: string[] = [];
+    let afterSkipped = false;
+    state.probing += data.titles.length;
+    renderFooter();
+    try {
+      for (const p of data.titles) {
+        if (gone.has(p.path)) {
+          lostTitles.push(p.path);
+          afterSkipped = true;
+          continue;
+        }
+        status(tr("main.analysiere", { path: p.path }));
+        try {
+          loaded.push(titleFromProject(p, await probeFile(p.path), afterSkipped));
+          afterSkipped = false;
+        } catch (e) {
+          lostTitles.push(`${p.path} (${e})`);
+          afterSkipped = true;
+        }
+      }
+    } finally {
+      state.probing -= data.titles.length;
+    }
+
+    state.splitUndo = null;
+    state.titles = loaded;
+    state.selected = loaded[0]?.id ?? null;
+    normalizeMerge();
+    Object.assign(state, {
+      disc: data.disc,
+      twoPass: data.twoPass,
+      motion: data.motion,
+      bdVideo: data.bdVideo,
+      bdAudio: data.bdAudio,
+      menuTitle: data.menuTitle,
+      menuTitleAuto: data.menuTitleAuto,
+    });
+    if (data.output) state.output = data.output;
+    if (data.template && (state.templates.length === 0 || state.templates.some((x) => x.path === data.template))) state.template = data.template;
+    // The layouts were made for these titles; with titles missing the stale check stays on the saved key.
+    const key = (k: string | null, l: CustomLayout | null) => (l && loaded.length === data.titles.length ? titlesKey(editorTitles()) : k);
+    const noTemplates = state.templates.length === 0;
+    slots.dvd = { layout: data.customLayout, key: key(data.layoutKey, data.customLayout), mode: noTemplates ? "custom" : data.menuMode };
+    slots.bd = { layout: data.customLayoutBd, key: key(data.layoutKeyBd, data.customLayoutBd), mode: noTemplates ? "custom" : data.menuModeBd };
+    const live = slots[mediumOf(state.disc)];
+    [state.menuMode, state.customLayout, state.customLayoutKey] = [live.mode, live.layout, live.key];
+    state.layoutErrors = [];
+
+    let note = "";
+    if (data.tvStandard && state.settings && data.tvStandard !== state.settings.tv_standard) {
+      try {
+        state.settings = await storeSettings({ ...state.settings, tv_standard: data.tvStandard });
+        note = " " + tr("project.tvApplied", { tv: data.tvStandard });
+      } catch (e) {
+        note = " " + String(e);
+      }
+    }
+    saveSettings();
+    syncControls();
+    projectPath = path;
+    renderAll();
+    scheduleCalc();
+    savedPrint = fingerprint(snapshotProject());
+    if (path) void clearAutosave();
+    const name = path ? (path.split(/[\\/]/).pop() ?? path) : tr("project.recovered");
+    const layoutLost = [...layoutFiles(data.customLayout), ...layoutFiles(data.customLayoutBd)].filter((p) => gone.has(p));
+    if (lostTitles.length > 0 || layoutLost.length > 0) {
+      showMissing(lostTitles, layoutLost);
+      status(tr("project.openedPartial", { name, count: loaded.length, missing: lostTitles.length + layoutLost.length }) + note, "error");
+    } else {
+      status(tr("project.opened", { name, count: loaded.length }) + note);
+    }
+  } finally {
+    projectBusy = false;
+  }
+}
+
+async function openProject() {
+  if (state.converting || projectBusy) return;
+  const path = await pickOpenPath();
+  if (!path) return;
+  if (state.titles.length > 0 && !(await ask(tr("project.replaceAsk"), { title: tr("project.replaceTitle"), kind: "warning" }))) return;
+  try {
+    await applyProject(await readProject(path), path);
+  } catch (e) {
+    status(tr("project.openFailed", { e: e instanceof Error ? e.message : String(e) }), "error");
+  }
+}
+
+async function saveProjectFile(saveAs: boolean) {
+  if (state.converting || projectBusy) return;
+  const path = saveAs || !projectPath ? await pickSavePath(projectPath, state.menuTitle.trim() || state.titles[0]?.label || "") : projectPath;
+  if (!path) return;
+  try {
+    const p = snapshotProject();
+    await writeProject(path, p);
+    projectPath = path;
+    savedPrint = fingerprint(p);
+    void clearAutosave();
+    status(tr("project.saved", { path }));
+  } catch (e) {
+    status(tr("project.saveFailed", { e: e instanceof Error ? e.message : String(e) }), "error");
+  }
+}
+
+/** Offers the recovery autosave of an interrupted session; declining discards it. */
+async function offerRecovery() {
+  const p = await readAutosave();
+  if (!p) return;
+  const when = p.savedAt ? new Date(p.savedAt).toLocaleString() : "";
+  if (await ask(tr("project.restoreAsk", { count: p.titles.length, when }), { title: tr("project.restoreTitle"), kind: "info" })) {
+    try {
+      await applyProject(p, null);
+    } catch (e) {
+      status(tr("project.openFailed", { e: String(e) }), "error");
+    }
+  } else {
+    void clearAutosave();
   }
 }
 
@@ -1961,6 +2297,16 @@ async function init() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Delete" && !(e.target instanceof HTMLInputElement) && !state.converting) removeSelected();
   });
+  $("btn-open-project").addEventListener("click", () => void openProject());
+  $("btn-save-project").addEventListener("click", () => void saveProjectFile(false));
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || state.converting || document.querySelector(".overlay:not([hidden])")) return;
+    const k = e.key.toLowerCase();
+    if (k !== "o" && k !== "s") return;
+    e.preventDefault();
+    if (k === "o") void openProject();
+    else void saveProjectFile(e.shiftKey);
+  });
 
   try {
     state.settings = await getSettings();
@@ -1970,6 +2316,34 @@ async function init() {
     status(tr("main.einstellungenKonntenNichtGeladen", { e }), "error");
   }
   updateCustomDiscLabel();
+
+  // Header language picker: same setting as Settings → Language, saved right away.
+  const langPicker = $("ui-lang") as HTMLSelectElement;
+  const switchLanguage = async (code: string) => {
+    await loadLanguage(code);
+    applyStatic();
+    renderAll();
+    langPicker.value = code;
+    void relabelTitles();
+  };
+  void availableLanguages().then((list) => {
+    langPicker.replaceChildren(...list.map((l) => new Option(l.name, l.code)));
+    langPicker.value = state.settings?.ui_language ?? "en";
+  });
+  langPicker.addEventListener("change", async () => {
+    if (!state.settings || state.converting) {
+      langPicker.value = state.settings?.ui_language ?? "en";
+      return;
+    }
+    try {
+      state.settings = await storeSettings({ ...state.settings, ui_language: langPicker.value });
+      await switchLanguage(state.settings.ui_language);
+    } catch (e) {
+      langPicker.value = state.settings.ui_language;
+      status(String(e), "error");
+    }
+  });
+
   $("btn-studio").addEventListener("click", () => void openStudio());
   $("btn-settings").addEventListener("click", async () => {
     if (state.converting || !state.settings) return;
@@ -1979,12 +2353,8 @@ async function init() {
       const langChanged = saved.ui_language !== state.settings?.ui_language;
       const relabel = langChanged || saved.track_label_mode !== state.settings?.track_label_mode;
       state.settings = saved;
-      if (langChanged) {
-        await loadLanguage(saved.ui_language);
-        applyStatic();
-        renderAll();
-      }
-      if (relabel) void relabelTitles();
+      if (langChanged) await switchLanguage(saved.ui_language);
+      else if (relabel) void relabelTitles();
       if (saved.template_dir !== previousTemplateDir) {
         await refreshTemplates();
         renderAll();
@@ -2093,7 +2463,8 @@ async function init() {
 
   const initial = await startupFiles().catch(() => [] as string[]);
   if (initial.length > 0) await addFiles(initial);
-  // `convertx-gui <DVD-Ordner>`: burn an existing DVD folder.
+  else void offerRecovery();
+  // `musadvd-gui <DVD folder>`: burn an existing DVD folder.
   const burnDir = await startupBurn().catch(() => null);
   if (burnDir) {
     const parts = burnDir.split(/[\\/]/).filter(Boolean);
@@ -2129,9 +2500,7 @@ async function refreshTemplates() {
 async function checkForUpdate() {
   try {
     const update = await check();
-    if (update && (await ask(tr("update.prompt", { version: update.version }), { title: tr("update.title"), kind: "info" }))) {
-      await update.downloadAndInstall(); // the passive NSIS installer restarts the app
-    }
+    if (update) openUpdateDialog(update);
   } catch {
     // no update check possible, not worth bothering the user
   }

@@ -277,12 +277,14 @@ fn font_candidates(style: &TextStyle) -> Vec<PathBuf> {
         "impact" => Some(["impact.ttf"; 4]),
         _ => None,
     };
+    let system = if variants.is_none() { crate::fonts::find_family(&style.font_name).map(|f| f.path.clone()) } else { None };
     let variant = (style.bold as usize) | ((style.italic as usize) << 1);
     let dirs = font_dirs();
     let mut out = Vec::new();
     if let Some(f) = &style.font_file {
         out.extend(font_file_candidates_in(f, dirs));
     }
+    out.extend(system);
     for dir in dirs {
         if let Some(v) = variants {
             out.push(dir.join(v[variant]));
@@ -398,7 +400,7 @@ fn fallback_style(height: u32) -> TextStyle {
 /// Smallest scale a text is shrunk to before it gets cut off with an ellipsis (default).
 const MIN_TEXT_SCALE: f32 = 0.7;
 
-/// What to do with menu texts that are too wide for their box ("Text zu lang").
+/// What to do with menu texts that are too wide for their box ("text too long").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextOverflow {
     /// Shrink moderately (to 70 %), then cut off with "…" (CLI default).
@@ -472,6 +474,29 @@ pub(crate) fn subtitle_font_chain() -> Vec<FontArc> {
             chain
         })
         .clone()
+}
+
+/// [`subtitle_font_chain`] with the user's chosen family in front when it resolves (curated table
+/// first, then installed system families); `None` or an unknown family gives today's chain.
+pub(crate) fn subtitle_font_chain_for(family: Option<&str>) -> Vec<FontArc> {
+    let Some(name) = family.map(str::trim).filter(|n| !n.is_empty()) else { return subtitle_font_chain() };
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<FontArc>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = name.to_lowercase();
+    if let Some(c) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return c.clone();
+    }
+    let mut style = fallback_style(32);
+    style.font_name = name.to_string();
+    // The arial.ttf last-resort guess of `font_candidates` must not masquerade as the chosen font.
+    let chosen = font_candidates(&style)
+        .iter()
+        .filter(|p| key == "arial" || p.file_name().map_or(true, |n| !n.eq_ignore_ascii_case("arial.ttf")))
+        .find_map(|p| load_font(p));
+    let mut chain: Vec<FontArc> = chosen.into_iter().collect();
+    chain.extend(subtitle_font_chain());
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, chain.clone());
+    chain
 }
 
 /// One laid-out character: which font of the chain renders it, and its glyph there.

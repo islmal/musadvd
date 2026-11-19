@@ -170,7 +170,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
         let (mut cur, mut prefix) = (0usize, String::new());
         for (i, part) in parts.iter().enumerate() {
             if fid_name(part).len() > 255 {
-                return Err(bad(format!("Name zu lang: {part}")));
+                return Err(bad(format!("name too long: {part}")));
             }
             if !prefix.is_empty() {
                 prefix.push('/');

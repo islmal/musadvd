@@ -1065,7 +1065,8 @@ Input #0, matroska,webm, from 'movie.mkv':
         assert!(skipped.is_empty());
 
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let Some(ffmpeg) = ["bin/ffmpeg.exe", "bin/ffmpeg"].iter().map(|p| root.join(p)).find(|p| p.is_file()) else {
+        // Only this platform's binary: a shared checkout (WSL) would otherwise run bin/ffmpeg.exe with Linux paths.
+        let Some(ffmpeg) = Some(root.join(format!("bin/ffmpeg{}", std::env::consts::EXE_SUFFIX))).filter(|p| p.is_file()) else {
             return;
         };
 

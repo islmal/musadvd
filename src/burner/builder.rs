@@ -124,9 +124,9 @@ fn attrs_of(meta: &std::fs::Metadata, name: &str) -> Attrs {
 
 pub fn skip_reason(a: Attrs, f: &StudioFilter) -> Option<&'static str> {
     if f.skip_hidden && a.hidden {
-        Some("versteckt")
+        Some("hidden")
     } else if f.skip_system && a.system {
-        Some("Systemdatei")
+        Some("system file")
     } else if f.skip_reparse && a.reparse {
         Some("Link (reparse point)")
     } else {
@@ -571,8 +571,8 @@ mod tests {
     #[test]
     fn filters_decide_by_attributes() {
         let f = StudioFilter::default();
-        assert_eq!(skip_reason(Attrs { hidden: true, ..Default::default() }, &f), Some("versteckt"));
-        assert_eq!(skip_reason(Attrs { system: true, ..Default::default() }, &f), Some("Systemdatei"));
+        assert_eq!(skip_reason(Attrs { hidden: true, ..Default::default() }, &f), Some("hidden"));
+        assert_eq!(skip_reason(Attrs { system: true, ..Default::default() }, &f), Some("system file"));
         assert!(skip_reason(Attrs { reparse: true, ..Default::default() }, &f).unwrap().contains("Link"));
         assert_eq!(skip_reason(Attrs::default(), &f), None);
         let off = StudioFilter { skip_hidden: false, skip_system: false, skip_reparse: false, skip_in_use: false };

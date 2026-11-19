@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::Args;
-use musadvd::burner::builder::{self, BuildError};
-use musadvd::burner::layerbreak::Capacities;
-use musadvd::burner::studio::{self, Ctx, Event, Outcome};
-use musadvd::burner::tools::{self, CandidateOptions};
-use musadvd::config::AppSettings;
+use crate::burner::builder::{self, BuildError};
+use crate::burner::layerbreak::Capacities;
+use crate::burner::studio::{self, Ctx, Event, Outcome};
+use crate::burner::tools::{self, CandidateOptions};
+use crate::config::AppSettings;
 
 #[derive(Args)]
 pub struct ReadDisc {
@@ -73,7 +73,7 @@ pub struct DriveInfoArgs {
     pub drive: Option<String>,
 }
 
-fn settings() -> musadvd::config::BurnStudioSettings {
+fn settings() -> crate::config::BurnStudioSettings {
     AppSettings::load_or_default(&AppSettings::default_path()).0.burn_studio.sanitized()
 }
 
@@ -91,7 +91,7 @@ fn ctx() -> Ctx {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             if rt.block_on(tokio::signal::ctrl_c()).is_ok() {
                 cancel.store(true, Ordering::SeqCst);
-                eprintln!("\nAbbruch angefordert …");
+                eprintln!("\nCancel requested …");
             }
         });
     }
@@ -106,7 +106,7 @@ fn ctx() -> Ctx {
                 return;
             }
             *l = (p.phase.clone(), pct);
-            let left = p.eta_secs.map_or(String::new(), |s| format!(" – {} left", musadvd::eta::format_remaining(s)));
+            let left = p.eta_secs.map_or(String::new(), |s| format!(" – {} left", crate::eta::format_remaining(s)));
             eprint!("\r  {}: {pct:>3}% ({:.1}x){left}    ", p.phase, p.speed_x);
         }
     });
@@ -118,7 +118,7 @@ fn finish(r: Result<Outcome, String>) -> ExitCode {
     eprintln!();
     match r {
         Ok(o) if o.cancelled => {
-            eprintln!("Abgebrochen.");
+            eprintln!("Cancelled.");
             ExitCode::from(130)
         }
         Ok(o) => {
@@ -175,7 +175,7 @@ pub fn build_iso(a: BuildIso) -> ExitCode {
         println!("  Layer break at sector {}", lb.l0_sectors);
     }
     plan.warnings.iter().for_each(|w| println!("  Note: {w}"));
-    finish(studio::build(&Ctx { settings: musadvd::config::BurnStudioSettings { build: cfg, ..c.settings.clone() }, ..c }, &plan, &a.output))
+    finish(studio::build(&Ctx { settings: crate::config::BurnStudioSettings { build: cfg, ..c.settings.clone() }, ..c }, &plan, &a.output))
 }
 
 pub fn iso_label(a: IsoLabel) -> ExitCode {
@@ -201,7 +201,7 @@ pub fn ifo_layerbreak(a: IfoLayerbreak) -> ExitCode {
     let g = settings().general;
     let opts = CandidateOptions { prefer_non_seamless: g.lb_check_seamless, show_interleaved: g.lb_show_interleaved || a.all };
     let found = if a.source.is_dir() {
-        let cfg = musadvd::config::StudioBuild { prompts: "always".into(), ..Default::default() };
+        let cfg = crate::config::StudioBuild { prompts: "always".into(), ..Default::default() };
         let plan = match builder::plan_build(&studio::build_input(std::slice::from_ref(&a.source), ""), &cfg) {
             Ok(p) => p,
             Err(e) => return fail(e),

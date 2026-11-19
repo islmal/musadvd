@@ -66,7 +66,7 @@ const treeNodes = (): { id: PageId; label: string; children?: { id: PageId; labe
 
 /**
  * Opens the settings dialog on a copy of `current`. `onSaved` receives the stored settings;
- * "Abbrechen" changes nothing.
+ * "Cancel" changes nothing.
  */
 export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguages: { code: string; name: string }[], onSaved: (s: AppSettings) => void) {
   let draft: AppSettings = structuredClone(current);

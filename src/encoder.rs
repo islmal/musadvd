@@ -795,6 +795,8 @@ pub struct EncodeJob<'a> {
     pub audio_filters: Vec<Option<String>>,
     /// Stream copy of the source video (passed [`dvd_video_copy`]): no filter, no hwaccel, no 2-pass.
     pub copy_video: bool,
+    /// Styling and sync of the text subtitles (Subtitles tab).
+    pub subtitle_style: textsub::SubtitleStyle,
 }
 
 /// 2-pass statistics files (`{stem}_2pass*.log|.mbtree|.temp`) in `dir`.
@@ -1040,7 +1042,7 @@ pub async fn run_encode(
     mut progress: impl FnMut(EncodePhase, FfmpegProgress),
 ) -> Result<Vec<String>, ToolError> {
     let duration = job.info.duration_secs;
-    let io = |error| ToolError::Io { tool: "Arbeitsordner".into(), error };
+    let io = |error| ToolError::Io { tool: "work folder".into(), error };
     let mut stages = Vec::new();
     if let Some(args) = job.subtitle_args() {
         tools.ffmpeg(&args, duration, |_| {}).await?;
@@ -1660,10 +1662,10 @@ async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) 
     let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Text subtitle #{}", sub.index), status: String::new(), log: e.to_string() };
     let path = job.dir.join(job.srt(n));
     let data = std::fs::read(&path).map_err(|error| ToolError::Io { tool: path.display().to_string(), error })?;
-    let (dir, tv, folder) = (job.dir.clone(), job.tv, format!("{}_s{}", job.stem, n + 1));
+    let (dir, tv, folder, style) = (job.dir.clone(), job.tv, format!("{}_s{}", job.stem, n + 1), job.subtitle_style.clone());
     let (xml, _count) = tokio::task::spawn_blocking(move || {
         let (cues, _skipped) = textsub::parse_srt(&String::from_utf8_lossy(&data));
-        let decoded = textsub::render_cues(&cues, tv);
+        let decoded = textsub::render_cues_styled(&cues, tv, &style);
         let (w, h) = tv.size();
         let whole = subpic::Target { frame: (w, h), area: (0, 0, w, h), source: (0, 0, w, h) };
         subpic::render(&decoded, &whole, tv, &dir, &folder)
@@ -2397,6 +2399,7 @@ mod tests {
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,
+            subtitle_style: Default::default(),
         };
         let args: Vec<String> = job.encode_args("pipe:1").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
@@ -3065,6 +3068,7 @@ mod tests {
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,
+            subtitle_style: Default::default(),
         };
         let args: Vec<String> = job.encode_args("o.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.join(" ").contains("-c:a:0 copy -sn"), "{args:?}");
@@ -3096,6 +3100,7 @@ mod tests {
             audio_modes: vec![AudioMode::Auto, AudioMode::Ac3],
             audio_filters: vec![],
             copy_video: false,
+            subtitle_style: Default::default(),
         };
         let outs = job.audio_outs();
         assert_eq!(outs.len(), 2);
@@ -3137,6 +3142,7 @@ mod tests {
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,
+            subtitle_style: Default::default(),
         };
         let dvd = strings(job.encode_args("o.mpg"));
         assert!(dvd.starts_with("-y -ss 10.000 -to 40.000 -i in.mkv -map 0:0 -vf crop=1920:800:0:140,fps=25,scale=720:"), "{dvd}");
@@ -3566,6 +3572,7 @@ mod tests {
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: true,
+            subtitle_style: Default::default(),
         };
         assert!(!job.uses_two_pass());
 

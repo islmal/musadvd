@@ -318,7 +318,7 @@ function viewRead(host: Host): HTMLElement {
     "div",
     {},
     el("div", { class: "opt-group" }, el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, t("studio.views.ziel")), row)),
-    el("p", { class: "hint" }, t("studio.views.teilenLayoutDateiLesefehler", { split: r.split, layout_file: r.layout_file, r: r.ignore_read_errors ? "ignorieren" : "abbrechen" })),
+    el("p", { class: "hint" }, t("studio.views.teilenLayoutDateiLesefehler", { split: r.split, layout_file: r.layout_file, r: r.ignore_read_errors ? t("studio.views.readErrorsIgnore") : t("studio.views.readErrorsAbort") })),
     actionBar(go),
   );
 }

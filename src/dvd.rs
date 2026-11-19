@@ -255,8 +255,8 @@ pub(crate) async fn remove_old_output(dir: &Path) -> Result<(), BuildError> {
             }
             Err(e) if e.raw_os_error() == Some(32) => {
                 return Err(BuildError::Template(format!(
-                    "{}: die alte DVD ist noch in einem anderen Programm geöffnet (z. B. VLC oder Explorer). \
-                     Bitte schließen oder ein anderes --output wählen.",
+                    "{}: the old DVD is still open in another program (e.g. VLC or Explorer). \
+                     Close it or choose a different --output.",
                     dir.display()
                 )))
             }
@@ -283,7 +283,7 @@ impl From<ToolError> for BuildError {
     }
 }
 
-/// DVD aspect ratio of the titles ("Seitenverhältnis").
+/// DVD aspect ratio of the titles (the UI's "aspect ratio").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AspectPolicy {
     /// 16:9 for wide sources, 4:3 otherwise.
@@ -312,7 +312,7 @@ pub struct ChapterSettings {
     pub interval_secs: f64,
     /// Shorter videos get no automatic chapters.
     pub min_video_secs: f64,
-    /// Name of chapters without a title; `<c>` = chapter number. `None` = "Kapitel N".
+    /// Name of chapters without a title; `<c>` = chapter number. `None` = the localized "Chapter N".
     pub label_template: Option<String>,
 }
 
@@ -377,7 +377,7 @@ pub struct BuildOptions {
     pub selections: Vec<StreamSelection>,
     /// Concurrent title encodes; `None` = half the logical CPUs ([`default_jobs`]).
     pub parallel_jobs: Option<usize>,
-    /// Start behaviour and what happens after a title ("Menü Optionen").
+    /// Start behaviour and what happens after a title (the UI's "menu options").
     pub playback: PlaybackOptions,
     /// No per-title root menu: the title's entry menu is its chapter menu.
     pub skip_root_menu: bool,
@@ -422,6 +422,22 @@ pub struct BuildOptions {
     pub cancel: CancelToken,
     /// Menus from the menu editor instead of the ConvertX template (`template` is unused then).
     pub custom_layout: Option<crate::layout::CustomLayout>,
+}
+
+impl BuildOptions {
+    /// The menu-editor layout with the global menu sound file (Settings / `--menu-audio`) filled into
+    /// every silent menu when motion menus are on, so custom menus honour it like templates do.
+    pub(crate) fn custom_layout_with_menu_audio(&self) -> Option<std::borrow::Cow<'_, crate::layout::CustomLayout>> {
+        let layout = self.custom_layout.as_ref()?;
+        Some(match &self.motion_audio {
+            MenuAudio::File(path) if self.motion_menu => {
+                let mut l = layout.clone();
+                crate::layout::apply_default_menu_audio(&mut l, path);
+                std::borrow::Cow::Owned(l)
+            }
+            _ => std::borrow::Cow::Borrowed(layout),
+        })
+    }
 }
 
 /// Result of the menu stage, whichever way the menus were made.
@@ -484,6 +500,9 @@ pub struct StreamSelection {
     pub contrast: Option<f32>,
     #[serde(default)]
     pub saturation: Option<f32>,
+    /// Styling and timing offset of this title's text subtitles.
+    #[serde(default)]
+    pub subtitle_style: crate::textsub::SubtitleStyle,
 }
 
 /// Index ranges of the menu entries: an input plus all directly following inputs that are merged
@@ -650,7 +669,33 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
     let weighted_secs: f64 = encoded.iter().map(|t| t.duration_secs * t.weight).sum();
     let audio_kbit: f64 = encoded.iter().map(|t| t.audio_kbps as f64 * t.duration_secs).sum();
     let audio_kbps = (audio_kbit / weighted_secs.max(1.0)).ceil() as u32;
-    calculator::calculate_capped(disc, weighted_secs, audio_kbps, overhead, profile.max_video_kbps_for(disc))
+    let plan = calculator::calculate_capped(disc, weighted_secs, audio_kbps, overhead, profile.max_video_kbps_for(disc))?;
+    // The calculator assumes every title gets `base * weight`, but `weighted_video_kbps` pins
+    // titles at the disc's floor/ceiling. Re-solve the base against the real per-title sizes.
+    let real_kbit = |base: u32| -> f64 {
+        overhead + encoded.iter().map(|t| (weighted_video_kbps(disc, base, t.weight, t.audio_kbps) + t.audio_kbps) as f64 * t.duration_secs).sum::<f64>()
+    };
+    // Unweighted titles are exactly what the calculator sized (its floor/ceiling clamp is the same).
+    if encoded.iter().all(|t| t.weight == 1.0) {
+        return Ok(plan);
+    }
+    let target = disc.target_kbit();
+    let (base, clamp) = if real_kbit(0) > target {
+        // Even every title at its floor overflows: report that honestly (the floor base also keeps
+        // `weighted_video_kbps` at the floor for each title).
+        let max_w = encoded.iter().map(|t| t.weight).fold(1.0, f64::max);
+        (((disc.limits().min_video_kbps as f64 / max_w).floor() as u32).min(plan.video_kbps), Clamp::Min)
+    } else {
+        // real_kbit is monotone in the base: largest base that still fits.
+        let (mut lo, mut hi) = (0, plan.video_kbps);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if real_kbit(mid) <= target { lo = mid } else { hi = mid - 1 }
+        }
+        // Still at the calculator's base: keep its verdict (e.g. capped at the maximum).
+        (lo, if lo == plan.video_kbps { plan.clamp } else { Clamp::None })
+    };
+    Ok(BitratePlan { video_kbps: base, clamp, estimated_mb: real_kbit(base) / 8192.0, ..plan })
 }
 
 /// Title frame size actually used: the chosen one, except that LP turns Full D1 into Half D1
@@ -791,6 +836,8 @@ struct TitlePlan {
     ui_lang: UiLang,
     video: VideoProcessing,
     loudnorm: bool,
+    /// Styling and timing offset of the text subtitles ([`StreamSelection::subtitle_style`]).
+    subtitle_style: crate::textsub::SubtitleStyle,
     video_mode: DvdVideoMode,
     /// Video is stream-copied at this average kbit/s ([`encoder::dvd_video_copy`]).
     copy_kbps: Option<u32>,
@@ -1088,6 +1135,7 @@ async fn encode_title(
         video: t.video,
         audio_filters,
         copy_video,
+        subtitle_style: t.subtitle_style.clone(),
     };
     let frames_per_run = t.info.duration_secs * output_fps(tv);
     // Frames done count over both runs of a 2-pass encode; never let them go backwards (the
@@ -1303,6 +1351,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             ui_lang: opts.ui_lang,
             video: opts.video.with_picture(sel.denoise, sel.brightness, sel.contrast, sel.saturation),
             loudnorm: opts.loudnorm,
+            subtitle_style: sel.subtitle_style.clone(),
             video_mode,
             copy_kbps: None,
             copy_bytes: None,
@@ -1354,7 +1403,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| titles[0].label.clone());
 
-    let stage: MenuStage = if let Some(layout) = &opts.custom_layout {
+    let sounded = opts.custom_layout_with_menu_audio();
+    let stage: MenuStage = if let Some(layout) = sounded.as_ref() {
         // 2-4. Custom layout (menu editor) ------------------------------------------------------------
         cancel.check()?;
         log(Event::Phase(BuildPhase::Menus));
@@ -2214,6 +2264,48 @@ mod tests {
         assert!(heavy.video_kbps < flat.video_kbps);
     }
 
+    /// Sum over encoded titles of the sizes `weighted_video_kbps` really gives, plus fixed overhead.
+    fn real_mb(disc: DiscType, plan: &BitratePlan, loads: &[TitleLoad], overhead_kbit: f64) -> f64 {
+        let kbit: f64 = loads
+            .iter()
+            .map(|t| (weighted_video_kbps(disc, plan.video_kbps, t.weight, t.audio_kbps) + t.audio_kbps) as f64 * t.duration_secs)
+            .sum();
+        (kbit + overhead_kbit) / 8192.0
+    }
+
+    #[test]
+    fn low_title_hitting_the_floor_still_fits_dvd5() {
+        let mk = |secs: f64, weight: f64| TitleLoad { duration_secs: secs, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight };
+        // Long Low title: 0.75 * base falls under the 1000 kbit/s floor, a short High title takes the rest.
+        let loads = [mk(20_000.0, QUALITY_LOW), mk(8000.0, QUALITY_HIGH)];
+        let plan = bitrate_plan(DiscType::Dvd5, &loads, 0.0, EncodingProfile::Auto).unwrap();
+        let used = real_mb(DiscType::Dvd5, &plan, &loads, DiscType::Dvd5.default_mux_overhead_kbit());
+        assert!(used <= DiscType::Dvd5.target_mb() as f64, "{used} MB");
+        assert!((used - plan.estimated_mb).abs() < 1e-6 && plan.fits());
+        assert_eq!(weighted_video_kbps(DiscType::Dvd5, plan.video_kbps, QUALITY_LOW, 192), DiscType::Dvd5.limits().min_video_kbps);
+    }
+
+    #[test]
+    fn low_title_hitting_the_floor_still_fits_bd25() {
+        let mk = |secs: f64, weight: f64| TitleLoad { duration_secs: secs, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight };
+        let loads = [mk(26_000.0, QUALITY_LOW), mk(12_000.0, QUALITY_HIGH)];
+        let plan = bitrate_plan(DiscType::Bd25, &loads, 0.0, EncodingProfile::Auto).unwrap();
+        assert!(weighted_video_kbps(DiscType::Bd25, plan.video_kbps, QUALITY_LOW, 448) == DiscType::Bd25.limits().min_video_kbps);
+        let used = real_mb(DiscType::Bd25, &plan, &loads, DiscType::Bd25.default_mux_overhead_kbit());
+        assert!(used <= DiscType::Bd25.target_mb() as f64, "{used} MB");
+        assert!((used - plan.estimated_mb).abs() < 1e-6 && plan.fits());
+    }
+
+    #[test]
+    fn floors_that_overflow_are_reported_honestly() {
+        let l = TitleLoad { duration_secs: 9.0 * 3600.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: QUALITY_LOW };
+        let plan = bitrate_plan(DiscType::Dvd5, &[l], 0.0, EncodingProfile::Auto).unwrap();
+        assert_eq!(plan.clamp, Clamp::Min);
+        assert!(!plan.fits());
+        let used = real_mb(DiscType::Dvd5, &plan, &[l], DiscType::Dvd5.default_mux_overhead_kbit());
+        assert!((used - plan.estimated_mb).abs() < 1e-6);
+    }
+
     #[test]
     fn copied_titles_take_a_fixed_share_first() {
         let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 640, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
@@ -2575,6 +2667,7 @@ mod tests {
             ui_lang: UiLang::DE,
             video: VideoProcessing::default(),
             loudnorm: false,
+            subtitle_style: Default::default(),
             video_mode: DvdVideoMode::Encode,
             copy_kbps: None,
             copy_bytes: None,

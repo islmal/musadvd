@@ -29,6 +29,23 @@ const BASELINE_ABOVE_BOX: i32 = 13;
 /// The XML used to pass `movie-height` two lines short of the frame ("recommended for spumux").
 const FRAME_TRIM: u32 = 2;
 
+/// User styling and sync of a title's text subtitles (Subtitles tab). Every field left at its
+/// default keeps today's measured spumux geometry, so the default output stays byte-identical.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SubtitleStyle {
+    /// Font family (curated name or an installed system family); `None` = bundled DejaVu Sans.
+    pub font_family: Option<String>,
+    /// Font size in percent of the default size (50–200).
+    pub font_size_pct: Option<f32>,
+    /// Outline width in pixels at DVD scale (0–6; scaled like the other metrics on HD).
+    pub outline_px: Option<u32>,
+    /// Distance of the last baseline box from the bottom edge, in percent of the frame height (0–30).
+    pub bottom_margin_pct: Option<f32>,
+    /// Shifts every cue by this many milliseconds (negative = earlier) before rendering.
+    pub offset_ms: i64,
+}
+
 const FILL: Rgba<u8> = Rgba([255, 255, 255, 255]);
 const EDGE: Rgba<u8> = Rgba([0, 0, 0, 255]);
 
@@ -346,7 +363,7 @@ pub fn parse_srt(text: &str) -> (Vec<Cue>, usize) {
 
 /// Frame and metrics of the rendering: the DVD values are measured (see the module docs), other
 /// canvases scale them.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Canvas {
     pub size: (u32, u32),
     em: f32,
@@ -356,19 +373,64 @@ pub struct Canvas {
     bottom: u32,
     baseline_above: i32,
     trim: u32,
+    /// Geometry scale relative to the DVD metrics (1.0 on DVD), for DVD-pixel style values.
+    scale: f32,
+    /// User-chosen font family (see [`SubtitleStyle::font_family`]).
+    font: Option<String>,
 }
 
 impl Canvas {
     pub fn dvd(tv: TvStandard) -> Canvas {
-        Canvas { size: tv.size(), em: EM_PX, pitch: LINE_PITCH, outline: OUTLINE, side: SIDE_MARGIN, bottom: BOTTOM_MARGIN, baseline_above: BASELINE_ABOVE_BOX, trim: FRAME_TRIM }
+        Canvas { size: tv.size(), em: EM_PX, pitch: LINE_PITCH, outline: OUTLINE, side: SIDE_MARGIN, bottom: BOTTOM_MARGIN, baseline_above: BASELINE_ABOVE_BOX, trim: FRAME_TRIM, scale: 1.0, font: None }
     }
 
     /// HD canvas: em 65 px at 1080 lines (what tsMuxeR was configured with), the rest scaled from the DVD metrics.
     pub fn hd(width: u32, height: u32) -> Canvas {
         let s = 65.0 * height as f32 / 1080.0 / EM_PX;
         let px = |v: f32| (v * s).round();
-        Canvas { size: (width, height), em: EM_PX * s, pitch: px(LINE_PITCH as f32) as i32, outline: px(OUTLINE as f32) as i32, side: px(SIDE_MARGIN as f32) as u32, bottom: px(BOTTOM_MARGIN as f32) as u32, baseline_above: px(BASELINE_ABOVE_BOX as f32) as i32, trim: 0 }
+        Canvas { size: (width, height), em: EM_PX * s, pitch: px(LINE_PITCH as f32) as i32, outline: px(OUTLINE as f32) as i32, side: px(SIDE_MARGIN as f32) as u32, bottom: px(BOTTOM_MARGIN as f32) as u32, baseline_above: px(BASELINE_ABOVE_BOX as f32) as i32, trim: 0, scale: s, font: None }
     }
+}
+
+impl Canvas {
+    /// Applies the user's size, outline, bottom margin and font; out-of-range values are clamped.
+    /// The default style leaves every metric untouched.
+    pub fn with_style(mut self, st: &SubtitleStyle) -> Canvas {
+        if let Some(p) = st.font_size_pct.filter(|p| p.is_finite()) {
+            let k = p.clamp(50.0, 200.0) / 100.0;
+            self.em *= k;
+            self.pitch = (self.pitch as f32 * k).round() as i32;
+            self.baseline_above = (self.baseline_above as f32 * k).round() as i32;
+        }
+        if let Some(o) = st.outline_px {
+            self.outline = (o.min(6) as f32 * self.scale).round() as i32;
+        }
+        if let Some(m) = st.bottom_margin_pct.filter(|m| m.is_finite()) {
+            self.bottom = (self.size.1 as f32 * m.clamp(0.0, 30.0) / 100.0).round() as u32;
+        }
+        self.font = st.font_family.as_ref().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+        self
+    }
+}
+
+/// Shifts every cue by `offset_ms` (negative = earlier): cues ending at or before 0 are dropped,
+/// starts are clamped to 0.
+pub fn apply_offset(cues: Vec<Cue>, offset_ms: i64) -> Vec<Cue> {
+    if offset_ms == 0 {
+        return cues;
+    }
+    let d = offset_ms as f64 / 1000.0;
+    cues.into_iter()
+        .filter_map(|mut c| {
+            c.start += d;
+            c.end += d;
+            if c.end <= 0.0 {
+                return None;
+            }
+            c.start = c.start.max(0.0);
+            Some(c)
+        })
+        .collect()
 }
 
 fn text_width_em(fonts: &[FontArc], text: &str, em: f32) -> f32 {
@@ -596,7 +658,7 @@ pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u3
 
 /// [`render_cue`] on any [`Canvas`].
 pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32, u32)> {
-    let fonts = crate::menu::subtitle_font_chain();
+    let fonts = crate::menu::subtitle_font_chain_for(c.font.as_deref());
     let (fw, fh) = c.size;
     let max_w = (fw - 2 * c.side) as f32;
     let (alignment, cue_lines) = extract_alignment(cue_lines);
@@ -735,10 +797,20 @@ pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32
 
 /// Renders all cues in parallel into pictures on the DVD frame of `tv`.
 pub fn render_cues(cues: &[Cue], tv: TvStandard) -> Decoded {
+    render_cues_on(cues, tv, &Canvas::dvd(tv))
+}
+
+/// [`render_cues`] with the user's offset (applied first) and style.
+pub fn render_cues_styled(cues: &[Cue], tv: TvStandard, style: &SubtitleStyle) -> Decoded {
+    let shifted = apply_offset(cues.to_vec(), style.offset_ms);
+    render_cues_on(&shifted, tv, &Canvas::dvd(tv).with_style(style))
+}
+
+fn render_cues_on(cues: &[Cue], tv: TvStandard, canvas: &Canvas) -> Decoded {
     let pictures = cues
         .par_iter()
         .filter_map(|c| {
-            let (image, x, y) = render_cue(tv, &c.lines)?;
+            let (image, x, y) = render_cue_on(canvas, &c.lines)?;
             Some(Picture { start: c.start, end: c.end, forced: false, x, y, image })
         })
         .collect();
@@ -748,6 +820,37 @@ pub fn render_cues(cues: &[Cue], tv: TvStandard) -> Decoded {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ink_rows(img: &RgbaImage, y: u32) -> (u32, u32) {
+        let top = (0..img.height()).find(|&r| (0..img.width()).any(|x| img.get_pixel(x, r)[3] > 0)).unwrap();
+        let bot = (0..img.height()).rev().find(|&r| (0..img.width()).any(|x| img.get_pixel(x, r)[3] > 0)).unwrap();
+        (y + top, y + bot)
+    }
+
+    #[test]
+    fn style_default_is_identity_and_applies() {
+        let d = Canvas::dvd(TvStandard::Pal);
+        assert_eq!(d.clone().with_style(&SubtitleStyle::default()), d);
+        let l = vec!["Hallo".to_string()];
+        let (a, _, ya) = render_cue_on(&d, &l).unwrap();
+        let big = d.clone().with_style(&SubtitleStyle { font_size_pct: Some(150.0), ..Default::default() });
+        let (b, _, yb) = render_cue_on(&big, &l).unwrap();
+        let (ra, rb) = (ink_rows(&a, ya), ink_rows(&b, yb));
+        assert!(rb.1 - rb.0 > ra.1 - ra.0);
+        let up = d.clone().with_style(&SubtitleStyle { bottom_margin_pct: Some(20.0), ..Default::default() });
+        let (c, _, yc) = render_cue_on(&up, &l).unwrap();
+        assert!(ink_rows(&c, yc).1 < ra.1);
+        let unk = d.with_style(&SubtitleStyle { font_family: Some("No Such Family 123".into()), ..Default::default() });
+        assert!(render_cue_on(&unk, &l).is_some());
+    }
+
+    #[test]
+    fn offset_shifts_and_drops() {
+        let c = |s, e| Cue { start: s, end: e, lines: vec!["x".into()] };
+        let out = apply_offset(vec![c(0.5, 1.0), c(1.0, 3.0), c(5.0, 6.0)], -1500);
+        assert_eq!(out, vec![c(0.0, 1.5), c(3.5, 4.5)]);
+        assert_eq!(apply_offset(vec![c(1.0, 2.0)], 500), vec![c(1.5, 2.5)]);
+    }
 
     #[test]
     fn parses_srt_variants() {

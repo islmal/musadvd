@@ -266,6 +266,35 @@ export function chapterLabel(t: EditorTitle | undefined, n: number): string {
   return t?.chapterNames?.[n - 1]?.trim() || tr("layout.kapitel", { n });
 }
 
+const RIP_TAGS = "2160p|1080p|720p|480p|4k|x264|x265|h264|h265|hevc|avc|aac|ac3|dts|webrip|web-dl|webdl|bluray|brrip|bdrip|dvdrip|hdtv|hdrip|10bit|remux";
+const RIP_TAG_RE = new RegExp(`(^|[\\s._\\-\\[(])(?:${RIP_TAGS})(?=$|[\\s._\\-\\])])`, "gi");
+
+/** Readable default caption from a file name: no extension, archive/YouTube ids or rip tags; never empty. */
+export function cleanTitle(name: string): string {
+  const base = name.trim();
+  let s = base.replace(/\.(mkv|mp4|avi|mov|m4v|wmv|flv|webm|ts|m2ts|mpg|mpeg|vob|iso)$/i, "");
+  // shortcut: an 11-char bracket needs a digit to count as a YouTube id, so "[Commentary]" survives.
+  s = s.replace(/\s*\[(?:-?\d[\d_]*|(?=[^\]]*\d)[A-Za-z0-9_-]{11})\]/g, "").replace(/\s*\(\d{5,}\)/g, "");
+  if (!/\s/.test(s)) s = s.replace(/[_.]+/g, " ");
+  // Run twice: adjacent tags share their separator, which the first match consumes.
+  s = s.replace(RIP_TAG_RE, "$1").replace(RIP_TAG_RE, "$1");
+  s = s.replace(/[[(]\s*[\])]/g, "").replace(/\s+/g, " ").replace(/^[\s\-_.|]+|[\s\-_.|]+$/g, "");
+  return s || base;
+}
+
+/** Font size shrunk (not below 55 %) so `value` fits `width`; sizes stay untouched when it already fits. */
+function fitSize(value: string, size: number, width: number, font: string, bold: boolean): number {
+  let w = value.length * size * 0.55; // shortcut: rough estimate without a DOM (tests), canvas below is exact
+  if (typeof document !== "undefined") {
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (ctx) {
+      ctx.font = `${bold ? "bold " : ""}${size}px "${font}"`;
+      w = ctx.measureText(value).width;
+    }
+  }
+  return w <= width ? size : Math.max(Math.floor(size * 0.55), Math.floor((size * width) / w));
+}
+
 /** Whether a title needs an audio/subtitle selection menu. */
 export function needsSettings(t: EditorTitle): boolean {
   return (t.audioTracks?.length ?? 0) > 1 || (t.subtitleTracks?.length ?? 0) > 0;
@@ -567,11 +596,21 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
 
   const layout: CustomLayout = { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, menus };
   if (preset) applyPreset(layout, preset);
+  // After the preset: it may change the font, and thus the text width.
+  for (const m of layout.menus) {
+    for (const e of m.elements) if (e.type === "text") e.size = fitSize(e.text, e.size, e.w, e.font, e.bold);
+  }
   return layout;
 }
 
 export type MenuPreset = "swiss" | "cinema" | "midnight";
 export const MENU_PRESETS: MenuPreset[] = ["swiss", "cinema", "midnight"];
+/** Bundled menu sound per preset (file in `assets/menu-audio/`, shipped as `menu-audio/`). */
+export const PRESET_SOUNDS: Record<MenuPreset, string> = {
+  swiss: "sunlight-on-the-floorboards.opus",
+  cinema: "porcelain-hours.opus",
+  midnight: "view-from-the-berth.opus",
+};
 
 interface PresetStyle {
   bg: string;

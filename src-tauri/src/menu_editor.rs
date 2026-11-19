@@ -84,10 +84,46 @@ pub fn check_layout(layout: CustomLayout, titles: Vec<EditorTitle>, tv: String) 
         Frame::Tv(tv) => layout::validate(&layout, &titles, tv),
         Frame::Bd(frame) => layout::validate_bd(&layout, &titles, frame),
     };
-    match result {
-        Ok(()) => vec![],
-        Err(e) => e.0,
+    let mut errs = result.err().map(|e| e.0).unwrap_or_default();
+    errs.extend(check_media_streams(&layout));
+    errs
+}
+
+/// True/false whether `path` has a stream of `kind` ("audio"/"video"); `None` when ffprobe is
+/// missing or fails (then the check is skipped).
+fn has_stream(ffprobe: &Path, path: &Path, kind: &str) -> Option<bool> {
+    let out = musadvd::tools::blocking_tool_command(ffprobe)
+        .args(["-v", "error", "-select_streams", &kind[..1], "-show_entries", "stream=codec_type", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .ok()?;
+    out.status.success().then(|| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+/// Menu sound files need an audio stream and background/element video files a video stream;
+/// otherwise the build would only fail at encode time.
+fn check_media_streams(layout: &CustomLayout) -> Vec<String> {
+    let Some(ffprobe) = musadvd::tools::find_tool("ffprobe") else { return vec![] };
+    let mut errs = Vec::new();
+    for m in &layout.menus {
+        let mut check = |p: &Path, kind: &str, what: &str| {
+            if p.is_file() && has_stream(&ffprobe, p, kind) == Some(false) {
+                errs.push(format!("Menu '{}': {what} '{}' has no {kind} stream", m.name, p.display()));
+            }
+        };
+        if let layout::MenuSound::File { path } = &m.audio {
+            check(Path::new(path), "audio", "sound file");
+        }
+        if let Some(p) = m.background.video.as_ref().and_then(|v| v.path.as_ref()) {
+            check(p, "video", "background video");
+        }
+        for e in &m.elements {
+            if let layout::Content::Video { path: Some(p), .. } = &e.content {
+                check(p, "video", "video file");
+            }
+        }
     }
+    errs
 }
 
 /// The lines a text element shows on the disc (word wrap and "…" exactly as the build draws

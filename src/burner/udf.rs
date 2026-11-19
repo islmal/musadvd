@@ -353,7 +353,7 @@ fn build_nodes(entries: &[TreeEntry]) -> Result<(Vec<Node>, Vec<ImageFile>, Vec<
         let (mut cur, mut prefix) = (0usize, String::new());
         for (i, part) in parts.iter().enumerate() {
             if fid_name(part).len() > 255 {
-                return Err(invalid(format!("Name zu lang: {part}")));
+                return Err(invalid(format!("name too long: {part}")));
             }
             if !prefix.is_empty() {
                 prefix.push('/');

@@ -200,7 +200,38 @@ export interface InputConfig {
   brightness?: number | null;
   contrast?: number | null;
   saturation?: number | null;
+  /** Styling and timing offset of the title's text subtitles. */
+  subtitleStyle?: SubtitleStyle;
 }
+
+/** Mirrors `textsub::SubtitleStyle`; null/absent fields keep the default look. */
+export interface SubtitleStyle {
+  /** Curated or installed system font family; null = bundled DejaVu Sans. */
+  fontFamily?: string | null;
+  /** Percent of the default size (50-200). */
+  fontSizePct?: number | null;
+  /** Outline width in px at DVD scale (0-6). */
+  outlinePx?: number | null;
+  /** Bottom margin in percent of the frame height (0-30). */
+  bottomMarginPct?: number | null;
+  /** Cue shift in milliseconds (negative = earlier). */
+  offsetMs?: number;
+}
+
+export interface SystemFont {
+  family: string;
+  path: string;
+}
+
+/** Installed OS font families, sorted and deduplicated (empty on failure). */
+export const listSystemFonts = () => invoke<SystemFont[]>("list_system_fonts").catch(() => [] as SystemFont[]);
+/** Writes a `.musadvd` project atomically; the JSON shape is owned by `project.ts`. */
+export const saveProject = (path: string, project: unknown) => invoke<void>("save_project", { path, project });
+export const loadProject = (path: string) => invoke<unknown>("load_project", { path });
+/** Paths from `paths` that are not existing files. */
+export const missingPaths = (paths: string[]) => invoke<string[]>("missing_paths", { paths });
+/** Recovery autosave file next to the settings file. */
+export const autosavePath = () => invoke<string>("autosave_path");
 
 export interface ConversionConfig {
   inputs: InputConfig[];
@@ -499,3 +530,20 @@ export const detectSceneChapters = (path: string, startSecs: number | null, endS
 /** Computes directional D-pad navigation for all buttons of `menu` using the author engine. */
 export const menuNavigation = (menu: CustomMenu, canvas: { width: number; height: number }, tv: string) =>
   invoke<ButtonNav[]>("menu_navigation", { menu, canvas, tv });
+
+/** How this copy was installed: decides who replaces the binaries on update. */
+export type InstallMode = "installer" | "appimage" | "portable" | "system";
+/** Absolute path of a bundled menu sound by file name, `null` when it is not shipped. */
+export const bundledMenuSound = (name: string) => invoke<string | null>("bundled_menu_sound", { name });
+export const updateInstallMode = () => invoke<InstallMode>("update_install_mode");
+/** Downloads, verifies (SHA-256) and swaps in release `version` for AppImage/portable installs, then relaunches. */
+export const selfUpdate = (version: string) => invoke<void>("self_update", { version });
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+export const onUpdateProgress = (cb: (p: UpdateProgress) => void): Promise<UnlistenFn> =>
+  listen<UpdateProgress>("update-progress", (e) => cb(e.payload));
+/** One human-readable English step line (asset lookup, checksum, extract, swap, relaunch). */
+export const onUpdateLog = (cb: (line: string) => void): Promise<UnlistenFn> =>
+  listen<string>("update-log", (e) => cb(e.payload));

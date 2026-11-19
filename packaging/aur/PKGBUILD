@@ -1,6 +1,6 @@
 # Maintainer: islmal <https://github.com/islmal/musadvd>
 pkgname=musadvd-bin
-pkgver=0.1.5
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="DVD, Blu-ray and AVCHD authoring engine, desktop GUI, and Burn Studio"
 arch=('x86_64')
@@ -19,6 +19,8 @@ package() {
   install -Dm755 musadvd-gui "${pkgdir}/usr/bin/musadvd-gui"
   install -dm755 "${pkgdir}/usr/share/musadvd/locales"
   install -m644 locales/*.json "${pkgdir}/usr/share/musadvd/locales/"
+  install -dm755 "${pkgdir}/usr/share/musadvd/menu-audio"
+  install -m644 menu-audio/*.opus "${pkgdir}/usr/share/musadvd/menu-audio/"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 THIRD_PARTY_NOTICES.md "${pkgdir}/usr/share/doc/${pkgname}/THIRD_PARTY_NOTICES.md"
 

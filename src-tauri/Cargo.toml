@@ -1,6 +1,6 @@
 [package]
 name = "musadvd-gui"
-version = "0.1.5"
+version = "1.0.0"
 edition = "2021"
 description = "Desktop GUI (Tauri) for the MusaDVD authoring engine"
 license = "GPL-3.0-or-later"
@@ -21,3 +21,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync"] }
 base64 = "0.22"
+# Self-update of AppImage / portable installs (same crates tauri-plugin-updater already pulls in).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+flate2 = "1"
+tar = "0.4"

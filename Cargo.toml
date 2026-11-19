@@ -7,7 +7,7 @@ resolver = "2"
 
 [package]
 name = "musadvd"
-version = "0.1.5"
+version = "1.0.0"
 edition = "2021"
 description = "DVD, Blu-ray and AVCHD authoring engine and CLI with Burn Studio"
 license = "GPL-3.0-or-later"
@@ -37,6 +37,8 @@ serde_json = "1"
 unicode-bidi = "0.3"
 # Parallel menu rendering.
 rayon = "1"
+# Enumerates installed OS font families for the menu/subtitle font pickers.
+fontdb = "0.23"
 # MD5 of images and disc reads (Burn Studio).
 md-5 = "0.10"
 

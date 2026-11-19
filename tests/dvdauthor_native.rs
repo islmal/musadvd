@@ -32,7 +32,7 @@ fn record() -> Option<PathBuf> {
 }
 
 fn ffmpeg() -> PathBuf {
-    ["bin/ffmpeg.exe", "bin/ffmpeg"].iter().map(|p| root().join(p)).find(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("ffmpeg"))
+    [format!("bin/ffmpeg{}", std::env::consts::EXE_SUFFIX)].iter().map(|p| root().join(p)).find(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("ffmpeg"))
 }
 
 /// Input stream `name` (created with `ffmpeg_args` when recording and missing); the spumux

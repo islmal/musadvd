@@ -42,7 +42,7 @@ impl fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
-/// CPU priority of the external tools ("Prozesspriorität").
+/// CPU priority of the external tools (the UI's "process priority").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProcessPriority {
     #[default]

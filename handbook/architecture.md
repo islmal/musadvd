@@ -116,7 +116,10 @@ Register map: `GPR1` chapter mark, `GPR2` play-all flag, `GPR3`-`GPR5`/`GPR7` in
   highlight.
 - **Presets**: `draftLayout(titles, tv, heading, preset?)` in `frontend/src/layout.ts` restyles the
   draft as `swiss`, `cinema` or `midnight` (flat backgrounds, rects, text, highlight colours; no
-  bundled image files). The editor's preset picker applies one as a single undo step.
+  bundled image files). The editor's preset picker applies one as a single undo step and gives
+  every silent menu the preset's bundled music (`PRESET_SOUNDS` → `assets/menu-audio/*.opus`,
+  shipped as `menu-audio/` and located by the `bundled_menu_sound` command via
+  `i18n::resource_dirs`, the same lookup as the locales).
 - **Intros / motion menus**: `menu_anim.rs` interpolates keyframes and composites sprites in
   memory (rayon); frames are piped to the encoder and never touch disk. A page is one clip
   `[intro | loop]` with marks;
@@ -134,7 +137,7 @@ on-the-fly image through `ringbuf.rs`) feed a backend: `imapi` (default) or `dir
 
 `src-tauri/src/preview.rs` is a loopback HTTP server that streams a 480p H.264 fMP4 proxy from one
 ffmpeg child (one token per file). Filters come from `encoder::preview_filter` (same `source_chain` as the encode, including denoise and picture EQ); a seek starts a
-new stream. Used by the "Schnitt & Bild" tab (`frontend/src/edit.ts`).
+new stream. Used by the "Trim & picture" tab (`frontend/src/edit.ts`).
 
 ## Things that are easy to get wrong
 

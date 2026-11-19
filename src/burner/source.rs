@@ -120,7 +120,7 @@ impl SectorSource for FileSource {
             let n = self.file.read(&mut buf[got..])?;
             if n == 0 {
                 if lba * SECTOR + got as u64 >= self.sectors * SECTOR {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "hinter dem Ende des Images"));
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past the end of the image"));
                 }
                 buf[got..].fill(0); // image ends inside the last sector
                 break;
@@ -143,7 +143,7 @@ impl SectorSource for ZeroSource {
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
         check(buf);
         if lba + (buf.len() / S) as u64 > self.0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "hinter dem Ende"));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past the end"));
         }
         buf.fill(0);
         Ok(())
@@ -198,7 +198,7 @@ impl SectorSource for Bin2352Source {
         for (i, out) in buf.chunks_exact_mut(S).enumerate() {
             let at = lba + i as u64;
             if at >= self.sectors {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "hinter dem Ende"));
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past the end"));
             }
             self.file.seek(SeekFrom::Start(at * RAW))?;
             self.file.read_exact(&mut raw)?;

@@ -47,24 +47,29 @@ impl UiLang {
 
 pub type Catalog = HashMap<String, String>;
 
-/// Candidate locale directories in lookup order (like [`crate::tools::bundled_bin_dirs`]).
-fn locales_dirs() -> Vec<PathBuf> {
+/// Candidate directories of a bundled resource folder `sub` (locales, menu sounds) in lookup
+/// order (like [`crate::tools::bundled_bin_dirs`]); `repo` is its path in the source tree.
+pub fn resource_dirs(sub: &str, repo: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        dirs.push(dir.join("locales"));
+        dirs.push(dir.join(sub));
         // Linux packages (.deb, AppImage): Tauri puts resources in `<prefix>/lib/<productName>`,
         // the executable in `<prefix>/bin`.
-        dirs.push(dir.join("../lib/MusaDVD/locales"));
-        // Arch package (`packaging/aur/PKGBUILD`): `/usr/bin` + `/usr/share/musadvd/locales`.
-        dirs.push(dir.join("../share/musadvd/locales"));
+        dirs.push(dir.join("../lib/MusaDVD").join(sub));
+        // Arch package (`packaging/aur/PKGBUILD`): `/usr/bin` + `/usr/share/musadvd/<sub>`.
+        dirs.push(dir.join("../share/musadvd").join(sub));
     }
-    let candidates = [std::env::current_dir().ok().map(|d| d.join("locales")), Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/src/locales")))];
+    let candidates = [std::env::current_dir().ok().map(|d| d.join(sub)), Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(repo))];
     for dir in candidates.into_iter().flatten() {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
     }
     dirs
+}
+
+fn locales_dirs() -> Vec<PathBuf> {
+    resource_dirs("locales", "frontend/src/locales")
 }
 
 fn locales_dir() -> Option<PathBuf> {

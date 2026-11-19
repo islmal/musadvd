@@ -587,6 +587,16 @@ pub fn menu_button_navigation(
     buttons.into_iter().map(|b| (b.name, b.nav)).collect()
 }
 
+/// Gives every menu without its own sound the global default menu audio file. FastPlay and
+/// transition sounds are left alone.
+pub fn apply_default_menu_audio(layout: &mut CustomLayout, path: &std::path::Path) {
+    for m in &mut layout.menus {
+        if m.audio == MenuSound::None {
+            m.audio = MenuSound::File { path: path.to_string_lossy().into_owned() };
+        }
+    }
+}
+
 /// Checks the layout against the DVD limits and the project's titles. Navigation command
 /// counts are checked by [`plan_navigation`] (also called here).
 pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -> Result<(), LayoutError> {
@@ -1932,6 +1942,15 @@ mod tests {
 
     fn layout(menus: Vec<CustomMenu>) -> CustomLayout {
         CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, menus }
+    }
+
+    #[test]
+    fn default_menu_audio_only_fills_silent_menus() {
+        let mut l = layout(vec![menu("a", MenuRole::Root, None, vec![]), menu("b", MenuRole::Root, None, vec![])]);
+        l.menus[1].audio = MenuSound::Title { title: 1, start_secs: None };
+        apply_default_menu_audio(&mut l, std::path::Path::new("x.mp3"));
+        assert_eq!(l.menus[0].audio, MenuSound::File { path: "x.mp3".into() });
+        assert!(matches!(l.menus[1].audio, MenuSound::Title { .. }));
     }
 
     #[test]

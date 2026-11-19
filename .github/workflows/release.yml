@@ -68,11 +68,12 @@ jobs:
         run: |
           $tag = "${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}"
           $stage = "portable/MusaDVD"
-          New-Item -ItemType Directory -Force -Path "$stage/bin", "$stage/locales" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$stage/bin", "$stage/locales", "$stage/menu-audio" | Out-Null
           Copy-Item "target/release/musadvd-gui.exe" "$stage/"
           Copy-Item "target/release/musadvd.exe" "$stage/"
           Copy-Item "bin/*.exe" "$stage/bin/"
           Copy-Item "frontend/src/locales/*.json" "$stage/locales/"
+          Copy-Item "assets/menu-audio/*.opus" "$stage/menu-audio/"
           Copy-Item "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md" "$stage/"
           $zip = "MusaDVD-$tag-windows-x64-portable.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
@@ -99,19 +100,25 @@ jobs:
             gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 
       - run: npm ci
+
+      - name: Build CLI binary
+        run: cargo build --release --bin musadvd
+
+      - name: Configure .deb to ship CLI as /usr/bin/musadvd
+        run: |
+          echo '{"bundle":{"linux":{"deb":{"files":{"/usr/bin/musadvd":"../target/release/musadvd"}}}}}' > src-tauri/tauri.linux.ci.conf.json
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          args: --config src-tauri/tauri.linux.ci.conf.json
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}
           releaseName: MusaDVD ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'Nightly' }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           releaseDraft: false
-
-      - name: Build CLI binary
-        run: cargo build --release --bin musadvd
 
       - name: Package and upload portable tar.gz
         env:
@@ -119,9 +126,10 @@ jobs:
         run: |
           TAG="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}"
           STAGE="portable/MusaDVD"
-          mkdir -p "$STAGE/locales"
+          mkdir -p "$STAGE/locales" "$STAGE/menu-audio"
           cp target/release/musadvd-gui target/release/musadvd "$STAGE/"
           cp frontend/src/locales/*.json "$STAGE/locales/"
+          cp assets/menu-audio/*.opus "$STAGE/menu-audio/"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "$STAGE/"
           TAR="MusaDVD-$TAG-linux-x86_64-portable.tar.gz"
           tar -czf "$TAR" -C portable MusaDVD

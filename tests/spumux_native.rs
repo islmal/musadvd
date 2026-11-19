@@ -114,7 +114,7 @@ fn run_reference(exe: &Path, dir: &Path, xml: &str, stream: &str) -> Vec<u8> {
 
 fn tools() -> Option<Ctx> {
     let record = std::env::var_os("SPUMUX_RECORD").map(|exe| {
-        let ffmpeg = ["bin/ffmpeg.exe", "bin/ffmpeg"].iter().map(Path::new).find(|p| p.is_file()).map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
+        let ffmpeg = [format!("bin/ffmpeg{}", std::env::consts::EXE_SUFFIX)].iter().map(Path::new).find(|p| p.is_file()).map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
         (PathBuf::from(exe), ffmpeg)
     });
     Some(Ctx { record })

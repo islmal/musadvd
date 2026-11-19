@@ -4,17 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MusaDVD</title>
+    <link rel="icon" type="image/png" href="/logo.png" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body data-entry="main">
     <div class="app">
       <header class="toolbar">
-        <div class="brand"><span class="disc" aria-hidden="true"></span>MusaDVD<span id="app-version" class="app-version"></span></div>
+        <div class="brand"><img class="brand-logo" src="/logo.png" alt="" aria-hidden="true" />MusaDVD<span id="app-version" class="app-version"></span><select id="ui-lang" class="ui-lang" data-i18n-title="settings.uiLanguage" title="Interface language"></select></div>
         <div class="toolbar-actions">
           <button id="btn-add" class="btn" data-i18n="app.addVideos">＋ Add videos</button>
           <button id="btn-remove" class="btn" disabled data-i18n="app.remove">Remove</button>
           <button id="btn-up" class="btn icon" data-i18n-title="app.moveUp" title="Move up" disabled>▲</button>
           <button id="btn-down" class="btn icon" data-i18n-title="app.moveDown" title="Move down" disabled>▼</button>
+          <button id="btn-open-project" class="btn" data-i18n="app.openProject" data-i18n-title="app.openProjectTip" title="Open project (Ctrl+O)">Open project …</button>
+          <button id="btn-save-project" class="btn" data-i18n="app.saveProject" data-i18n-title="app.saveProjectTip" title="Save project (Ctrl+S, Ctrl+Shift+S: save as)">Save project …</button>
           <button id="btn-studio" class="btn" data-i18n="app.studio" data-i18n-title="app.studioTip" title="Burn Studio: burn, read, verify and create images">💿 Burn Studio …</button>
           <button id="btn-settings" class="btn" data-i18n="app.settings" data-i18n-title="app.settingsTip" title="General settings">⚙ Settings</button>
         </div>

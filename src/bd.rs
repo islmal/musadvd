@@ -201,6 +201,8 @@ struct BdTitle {
     copy_kbps: Option<u32>,
     /// Quality weight of the encoded video ([`crate::dvd::quality_weight`]).
     weight: f64,
+    /// Styling and sync of the text subtitles (rendered to PGS).
+    subtitle_style: crate::textsub::SubtitleStyle,
 }
 
 impl BdTitle {
@@ -303,7 +305,9 @@ async fn encode_bd_title(
             let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
             let text = std::fs::read(&srt).at(&srt)?;
             let (cues, _skipped) = crate::textsub::parse_srt(&String::from_utf8_lossy(&text));
-            std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h), t.rate.fps)).at(&sup)?;
+            let st = &t.subtitle_style;
+            let cues = crate::textsub::apply_offset(cues, st.offset_ms);
+            std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h).with_style(st), t.rate.fps)).at(&sup)?;
         } else if matches!(s.codec.as_str(), "dvd_subtitle" | "dvb_subtitle" | "xsub") {
             let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
             let json = if s.codec == "dvd_subtitle" {
@@ -386,12 +390,12 @@ async fn encode_bd_title(
         return Err(BuildError::Internal(format!("{}: ffprobe reports no duration", mkv.display())));
     }
     let mut labels = t.audio_labels(layout).into_iter();
-    let audio = (0..layout.audio_langs.len()).map(|k| if k < t.audio.len() { labels.next().unwrap_or_default() } else { "Stille (Platzhalter)".to_string() }).collect();
+    let audio = (0..layout.audio_langs.len()).map(|k| if k < t.audio.len() { labels.next().unwrap_or_default() } else { "Silence (placeholder)".to_string() }).collect();
     let sub_labels = t.subtitle_labels();
     let subtitles = (0..layout.subs.len())
         .map(|k| match t.sub_for(layout, k) {
             Some(_) => sub_labels[k].clone(),
-            None => "leer (Platzhalter)".to_string(),
+            None => "empty (placeholder)".to_string(),
         })
         .collect();
     let report = TitleReport {
@@ -693,6 +697,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             loudnorm: opts.loudnorm,
             copy_kbps: None,
             weight: crate::dvd::quality_weight(sel.bd_quality.as_deref()),
+            subtitle_style: sel.subtitle_style.clone(),
             info,
         });
     }
@@ -799,7 +804,8 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     log(Event::Phase(BuildPhase::Menus));
     let template_layout;
     let disc_layout = &layout;
-    let menu_layout = match (&opts.custom_layout, opts.template.as_os_str().is_empty()) {
+    let sounded = opts.custom_layout_with_menu_audio();
+    let menu_layout = match (sounded.as_deref(), opts.template.as_os_str().is_empty()) {
         (Some(layout), _) => {
             log(Event::Step(tf!(opts.ui_lang, "custom_layout", n = layout.menus.len())));
             Some(layout)
@@ -944,7 +950,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         };
         if finished_now.is_some() || last_eta.elapsed().as_millis() >= 1000 {
             last_eta = std::time::Instant::now();
-            let detail = format!("Video {} von {count}", (finished_titles + 1).min(count));
+            let detail = format!("Video {} of {count}",(finished_titles + 1).min(count));
             let remaining = frame_eta.remaining_secs().map(|s| s + authoring_estimate);
             log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Encoding, Some(detail), remaining, burn_estimate)));
         }
