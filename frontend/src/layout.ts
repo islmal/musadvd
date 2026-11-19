@@ -1,3 +1,4 @@
+import type { ButtonNav } from "./api";
 import { t as tr } from "./i18n";
 // Custom menu layouts (same JSON as `src/layout.rs`) and a generator for a first draft.
 
@@ -360,6 +361,73 @@ export function emptyMenu(name: string, role: MenuRole, title: number | null = n
 
 export function isButton(e: LayoutElement): boolean {
   return !!e.action;
+}
+
+type NavDir = "up" | "down" | "left" | "right";
+
+/**
+ * Spatial remote-control navigation fallback mirroring `author::compute_navigation`.
+ * Used immediately on entering Remote Test mode while the authoritative Rust graph loads.
+ */
+export function computeNavigationFallback(menu: CustomMenu): ButtonNav[] {
+  const btns = menu.elements.filter(isButton).map((e) => ({
+    id: e.id,
+    x0: e.x,
+    y0: e.y,
+    x1: e.x + e.w,
+    y1: e.y + e.h,
+    cx: e.x + e.w / 2,
+    cy: e.y + e.h / 2,
+  }));
+  const axisGap = (a0: number, a1: number, b0: number, b1: number): number =>
+    b0 >= a1 ? b0 - a1 : a0 >= b1 ? a0 - b1 : 0;
+
+  const target = (from: number, dir: NavDir): string => {
+    const a = btns[from];
+    let bestCone: { score: number; idx: number } | null = null;
+    let bestHalf: { score: number; idx: number } | null = null;
+    for (let i = 0; i < btns.length; i++) {
+      if (i === from) continue;
+      const b = btns[i];
+      let primary: number;
+      let gap: number;
+      let centerSecondary: number;
+      if (dir === "up") {
+        primary = a.cy - b.cy;
+        gap = axisGap(a.x0, a.x1, b.x0, b.x1);
+        centerSecondary = Math.abs(b.cx - a.cx);
+      } else if (dir === "down") {
+        primary = b.cy - a.cy;
+        gap = axisGap(a.x0, a.x1, b.x0, b.x1);
+        centerSecondary = Math.abs(b.cx - a.cx);
+      } else if (dir === "left") {
+        primary = a.cx - b.cx;
+        gap = axisGap(a.y0, a.y1, b.y0, b.y1);
+        centerSecondary = Math.abs(b.cy - a.cy);
+      } else {
+        primary = b.cx - a.cx;
+        gap = axisGap(a.y0, a.y1, b.y0, b.y1);
+        centerSecondary = Math.abs(b.cy - a.cy);
+      }
+      if (primary <= 0) continue;
+      const score = primary + 2.0 * gap + 0.01 * centerSecondary;
+      if (gap <= primary) {
+        if (!bestCone || score < bestCone.score) bestCone = { score, idx: i };
+      } else {
+        if (!bestHalf || score < bestHalf.score) bestHalf = { score, idx: i };
+      }
+    }
+    const chosen = bestCone ?? bestHalf;
+    return btns[chosen ? chosen.idx : from].id;
+  };
+
+  return btns.map((b, i) => ({
+    id: b.id,
+    up: target(i, "up"),
+    down: target(i, "down"),
+    left: target(i, "left"),
+    right: target(i, "right"),
+  }));
 }
 
 /** Menus that move (video elements, video background or sound) – they are encoded as loops. */

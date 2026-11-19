@@ -30,11 +30,16 @@ with Ctrl+C (child processes are killed).
   keeps only its core), integer PCM / FLAC <= 24 bit as lossless LPCM (source rate kept). With
   `auto` an explicit `--audio ac3` / `lpcm` copies only tracks already in that format; `strict`
   fails before encoding if any track cannot be copied. Trimmed or loudnormed titles never copy.
+- **DVD-Video stream copy**: `--dvd-video encode|auto|strict` (default `encode`) copies MPEG-2
+  that already meets the DVD spec (NTSC 720/704x480 at 29.97/23.976, PAL 720/704x576 at 25,
+  `yuv420p`, <= 9800 kbit/s). Copied titles are reserved at their exact size in the bitrate plan;
+  `strict` fails before menus and encoding. Trimmed, cropped, scaled, deinterlaced or
+  picture-filtered titles never copy.
 - **Video processing**: `--scale letterbox|panscan|stretch`, `--scale-filter
   bilinear|bicubic|lanczos`, `--deinterlace auto|yadif|off`.
 - **Structure**: `--merge 2,3` joins inputs behind one menu entry; `--single-video` (Blu-ray);
   `--project-name`.
-- **Performance**: `--jobs N`, `--two-pass`, `--fast`, `--hw-decode`, `--hw-accel
+- **Performance**: `--jobs N`, `--two-pass` (pass 1 is a fast statistics-only run; pass 2 adds `-mbd rd`, and `-trellis 1 -intra_vlc 1` unless `--fast`), `--fast`, `--hw-decode`, `--hw-accel
   none|nvidia|intel|amd`, `--no-hw-encode`.
 - **Diagnostics**: `--keep-work` keeps `<output>/<project>.musadvd-work/` (intermediate files, logs).
 

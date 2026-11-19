@@ -1,5 +1,5 @@
 // Typed wrappers around the Tauri commands in src-tauri/src/main.rs.
-import type { CustomLayout, EditorTitle, LayoutElement } from "./layout";
+import type { CustomLayout, CustomMenu, EditorTitle, LayoutElement } from "./layout";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -71,6 +71,37 @@ export interface Crop {
   bottom: number;
   left: number;
   right: number;
+}
+
+/** Per-title picture filters applied during encode and live preview. */
+export interface PictureOptions {
+  denoise?: number | null;
+  brightness?: number | null;
+  contrast?: number | null;
+  saturation?: number | null;
+}
+
+export interface QualityTestRequest {
+  path: string;
+  disc: Disc;
+  videoKbps?: number | null;
+  audioKbps: number;
+  startSecs?: number | null;
+  trimStart?: number | null;
+  trimEnd?: number | null;
+  crop?: Crop | null;
+  denoise?: number | null;
+  brightness?: number | null;
+  contrast?: number | null;
+  saturation?: number | null;
+  bdResolution?: string | null;
+  bdRate?: string | null;
+}
+
+export interface QualityTestResult {
+  sample_path: string;
+  psnr_db: number;
+  verdict: "excellent" | "good" | "fair" | "poor";
 }
 
 export interface SubtitleTrack {
@@ -165,6 +196,10 @@ export interface InputConfig {
   bdRate?: string | null;
   bdVideo?: string | null;
   bdQuality?: string | null;
+  denoise?: number | null;
+  brightness?: number | null;
+  contrast?: number | null;
+  saturation?: number | null;
 }
 
 export interface ConversionConfig {
@@ -441,6 +476,26 @@ export const sourceFrame = (path: string, atSecs: number, width: number) => invo
 export const detectCrop = (path: string, startSecs: number | null, endSecs: number | null) =>
   invoke<Crop>("detect_crop", { path, startSecs, endSecs });
 /** Registers a video for the live player; returns the stream URL (append `?t=<secs>&a=<audio index>`). */
-export const previewStream = (path: string, crop: Crop | null) => invoke<string>("preview_stream", { path, crop });
+export const previewStream = (path: string, crop: Crop | null, picture?: PictureOptions | null) =>
+  invoke<string>("preview_stream", { path, crop, picture: picture ?? null });
 /** Kills the running preview ffmpeg. */
 export const previewStop = () => invoke<void>("preview_stop");
+/** Encodes a 10-second quality sample and returns PSNR and verdict. */
+export const testTitleQuality = (request: QualityTestRequest) =>
+  invoke<QualityTestResult>("test_title_quality", { request });
+
+/** Directional D-pad navigation links for a menu button. */
+export interface ButtonNav {
+  id: string;
+  up: string | null;
+  down: string | null;
+  left: string | null;
+  right: string | null;
+}
+
+/** Detects scene-change timestamps (seconds) in a video within the optional trim window. */
+export const detectSceneChapters = (path: string, startSecs: number | null, endSecs: number | null) =>
+  invoke<number[]>("detect_scene_chapters", { path, startSecs, endSecs });
+/** Computes directional D-pad navigation for all buttons of `menu` using the author engine. */
+export const menuNavigation = (menu: CustomMenu, canvas: { width: number; height: number }, tv: string) =>
+  invoke<ButtonNav[]>("menu_navigation", { menu, canvas, tv });

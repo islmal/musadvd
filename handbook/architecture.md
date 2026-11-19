@@ -55,6 +55,12 @@ probe (ffprobe JSON, probe.rs)
 Output layout: `<output>/<project>/VIDEO_TS/`; temporary files in `<output>/<project>.musadvd-work/`
 (removed after the build unless `keep_work`).
 
+**Video copy (`DvdVideoMode`)**: with `auto`/`strict`, `encoder::dvd_video_copy` decides per title
+whether compliant MPEG-2 is stream-copied (`-c:v copy`, still piped through the native subtitle
+stage). `bitrate_plan` reserves a copied title's exact byte size (`TitleLoad::copy_bytes`) and
+shares the rest among re-encoded titles; `strict` fails before menus and encoding. Two-pass
+encodes run a fast statistics-only pass 1 with the same GOP and rate control as pass 2.
+
 ## Blu-ray / AVCHD pipeline
 
 `build_dvd` hands over to `bd::build_bd` for `DiscType::Bd25/Bd50/Avchd5/Avchd9`.
@@ -127,7 +133,7 @@ on-the-fly image through `ringbuf.rs`) feed a backend: `imapi` (default) or `dir
 ## Live player
 
 `src-tauri/src/preview.rs` is a loopback HTTP server that streams a 480p H.264 fMP4 proxy from one
-ffmpeg child (one token per file). Filters come from `encoder::preview_filter`; a seek starts a
+ffmpeg child (one token per file). Filters come from `encoder::preview_filter` (same `source_chain` as the encode, including denoise and picture EQ); a seek starts a
 new stream. Used by the "Schnitt & Bild" tab (`frontend/src/edit.ts`).
 
 ## Things that are easy to get wrong

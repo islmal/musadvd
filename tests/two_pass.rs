@@ -77,6 +77,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         audio_mode: Default::default(),
         audio_modes: vec![],
         audio_filters: vec![],
+        copy_video: false,
     }
 }
 
@@ -103,6 +104,27 @@ fn first_pass_is_video_only_to_null_device() {
     // Same rate control as the final run, otherwise the statistics do not apply.
     assert!(pair(&a, "-b:v", "6000k"));
     assert!(pair(&a, "-c:v", "mpeg2video"));
+    // Pass 1 uses fast statistics flags regardless of `fast`, while keeping GOP/rate-control intact.
+    for (flag, val) in [
+        ("-mbd", "simple"),
+        ("-trellis", "0"),
+        ("-dia_size", "1"),
+        ("-subq", "1"),
+        ("-cmp", "sad"),
+        ("-subcmp", "sad"),
+        ("-mbcmp", "sad"),
+        ("-g", "12"),
+        ("-bf", "2"),
+        ("-flags", "+cgop"),
+        ("-sc_threshold", "1000000000"),
+        ("-maxrate", "9588k"),
+        ("-bufsize", "1835k"),
+    ] {
+        assert!(pair(&a, flag, val), "expected {flag} {val} in {a:?}");
+    }
+    assert!(!pair(&a, "-mbd", "rd"), "{a:?}");
+    assert!(!pair(&a, "-trellis", "1"), "{a:?}");
+    assert!(!a.iter().any(|x| x == "-intra_vlc" || x == "-motion_est"), "{a:?}");
 }
 
 #[test]
@@ -113,11 +135,23 @@ fn second_pass_reads_log_and_writes_audio() {
     assert!(pair(&a, "-pass", "2"), "{a:?}");
     assert!(pair(&a, "-passlogfile", &prefix));
     assert!(pair(&a, "-c:a:0", "ac3"), "AC-3 audio is written in pass 2");
+    assert!(pair(&a, "-mbd", "rd"), "{a:?}");
+    assert!(pair(&a, "-trellis", "1"), "{a:?}");
+    assert!(pair(&a, "-intra_vlc", "1"), "{a:?}");
     // One output: the DVD program stream (video + audio muxed directly).
     assert!(pair(&a, "-f", "dvd"));
     assert_eq!(a.last().unwrap(), "out.mpg");
     let pass_pos = a.iter().position(|x| x == "-pass").unwrap();
     assert!(pass_pos < a.len() - 1);
+
+    // Draft mode (`fast: true`) keeps `-mbd rd` and omits `-trellis` / `-intra_vlc` on Pass 2,
+    // while Pass 1 stays identical to full-quality Pass 1.
+    let mut fast_job = job(&info, Path::new("w"), true);
+    fast_job.fast = true;
+    let fast_p2 = strings(&fast_job.encode_args("out.mpg"));
+    assert!(pair(&fast_p2, "-mbd", "rd"), "{fast_p2:?}");
+    assert!(!fast_p2.iter().any(|x| x == "-trellis" || x == "-intra_vlc"), "{fast_p2:?}");
+    assert_eq!(strings(&fast_job.first_pass_args()), strings(&job(&info, Path::new("w"), true).first_pass_args()));
 }
 
 #[test]

@@ -20,19 +20,25 @@ mod burn_studio;
 mod menu_editor;
 mod preview;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
+use musadvd::author::Resolution;
+use musadvd::bd::{bd_frame_rate, BdRate};
 use musadvd::calculator::{Clamp, DiscType, EncodingProfile, Quality};
 use musadvd::config::{AppSettings, UNSUPPORTED_CHOICES};
 use musadvd::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
-use musadvd::encoder::{ac3_settings, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget};
+use musadvd::encoder::{
+    self, ac3_settings, max_video_rate, parse_psnr_average, plan_audio, psnr_verdict,
+    quality_psnr_args, Aspect, AudioMode, AudioOut, AudioTarget, VBV_BUFFER_KBIT,
+};
 use musadvd::menu::{UiLang, DEFAULT_MOTION_SECS};
 use musadvd::probe::{self, language_name, SubtitleKind, TrackLabelMode};
 use musadvd::template::Template;
-use musadvd::tools::Toolchain;
+use musadvd::tools::{blocking_tool_command, Toolchain};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::OnceCell;
@@ -491,6 +497,325 @@ async fn detect_crop(state: State<'_, AppState>, path: String, start_secs: Optio
     musadvd::encoder::detect_crop(tools, &info).await.map_err(|e| e.to_string())
 }
 
+/// Detects scene changes inside `[start_secs, end_secs]` and returns chapter cut timestamps in seconds.
+#[tauri::command]
+async fn detect_scene_chapters(
+    state: State<'_, AppState>,
+    path: String,
+    start_secs: Option<f64>,
+    end_secs: Option<f64>,
+) -> Result<Vec<f64>, String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("File not found: {}", p.display()));
+    }
+    let tools = toolchain(&state).await?;
+    let info = probe::probe(&tools.ffprobe, &p).await.map_err(|e| e.to_string())?;
+    if info.video.is_none() {
+        return Err("The file has no video stream".to_string());
+    }
+    let ffmpeg = tools.ffmpeg.clone();
+    let duration_secs = info.duration_secs;
+    tokio::task::spawn_blocking(move || {
+        probe::detect_scene_chapters(
+            &ffmpeg,
+            &p,
+            start_secs,
+            end_secs,
+            duration_secs,
+            probe::DEFAULT_SCENE_THRESHOLD,
+            probe::MIN_SCENE_GAP_SECS,
+        )
+    })
+    .await
+    .map_err(|e| format!("Scene detection task panicked: {e}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityTestRequest {
+    path: String,
+    disc: DiscType,
+    #[serde(default)]
+    video_kbps: Option<u32>,
+    #[serde(default)]
+    audio_kbps: u32,
+    #[serde(default)]
+    start_secs: Option<f64>,
+    #[serde(default)]
+    trim_start: Option<f64>,
+    #[serde(default)]
+    trim_end: Option<f64>,
+    #[serde(default)]
+    crop: Option<probe::Crop>,
+    #[serde(default)]
+    denoise: Option<f32>,
+    #[serde(default)]
+    brightness: Option<f32>,
+    #[serde(default)]
+    contrast: Option<f32>,
+    #[serde(default)]
+    saturation: Option<f32>,
+    #[serde(default)]
+    bd_resolution: Option<String>,
+    #[serde(default)]
+    bd_rate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QualityTestResult {
+    sample_path: String,
+    psnr_db: f64,
+    verdict: String,
+}
+
+fn quality_test_window(
+    duration_secs: f64,
+    trim_start: Option<f64>,
+    trim_end: Option<f64>,
+    start_secs: Option<f64>,
+) -> (f64, f64, f64) {
+    let total_dur = if duration_secs.is_finite() && duration_secs > 0.0 { duration_secs } else { 0.0 };
+    let t0 = trim_start.filter(|x| x.is_finite() && *x >= 0.0).unwrap_or(0.0).min(total_dur);
+    let t1 = trim_end.filter(|x| x.is_finite() && *x > t0).unwrap_or(total_dur).min(total_dur);
+    let eff_dur = (t1 - t0).max(0.5);
+    let sample_secs = eff_dur.min(10.0);
+    let max_at = (t1 - sample_secs).max(t0);
+    let at = match start_secs.filter(|s| s.is_finite() && *s >= 0.0) {
+        Some(s) => s.clamp(t0, max_at),
+        None => (t0 + eff_dur * 0.25).min(max_at),
+    };
+    (eff_dur, sample_secs, at)
+}
+
+fn tail_lines(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join(" | ")
+}
+
+fn dvd_quality_sample_spec(
+    v: &probe::VideoStream,
+    opts: &BuildOptions,
+    vp: musadvd::encoder::VideoProcessing,
+    video_kbps: u32,
+    audio_kbps: u32,
+    sample_path: &Path,
+) -> (String, Vec<OsString>) {
+    let res = dvd::effective_resolution(opts.resolution, opts.encoding_profile, video_kbps);
+    let aspect = if !res.allows_wide() {
+        Aspect::Standard
+    } else {
+        opts.aspect_policy.aspect_for(v.display_aspect)
+    };
+    let vf = encoder::video_filter(v, aspect, opts.tv_standard, res, vp);
+    let maxrate = max_video_rate(audio_kbps).max(video_kbps);
+    let (primaries, trc, matrix) = match opts.tv_standard {
+        musadvd::author::TvStandard::Pal => ("bt470bg", "gamma28", "bt470bg"),
+        musadvd::author::TvStandard::Ntsc => ("smpte170m", "smpte170m", "smpte170m"),
+    };
+    let gop = opts.tv_standard.gop().to_string();
+    let mut args: Vec<OsString> = [
+        "-c:v", "mpeg2video", "-threads", "0", "-pix_fmt", "yuv420p", "-r", opts.tv_standard.frame_rate(),
+        "-g", &gop, "-bf", "2", "-dc", "9", "-qmin", "2", "-mbd", "rd", "-flags", "+cgop",
+        "-sc_threshold", "1000000000",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    if !opts.fast_encode {
+        args.extend(["-trellis", "1", "-intra_vlc", "1"].map(OsString::from));
+    }
+    args.extend(["-color_primaries", primaries, "-color_trc", trc, "-colorspace", matrix].map(OsString::from));
+    args.extend([
+        "-b:v".into(),
+        format!("{video_kbps}k").into(),
+        "-maxrate".into(),
+        format!("{maxrate}k").into(),
+        "-bufsize".into(),
+        format!("{VBV_BUFFER_KBIT}k").into(),
+        "-aspect".into(),
+        aspect.as_str().into(),
+        "-an".into(),
+        "-sn".into(),
+        "-f".into(),
+        "dvd".into(),
+        sample_path.to_path_buf().into_os_string(),
+    ]);
+    (vf, args)
+}
+
+fn bd_quality_sample_spec(
+    v: &probe::VideoStream,
+    opts: &BuildOptions,
+    request: &QualityTestRequest,
+    vp: musadvd::encoder::VideoProcessing,
+    video_kbps: u32,
+    sample_path: &Path,
+) -> Result<(String, Vec<OsString>), String> {
+    let res = match request.bd_resolution.as_deref().filter(|s| !s.is_empty()) {
+        None => opts.resolution,
+        Some("1080") | Some("1080p") => Resolution::Hd1080,
+        Some("720") | Some("720p") => Resolution::Hd720,
+        Some(other) => return Err(format!("Unknown Blu-ray resolution: {other}")),
+    };
+    let rate = match request.bd_rate.as_deref().filter(|s| !s.is_empty()) {
+        None => bd_frame_rate(&[v.fps], opts.tv_standard, res),
+        Some(name) => BdRate::from_name(name, res)
+            .ok_or_else(|| format!("{name} is not a Blu-ray frame rate at {}", res.label()))?,
+    };
+    let vf = encoder::bd_video_filter(v, rate, res, vp);
+    let limits = request.disc.limits();
+    let vbv_max = limits.vbv_maxrate_kbps.max(video_kbps);
+    let vbv_buf = limits.vbv_bufsize_kbit;
+    let preset = if opts.fast_encode { "veryfast" } else { "slow" };
+    let mut x264 = String::from("slices=4:b-pyramid=strict:nal-hrd=vbr:aud=1:open-gop=0:weightp=1");
+    if rate.fake_interlaced {
+        x264.push_str(":fake-interlaced=1:pic-struct=1");
+    }
+    let mut args: Vec<OsString> = [
+        "-c:v", "libx264", "-preset", preset, "-profile:v", "high", "-level:v", "4.1", "-bluray-compat", "1",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    args.extend([
+        "-b:v".into(),
+        format!("{video_kbps}k").into(),
+        "-maxrate".into(),
+        format!("{vbv_max}k").into(),
+        "-bufsize".into(),
+        format!("{vbv_buf}k").into(),
+        "-g".into(),
+        rate.keyint().to_string().into(),
+        "-bf".into(),
+        "3".into(),
+        "-x264-params".into(),
+        x264.into(),
+    ]);
+    args.extend([
+        "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+        "-an", "-sn", "-f", "matroska",
+    ].map(OsString::from));
+    args.push(sample_path.to_path_buf().into_os_string());
+    Ok((vf, args))
+}
+
+async fn run_quality_test(
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    settings: &AppSettings,
+    request: QualityTestRequest,
+) -> Result<QualityTestResult, String> {
+    let path = PathBuf::from(&request.path);
+    if !path.is_file() {
+        return Err(format!("File not found: {}", path.display()));
+    }
+    let mut info = probe::probe(ffprobe, &path).await.map_err(|e| e.to_string())?;
+    probe::apply_crop(&mut info, request.crop.unwrap_or_default())?;
+    let v = info.video.clone().ok_or_else(|| "The file has no video stream".to_string())?;
+
+    let mut opts = BuildOptions { disc: request.disc, ..BuildOptions::default() };
+    settings.apply_to(&mut opts);
+    let vp = opts
+        .video
+        .with_picture(request.denoise, request.brightness, request.contrast, request.saturation);
+
+    let (eff_dur, sample_secs, at) =
+        quality_test_window(info.duration_secs, request.trim_start, request.trim_end, request.start_secs);
+    let limits = request.disc.limits();
+    let video_kbps = match request.video_kbps {
+        Some(k) if k > 0 => k.clamp(limits.min_video_kbps, limits.max_video_kbps),
+        _ => musadvd::calculator::calculate_capped(
+            request.disc,
+            eff_dur,
+            request.audio_kbps,
+            request.disc.default_mux_overhead_kbit(),
+            opts.encoding_profile.max_video_kbps_for(request.disc),
+        )
+        .map_or(limits.min_video_kbps, |p| p.video_kbps),
+    };
+
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let ext = if request.disc.is_bluray() { "mkv" } else { "mpg" };
+    let sample_path = std::env::temp_dir().join(format!("musadvd-qtest-{pid}-{nanos}.{ext}"));
+
+    let (vf, codec_args) = if request.disc.is_bluray() {
+        bd_quality_sample_spec(&v, &opts, &request, vp, video_kbps, &sample_path)?
+    } else {
+        dvd_quality_sample_spec(&v, &opts, vp, video_kbps, request.audio_kbps, &sample_path)
+    };
+
+    let mut encode_args: Vec<OsString> = vec![
+        "-hide_banner".into(),
+        "-nostdin".into(),
+        "-y".into(),
+        "-ss".into(),
+        format!("{at:.3}").into(),
+        "-t".into(),
+        format!("{sample_secs:.3}").into(),
+        "-i".into(),
+        path.clone().into_os_string(),
+        "-map".into(),
+        format!("0:{}", v.index).into(),
+        "-vf".into(),
+        vf.clone().into(),
+    ];
+    encode_args.extend(codec_args);
+
+    let ffmpeg_bin = ffmpeg.to_path_buf();
+    let sample_for_job = sample_path.clone();
+    let source_for_job = path;
+    let v_index = v.index;
+
+    tokio::task::spawn_blocking(move || -> Result<QualityTestResult, String> {
+        let enc_out = blocking_tool_command(&ffmpeg_bin)
+            .args(&encode_args)
+            .output()
+            .map_err(|e| format!("Failed to start ffmpeg: {e}"))?;
+        if !enc_out.status.success() {
+            let _ = std::fs::remove_file(&sample_for_job);
+            let err = String::from_utf8_lossy(&enc_out.stderr);
+            return Err(format!("Quality sample encode failed ({}): {}", enc_out.status, tail_lines(&err, 6)));
+        }
+
+        let psnr_args = quality_psnr_args(&sample_for_job, &source_for_job, v_index, at, sample_secs, &vf);
+        let psnr_out = blocking_tool_command(&ffmpeg_bin)
+            .args(&psnr_args)
+            .output()
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&sample_for_job);
+                format!("Failed to start ffmpeg for PSNR: {e}")
+            })?;
+        let stderr = String::from_utf8_lossy(&psnr_out.stderr);
+        if !psnr_out.status.success() {
+            let _ = std::fs::remove_file(&sample_for_job);
+            return Err(format!("Quality PSNR analysis failed ({}): {}", psnr_out.status, tail_lines(&stderr, 6)));
+        }
+        let psnr_db = parse_psnr_average(&stderr).ok_or_else(|| {
+            let _ = std::fs::remove_file(&sample_for_job);
+            "Failed to parse PSNR average from ffmpeg output".to_string()
+        })?;
+        let verdict = psnr_verdict(psnr_db).to_string();
+        Ok(QualityTestResult {
+            sample_path: sample_for_job.to_string_lossy().into_owned(),
+            psnr_db: (psnr_db * 100.0).round() / 100.0,
+            verdict,
+        })
+    })
+    .await
+    .map_err(|e| format!("Quality test task panicked: {e}"))?
+}
+
+/// Encodes up to 10 seconds of a title with the active settings and computes PSNR against the filtered source.
+#[tauri::command]
+async fn test_title_quality(state: State<'_, AppState>, request: QualityTestRequest) -> Result<QualityTestResult, String> {
+    let tools = toolchain(&state).await?;
+    let settings = state.settings();
+    run_quality_test(&tools.ffmpeg, &tools.ffprobe, &settings, request).await
+}
+
 /// Files passed on the command line (videos dropped onto the .exe, "Open with").
 #[tauri::command]
 fn startup_files() -> Vec<String> {
@@ -732,8 +1057,20 @@ struct InputConfig {
     bd_rate: Option<String>,
     #[serde(default)]
     bd_video: Option<String>,
+    /// DVD-Video override of this title (see `StreamSelection`).
+    #[serde(default)]
+    dvd_video: Option<String>,
     #[serde(default)]
     bd_quality: Option<String>,
+    /// Per-title picture adjustments (override project defaults when `Some`).
+    #[serde(default)]
+    denoise: Option<f32>,
+    #[serde(default)]
+    brightness: Option<f32>,
+    #[serde(default)]
+    contrast: Option<f32>,
+    #[serde(default)]
+    saturation: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -811,7 +1148,12 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 bd_resolution: i.bd_resolution.clone(),
                 bd_rate: i.bd_rate.clone(),
                 bd_video: i.bd_video.clone(),
+                dvd_video: i.dvd_video.clone(),
                 bd_quality: i.bd_quality.clone(),
+                denoise: i.denoise,
+                brightness: i.brightness,
+                contrast: i.contrast,
+                saturation: i.saturation,
             })
             .collect(),
         ..BuildOptions::default()
@@ -962,12 +1304,15 @@ fn main() {
             preview::preview_stop,
             source_frame,
             detect_crop,
+            detect_scene_chapters,
+            test_title_quality,
             menu_editor::check_layout,
             menu_editor::text_lines,
             menu_editor::load_layout,
             menu_editor::import_convertx_template,
             menu_editor::save_layout,
             menu_editor::image_preview,
+            menu_editor::menu_navigation,
             burn_studio::studio_cancel,
             burn_studio::studio_drives,
             burn_studio::studio_drive_info,
@@ -1005,8 +1350,8 @@ mod tests {
         let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
             titles: vec![
-                TitleLoad { duration_secs: 5400.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, weight: 1.0 },
-                TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 },
+                TitleLoad { duration_secs: 5400.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
+                TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
             ],
             motion_menu: false,
             motion_duration: None,
@@ -1026,7 +1371,7 @@ mod tests {
     fn calculation_too_long_for_dvd5() {
         let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 8.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 8.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
@@ -1044,7 +1389,7 @@ mod tests {
     fn calculation_follows_the_profile() {
         let project = || ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
             motion_menu: false,
             motion_duration: None,
             bd_menu_secs: vec![],
@@ -1061,7 +1406,7 @@ mod tests {
     fn blu_ray_calculation_uses_bd_limits() {
         let project = |disc| ProjectSettings {
             disc,
-            titles: vec![TitleLoad { duration_secs: 2.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 2.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
@@ -1081,7 +1426,7 @@ mod tests {
         let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp).unwrap();
         assert_eq!((lp.video_kbps, lp.clamp.as_str()), (12_000, "max"));
         // A 12 h project does not fit a BD-25 even at 4000 kbps and is rated poor.
-        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 12.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 }], ..project(DiscType::Bd25) };
+        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 12.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }], ..project(DiscType::Bd25) };
         let r = project_calculation(long, EncodingProfile::Auto).unwrap();
         assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
         assert_eq!((r.titles[0].quality, r.titles[0].quality_percent), (Quality::Poor, 0.0));
@@ -1089,7 +1434,7 @@ mod tests {
 
     #[test]
     fn avchd_estimate_uses_avchd_limits() {
-        let titles = vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 }];
+        let titles = vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }];
         let r = project_calculation(
             ProjectSettings { disc: DiscType::Avchd5, titles: titles.clone(), motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
             EncodingProfile::Auto,
@@ -1166,7 +1511,7 @@ mod tests {
         };
         let s = ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
@@ -1215,5 +1560,128 @@ mod tests {
         assert!(preview_data_url(None, &thumb.to_string_lossy()).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn quality_test_window_and_serde() {
+        assert_eq!(quality_test_window(120.0, None, None, None), (120.0, 10.0, 30.0));
+        assert_eq!(quality_test_window(120.0, Some(10.0), Some(50.0), None), (40.0, 10.0, 20.0));
+        assert_eq!(quality_test_window(120.0, Some(10.0), Some(50.0), Some(45.0)), (40.0, 10.0, 40.0));
+        assert_eq!(quality_test_window(4.0, None, None, Some(2.0)), (4.0, 4.0, 0.0));
+        assert_eq!(quality_test_window(20.0, Some(f64::NAN), Some(-1.0), Some(f64::INFINITY)), (20.0, 10.0, 5.0));
+
+        let req: QualityTestRequest = serde_json::from_str(
+            r#"{"path":"video.mkv","disc":"dvd5","audioKbps":192,"denoise":2.5,"bdResolution":"720"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.path, "video.mkv");
+        assert_eq!(req.disc, DiscType::Dvd5);
+        assert_eq!(req.audio_kbps, 192);
+        assert_eq!(req.denoise, Some(2.5));
+        assert_eq!(req.bd_resolution.as_deref(), Some("720"));
+        assert_eq!((req.brightness, req.contrast, req.saturation), (None, None, None));
+
+        let res = QualityTestResult {
+            sample_path: "sample.mpg".into(),
+            psnr_db: 38.42,
+            verdict: "good".into(),
+        };
+        let json = serde_json::to_string(&res).unwrap();
+        assert!(json.contains(r#""sample_path":"sample.mpg""#), "{json}");
+        assert!(json.contains(r#""psnr_db":38.42"#), "{json}");
+        assert!(json.contains(r#""verdict":"good""#), "{json}");
+
+        let input: InputConfig = serde_json::from_str(
+            r#"{"path":"a.mkv","audio":[1],"subtitles":[],"label":null,"chapters":[],"contrast":1.15}"#,
+        )
+        .unwrap();
+        assert_eq!((input.denoise, input.brightness, input.contrast, input.saturation), (None, None, Some(1.15), None));
+    }
+
+    #[test]
+    fn quality_test_runner_evaluates_synthetic_clip() {
+        let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bin");
+        let (ffmpeg, ffprobe) = (bin.join("ffmpeg.exe"), bin.join("ffprobe.exe"));
+        if !ffmpeg.is_file() || !ffprobe.is_file() {
+            eprintln!("skipped: bin/ffmpeg.exe or ffprobe.exe missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cx-qtest-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("clip.mp4");
+        let st = blocking_tool_command(&ffmpeg)
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc2=s=640x360:r=25:d=2",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            ])
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(st.success(), "synthetic clip generation failed");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dvd_res = rt
+            .block_on(run_quality_test(
+                &ffmpeg,
+                &ffprobe,
+                &AppSettings::default(),
+                QualityTestRequest {
+                    path: src.to_string_lossy().into_owned(),
+                    disc: DiscType::Dvd5,
+                    video_kbps: Some(4500),
+                    audio_kbps: 192,
+                    start_secs: Some(0.0),
+                    trim_start: None,
+                    trim_end: None,
+                    crop: None,
+                    denoise: Some(2.0),
+                    brightness: Some(0.05),
+                    contrast: Some(1.05),
+                    saturation: Some(1.1),
+                    bd_resolution: None,
+                    bd_rate: None,
+                },
+            ))
+            .unwrap();
+        let dvd_sample = PathBuf::from(&dvd_res.sample_path);
+        assert!(dvd_sample.is_file(), "missing DVD sample: {}", dvd_sample.display());
+        assert!(std::fs::metadata(&dvd_sample).unwrap().len() > 0);
+        assert!(dvd_res.psnr_db.is_finite() && dvd_res.psnr_db > 15.0, "psnr={}", dvd_res.psnr_db);
+        assert!(["excellent", "good", "fair", "poor"].contains(&dvd_res.verdict.as_str()), "verdict={}", dvd_res.verdict);
+        let _ = std::fs::remove_file(&dvd_sample);
+
+        let bd_res = rt
+            .block_on(run_quality_test(
+                &ffmpeg,
+                &ffprobe,
+                &AppSettings { fast_encode: true, ..AppSettings::default() },
+                QualityTestRequest {
+                    path: src.to_string_lossy().into_owned(),
+                    disc: DiscType::Bd25,
+                    video_kbps: Some(8000),
+                    audio_kbps: 448,
+                    start_secs: None,
+                    trim_start: None,
+                    trim_end: None,
+                    crop: None,
+                    denoise: None,
+                    brightness: None,
+                    contrast: None,
+                    saturation: None,
+                    bd_resolution: Some("720".into()),
+                    bd_rate: Some("50".into()),
+                },
+            ))
+            .unwrap();
+        let bd_sample = PathBuf::from(&bd_res.sample_path);
+        assert!(bd_sample.is_file(), "missing BD sample: {}", bd_sample.display());
+        assert!(std::fs::metadata(&bd_sample).unwrap().len() > 0);
+        assert!(bd_res.psnr_db.is_finite() && bd_res.psnr_db > 15.0, "psnr={}", bd_res.psnr_db);
+        assert!(["excellent", "good", "fair", "poor"].contains(&bd_res.verdict.as_str()), "verdict={}", bd_res.verdict);
+        let _ = std::fs::remove_file(&bd_sample);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::author::{PlaybackOptions, Resolution, TvStandard};
-use crate::encoder::{AudioMode, BdEncoder, Deinterlace, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
+use crate::encoder::{AudioMode, BdEncoder, Deinterlace, DvdVideoMode, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::i18n::{available_languages, tr, UiLang};
@@ -22,6 +22,7 @@ use crate::tools::ProcessPriority;
 pub const TEXT_OVERFLOW_ACTIONS: &[&str] = &["reduce_font_size", "truncate"];
 pub const TV_STANDARDS: &[&str] = &["PAL", "NTSC"];
 pub const DVD_RESOLUTIONS: &[&str] = &["Full D1", "Half D1", "SIF"];
+pub const DVD_VIDEO_MODES: &[&str] = &["encode", "auto", "strict"];
 pub const BD_RESOLUTIONS: &[&str] = &["1080p", "720p"];
 pub const ASPECT_POLICIES: &[&str] = &["Auto", "4:3", "16:9"];
 pub const ENCODING_PROFILES: &[&str] = &["Auto", "SP_Short", "MP_Medium", "LP_Long"];
@@ -93,6 +94,8 @@ pub struct AppSettings {
     // Output & TV format
     pub tv_standard: String,
     pub dvd_resolution: String,
+    /// DVD-Video stream handling (`encode`, `auto`, `strict`).
+    pub dvd_video: String,
     /// Frame size of Blu-ray titles (`1080p` or `720p`); used when the disc is a BD.
     pub bd_resolution: String,
     /// Blu-ray: only one video per disc (no playlist of several videos).
@@ -175,6 +178,7 @@ impl Default for AppSettings {
             template_dir: String::new(),
             tv_standard: TV_STANDARDS[0].into(),
             dvd_resolution: DVD_RESOLUTIONS[0].into(),
+            dvd_video: DVD_VIDEO_MODES[0].into(),
             bd_resolution: BD_RESOLUTIONS[0].into(),
             bd_single_video: false,
             aspect_ratio_policy: ASPECT_POLICIES[0].into(),
@@ -672,6 +676,7 @@ impl AppSettings {
             self.menu_audio = MENU_AUDIO_MODES[0].into();
         }
         self.dvd_resolution = choice(&self.dvd_resolution, DVD_RESOLUTIONS);
+        self.dvd_video = choice(&self.dvd_video, DVD_VIDEO_MODES);
         self.bd_resolution = choice(&self.bd_resolution, BD_RESOLUTIONS);
         self.aspect_ratio_policy = choice(&self.aspect_ratio_policy, ASPECT_POLICIES);
         self.encoding_profile = choice(&self.encoding_profile, ENCODING_PROFILES);
@@ -808,6 +813,7 @@ impl AppSettings {
                 "off" => Deinterlace::Off,
                 _ => Deinterlace::Auto,
             },
+            ..VideoProcessing::default()
         }
     }
 
@@ -866,6 +872,7 @@ impl AppSettings {
         };
         opts.bd_single_video = self.bd_single_video;
         opts.encoding_profile = self.profile();
+        opts.dvd_video = DvdVideoMode::from_setting(&self.dvd_video);
         opts.motion_audio = match self.menu_audio.as_str() {
             "silence" => MenuAudio::Silence,
             "file" if !self.menu_audio_file.is_empty() => MenuAudio::File(PathBuf::from(&self.menu_audio_file)),
@@ -1030,7 +1037,7 @@ mod tests {
         assert_eq!(o.video.filter, ScaleFilter::Bicubic);
         let s = AppSettings { scale_mode: "panscan".into(), scale_filter: "lanczos".into(), deinterlace: "off".into(), ..AppSettings::default() };
         s.apply_to(&mut o);
-        assert_eq!(o.video, VideoProcessing { scale: ScaleMode::PanScan, filter: ScaleFilter::Lanczos, deinterlace: Deinterlace::Off });
+        assert_eq!(o.video, VideoProcessing { scale: ScaleMode::PanScan, filter: ScaleFilter::Lanczos, deinterlace: Deinterlace::Off, ..VideoProcessing::default() });
         let s = AppSettings { scale_mode: "stretch".into(), deinterlace: "yadif".into(), ..AppSettings::default() };
         s.apply_to(&mut o);
         assert_eq!((o.video.scale, o.video.deinterlace), (ScaleMode::Stretch, Deinterlace::Yadif));
@@ -1053,6 +1060,24 @@ mod tests {
         assert_eq!(AppSettings { bd_resolution: "4k".into(), ..AppSettings::default() }.sanitized().bd_resolution, "1080p");
         let old: AppSettings = serde_json::from_str(r#"{"dvd_resolution":"Half D1"}"#).unwrap();
         assert_eq!((old.bd_resolution.as_str(), old.bd_single_video), ("1080p", false));
+    }
+
+    #[test]
+    fn dvd_video_setting_sanitizes_and_applies() {
+        let def = AppSettings::default();
+        assert_eq!(def.dvd_video, "encode");
+        assert_eq!(AppSettings { dvd_video: "AUTO".into(), ..AppSettings::default() }.sanitized().dvd_video, "auto");
+        assert_eq!(AppSettings { dvd_video: "strict".into(), ..AppSettings::default() }.sanitized().dvd_video, "strict");
+        assert_eq!(AppSettings { dvd_video: "bogus".into(), ..AppSettings::default() }.sanitized().dvd_video, "encode");
+
+        let mut opts = BuildOptions::default();
+        assert_eq!(opts.dvd_video, DvdVideoMode::Encode);
+        AppSettings { dvd_video: "auto".into(), ..AppSettings::default() }.apply_to(&mut opts);
+        assert_eq!(opts.dvd_video, DvdVideoMode::Auto);
+        AppSettings { dvd_video: "strict".into(), ..AppSettings::default() }.apply_to(&mut opts);
+        assert_eq!(opts.dvd_video, DvdVideoMode::Strict);
+        AppSettings { dvd_video: "bogus".into(), ..AppSettings::default() }.apply_to(&mut opts);
+        assert_eq!(opts.dvd_video, DvdVideoMode::Encode);
     }
 }
 

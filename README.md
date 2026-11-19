@@ -3,6 +3,8 @@
 DVD, Blu-ray and AVCHD authoring in Rust: a desktop app (Tauri; German, English, Russian) and a
 CLI that turn video files into a menu-driven disc structure, an image, or a burned disc.
 
+> **Status:** pre-1.0 (`0.x`). Features and settings may still change; see [CHANGELOG.md](CHANGELOG.md).
+
 Not affiliated with VSO Software. ConvertX templates are not included; they are only read from a
 user's own ConvertXToDVD installation.
 
@@ -11,11 +13,13 @@ user's own ConvertXToDVD installation.
 - DVD-Video, Blu-ray and AVCHD output, native muxing and IFO/BDMV writers (no `dvdauthor`/`tsMuxeR` needed)
 - Menus from ConvertX templates or custom layouts (built-in WYSIWYG menu editor)
 - **Burn Studio**: read, build, verify and burn images (UDF 1.02 + ISO 9660), Discovery media tests, layer-break tools
+- Smart stream copy: Blu-ray/AVCHD H.264 and audio, and DVD-compliant MPEG-2 video (`--dvd-video auto`), re-encoding only what does not fit
+- Picture tools: trim/crop, denoise and brightness/contrast/saturation with live preview, a 10-second PSNR quality test, scene-change chapters, and a remote-control "Test Remote" mode in the menu editor
 - `ffmpeg`-based encoding with automatic GPU decoding (`d3d11va`/`cuda`/`qsv` on Windows, `vaapi`/`cuda`/`qsv` on Linux) and optional GPU encoding
 
 ## Installation
 
-Prebuilt packages are published automatically on [GitHub Releases](https://github.com/islmal/musadvd/releases) (tagged releases and rolling `nightly` builds).
+Prebuilt packages are published automatically on [GitHub Releases](https://github.com/islmal/musadvd/releases) (tagged releases and rolling `nightly` builds). See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ### Windows
 

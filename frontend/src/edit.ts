@@ -1,7 +1,20 @@
-// Tab "Schnitt & Bild": timeline trimmer (start/end of the used section) and crop inspector
-// (black bars cut away, with automatic detection and a preview of the output frame). The trimmer has a
-// live player (ffmpeg fMP4 stream from `preview.rs`) to set start, end and chapters at the playhead.
-import { detectCrop, previewStop, previewStream, sourceFrame, type Crop, type VideoMetadata } from "./api";
+// Tab "Edit & Picture": timeline trimmer (start/end of the used section), crop inspector
+// (black bars cut away, with automatic detection and output preview), picture filters (denoise & EQ),
+// and a 10s quality test sample encoder. The trimmer has a live player (ffmpeg fMP4 stream from `preview.rs`).
+import {
+  detectCrop,
+  detectSceneChapters,
+  openFolder,
+  previewStop,
+  previewStream,
+  sourceFrame,
+  testTitleQuality,
+  type Crop,
+  type Disc,
+  type PictureOptions,
+  type QualityTestResult,
+  type VideoMetadata,
+} from "./api";
 import { fmtNumber, t as tr } from "./i18n";
 
 /** The part of a project title this tab edits. */
@@ -11,7 +24,11 @@ export interface EditTarget {
   trimStart: number | null;
   trimEnd: number | null;
   crop: Crop | null;
-  /** Chapter starts in source seconds (first is 0); edited in place by "Kapitel hier setzen". */
+  denoise: number | null;
+  brightness: number | null;
+  contrast: number | null;
+  saturation: number | null;
+  /** Chapter starts in source seconds (first is 0); edited in place by "Set chapter here". */
   chapters: number[];
 }
 
@@ -25,10 +42,19 @@ export interface EditHooks {
   audioIndex(): number | null;
   /** Turn the title into one title per chapter segment. */
   split(): void;
+  /** Current disc and planned bitrate context for the 10s quality test. */
+  qualityContext(): {
+    disc: Disc;
+    videoKbps: number | null;
+    audioKbps: number;
+    bdResolution?: string | null;
+    bdRate?: string | null;
+  };
 }
 
 const MIN_SECS = 1;
 const MIN_PIXELS = 64;
+const MAX_CHAPTERS = 99;
 
 type Child = Node | string | null | undefined | false;
 
@@ -118,7 +144,11 @@ const even = (v: number) => Math.round(v / 2) * 2;
 
 export function renderEditTab(t: EditTarget, hooks: EditHooks): HTMLElement {
   const root = h("div", { class: "edit-tab" });
-  root.append(renderTrim(t, hooks), renderCrop(t, hooks));
+  let onTrimChange: (() => void) | null = null;
+  const trim = renderTrim(t, hooks, () => onTrimChange?.());
+  const quality = renderQualityTest(t, hooks, trim.playSample);
+  onTrimChange = quality.updateAutoPlaceholder;
+  root.append(trim.el, renderCrop(t, hooks), renderPictureFilters(t, hooks, trim.refreshPreview), quality.el);
   return root;
 }
 
@@ -126,7 +156,20 @@ export function renderEditTab(t: EditTarget, hooks: EditHooks): HTMLElement {
 // Timeline trimmer
 // ---------------------------------------------------------------------------
 
-function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
+interface TrimController {
+  el: HTMLElement;
+  refreshPreview(): void;
+  playSample(samplePath: string): void;
+}
+
+const pictureOf = (t: EditTarget): PictureOptions => ({
+  denoise: t.denoise,
+  brightness: t.brightness,
+  contrast: t.contrast,
+  saturation: t.saturation,
+});
+
+function renderTrim(t: EditTarget, hooks: EditHooks, onTrimChange?: () => void): TrimController {
   const dur = t.meta.durationSecs;
   let start = t.trimStart ?? 0;
   let end = t.trimEnd ?? dur;
@@ -149,7 +192,8 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   let base = 0;
   let seq = 0;
   let streamUrl: Promise<string> | null = null;
-  let streamCrop = "";
+  let streamKey = "";
+  let playingSample = false;
   const pos = () => base + (video.currentTime || 0);
   const paintPlayhead = () => {
     playhead.style.left = `${(clamp(pos(), 0, dur) / dur) * 100}%`;
@@ -159,12 +203,14 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
   const seek = async (secs: number, play: boolean) => {
     const mine = ++seq;
     const at = clamp(secs, 0, Math.max(0, dur - 0.1));
+    playingSample = false;
     try {
-      // The stream bakes the crop in: a changed crop needs a new token.
-      const cropKey = JSON.stringify(t.crop);
-      if (cropKey !== streamCrop) streamUrl = null;
-      streamCrop = cropKey;
-      streamUrl ??= previewStream(t.meta.path, t.crop);
+      // The stream bakes crop and picture filters in: any change needs a new token.
+      const picture = pictureOf(t);
+      const key = JSON.stringify({ crop: t.crop, ...picture });
+      if (key !== streamKey) streamUrl = null;
+      streamKey = key;
+      streamUrl ??= previewStream(t.meta.path, t.crop, picture);
       const url = await streamUrl;
       await previewStop();
       if (mine !== seq) return;
@@ -175,6 +221,31 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
       paintPlayhead();
     } catch (e) {
       streamUrl = null;
+      hooks.status(tr("edit.vorschau2", { e }), "error");
+    }
+  };
+  const refreshPreview = () => {
+    streamUrl = null;
+    streamKey = "";
+    if (video.src) {
+      const at = playingSample ? start : pos();
+      void seek(at, !video.paused);
+    }
+  };
+  const playSample = async (samplePath: string) => {
+    const mine = ++seq;
+    streamUrl = null;
+    streamKey = "";
+    playingSample = true;
+    try {
+      const url = await previewStream(samplePath, null, null);
+      await previewStop();
+      if (mine !== seq) return;
+      base = 0;
+      video.src = `${url}?t=0.000`;
+      void video.play().catch(() => {});
+      paintPlayhead();
+    } catch (e) {
       hooks.status(tr("edit.vorschau2", { e }), "error");
     }
   };
@@ -223,6 +294,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     if (document.activeElement !== endInput) endInput.value = fmtPrecise(end);
     length.textContent = tr("edit.laengeVon", { fmtPrecise: fmtPrecise(end - start), fmtPrecise2: fmtPrecise(dur) });
     refreshSplit();
+    onTrimChange?.();
   };
 
   /** `show`: a committed handle/typed change shows that frame (paused) in the player. */
@@ -297,6 +369,11 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     hooks.status(tr("edit.kapitelBeiGesetzt", { fmtPrecise: fmtPrecise(c) }));
   };
   const btn = (label: string, onclick: () => void, title?: string) => h("button", { class: "btn", type: "button", onclick, title }, label);
+  const detectScenesBtn = h(
+    "button",
+    { class: "btn", type: "button", disabled: !t.meta.video },
+    tr("edit.detectScenes"),
+  ) as HTMLButtonElement;
 
   paint();
   paintMarks();
@@ -308,7 +385,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
       if (!video.src) video.poster = u;
     })
     .catch(() => {});
-  return h(
+  const el = h(
     "section",
     { class: "edit-section" },
     h("h3", {}, tr("edit.schnitt")),
@@ -329,6 +406,7 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
         btn(tr("edit.startHierSetzen"), () => set("start", pos(), true, false)),
         btn(tr("edit.endeHierSetzen"), () => set("end", pos(), true, false)),
         btn(tr("edit.kapitelHierSetzen"), addChapter),
+        detectScenesBtn,
       ),
     ),
     track,
@@ -356,6 +434,43 @@ function renderTrim(t: EditTarget, hooks: EditHooks): HTMLElement {
     ),
     h("div", { class: "row" }, splitBtn, splitHint),
   );
+
+  let detectSeq = 0;
+  detectScenesBtn.addEventListener("click", async () => {
+    const mine = ++detectSeq;
+    detectScenesBtn.disabled = true;
+    detectScenesBtn.textContent = tr("edit.detectScenesRunning");
+    try {
+      const cuts = await detectSceneChapters(t.meta.path, t.trimStart, t.trimEnd);
+      if (mine !== detectSeq || !el.isConnected) return;
+      let added = 0;
+      for (const raw of cuts) {
+        if (t.chapters.length >= MAX_CHAPTERS) break;
+        const c = Math.round(raw * 10) / 10;
+        if (!Number.isFinite(c) || c <= 0 || c >= dur - 1) continue;
+        if (t.chapters.some((x) => Math.abs(x - c) < 0.5)) continue;
+        t.chapters.push(c);
+        added += 1;
+      }
+      t.chapters.sort((x, y) => x - y);
+      if (t.chapters.length > MAX_CHAPTERS) t.chapters.length = MAX_CHAPTERS;
+      paintMarks();
+      refreshSplit();
+      hooks.changed();
+      hooks.status(added > 0 ? tr("edit.detectScenesFound", { count: added }) : tr("edit.detectScenesNone"));
+    } catch (e) {
+      if (mine === detectSeq && el.isConnected) {
+        hooks.status(tr("edit.detectScenesFailed", { e }), "error");
+      }
+    } finally {
+      if (mine === detectSeq) {
+        detectScenesBtn.disabled = !t.meta.video;
+        detectScenesBtn.textContent = tr("edit.detectScenes");
+      }
+    }
+  });
+
+  return { el, refreshPreview, playSample: (samplePath) => void playSample(samplePath) };
 }
 
 // ---------------------------------------------------------------------------
@@ -559,4 +674,261 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
       ),
     ),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Picture filters (Denoise & EQ)
+// ---------------------------------------------------------------------------
+
+type PictureKey = "denoise" | "brightness" | "contrast" | "saturation";
+
+interface SliderSpec {
+  key: PictureKey;
+  labelKey: string;
+  min: number;
+  max: number;
+  step: number;
+  neutral: number;
+  digits: number;
+  signed?: boolean;
+}
+
+const PICTURE_SLIDERS: SliderSpec[] = [
+  { key: "denoise", labelKey: "edit.denoise", min: 0, max: 8, step: 0.5, neutral: 0, digits: 1 },
+  { key: "brightness", labelKey: "edit.brightness", min: -0.5, max: 0.5, step: 0.02, neutral: 0, digits: 2, signed: true },
+  { key: "contrast", labelKey: "edit.contrast", min: 0.5, max: 1.5, step: 0.05, neutral: 1, digits: 2 },
+  { key: "saturation", labelKey: "edit.saturation", min: 0, max: 2, step: 0.05, neutral: 1, digits: 2 },
+];
+
+function formatSliderValue(spec: SliderSpec, val: number | null): string {
+  if (spec.key === "denoise" && val === null) return tr("edit.denoiseOff");
+  const n = val ?? spec.neutral;
+  const clean = Math.abs(n) < 1e-4 ? 0 : n;
+  const formatted = fmtNumber(clean, spec.digits);
+  return spec.signed && clean > 1e-4 ? `+${formatted}` : formatted;
+}
+
+const normalizeSlider = (spec: SliderSpec, raw: number): number | null =>
+  Math.abs(raw - spec.neutral) <= 1e-4 ? null : Number(raw.toFixed(2));
+
+function renderPictureFilters(t: EditTarget, hooks: EditHooks, refreshPreview: () => void): HTMLElement {
+  const inputs = {} as Record<PictureKey, HTMLInputElement>;
+  const outputs = {} as Record<PictureKey, HTMLElement>;
+
+  const sliders = PICTURE_SLIDERS.map((spec) => {
+    const valText = h("span", { class: "picture-slider-val mono" }, formatSliderValue(spec, t[spec.key]));
+    const input = h("input", {
+      type: "range",
+      min: String(spec.min),
+      max: String(spec.max),
+      step: String(spec.step),
+      "aria-label": tr(spec.labelKey),
+      oninput: () => {
+        const v = normalizeSlider(spec, Number(input.value));
+        t[spec.key] = v;
+        valText.textContent = formatSliderValue(spec, v);
+      },
+      onchange: () => {
+        const v = normalizeSlider(spec, Number(input.value));
+        t[spec.key] = v;
+        valText.textContent = formatSliderValue(spec, v);
+        refreshPreview();
+        hooks.changed();
+      },
+    }) as HTMLInputElement;
+    input.value = String(t[spec.key] ?? spec.neutral);
+    inputs[spec.key] = input;
+    outputs[spec.key] = valText;
+    return h(
+      "label",
+      { class: "picture-slider" },
+      h("span", { class: "picture-slider-label" }, tr(spec.labelKey)),
+      valText,
+      input,
+    );
+  });
+
+  const resetBtn = h(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      onclick: () => {
+        for (const spec of PICTURE_SLIDERS) {
+          t[spec.key] = null;
+          inputs[spec.key].value = String(spec.neutral);
+          outputs[spec.key].textContent = formatSliderValue(spec, null);
+        }
+        refreshPreview();
+        hooks.changed();
+      },
+    },
+    tr("edit.zuruecksetzen"),
+  );
+
+  return h(
+    "section",
+    { class: "edit-section" },
+    h("h3", {}, tr("edit.pictureFiltersTitle")),
+    h("p", { class: "hint" }, tr("edit.pictureFiltersHint")),
+    h("div", { class: "picture-controls" }, ...sliders),
+    h("div", { class: "row" }, resetBtn),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Quality test (10s sample)
+// ---------------------------------------------------------------------------
+
+const VERDICT_KEYS: Record<QualityTestResult["verdict"], string> = {
+  excellent: "edit.verdictExcellent",
+  good: "edit.verdictGood",
+  fair: "edit.verdictFair",
+  poor: "edit.verdictPoor",
+};
+
+function parentDir(path: string): string {
+  const sep = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (sep < 0) return path;
+  if (sep === 0) return "/";
+  if (sep === 2 && path[1] === ":") return path.slice(0, 3);
+  return path.slice(0, sep);
+}
+
+function fileBaseName(path: string): string {
+  const sep = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return sep >= 0 ? path.slice(sep + 1) : path;
+}
+
+function renderQualityTest(
+  t: EditTarget,
+  hooks: EditHooks,
+  playSample: (samplePath: string) => void,
+): { el: HTMLElement; updateAutoPlaceholder(): void } {
+  const autoTime = () => {
+    const dur = t.meta.durationSecs;
+    const t0 = Math.max(0, Math.min(t.trimStart ?? 0, dur));
+    const t1 = Math.max(t0, Math.min(t.trimEnd ?? dur, dur));
+    const effDur = Math.max(0.5, t1 - t0);
+    const sampleSecs = Math.min(effDur, 10);
+    return Math.min(t0 + effDur * 0.25, Math.max(t0, t1 - sampleSecs));
+  };
+
+  const timeInput = h("input", {
+    type: "text",
+    class: "mono time",
+    "aria-label": tr("edit.qualityTestTimestamp"),
+  }) as HTMLInputElement;
+  const updateAutoPlaceholder = () => {
+    timeInput.placeholder = tr("edit.qualityTestAuto25", { time: fmtPrecise(autoTime()) });
+  };
+  updateAutoPlaceholder();
+
+  const usePlayheadBtn = h(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      onclick: () => {
+        timeInput.value = fmtPrecise(player?.pos() ?? autoTime());
+      },
+    },
+    tr("edit.qualityTestUsePlayhead"),
+  );
+
+  const testBtn = h(
+    "button",
+    { class: "btn primary", type: "button", disabled: !t.meta.video },
+    tr("edit.qualityTestBtn"),
+  ) as HTMLButtonElement;
+  const resultBox = h("div", { class: "quality-result", hidden: true });
+
+  const el = h(
+    "section",
+    { class: "edit-section" },
+    h("h3", {}, tr("edit.qualityTestTitle")),
+    h("p", { class: "hint" }, tr("edit.qualityTestHint")),
+    h(
+      "div",
+      { class: "quality-test-controls" },
+      h("label", {}, tr("edit.qualityTestTimestamp"), timeInput),
+      usePlayheadBtn,
+      testBtn,
+    ),
+    resultBox,
+  );
+
+  const showResult = (res: QualityTestResult) => {
+    resultBox.replaceChildren(
+      h(
+        "div",
+        { class: "quality-result-main" },
+        h("span", { class: `badge quality-verdict verdict-${res.verdict}` }, tr(VERDICT_KEYS[res.verdict])),
+        h("span", { class: "mono quality-psnr" }, tr("edit.qualityTestResult", { psnr: fmtNumber(res.psnr_db, 2) })),
+        h("span", { class: "mono quality-sample-path", title: res.sample_path }, fileBaseName(res.sample_path)),
+      ),
+      h(
+        "div",
+        { class: "quality-result-actions" },
+        h("button", { class: "btn", type: "button", onclick: () => playSample(res.sample_path) }, tr("edit.qualityTestPreview")),
+        h(
+          "button",
+          {
+            class: "btn",
+            type: "button",
+            onclick: () => void openFolder(parentDir(res.sample_path)).catch((e) => hooks.status(String(e), "error")),
+          },
+          tr("edit.qualityTestOpenFolder"),
+        ),
+      ),
+    );
+    resultBox.hidden = false;
+  };
+
+  let testSeq = 0;
+  testBtn.addEventListener("click", async () => {
+    const raw = timeInput.value.trim();
+    let startSecs: number | null = null;
+    if (raw !== "") {
+      const parsed = parsePrecise(raw);
+      if (parsed === null || !Number.isFinite(parsed) || parsed < 0 || parsed > t.meta.durationSecs) {
+        hooks.status(tr("edit.qualityTestInvalidTime"), "error");
+        return;
+      }
+      startSecs = parsed;
+    }
+    const mine = ++testSeq;
+    testBtn.disabled = true;
+    testBtn.textContent = tr("edit.qualityTestRunning");
+    try {
+      const ctx = hooks.qualityContext();
+      const res = await testTitleQuality({
+        path: t.meta.path,
+        disc: ctx.disc,
+        videoKbps: ctx.videoKbps,
+        audioKbps: ctx.audioKbps,
+        startSecs,
+        trimStart: t.trimStart,
+        trimEnd: t.trimEnd,
+        crop: t.crop,
+        denoise: t.denoise,
+        brightness: t.brightness,
+        contrast: t.contrast,
+        saturation: t.saturation,
+        bdResolution: ctx.bdResolution ?? null,
+        bdRate: ctx.bdRate ?? null,
+      });
+      if (mine !== testSeq || !el.isConnected) return;
+      showResult(res);
+    } catch (e) {
+      if (mine === testSeq && el.isConnected) {
+        hooks.status(tr("edit.qualityTestFailed", { e }), "error");
+      }
+    } finally {
+      testBtn.disabled = !t.meta.video;
+      testBtn.textContent = tr("edit.qualityTestBtn");
+    }
+  });
+
+  return { el, updateAutoPlaceholder };
 }

@@ -168,6 +168,11 @@ impl DiscType {
     }
 }
 
+/// Converts a byte count to kilobits using the calculator's `1 MiB = 8192 kbit` convention (`1 kbit = 128 bytes`).
+pub fn bytes_to_kbit(bytes: u64) -> f64 {
+    bytes as f64 / 128.0
+}
+
 /// Encoding profile ("Profil"): an upper limit for the video bitrate. `Auto` and `Sp` fill the
 /// disc up to [`MAX_VIDEO_KBPS`]; `Mp`/`Lp` stop earlier (smaller output for short projects),
 /// and `Lp` switches to Half D1 when the bitrate drops below [`LP_HALF_D1_BELOW_KBPS`].
@@ -501,5 +506,30 @@ mod tests {
         assert_eq!(long.video_kbps, calculate_with_overhead(DiscType::Dvd5, 4.0 * 3600.0, 192, 0.0).unwrap().video_kbps);
         // The ceiling never goes below the minimum.
         assert_eq!(calculate_capped(DiscType::Dvd5, 1800.0, 192, 0.0, 10).unwrap().video_kbps, MIN_VIDEO_KBPS);
+    }
+
+    #[test]
+    fn bytes_to_kbit_and_fixed_overhead_deduction() {
+        assert_eq!(bytes_to_kbit(1024 * 1024), 8192.0);
+        assert_eq!(bytes_to_kbit(128), 1.0);
+        assert_eq!(bytes_to_kbit(0), 0.0);
+
+        // Reserving 1000 MiB of fixed byte overhead reduces available bitrate accordingly.
+        let fixed = bytes_to_kbit(1000 * 1024 * 1024);
+        let base = calculate_with_overhead(DiscType::Dvd5, 3600.0, 192, 0.0).unwrap();
+        let reduced = calculate_with_overhead(DiscType::Dvd5, 3600.0, 192, fixed).unwrap();
+        assert_eq!(reduced.clamp, Clamp::None);
+        assert!(reduced.fits());
+        assert!(reduced.video_kbps < base.video_kbps);
+        let expected_raw = (DiscType::Dvd5.target_kbit() - 192.0 * 3600.0 - fixed) / 3600.0;
+        assert!((reduced.raw_video_kbps - expected_raw).abs() < 1e-9);
+        assert_eq!(reduced.video_kbps, expected_raw.floor() as u32);
+
+        // Overflowing fixed byte overhead clamps down to MIN_VIDEO_KBPS with Clamp::Min.
+        let overflow = bytes_to_kbit(4200 * 1024 * 1024);
+        let clamped = calculate_capped(DiscType::Dvd5, 3600.0, 192, overflow, MAX_VIDEO_KBPS).unwrap();
+        assert_eq!(clamped.clamp, Clamp::Min);
+        assert_eq!(clamped.video_kbps, MIN_VIDEO_KBPS);
+        assert!(!clamped.fits());
     }
 }

@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use musadvd::calculator::DiscType;
-use musadvd::encoder::MenuAudio;
-use musadvd::dvd::{self, BuildOptions, Event, StreamSelection};
+use musadvd::encoder::{DvdVideoMode, MenuAudio};
+use musadvd::dvd::{self, BuildOptions, BuildPhase, Event, StreamSelection};
+use musadvd::layout::CustomLayout;
 use musadvd::menu::UiLang;
 use musadvd::tools::Toolchain;
 
@@ -203,4 +204,148 @@ fn merged_inputs_share_one_titleset() {
 /// True if the output directory still holds a `<project>.musadvd-work` folder.
 fn has_work_dir(out: &std::path::Path) -> bool {
     std::fs::read_dir(out).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".musadvd-work"))
+}
+
+fn simple_custom_layout(titles: usize) -> CustomLayout {
+    let elements: Vec<String> = (1..=titles)
+        .map(|n| {
+            format!(
+                r#"{{"type":"text","text":"Title {n}","x":40,"y":{y},"w":300,"h":44,"action":{{"type":"playTitle","title":{n}}}}}"#,
+                y = 100 + (n - 1) * 60
+            )
+        })
+        .collect();
+    let json = format!(
+        r##"{{"version":1,"canvas":{{"width":720,"height":576}},"menus":[{{"id":"main","name":"Main","role":"title","background":{{"color":"#101820"}},"elements":[{}]}}]}}"##,
+        elements.join(",")
+    );
+    CustomLayout::from_json(&json).unwrap()
+}
+
+#[test]
+fn dvd_video_auto_copies_compliant_mpeg2_with_subtitles_and_reencodes_h264() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let tools = match rt.block_on(Toolchain::detect()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let dir = std::env::temp_dir().join(format!("cx_dvd_copy_auto_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+
+    std::fs::write(dir.join("sub.srt"), "1\n00:00:00,500 --> 00:00:02,500\nCopied MPEG-2 subtitle\n").unwrap();
+    let mpeg2_clip = dir.join("native.mkv");
+    ffmpeg(&tools, &[
+        "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:duration=4",
+        "-f", "lavfi", "-i", "sine=f=440:duration=4",
+        "-i", &s(&dir.join("sub.srt")),
+        "-map", "0", "-map", "1", "-map", "2",
+        "-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-b:v", "3000k", "-maxrate", "8000k", "-bufsize", "1835k",
+        "-g", "12", "-bf", "2", "-aspect", "16:9",
+        "-c:a", "ac3", "-b:a", "192k", "-ar", "48000",
+        "-c:s", "srt",
+        &s(&mpeg2_clip),
+    ]);
+    let h264_clip = dir.join("reencode.mp4");
+    ffmpeg(&tools, &[
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=4",
+        "-f", "lavfi", "-i", "sine=f=330:duration=4",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+        &s(&h264_clip),
+    ]);
+
+    let opts = BuildOptions {
+        inputs: vec![mpeg2_clip, h264_clip],
+        disc: DiscType::Dvd5,
+        custom_layout: Some(simple_custom_layout(2)),
+        output: dir.join("out"),
+        ui_lang: UiLang::EN,
+        two_pass: true,
+        dvd_video: DvdVideoMode::Auto,
+        chapters: dvd::ChapterSettings { interval_secs: 300.0, ..Default::default() },
+        ..Default::default()
+    };
+    let mut steps = Vec::new();
+    let mut warns = Vec::new();
+    let report = rt
+        .block_on(dvd::build_dvd(&opts, &mut |e: Event| match e {
+            Event::Step(msg) => steps.push(msg),
+            Event::Warning(msg) => warns.push(msg),
+            _ => {}
+        }))
+        .unwrap_or_else(|e| panic!("build failed: {e}"));
+
+    assert!(
+        steps.iter().any(|m| m.contains("native:") && m.contains("copied unchanged")),
+        "expected copy step in {steps:?}"
+    );
+    assert!(
+        warns.iter().any(|m| m.contains("reencode:") && m.contains("re-encoded") && m.contains("MPEG-2")),
+        "expected fallback warning in {warns:?}"
+    );
+
+    let vts = &report.video_ts;
+    for f in ["VIDEO_TS.IFO", "VIDEO_TS.VOB", "VTS_01_0.IFO", "VTS_01_1.VOB", "VTS_02_0.IFO", "VTS_02_1.VOB"] {
+        assert!(vts.join(f).is_file(), "{f} missing");
+    }
+    let c1 = codecs(&tools, &vts.join("VTS_01_1.VOB"));
+    assert_eq!(c1.iter().filter(|c| *c == "mpeg2video").count(), 1, "{c1:?}");
+    assert_eq!(c1.iter().filter(|c| *c == "ac3").count(), 1, "{c1:?}");
+    assert_eq!(c1.iter().filter(|c| *c == "dvd_subtitle").count(), 1, "{c1:?}");
+
+    let c2 = codecs(&tools, &vts.join("VTS_02_1.VOB"));
+    assert_eq!(c2.iter().filter(|c| *c == "mpeg2video").count(), 1, "{c2:?}");
+    assert_eq!(c2.iter().filter(|c| *c == "ac3").count(), 1, "{c2:?}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn dvd_video_strict_fails_before_encoding_on_non_compliant_source() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let tools = match rt.block_on(Toolchain::detect()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let dir = std::env::temp_dir().join(format!("cx_dvd_copy_strict_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("h264.mp4");
+    ffmpeg(&tools, &[
+        "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:duration=2",
+        "-f", "lavfi", "-i", "sine=f=440:duration=2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+        clip.to_str().unwrap(),
+    ]);
+
+    let opts = BuildOptions {
+        inputs: vec![clip],
+        disc: DiscType::Dvd5,
+        custom_layout: Some(simple_custom_layout(1)),
+        output: dir.join("out"),
+        ui_lang: UiLang::EN,
+        dvd_video: DvdVideoMode::Strict,
+        ..Default::default()
+    };
+    let mut phases = Vec::new();
+    let err = rt
+        .block_on(dvd::build_dvd(&opts, &mut |e: Event| {
+            if let Event::Phase(p) = e {
+                phases.push(p);
+            }
+        }))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("cannot be copied") && err.contains("MPEG-2"), "{err}");
+    assert!(!phases.iter().any(|p| matches!(p, BuildPhase::Menus | BuildPhase::MenuEncoding | BuildPhase::Encoding { .. })), "{phases:?}");
+
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -158,6 +158,10 @@ enum Command {
         /// audio (Blu-ray/AVCHD; DVD falls back to AC-3). On Blu-ray --bd-audio decides copying.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// DVD video: encode always re-encodes, auto copies MPEG-2 streams that already meet the
+        /// DVD-Video spec (untrimmed, uncropped), strict copies every title or fails.
+        #[arg(long, value_enum, default_value = "encode")]
+        dvd_video: DvdVideoArg,
         /// Blu-ray/AVCHD video: encode always re-encodes, auto copies H.264 streams that already
         /// meet the disc spec (untrimmed, uncropped), strict copies every title or fails.
         #[arg(long, value_enum, default_value = "encode")]
@@ -333,6 +337,23 @@ enum BdVideoArg {
     Encode,
     Auto,
     Strict,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DvdVideoArg {
+    Encode,
+    Auto,
+    Strict,
+}
+
+impl From<DvdVideoArg> for musadvd::encoder::DvdVideoMode {
+    fn from(a: DvdVideoArg) -> Self {
+        match a {
+            DvdVideoArg::Encode => Self::Encode,
+            DvdVideoArg::Auto => Self::Auto,
+            DvdVideoArg::Strict => Self::Strict,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -863,6 +884,7 @@ fn main() -> ExitCode {
             no_hw_encode,
             no_menu_animations,
             audio,
+            dvd_video,
             bd_video,
             bd_audio,
             track_labels,
@@ -942,6 +964,7 @@ fn main() -> ExitCode {
                 hw_accel: if no_hw_encode { HwAccelArg::None } else { hw_accel }.into(),
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
+                dvd_video: dvd_video.into(),
                 bd_video: match bd_video {
                     BdVideoArg::Encode => musadvd::encoder::BdVideoMode::Encode,
                     BdVideoArg::Auto => musadvd::encoder::BdVideoMode::Auto,
@@ -970,6 +993,7 @@ fn main() -> ExitCode {
                         DeinterlaceArg::Yadif => musadvd::encoder::Deinterlace::Yadif,
                         DeinterlaceArg::Off => musadvd::encoder::Deinterlace::Off,
                     },
+                    ..Default::default()
                 },
                 ..Default::default()
             };
@@ -1080,5 +1104,27 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use musadvd::encoder::DvdVideoMode;
+
+    #[test]
+    fn parses_dvd_video_flag() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["musadvd", "build-dvd", "--input", "clip.mpg", "--layout", "menu.json", "--output", "out"];
+            args.extend_from_slice(extra);
+            let Cli { command: Command::BuildDvd { dvd_video, .. } } = Cli::try_parse_from(args).unwrap() else {
+                panic!("expected BuildDvd");
+            };
+            DvdVideoMode::from(dvd_video)
+        };
+        assert_eq!(parse(&[]), DvdVideoMode::Encode);
+        assert_eq!(parse(&["--dvd-video", "encode"]), DvdVideoMode::Encode);
+        assert_eq!(parse(&["--dvd-video", "auto"]), DvdVideoMode::Auto);
+        assert_eq!(parse(&["--dvd-video", "strict"]), DvdVideoMode::Strict);
     }
 }

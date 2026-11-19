@@ -549,6 +549,44 @@ pub fn element_text_lines(e: &Element, canvas: Canvas, tv: impl Into<MenuFrame> 
     Some(menu::text_lines(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, bw, bh))
 }
 
+/// Computes remote-control directional navigation links (`(element_id, Navigation)`) for all
+/// button elements in `menu` using the exact same button rectangle clipping and
+/// [`author::compute_navigation`] algorithm as DVD / Blu-ray menu authoring.
+pub fn menu_button_navigation(
+    menu: &CustomMenu,
+    canvas: Canvas,
+    frame: impl Into<MenuFrame>,
+    bluray: bool,
+) -> Vec<(String, Navigation)> {
+    let frame = frame.into();
+    let mut buttons: Vec<MenuButton> = menu
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.action.is_some())
+        .filter_map(|(n, e)| {
+            let rect = if bluray {
+                bd_button_rect(e, canvas, frame)
+            } else {
+                button_rect(e, canvas, frame)
+            }?;
+            Some(MenuButton {
+                name: e.id.clone(),
+                template_index: n,
+                location: "CUSTOM".into(),
+                rect,
+                action: ButtonAction::Commands(String::new()),
+                label: None,
+                thumbnail: None,
+                clip: None,
+                nav: Navigation::default(),
+            })
+        })
+        .collect();
+    author::compute_navigation(&mut buttons);
+    buttons.into_iter().map(|b| (b.name, b.nav)).collect()
+}
+
 /// Checks the layout against the DVD limits and the project's titles. Navigation command
 /// counts are checked by [`plan_navigation`] (also called here).
 pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -> Result<(), LayoutError> {
@@ -2376,5 +2414,101 @@ mod tests {
         let hl = image::open(&files.highlight).unwrap().to_rgba8();
         assert_eq!(hl.get_pixel(301, 120).0[3], 204, "frame highlight around the rect button");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn menu_button_navigation_matches_author_on_pal_and_bd1080() {
+        let mut deco = text(40.0, 20.0, "Title", None);
+        deco.id = "deco".into();
+        deco.w = 640.0;
+        deco.h = 40.0;
+
+        // Stacked and mixed-width left/right buttons, plus one out-of-frame button that must be skipped.
+        let mut top = text(100.0, 40.0, "Play", Some(Action::PlayTitle { title: 1 }));
+        top.id = "btn_top".into();
+        top.w = 340.0;
+        top.h = 50.0;
+
+        let mut mid_left = text(100.0, 200.0, "Chapters", Some(Action::menu("chapters")));
+        mid_left.id = "btn_mid_left".into();
+        mid_left.w = 140.0;
+        mid_left.h = 50.0;
+
+        let mut mid_right = text(260.0, 200.0, "Audio", Some(Action::menu("settings")));
+        mid_right.id = "btn_mid_right".into();
+        mid_right.w = 240.0;
+        mid_right.h = 50.0;
+
+        let mut bottom = text(100.0, 360.0, "Play All", Some(Action::PlayAll));
+        bottom.id = "btn_bottom".into();
+        bottom.w = 220.0;
+        bottom.h = 50.0;
+
+        let mut offscreen = text(760.0, 200.0, "Hidden", Some(Action::PlayAll));
+        offscreen.id = "btn_offscreen".into();
+
+        let m = menu("main", MenuRole::Title, None, vec![deco, top, mid_left, mid_right, bottom, offscreen]);
+        let pal_canvas = Canvas { width: 720, height: 576 };
+
+        let check = |canvas: Canvas, frame: MenuFrame, bluray: bool| {
+            let got = menu_button_navigation(&m, canvas, frame, bluray);
+            let mut expected: Vec<MenuButton> = m
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.action.is_some())
+                .filter_map(|(n, e)| {
+                    let rect = if bluray {
+                        bd_button_rect(e, canvas, frame)
+                    } else {
+                        button_rect(e, canvas, frame)
+                    }?;
+                    Some(MenuButton {
+                        name: e.id.clone(),
+                        template_index: n,
+                        location: "CUSTOM".into(),
+                        rect,
+                        action: ButtonAction::Commands(String::new()),
+                        label: None,
+                        thumbnail: None,
+                        clip: None,
+                        nav: Navigation::default(),
+                    })
+                })
+                .collect();
+            author::compute_navigation(&mut expected);
+            let expected_pairs: Vec<(String, Navigation)> = expected.into_iter().map(|b| (b.name, b.nav)).collect();
+            assert_eq!(got, expected_pairs);
+            got
+        };
+
+        let pal_nav = check(pal_canvas, TvStandard::Pal.into(), false);
+        assert_eq!(pal_nav.len(), 4);
+        assert_eq!(pal_nav[0].0, "btn_top");
+        assert_eq!(pal_nav[0].1.down.as_deref(), Some("btn_mid_left"));
+        assert_eq!(pal_nav[1].0, "btn_mid_left");
+        assert_eq!(pal_nav[1].1.up.as_deref(), Some("btn_top"));
+        assert_eq!(pal_nav[1].1.right.as_deref(), Some("btn_mid_right"));
+        assert_eq!(pal_nav[1].1.down.as_deref(), Some("btn_bottom"));
+        assert_eq!(pal_nav[2].0, "btn_mid_right");
+        assert_eq!(pal_nav[2].1.up.as_deref(), Some("btn_top"));
+        assert_eq!(pal_nav[2].1.left.as_deref(), Some("btn_mid_left"));
+        assert_eq!(pal_nav[2].1.down.as_deref(), Some("btn_bottom"));
+        assert_eq!(pal_nav[3].0, "btn_bottom");
+        assert_eq!(pal_nav[3].1.up.as_deref(), Some("btn_mid_left"));
+
+        // BD1080 with scaled canvas (all 5 action elements fit after checking 720x576 canvas vs offscreen x=900 -> >720).
+        let bd_nav = check(pal_canvas, MenuFrame::square(1920, 1080), true);
+        assert_eq!(bd_nav.len(), 4);
+        assert_eq!(bd_nav[1].1.right.as_deref(), Some("btn_mid_right"));
+        assert_eq!(bd_nav[2].1.left.as_deref(), Some("btn_mid_left"));
+
+        // BD1080 native 1920x1080 canvas includes the button at x=760.
+        let bd_native_canvas = Canvas { width: 1920, height: 1080 };
+        let bd_native = check(bd_native_canvas, MenuFrame::square(1920, 1080), true);
+        assert_eq!(bd_native.len(), 5);
+        assert_eq!(bd_native[4].0, "btn_offscreen");
+        assert_eq!(bd_native[2].1.right.as_deref(), Some("btn_offscreen"));
+        assert_eq!(bd_native[4].1.left.as_deref(), Some("btn_mid_right"));
     }
 }

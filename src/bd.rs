@@ -688,7 +688,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             bd_audio: opts.bd_audio,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
-            video: opts.video,
+            video: opts.video.with_picture(sel.denoise, sel.brightness, sel.contrast, sel.saturation),
             audio_target: if opts.disc.is_avchd() { AudioTarget::Avchd } else { AudioTarget::Bluray },
             loudnorm: opts.loudnorm,
             copy_kbps: None,
@@ -844,7 +844,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // 4. Bitrate -----------------------------------------------------------------------------
     let loads: Vec<TitleLoad> = titles
         .iter()
-        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(&layout), subtitle_streams: layout.subs.len(), copy_video_kbps: t.copy_kbps, weight: t.weight })
+        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(&layout), subtitle_streams: layout.subs.len(), copy_video_kbps: t.copy_kbps, copy_bytes: None, weight: t.weight })
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = crate::dvd::avg_audio_kbps(&loads);

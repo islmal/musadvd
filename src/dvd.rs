@@ -25,7 +25,7 @@ use crate::author::{
     TitleSpec, TitlesetSpec, VobSpec, MAX_CHAPTERS, MAX_TITLES,
 };
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
-use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
+use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, DvdVideoMode, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
 use crate::menu_anim;
 use crate::config::HwAccelMode;
 use crate::i18n::tr;
@@ -414,6 +414,8 @@ pub struct BuildOptions {
     pub bd_single_video: bool,
     /// Blu-ray / AVCHD: re-encode the video, copy compliant streams, or copy all of them.
     pub bd_video: crate::encoder::BdVideoMode,
+    /// DVD-Video: re-encode the video, copy compliant MPEG-2 streams, or copy all of them.
+    pub dvd_video: crate::encoder::DvdVideoMode,
     /// Blu-ray / AVCHD: encode every audio track, copy compliant ones, or copy all of them.
     pub bd_audio: crate::encoder::BdAudioMode,
     /// Lets another thread cancel the build.
@@ -467,9 +469,21 @@ pub struct StreamSelection {
     pub bd_rate: Option<String>,
     #[serde(default)]
     pub bd_video: Option<String>,
+    /// DVD-Video only: video handling (`encode`/`auto`/`copy`/`strict`) of this title instead of the project's.
+    #[serde(default)]
+    pub dvd_video: Option<String>,
     /// Blu-ray only: quality weight of the encoded video (`low` / `high`, else normal), see [`quality_weight`].
     #[serde(default)]
     pub bd_quality: Option<String>,
+    /// Per-title picture adjustments (override project defaults when `Some`).
+    #[serde(default)]
+    pub denoise: Option<f32>,
+    #[serde(default)]
+    pub brightness: Option<f32>,
+    #[serde(default)]
+    pub contrast: Option<f32>,
+    #[serde(default)]
+    pub saturation: Option<f32>,
 }
 
 /// Index ranges of the menu entries: an input plus all directly following inputs that are merged
@@ -567,6 +581,9 @@ pub struct TitleLoad {
     /// taken off the disc before the encoded titles share the rest.
     #[serde(default)]
     pub copy_video_kbps: Option<u32>,
+    /// Exact source file size in bytes for DVD stream-copied titles (`None` = use bitrate * duration).
+    #[serde(default)]
+    pub copy_bytes: Option<u64>,
     /// Quality weight of an encoded title: its video bitrate relative to the disc's base bitrate
     /// ([`QUALITY_LOW`] / 1.0 / [`QUALITY_HIGH`]).
     #[serde(default = "one")]
@@ -603,8 +620,15 @@ pub fn weighted_video_kbps(disc: DiscType, base_kbps: u32, weight: f64, audio_kb
 pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile: EncodingProfile) -> Result<BitratePlan, CalcError> {
     let subs_kbit: f64 =
         titles.iter().map(|t| (t.subtitle_streams as u32 * SUBTITLE_KBPS) as f64 * t.duration_secs).sum();
-    let (copied, encoded): (Vec<TitleLoad>, Vec<TitleLoad>) = titles.iter().partition(|t| t.copy_video_kbps.is_some());
-    let copied_kbit: f64 = copied.iter().map(|t| (t.copy_video_kbps.unwrap_or(0) + t.audio_kbps) as f64 * t.duration_secs).sum();
+    let (copied, encoded): (Vec<TitleLoad>, Vec<TitleLoad>) =
+        titles.iter().partition(|t| t.copy_video_kbps.is_some() || t.copy_bytes.is_some());
+    let copied_kbit: f64 = copied
+        .iter()
+        .map(|t| match t.copy_bytes {
+            Some(bytes) => calculator::bytes_to_kbit(bytes),
+            None => (t.copy_video_kbps.unwrap_or(0) + t.audio_kbps) as f64 * t.duration_secs,
+        })
+        .sum();
     let overhead = disc.default_mux_overhead_kbit() + menu_mb * 8192.0 + subs_kbit + copied_kbit;
     if encoded.is_empty() && !copied.is_empty() {
         // Nothing left to encode: the copies either fit or they do not.
@@ -767,6 +791,11 @@ struct TitlePlan {
     ui_lang: UiLang,
     video: VideoProcessing,
     loudnorm: bool,
+    video_mode: DvdVideoMode,
+    /// Video is stream-copied at this average kbit/s ([`encoder::dvd_video_copy`]).
+    copy_kbps: Option<u32>,
+    /// Source file byte size of a stream-copied title for exact bitrate budget deduction.
+    copy_bytes: Option<u64>,
     /// Length of the motion menus that play this title's clip (limits how late the clip may start).
     motion_secs: f64,
     stem: String,
@@ -1029,7 +1058,8 @@ async fn encode_title(
     resolution: Resolution,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>), BuildError> {
-    let hwaccel = match hw_decode {
+    let copy_video = t.copy_kbps.is_some();
+    let hwaccel = match hw_decode.filter(|_| !copy_video) {
         Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
         None => None,
     };
@@ -1057,6 +1087,7 @@ async fn encode_title(
         audio_modes: t.audio_modes.clone(),
         video: t.video,
         audio_filters,
+        copy_video,
     };
     let frames_per_run = t.info.duration_secs * output_fps(tv);
     // Frames done count over both runs of a 2-pass encode; never let them go backwards (the
@@ -1253,6 +1284,12 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         };
         let aspect = opts.aspect_policy.aspect_for(info.video.as_ref().map_or(16.0 / 9.0, |v| v.display_aspect));
         let audio_modes = vec![opts.audio_mode; audio.len()];
+        let video_mode = match sel.dvd_video.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("encode") => DvdVideoMode::Encode,
+            Some("auto") => DvdVideoMode::Auto,
+            Some("copy" | "strict") => DvdVideoMode::Strict,
+            _ => opts.dvd_video,
+        };
         titles.push(TitlePlan {
             label,
             audio,
@@ -1264,8 +1301,11 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             audio_modes,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
-            video: opts.video,
+            video: opts.video.with_picture(sel.denoise, sel.brightness, sel.contrast, sel.saturation),
             loudnorm: opts.loudnorm,
+            video_mode,
+            copy_kbps: None,
+            copy_bytes: None,
             motion_secs: opts.motion_duration.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(menu::DEFAULT_MOTION_SECS),
             stem: format!("title_{:02}", i + 1),
             thumbnail: None,
@@ -1286,6 +1326,21 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             )));
         }
         harmonize_group(&mut titles[g.clone()]);
+    }
+
+    for t in titles.iter_mut().filter(|t| t.video_mode != DvdVideoMode::Encode) {
+        let max = encoder::MAX_VIDEO_PEAK_KBPS.min(DVD_MAX_TOTAL_KBPS.saturating_sub(t.audio_kbps()));
+        match encoder::dvd_video_copy(&t.info, tv, opts.resolution, t.aspect, t.video, max) {
+            Ok(copy) => {
+                t.copy_kbps = Some(copy.kbps);
+                t.copy_bytes = Some(copy.bytes);
+                log(Event::Step(tf!(opts.ui_lang, "bd_video_copy", label = t.label, kbps = copy.kbps)));
+            }
+            Err(why) if t.video_mode == DvdVideoMode::Strict => {
+                return Err(BuildError::Template(format!("{}: the video cannot be copied – {why}", t.label)));
+            }
+            Err(why) => warn(log, tf!(opts.ui_lang, "bd_video_copy_fallback", label = t.label, reason = why)),
+        }
     }
 
     let tools = Arc::new(tools.with_priority(opts.process_priority));
@@ -1751,7 +1806,14 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     // 6. Bitrate ----------------------------------------------------------------------------------
     let loads: Vec<TitleLoad> = titles
         .iter()
-        .map(|t| TitleLoad { duration_secs: t.info.duration_secs, audio_kbps: t.audio_kbps(), subtitle_streams: t.subtitles.len(), copy_video_kbps: None, weight: 1.0 })
+        .map(|t| TitleLoad {
+            duration_secs: t.info.duration_secs,
+            audio_kbps: t.audio_kbps(),
+            subtitle_streams: t.subtitles.len(),
+            copy_video_kbps: t.copy_kbps,
+            copy_bytes: t.copy_bytes,
+            weight: 1.0,
+        })
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = avg_audio_kbps(&loads);
@@ -1773,7 +1835,11 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         target = opts.disc.target_mb(),
         profile = profile
     )));
-    let resolution = effective_resolution(opts.resolution, opts.encoding_profile, plan.video_kbps);
+    let resolution = if plan.video_kbps > 0 {
+        effective_resolution(opts.resolution, opts.encoding_profile, plan.video_kbps)
+    } else {
+        opts.resolution
+    };
     if resolution != opts.resolution {
         log(Event::Step(tf!(
             opts.ui_lang,
@@ -1785,12 +1851,15 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         )));
     }
     if !resolution.allows_wide() {
-        let wide: Vec<&str> =
-            titles.iter().filter(|t| t.aspect == Aspect::Wide).map(|t| t.label.as_str()).collect();
+        let wide: Vec<&str> = titles
+            .iter()
+            .filter(|t| t.copy_kbps.is_none() && t.aspect == Aspect::Wide)
+            .map(|t| t.label.as_str())
+            .collect();
         if !wide.is_empty() {
             warn(log, tf!(opts.ui_lang, "wide_letterbox_warn", res = resolution.label(), titles = wide.join(", ")));
         }
-        for t in titles.iter_mut() {
+        for t in titles.iter_mut().filter(|t| t.copy_kbps.is_none()) {
             t.aspect = Aspect::Standard;
         }
     }
@@ -1816,7 +1885,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .iter()
         .map(|t| {
             let (t, tools, work) = (t.clone(), tools.clone(), work.clone());
-            let video_kbps = plan.video_kbps.min(DVD_MAX_TOTAL_KBPS - t.audio_kbps());
+            let video_kbps = t.copy_kbps.unwrap_or_else(|| plan.video_kbps.min(DVD_MAX_TOTAL_KBPS.saturating_sub(t.audio_kbps())));
             let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
                 encode_title(&tools, &t, &work, video_kbps, two_pass, fast, hw_decode, tv, resolution, progress).await
@@ -1835,8 +1904,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     // image + burn estimate assumes the default speed (DVD-5 max, DVD-9 4x) with verification.
     let frames: Vec<f64> = titles.iter().map(|t| t.info.duration_secs * output_fps(tv)).collect();
     let mut frame_eta = FrameEta::new(&frames, if opts.two_pass { 2 } else { 1 });
-    let expected_bytes =
-        (plan.video_kbps + avg_audio) as f64 * 1000.0 / 8.0 * total_secs + menu_mb * 1024.0 * 1024.0;
+    let expected_bytes = plan.estimated_mb * 1024.0 * 1024.0;
     let dual_layer = expected_bytes > SINGLE_LAYER_BYTES;
     let burn_estimate = Some(eta::image_and_burn_secs(eta::Medium::Dvd, expected_bytes, eta::default_speed_x(eta::Medium::Dvd, dual_layer), true, dual_layer));
     let authoring_estimate = eta::authoring_secs(expected_bytes);
@@ -1883,7 +1951,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     let (reports, hwaccels): (Vec<TitleReport>, Vec<Option<&'static str>>) = reports.into_iter().unzip();
     if let Some(hw) = hwaccels.iter().flatten().next() {
         log(Event::Step(tf!(opts.ui_lang, "gpu_decode", hw = hw)));
-    } else if opts.hw_decode {
+    } else if opts.hw_decode && titles.iter().any(|t| t.copy_kbps.is_none()) {
         log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
     }
 
@@ -2118,8 +2186,8 @@ mod tests {
     #[test]
     fn bitrate_plan_matches_calculator() {
         let loads = [
-            TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, weight: 1.0 },
-            TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 },
+            TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
+            TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
         ];
         assert_eq!(avg_audio_kbps(&loads), 491); // (640*3600 + 192*1800) / 5400
         let plan = bitrate_plan(DiscType::Dvd5, &loads, 1.0, EncodingProfile::Auto).unwrap();
@@ -2131,7 +2199,7 @@ mod tests {
 
     #[test]
     fn quality_weight_shifts_the_bitrate_share_and_still_fits() {
-        let normal = TitleLoad { duration_secs: 7200.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 };
+        let normal = TitleLoad { duration_secs: 7200.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
         let (low, high) = (TitleLoad { weight: QUALITY_LOW, ..normal }, TitleLoad { weight: QUALITY_HIGH, ..normal });
         let flat = bitrate_plan(DiscType::Bd25, &[normal, normal], 0.0, EncodingProfile::Auto).unwrap();
         let plan = bitrate_plan(DiscType::Bd25, &[low, high], 0.0, EncodingProfile::Auto).unwrap();
@@ -2148,7 +2216,7 @@ mod tests {
 
     #[test]
     fn copied_titles_take_a_fixed_share_first() {
-        let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 640, subtitle_streams: 0, copy_video_kbps: None, weight: 1.0 };
+        let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 640, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
         let copy = TitleLoad { copy_video_kbps: Some(20_000), ..enc };
         let alone = bitrate_plan(DiscType::Bd25, &[enc], 0.0, EncodingProfile::Auto).unwrap();
         let mixed = bitrate_plan(DiscType::Bd25, &[enc, copy], 0.0, EncodingProfile::Auto).unwrap();
@@ -2158,6 +2226,43 @@ mod tests {
         assert_eq!((only.video_kbps, only.clamp), (0, Clamp::None));
         let too_big = bitrate_plan(DiscType::Bd25, &[copy; 4], 0.0, EncodingProfile::Auto).unwrap();
         assert_eq!(too_big.clamp, Clamp::Min, "four 20 Mbit/s hours overflow a BD-25");
+    }
+
+    #[test]
+    fn dvd_copied_titles_reserve_exact_copy_bytes() {
+        let enc = TitleLoad { duration_secs: 3600.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
+        let copy_1500_mib = TitleLoad {
+            duration_secs: 3600.0,
+            audio_kbps: 192,
+            subtitle_streams: 0,
+            copy_video_kbps: Some(3000),
+            copy_bytes: Some(1500 * 1024 * 1024),
+            weight: 1.0,
+        };
+        let mixed = bitrate_plan(DiscType::Dvd5, &[enc, copy_1500_mib], 0.0, EncodingProfile::Auto).unwrap();
+        let expected_overhead = DiscType::Dvd5.default_mux_overhead_kbit() + calculator::bytes_to_kbit(1500 * 1024 * 1024);
+        let direct = calculator::calculate_capped(
+            DiscType::Dvd5,
+            3600.0,
+            192,
+            expected_overhead,
+            EncodingProfile::Auto.max_video_kbps_for(DiscType::Dvd5),
+        )
+        .unwrap();
+        assert_eq!(mixed.video_kbps, direct.video_kbps);
+        assert!((mixed.estimated_mb - direct.estimated_mb).abs() < 1e-9);
+        assert!(mixed.fits());
+
+        // All-copied DVD-5: two 1500 MiB titles (~3000 MiB + 2% overhead = 3086 MiB) fit cleanly.
+        let fit = bitrate_plan(DiscType::Dvd5, &[copy_1500_mib, copy_1500_mib], 0.0, EncodingProfile::Auto).unwrap();
+        assert_eq!((fit.video_kbps, fit.clamp), (0, Clamp::None));
+        assert!(fit.fits());
+        assert!((fit.estimated_mb - (3000.0 + 4300.0 * 0.02)).abs() < 1e-6);
+
+        // Three 1500 MiB titles (4500 MiB > 4300 MiB) overflow and clamp to Min.
+        let overflow = bitrate_plan(DiscType::Dvd5, &[copy_1500_mib; 3], 0.0, EncodingProfile::Auto).unwrap();
+        assert_eq!((overflow.video_kbps, overflow.clamp), (0, Clamp::Min));
+        assert!(!overflow.fits());
     }
 
     #[test]
@@ -2470,6 +2575,9 @@ mod tests {
             ui_lang: UiLang::DE,
             video: VideoProcessing::default(),
             loudnorm: false,
+            video_mode: DvdVideoMode::Encode,
+            copy_kbps: None,
+            copy_bytes: None,
             motion_secs: 15.0,
             stem: stem.into(),
             thumbnail: None,

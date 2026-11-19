@@ -9,6 +9,7 @@
   versions keep loading.
 - `AppSettings::sanitized()` clamps numbers and replaces unknown choices with defaults. Enums that
   grow use `#[serde(other)]` on the last variant (e.g. `HwAccelMode`).
+- Video copy choices are strings validated by `sanitized()`: `dvd_video` (`encode` default, `auto`, `strict`; `config::DVD_VIDEO_MODES`) next to the Blu-ray `bd_video` / `bd_audio`. Per-title picture filters (`denoise`, `brightness`, `contrast`, `saturation`) live in `StreamSelection`, not in `AppSettings`.
 - Burn Studio settings are the `burn_studio` section (`BurnStudioSettings`: general, read, filter,
   build, write, verify, graph, io, speed rules, per-operation overrides). The TypeScript mirror is
   `frontend/src/studio/api.ts`.

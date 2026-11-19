@@ -1,7 +1,7 @@
 //! Backend of the menu editor: layout checks against the project's titles, loading/saving
 //! layout files, and image previews for the editor canvas.
 //!
-//! Commands: `check_layout`, `text_lines`, `load_layout`, `save_layout`, `image_preview` (frames of the
+//! Commands: `check_layout`, `text_lines`, `menu_navigation`, `load_layout`, `save_layout`, `image_preview` (frames of the
 //! titles for video placeholders come from `title_frame` in `main.rs`, which needs the tools).
 
 use std::path::Path;
@@ -99,6 +99,30 @@ pub fn text_lines(element: Element, canvas: Canvas, tv: String) -> Vec<String> {
         Frame::Bd(frame) => layout::element_text_lines(&element, canvas, frame),
     };
     lines.unwrap_or_default()
+}
+
+/// Directional remote navigation links for one menu button.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButtonNav {
+    pub id: String,
+    pub up: Option<String>,
+    pub down: Option<String>,
+    pub left: Option<String>,
+    pub right: Option<String>,
+}
+
+/// Computes author-consistent remote navigation links for every button element in `menu`.
+#[tauri::command]
+pub fn menu_navigation(menu: musadvd::layout::CustomMenu, canvas: Canvas, tv: String) -> Vec<ButtonNav> {
+    let (frame, bluray) = match frame_of(&tv) {
+        Frame::Tv(tv) => (MenuFrame::from(tv), false),
+        Frame::Bd(frame) => (frame, true),
+    };
+    musadvd::layout::menu_button_navigation(&menu, canvas, frame, bluray)
+        .into_iter()
+        .map(|(id, nav)| ButtonNav { id, up: nav.up, down: nav.down, left: nav.left, right: nav.right })
+        .collect()
 }
 
 /// A ConvertX template turned into an editable layout, with the converter's (German) notes.
@@ -237,5 +261,58 @@ mod tests {
         let bad = dir.join("missing").join("x.json").to_string_lossy().into_owned();
         assert!(save_layout(bad.clone(), layout).unwrap_err().contains(&bad));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn nav(id: &str, up: &str, down: &str, left: &str, right: &str) -> ButtonNav {
+        ButtonNav {
+            id: id.into(),
+            up: Some(up.into()),
+            down: Some(down.into()),
+            left: Some(left.into()),
+            right: Some(right.into()),
+        }
+    }
+
+    #[test]
+    fn menu_navigation_returns_exact_links_on_pal_and_bd1080() {
+        let pal_layout = CustomLayout::from_json(
+            r#"{"canvas": {"width": 720, "height": 576}, "menus": [{"id": "main", "name": "Main", "role": "title", "elements": [
+                {"id": "deco", "type": "text", "text": "Header", "x": 100, "y": 20, "w": 460, "h": 40},
+                {"id": "play", "type": "text", "text": "Play", "x": 100, "y": 80, "w": 460, "h": 60, "action": {"type": "playTitle", "title": 1}},
+                {"id": "chap", "type": "text", "text": "Chapters", "x": 100, "y": 240, "w": 180, "h": 60, "action": {"type": "menu", "menu": "chapters"}},
+                {"id": "audio", "type": "text", "text": "Audio", "x": 360, "y": 240, "w": 200, "h": 60, "action": {"type": "menu", "menu": "audio"}}
+            ]}]}"#,
+        )
+        .unwrap();
+        let pal_nav = menu_navigation(pal_layout.menus[0].clone(), pal_layout.canvas, "PAL".into());
+        assert_eq!(
+            pal_nav,
+            vec![
+                nav("play", "play", "audio", "chap", "audio"),
+                nav("chap", "play", "chap", "chap", "audio"),
+                nav("audio", "play", "audio", "chap", "audio"),
+            ]
+        );
+
+        let bd_layout = CustomLayout::from_json(
+            r#"{"canvas": {"width": 1920, "height": 1080}, "menus": [{"id": "main", "name": "Main", "role": "title", "elements": [
+                {"id": "deco", "type": "text", "text": "Header", "x": 200, "y": 40, "w": 800, "h": 60},
+                {"id": "play", "type": "text", "text": "Play", "x": 200, "y": 160, "w": 800, "h": 100, "action": {"type": "playTitle", "title": 1}},
+                {"id": "chap", "type": "text", "text": "Chapters", "x": 200, "y": 460, "w": 320, "h": 100, "action": {"type": "menu", "menu": "chapters"}},
+                {"id": "audio", "type": "text", "text": "Audio", "x": 640, "y": 460, "w": 360, "h": 100, "action": {"type": "menu", "menu": "audio"}},
+                {"id": "subs", "type": "text", "text": "Subtitles", "x": 200, "y": 720, "w": 320, "h": 100, "action": {"type": "menu", "menu": "subs"}}
+            ]}]}"#,
+        )
+        .unwrap();
+        let bd_nav = menu_navigation(bd_layout.menus[0].clone(), bd_layout.canvas, "BD1080".into());
+        assert_eq!(
+            bd_nav,
+            vec![
+                nav("play", "play", "audio", "chap", "audio"),
+                nav("chap", "play", "subs", "chap", "audio"),
+                nav("audio", "play", "subs", "chap", "audio"),
+                nav("subs", "chap", "subs", "subs", "audio"),
+            ]
+        );
     }
 }

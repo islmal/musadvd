@@ -183,14 +183,29 @@ impl PreviewServer {
     }
 }
 
-/// Registers `path` (with the user's `crop`) for streaming and returns the base URL (the frontend
-/// adds `?t=..&a=..`). A crop change needs a new token.
+/// Per-title picture filter overrides passed from the preview player.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureOptions {
+    #[serde(default)]
+    pub denoise: Option<f32>,
+    #[serde(default)]
+    pub brightness: Option<f32>,
+    #[serde(default)]
+    pub contrast: Option<f32>,
+    #[serde(default)]
+    pub saturation: Option<f32>,
+}
+
+/// Registers `path` (with the user's `crop` and `picture` filters) for streaming and returns the
+/// base URL (the frontend adds `?t=..&a=..`). A crop or picture change needs a new token.
 #[tauri::command]
 pub async fn preview_stream(
     server: State<'_, Arc<PreviewServer>>,
     state: State<'_, AppState>,
     path: String,
     crop: Option<Crop>,
+    picture: Option<PictureOptions>,
 ) -> Result<String, String> {
     let path = PathBuf::from(path);
     if !path.is_file() {
@@ -202,7 +217,12 @@ pub async fn preview_stream(
     let video = info.video.ok_or("The file has no video stream")?;
     let _ = server.ffmpeg.set(tools.ffmpeg.clone());
     let token = new_token();
-    let entry = Entry { path, video, vp: state.settings().video_processing() };
+    let p = picture.unwrap_or_default();
+    let vp = state
+        .settings()
+        .video_processing()
+        .with_picture(p.denoise, p.brightness, p.contrast, p.saturation);
+    let entry = Entry { path, video, vp };
     server.tokens.lock().unwrap_or_else(|e| e.into_inner()).insert(token.clone(), entry);
     Ok(format!("http://127.0.0.1:{}/s/{token}", server.port))
 }
@@ -313,5 +333,13 @@ mod tests {
     fn tokens_are_unique() {
         assert_ne!(new_token(), new_token());
         assert_eq!(new_token().len(), 32);
+    }
+
+    #[test]
+    fn picture_options_serde_defaults() {
+        let empty: PictureOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!((empty.denoise, empty.brightness, empty.contrast, empty.saturation), (None, None, None, None));
+        let partial: PictureOptions = serde_json::from_str(r#"{"denoise":2.5,"saturation":1.2}"#).unwrap();
+        assert_eq!((partial.denoise, partial.brightness, partial.contrast, partial.saturation), (Some(2.5), None, None, Some(1.2)));
     }
 }

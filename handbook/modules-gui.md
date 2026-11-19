@@ -13,11 +13,11 @@ and three windows, all started through `frontend/src/boot.ts` (which awaits `ini
 
 | File | Purpose |
 |---|---|
-| `main.rs` | App setup and the main commands: `probe_file`, `list_templates` (empty list when no ConvertX templates are installed), `template_preview`, `calculate_project`, `source_frame`, `detect_crop`, `title_frame`, `start_conversion` (progress as `convert-event`, result as one `convert-done`), `default_output_dir`, settings (`get_settings`, `save_settings`, which also calls `i18n::reload()`), `get_locale_data`. |
+| `main.rs` | App setup and the main commands: `probe_file`, `list_templates` (empty list when no ConvertX templates are installed), `template_preview`, `calculate_project`, `source_frame`, `detect_crop`, `title_frame`, `test_title_quality` (10 s sample + PSNR verdict), `detect_scene_chapters`, `start_conversion` (progress as `convert-event`, result as one `convert-done`), `default_output_dir`, settings (`get_settings`, `save_settings`, which also calls `i18n::reload()`), `get_locale_data`. |
 | `burn.rs` | Burn after a conversion: `list_drives`, `disc_needs`, `probe_media`, `start_burn`, `cancel_burn`, `startup_burn`, `open_folder`. Events `burn-progress`, `burn-done`. Goes through `burner::burn_video_ts`. |
 | `burn_studio.rs` | Burn Studio commands. One operation at a time (`StudioState`) on its own thread; events `studio-progress`, `studio-graph` (at most 4/s), `studio-log`, `studio-done`. |
-| `menu_editor.rs` | `check_layout` (layout vs project titles), `text_lines`, `load_layout`, `save_layout`, `image_preview`. |
-| `preview.rs` | Live player: loopback HTTP server, one ffmpeg child, token per file; `preview_stream`, `preview_stop`. |
+| `menu_editor.rs` | `check_layout` (layout vs project titles), `text_lines`, `menu_navigation` (remote links), `load_layout`, `save_layout`, `image_preview`. |
+| `preview.rs` | Live player: loopback HTTP server, one ffmpeg child, token per file; `preview_stream` (takes optional `PictureOptions` so the preview matches the encode), `preview_stop`. |
 
 `tauri.conf.json` and `capabilities/` define windows and permissions. Without the
 `tauri/custom-protocol` feature the exe loads `http://localhost:5173` (dev server) instead of the
@@ -30,8 +30,8 @@ embedded `dist/`.
 | `api.ts` | Typed wrappers of the Tauri commands; mirrors Rust types (`DiscType`, `AudioChoice`, settings). |
 | `main.ts` | Main window: title list, drag reorder, merge, project settings, size estimate, conversion; Blu-ray footer modes (`bdVideo`, `bdAudio`), Copy/Re-encode badges per title and audio track, strict start gates. |
 | `order.ts` | Pure title-list helpers (`moveItem`); also run by `scripts/check-order.mjs`. |
-| `edit.ts` | "Schnitt & Bild" tab: trimmer with live player, crop inspector, chapter marks. |
-| `menuEditor.ts` | WYSIWYG menu editor: menu manager, stage with drag/resize, properties, Canvas timeline with intro keyframes, template import, rectangles, preset picker (one undo step). |
+| `edit.ts` | "Schnitt & Bild" tab: trimmer with live player, crop inspector, chapter marks, "Detect Scenes", denoise/EQ sliders, 10 s quality test. |
+| `menuEditor.ts` | WYSIWYG menu editor: menu manager, stage with drag/resize, properties, Canvas timeline with intro keyframes, template import, rectangles, preset picker (one undo step), "Test Remote" mode (keyboard/D-pad navigation, menu and title preview; `layout.ts` has a fallback navigation if the backend is unavailable). |
 | `layout.ts` | `CustomLayout` types (same JSON as `src/layout.rs`), the first-draft generator `draftLayout` and its presets (`swiss`, `cinema`, `midnight`). |
 | `editorWindow.ts` | Editor window entry: receives project data, reports applied layouts to the main window. |
 | `settings.ts` | General settings dialog (navigation tree + pages). |

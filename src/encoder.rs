@@ -99,7 +99,8 @@ fn crop_filter(v: &VideoStream) -> Option<String> {
 }
 
 /// How the picture is fitted into the coded frame ("Video Skaliermethode").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScaleMode {
     /// Keep the aspect, add black bars.
     #[default]
@@ -111,7 +112,8 @@ pub enum ScaleMode {
 }
 
 /// swscale algorithm ("Skalierungsfilter").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScaleFilter {
     Bilinear,
     #[default]
@@ -130,7 +132,8 @@ impl ScaleFilter {
 }
 
 /// "Video-Deinterlacing".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Deinterlace {
     /// `bwdif` only for sources flagged interlaced.
     #[default]
@@ -141,11 +144,73 @@ pub enum Deinterlace {
 }
 
 /// Video processing options shared by the DVD and Blu-ray encodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoProcessing {
+    #[serde(default)]
     pub scale: ScaleMode,
+    #[serde(default)]
     pub filter: ScaleFilter,
+    #[serde(default)]
     pub deinterlace: Deinterlace,
+    /// 3D denoiser (`hqdn3d`) spatial luma strength (`0.0` / `None` = off, clamped `0.0..=12.0`).
+    #[serde(default)]
+    pub denoise: Option<f32>,
+    /// `eq` brightness adjustment (neutral `0.0`, clamped `-1.0..=1.0`).
+    #[serde(default)]
+    pub brightness: Option<f32>,
+    /// `eq` contrast multiplier (neutral `1.0`, clamped `0.0..=2.0`).
+    #[serde(default)]
+    pub contrast: Option<f32>,
+    /// `eq` saturation multiplier (neutral `1.0`, clamped `0.0..=3.0`).
+    #[serde(default)]
+    pub saturation: Option<f32>,
+}
+
+impl VideoProcessing {
+    /// Overlays per-title picture adjustments (`Some(...)`) onto these defaults.
+    pub fn with_picture(
+        mut self,
+        denoise: Option<f32>,
+        brightness: Option<f32>,
+        contrast: Option<f32>,
+        saturation: Option<f32>,
+    ) -> Self {
+        self.denoise = denoise.or(self.denoise);
+        self.brightness = brightness.or(self.brightness);
+        self.contrast = contrast.or(self.contrast);
+        self.saturation = saturation.or(self.saturation);
+        self
+    }
+
+    /// Whether any non-neutral denoise or colour filter is active.
+    pub fn has_picture_filters(self) -> bool {
+        !picture_filters(self).is_empty()
+    }
+}
+
+/// Denoise (`hqdn3d`) and tonal/colour (`eq`) filters active on `vp`, if any.
+fn picture_filters(vp: VideoProcessing) -> Vec<String> {
+    let mut f = Vec::new();
+    if let Some(s) = vp.denoise.filter(|s| s.is_finite() && *s > 0.0) {
+        let luma = s.clamp(0.0, 12.0);
+        f.push(format!("hqdn3d={luma:.2}:{:.2}:{:.2}:{:.2}", luma * 0.75, luma * 1.5, luma * 1.125));
+    }
+    let eq: Vec<String> = [
+        ("brightness", vp.brightness, 0.0, -1.0, 1.0),
+        ("contrast", vp.contrast, 1.0, 0.0, 2.0),
+        ("saturation", vp.saturation, 1.0, 0.0, 3.0),
+    ]
+    .into_iter()
+    .filter_map(|(name, val, neutral, min, max)| {
+        let v = val.filter(|v| v.is_finite() && (*v - neutral).abs() > 1e-4)?;
+        Some(format!("{name}={:.2}", v.clamp(min, max)))
+    })
+    .collect();
+    if !eq.is_empty() {
+        f.push(format!("eq={}", eq.join(":")));
+    }
+    f
 }
 
 /// Deinterlacer chosen by `vp` for this source, if any.
@@ -162,11 +227,12 @@ fn tonemap_filter(v: &VideoStream) -> Option<&'static str> {
     v.hdr.then_some("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
 }
 
-/// Head shared by encode and preview: deinterlacer, tonemap (HDR only), user crop.
+/// Head shared by encode and preview: deinterlacer, tonemap (HDR only), user crop, picture filters.
 fn source_chain(v: &VideoStream, vp: VideoProcessing) -> Vec<String> {
     let mut f: Vec<String> = deint_filter(v, vp).into_iter().collect();
     f.extend(tonemap_filter(v).map(String::from));
     f.extend(crop_filter(v));
+    f.extend(picture_filters(vp));
     f
 }
 
@@ -174,11 +240,20 @@ fn source_chain(v: &VideoStream, vp: VideoProcessing) -> Vec<String> {
 /// Tonemapping runs after the downscale (real-time at 4K); the encode tonemaps first, the small
 /// difference is acceptable for a preview.
 pub fn preview_filter(v: &VideoStream, vp: VideoProcessing, height: u32) -> String {
-    let mut f: Vec<String> = deint_filter(v, vp).into_iter().collect();
-    f.extend(crop_filter(v));
     let w = (v.display_aspect * height as f64 / 2.0).round() as u32 * 2;
-    f.push(format!("scale={w}:{height}:flags={}", vp.filter.flag()));
-    f.extend(tonemap_filter(v).map(String::from));
+    let scale = format!("scale={w}:{height}:flags={}", vp.filter.flag());
+    let mut f = if v.hdr {
+        let mut f: Vec<String> = deint_filter(v, vp).into_iter().collect();
+        f.extend(crop_filter(v));
+        f.push(scale);
+        f.extend(tonemap_filter(v).map(String::from));
+        f.extend(picture_filters(vp));
+        f
+    } else {
+        let mut f = source_chain(v, vp);
+        f.push(scale);
+        f
+    };
     f.push("setsar=1".to_string());
     f.push("format=yuv420p".to_string());
     f.join(",")
@@ -604,6 +679,79 @@ pub fn max_video_rate(audio_kbps_total: u32) -> u32 {
 /// Output device ffmpeg writes to when only pass-1 statistics are wanted.
 pub const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
+/// Parses the last `average:<dB>` value emitted by FFmpeg's `psnr` filter.
+/// Maps `inf` (identical/lossless) to `99.9` so the value stays finite in JSON.
+pub fn parse_psnr_average(log: &str) -> Option<f64> {
+    for line in log.lines().rev() {
+        if !line.contains("PSNR") {
+            continue;
+        }
+        let Some(pos) = line.rfind("average:") else {
+            continue;
+        };
+        let Some(tok) = line[pos + "average:".len()..].split_whitespace().next() else {
+            continue;
+        };
+        if tok.eq_ignore_ascii_case("inf") {
+            return Some(99.9);
+        }
+        if let Some(v) = tok.parse::<f64>().ok().filter(|v| v.is_finite()) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Maps an average PSNR score in dB to a short quality verdict.
+pub fn psnr_verdict(psnr_db: f64) -> &'static str {
+    if psnr_db >= 40.0 {
+        "excellent"
+    } else if psnr_db >= 36.0 {
+        "good"
+    } else if psnr_db >= 32.0 {
+        "fair"
+    } else {
+        "poor"
+    }
+}
+
+/// Arguments for running FFmpeg's `psnr` filter between an encoded `sample` and the matching
+/// `[at_secs, at_secs + duration_secs)` window of `source` filtered with `vf`.
+pub fn quality_psnr_args(
+    sample: &Path,
+    source: &Path,
+    v_index: u32,
+    at_secs: f64,
+    duration_secs: f64,
+    vf: &str,
+) -> Vec<OsString> {
+    let ref_chain = if vf.trim().is_empty() {
+        "setpts=PTS-STARTPTS".to_string()
+    } else {
+        format!("{vf},setpts=PTS-STARTPTS")
+    };
+    let lavfi = format!(
+        "[0:v]setpts=PTS-STARTPTS,format=yuv420p[dist];[1:{v_index}]{ref_chain}[ref];[dist][ref]psnr=shortest=1"
+    );
+    vec![
+        "-hide_banner".into(),
+        "-nostdin".into(),
+        "-i".into(),
+        sample.to_path_buf().into_os_string(),
+        "-ss".into(),
+        format!("{:.3}", at_secs.max(0.0)).into(),
+        "-t".into(),
+        format!("{:.3}", duration_secs.max(0.0)).into(),
+        "-i".into(),
+        source.to_path_buf().into_os_string(),
+        "-lavfi".into(),
+        lavfi.into(),
+        "-f".into(),
+        "null".into(),
+        NULL_DEVICE.into(),
+    ]
+}
+
 /// Which encoding run a progress report belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodePhase {
@@ -645,6 +793,8 @@ pub struct EncodeJob<'a> {
     /// Audio filter (loudnorm) per audio track; a filtered track is never copied. Missing
     /// entries mean no filter.
     pub audio_filters: Vec<Option<String>>,
+    /// Stream copy of the source video (passed [`dvd_video_copy`]): no filter, no hwaccel, no 2-pass.
+    pub copy_video: bool,
 }
 
 /// 2-pass statistics files (`{stem}_2pass*.log|.mbtree|.temp`) in `dir`.
@@ -672,6 +822,11 @@ fn cleanup_passlogs_in(dir: &Path, stem: &str) -> std::io::Result<()> {
 }
 
 impl EncodeJob<'_> {
+    /// Whether this job actually runs a 2-pass analysis + final encode (disabled for stream-copied video).
+    pub fn uses_two_pass(&self) -> bool {
+        self.two_pass && !self.copy_video
+    }
+
     /// `-passlogfile` prefix; ffmpeg appends `-0.log` (and `.mbtree` for x264).
     pub fn passlog_prefix(&self) -> PathBuf {
         self.dir.join(format!("{}_2pass", self.stem))
@@ -687,8 +842,9 @@ impl EncodeJob<'_> {
         cleanup_passlogs_in(&self.dir, &self.stem)
     }
 
-    /// MPEG-2 video settings shared by all runs (codec, GOP, rate control, aspect).
-    fn video_codec_args(&self) -> Vec<OsString> {
+    /// MPEG-2 video settings for encoding or Pass-1 statistics collection (`analysis = true`).
+    /// Keeps frame rate, GOP structure, and rate control identical across passes.
+    fn video_codec_args(&self, analysis: bool) -> Vec<OsString> {
         let s = |x: &str| OsString::from(x);
         let maxrate = max_video_rate(self.audio_kbps_total()).max(self.video_kbps);
         // BT.601 colour tags: 625-line (bt470bg) for PAL, 525-line (smpte170m) for NTSC.
@@ -697,16 +853,22 @@ impl EncodeJob<'_> {
             TvStandard::Ntsc => ("smpte170m", "smpte170m", "smpte170m"),
         };
         let gop = self.tv.gop().to_string();
+        let mbd = if analysis { "simple" } else { "rd" };
         let mut a: Vec<OsString> = [
             "-c:v", "mpeg2video", "-threads", "0", "-pix_fmt", "yuv420p", "-r", self.tv.frame_rate(), "-g", &gop, "-bf", "2",
-            "-dc", "9", "-qmin", "2", "-mbd", "rd",
+            "-dc", "9", "-qmin", "2", "-mbd", mbd,
             // Closed GOPs: dvdauthor warns on every chapter cell otherwise; mpeg2video refuses +cgop with scene-change detection.
             "-flags", "+cgop", "-sc_threshold", "1000000000",
         ]
         .map(s)
         .to_vec();
-        if !self.fast {
-            a.extend([s("-trellis"), s("1")]);
+        if analysis {
+            a.extend(
+                ["-trellis", "0", "-dia_size", "1", "-subq", "1", "-cmp", "sad", "-subcmp", "sad", "-mbcmp", "sad"]
+                    .map(s),
+            );
+        } else if !self.fast {
+            a.extend(["-trellis", "1", "-intra_vlc", "1"].map(s));
         }
         a.extend(["-color_primaries", primaries, "-color_trc", trc, "-colorspace", matrix].map(s));
         a.extend([
@@ -726,18 +888,23 @@ impl EncodeJob<'_> {
     fn video_input_args(&self) -> Vec<OsString> {
         let v = self.info.video.as_ref().expect("probed file has video");
         let mut a: Vec<OsString> = vec!["-y".into()];
-        if let Some(hw) = self.hwaccel {
+        if self.copy_video {
+            a.extend(["-fflags".into(), "+genpts".into()]);
+        } else if let Some(hw) = self.hwaccel {
             a.extend(["-hwaccel".into(), hw.into()]);
         }
         a.extend(self.info.input_args());
-        a.extend(["-map".into(), format!("0:{}", v.index).into(), "-vf".into(), video_filter(v, self.aspect, self.tv, self.resolution, self.video).into()]);
+        a.extend(["-map".into(), format!("0:{}", v.index).into()]);
+        if !self.copy_video {
+            a.extend(["-vf".into(), video_filter(v, self.aspect, self.tv, self.resolution, self.video).into()]);
+        }
         a
     }
 
-    /// Arguments of the 2-pass analysis run: video only, statistics log, no real output.
+    /// Arguments of the 2-pass analysis run: fast video-only statistics collection, no real output.
     pub fn first_pass_args(&self) -> Vec<OsString> {
         let mut a = self.video_input_args();
-        a.extend(self.video_codec_args());
+        a.extend(self.video_codec_args(true));
         a.extend([
             "-pass".into(),
             "1".into(),
@@ -810,9 +977,13 @@ impl EncodeJob<'_> {
     pub fn encode_args(&self, output: impl Into<OsString>) -> Vec<OsString> {
         let s = |x: &str| OsString::from(x);
         let mut a = self.video_input_args();
-        a.extend(self.video_codec_args());
-        if self.two_pass {
-            a.extend([s("-pass"), s("2"), s("-passlogfile"), self.passlog_prefix().into_os_string()]);
+        if self.copy_video {
+            a.extend([s("-c:v"), s("copy")]);
+        } else {
+            a.extend(self.video_codec_args(false));
+            if self.uses_two_pass() {
+                a.extend([s("-pass"), s("2"), s("-passlogfile"), self.passlog_prefix().into_os_string()]);
+            }
         }
         for track in &self.audio {
             a.extend([s("-map"), format!("0:{}", track.index).into()]);
@@ -887,7 +1058,7 @@ pub async fn run_encode(
     let cleanup = |job: &EncodeJob| {
         job.cleanup_passlogs().map_err(|error| ToolError::Io { tool: "2-pass log cleanup".into(), error })
     };
-    let final_phase = if job.two_pass {
+    let final_phase = if job.uses_two_pass() {
         cleanup(job)?;
         tools.ffmpeg_with(&job.first_pass_args(), duration, |p| progress(EncodePhase::Analysis, p)).await?;
         EncodePhase::Final
@@ -904,7 +1075,7 @@ pub async fn run_encode(
             .ffmpeg_spumux_pipeline(&args, &job.dir, &stages, &job.vob(), duration, |p| progress(final_phase, p))
             .await?
     };
-    if job.two_pass {
+    if job.uses_two_pass() {
         cleanup(job)?;
     }
     Ok(logs)
@@ -946,6 +1117,117 @@ pub fn bd_video_filter(v: &VideoStream, rate: BdRate, resolution: Resolution, vp
     f.join(",")
 }
 
+/// What happens to the video stream of a DVD-Video title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DvdVideoMode {
+    /// Always re-encode.
+    #[default]
+    Encode,
+    /// Copy streams that pass [`dvd_video_copy`], encode the rest.
+    Auto,
+    /// Copy every title; the build fails when one does not pass [`dvd_video_copy`].
+    Strict,
+}
+
+impl DvdVideoMode {
+    pub fn from_setting(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => DvdVideoMode::Auto,
+            "strict" => DvdVideoMode::Strict,
+            _ => DvdVideoMode::Encode,
+        }
+    }
+}
+
+/// Video copy parameters computed by [`dvd_video_copy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DvdVideoCopy {
+    pub kbps: u32,
+    pub bytes: u64,
+}
+
+/// Whether `v` has a native DVD-Video resolution and frame rate for `tv`.
+pub fn is_dvd_native_format(v: &VideoStream, tv: TvStandard) -> bool {
+    if !v.fps.is_finite() {
+        return false;
+    }
+    match tv {
+        TvStandard::Pal => {
+            matches!((v.width, v.height), (720, 576) | (704, 576)) && (v.fps - 25.0).abs() <= 0.05
+        }
+        TvStandard::Ntsc => {
+            matches!((v.width, v.height), (720, 480) | (704, 480))
+                && ((v.fps - 30000.0 / 1001.0).abs() <= 0.05 || (v.fps - 24000.0 / 1001.0).abs() <= 0.05)
+        }
+    }
+}
+
+/// Whether the video stream of `info` can be stream-copied unchanged onto a DVD-Video title
+/// without transcoding: returns its bitrate and size in bytes, or an English reason why it must
+/// be re-encoded.
+pub fn dvd_video_copy(
+    info: &MediaInfo,
+    tv: TvStandard,
+    resolution: Resolution,
+    aspect: Aspect,
+    vp: VideoProcessing,
+    max_kbps: u32,
+) -> Result<DvdVideoCopy, String> {
+    let v = info.video.as_ref().ok_or("no video stream")?;
+    if v.codec != "mpeg2video" {
+        return Err(format!("{} video (needs MPEG-2)", v.codec.to_uppercase()));
+    }
+    if v.pix_fmt != "yuv420p" {
+        return Err(format!(
+            "pixel format {} (needs yuv420p)",
+            if v.pix_fmt.is_empty() { "unknown" } else { &v.pix_fmt }
+        ));
+    }
+    if v.hdr {
+        return Err("HDR video (needs SDR)".into());
+    }
+    if !is_dvd_native_format(v, tv) {
+        let std_name = match tv {
+            TvStandard::Pal => "PAL",
+            TvStandard::Ntsc => "NTSC",
+        };
+        return Err(format!("{}×{} {:.3} fps is not DVD-compliant for {std_name}", v.width, v.height, v.fps));
+    }
+    if resolution != Resolution::FullD1 {
+        return Err(format!("{}×{} source (title requests {})", v.width, v.height, resolution.label()));
+    }
+    let src_aspect = Aspect::for_source(v.display_aspect);
+    if aspect != src_aspect {
+        return Err(format!("{} source (title requests {})", src_aspect.as_str(), aspect.as_str()));
+    }
+    if info.trim.is_some() {
+        return Err("trim active".into());
+    }
+    if v.crop.is_some() {
+        return Err("crop active".into());
+    }
+    if vp.deinterlace == Deinterlace::Yadif {
+        return Err("forced deinterlacing".into());
+    }
+    if vp.scale != ScaleMode::Letterbox {
+        return Err("scale override active".into());
+    }
+    if vp.has_picture_filters() {
+        return Err("picture filters active".into());
+    }
+    let kbps = source_video_kbps(info).ok_or("unknown video bitrate")?;
+    let cap = max_kbps.min(MAX_VIDEO_PEAK_KBPS);
+    if kbps > cap {
+        return Err(format!("{kbps} kbit/s video (DVD limit {cap})"));
+    }
+    let bytes = std::fs::metadata(&info.path)
+        .ok()
+        .map(|m| m.len())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| ((kbps as f64 * 1000.0 / 8.0) * info.duration_secs.max(0.0)).round() as u64);
+    Ok(DvdVideoCopy { kbps, bytes })
+}
+
 /// What happens to the video stream of a Blu-ray / AVCHD title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BdVideoMode {
@@ -973,7 +1255,8 @@ impl BdVideoMode {
 /// ([`crate::bd_mux::scan_video`]), which the GUI's probe does not run.
 pub fn source_video_kbps(info: &MediaInfo) -> Option<u32> {
     let v = info.video.as_ref()?;
-    if let Some(b) = v.bit_rate {
+    // MPEG-2 sequence headers encode VBR as 0x3FFFF * 400 = 104,857,200 bit/s.
+    if let Some(b) = v.bit_rate.filter(|&b| !(v.codec == "mpeg2video" && b >= 104_857_200)) {
         return Some(b.div_ceil(1000));
     }
     let bytes = std::fs::metadata(&info.path).ok()?.len();
@@ -1040,6 +1323,9 @@ pub fn bd_stream_copy(info: &MediaInfo, vp: VideoProcessing, max_kbps: u32) -> R
     }
     if vp.deinterlace == Deinterlace::Yadif {
         return Err("forced deinterlacing".into());
+    }
+    if vp.has_picture_filters() {
+        return Err("picture filters active".into());
     }
     let kbps = source_video_kbps(info).ok_or("unknown video bitrate")?;
     if kbps > max_kbps {
@@ -2110,6 +2396,7 @@ mod tests {
             audio_mode: AudioMode::Auto,
             audio_modes: vec![],
             audio_filters: vec![],
+            copy_video: false,
         };
         let args: Vec<String> = job.encode_args("pipe:1").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let joined = args.join(" ");
@@ -2142,23 +2429,37 @@ mod tests {
         let none = EncodeJob { subtitles: vec![], ..job.clone() };
         assert!(none.subtitle_args().is_none());
 
-        // Fast mode drops exactly the trellis option, in every run.
+        // Fast mode drops -trellis 1 and -intra_vlc 1 on final/single-pass encodes; Pass 1 always
+        // uses fast statistics-only settings regardless of `fast`.
         let strings = |a: Vec<OsString>| a.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        let without_trellis = |a: Vec<String>| {
+        let without_quality_tuning = |a: Vec<String>| {
             let i = a.iter().position(|x| x == "-trellis").expect("default encode uses trellis");
-            assert_eq!(a[i - 2..=i + 1], ["-sc_threshold", "1000000000", "-trellis", "1"]);
-            [&a[..i], &a[i + 2..]].concat()
+            assert_eq!(a[i - 2..=i + 3], ["-sc_threshold", "1000000000", "-trellis", "1", "-intra_vlc", "1"]);
+            [&a[..i], &a[i + 4..]].concat()
         };
         let fast = EncodeJob { fast: true, two_pass: true, ..job.clone() };
         let slow = EncodeJob { two_pass: true, ..job };
-        for (f, s) in [
-            (strings(fast.encode_args("x.mpg")), strings(slow.encode_args("x.mpg"))),
-            (strings(fast.first_pass_args()), strings(slow.first_pass_args())),
-        ] {
-            assert!(!f.iter().any(|x| x == "-trellis"), "{f:?}");
-            assert!(f.join(" ").contains("-mbd rd -flags +cgop -sc_threshold 1000000000 -color_primaries bt470bg"), "{f:?}");
-            assert_eq!(f, without_trellis(s));
-        }
+
+        let fast_enc = strings(fast.encode_args("x.mpg"));
+        let slow_enc = strings(slow.encode_args("x.mpg"));
+        assert!(!fast_enc.iter().any(|x| x == "-trellis" || x == "-intra_vlc"), "{fast_enc:?}");
+        assert!(fast_enc.join(" ").contains("-mbd rd -flags +cgop -sc_threshold 1000000000 -color_primaries bt470bg"), "{fast_enc:?}");
+        assert!(slow_enc.join(" ").contains("-mbd rd -flags +cgop -sc_threshold 1000000000 -trellis 1 -intra_vlc 1 -color_primaries bt470bg"), "{slow_enc:?}");
+        assert_eq!(fast_enc, without_quality_tuning(slow_enc));
+
+        let fast_p1 = strings(fast.first_pass_args());
+        let slow_p1 = strings(slow.first_pass_args());
+        assert_eq!(fast_p1, slow_p1);
+        let p1_joined = slow_p1.join(" ");
+        assert!(
+            p1_joined.contains(
+                "-g 12 -bf 2 -dc 9 -qmin 2 -mbd simple -flags +cgop -sc_threshold 1000000000 -trellis 0 -dia_size 1 -subq 1 -cmp sad -subcmp sad -mbcmp sad -color_primaries bt470bg"
+            ),
+            "{p1_joined}"
+        );
+        assert!(p1_joined.contains("-b:v 5000k -maxrate 9140k -bufsize 1835k"), "{p1_joined}");
+        assert!(p1_joined.contains("-pass 1 -passlogfile "), "{p1_joined}");
+        assert!(!p1_joined.contains("-mbd rd") && !p1_joined.contains("-trellis 1") && !p1_joined.contains("-intra_vlc"), "{p1_joined}");
     }
 
     fn slot(x: u32, has_audio: bool, letterbox: bool) -> VideoSlot {
@@ -2393,7 +2694,7 @@ mod tests {
 
     #[test]
     fn video_processing_modes() {
-        let vp = |scale, filter, deinterlace| VideoProcessing { scale, filter, deinterlace };
+        let vp = |scale, filter, deinterlace| VideoProcessing { scale, filter, deinterlace, ..Default::default() };
         let scope = video(1920, 800, 2.4, "progressive");
         let pan = vp(ScaleMode::PanScan, ScaleFilter::Bicubic, Deinterlace::Auto);
         assert_eq!(
@@ -2763,6 +3064,7 @@ mod tests {
             audio_mode: AudioMode::Auto,
             audio_modes: vec![],
             audio_filters: vec![],
+            copy_video: false,
         };
         let args: Vec<String> = job.encode_args("o.mpg").iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.join(" ").contains("-c:a:0 copy -sn"), "{args:?}");
@@ -2793,6 +3095,7 @@ mod tests {
             audio_mode: AudioMode::Auto,
             audio_modes: vec![AudioMode::Auto, AudioMode::Ac3],
             audio_filters: vec![],
+            copy_video: false,
         };
         let outs = job.audio_outs();
         assert_eq!(outs.len(), 2);
@@ -2833,6 +3136,7 @@ mod tests {
             audio_mode: AudioMode::Auto,
             audio_modes: vec![],
             audio_filters: vec![],
+            copy_video: false,
         };
         let dvd = strings(job.encode_args("o.mpg"));
         assert!(dvd.starts_with("-y -ss 10.000 -to 40.000 -i in.mkv -map 0:0 -vf crop=1920:800:0:140,fps=25,scale=720:"), "{dvd}");
@@ -2965,6 +3269,318 @@ mod tests {
         };
         let a = joined(&intro_background_stream(&frame, rate, &clip, 75).args);
         assert!(a.starts_with("-stream_loop -1 -ss 4.000 -t ") && a.contains("[bg0][shade]overlay=0:0:format=rgb[bg]"), "{a}");
+    }
+
+    #[test]
+    fn video_processing_and_stream_selection_serde_defaults() {
+        let vp: VideoProcessing = serde_json::from_str("{}").unwrap();
+        assert_eq!(vp, VideoProcessing::default());
+        assert_eq!(vp.scale, ScaleMode::Letterbox);
+        assert_eq!(vp.filter, ScaleFilter::Bicubic);
+        assert_eq!(vp.deinterlace, Deinterlace::Auto);
+        assert_eq!((vp.denoise, vp.brightness, vp.contrast, vp.saturation), (None, None, None, None));
+        assert!(!vp.has_picture_filters());
+
+        let parsed: VideoProcessing = serde_json::from_str(
+            r#"{"scale":"panscan","filter":"lanczos","deinterlace":"off","denoise":4.5,"brightness":-0.1,"contrast":1.2,"saturation":1.5}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.scale, ScaleMode::PanScan);
+        assert_eq!(parsed.filter, ScaleFilter::Lanczos);
+        assert_eq!(parsed.deinterlace, Deinterlace::Off);
+        assert_eq!(parsed.denoise, Some(4.5));
+        assert_eq!(parsed.brightness, Some(-0.1));
+        assert_eq!(parsed.contrast, Some(1.2));
+        assert_eq!(parsed.saturation, Some(1.5));
+
+        let sel: crate::dvd::StreamSelection = serde_json::from_str("{}").unwrap();
+        assert_eq!(sel, crate::dvd::StreamSelection::default());
+        assert_eq!((sel.denoise, sel.brightness, sel.contrast, sel.saturation), (None, None, None, None));
+    }
+
+    #[test]
+    fn picture_filters_in_encode_and_preview_chains() {
+        let base = VideoProcessing { denoise: Some(4.0), brightness: Some(0.1), ..Default::default() };
+        let overlaid = base.with_picture(None, Some(-0.2), Some(1.25), Some(0.8));
+        assert_eq!(overlaid.denoise, Some(4.0));
+        assert_eq!(overlaid.brightness, Some(-0.2));
+        assert_eq!(overlaid.contrast, Some(1.25));
+        assert_eq!(overlaid.saturation, Some(0.8));
+        assert!(overlaid.has_picture_filters());
+
+        let expected_pic = "hqdn3d=4.00:3.00:6.00:4.50,eq=brightness=-0.20:contrast=1.25:saturation=0.80";
+
+        let mut sdr = video(1920, 1080, 16.0 / 9.0, "tt");
+        sdr.crop = Some(crate::probe::CropRect { x: 0, y: 100, w: 1920, h: 800 });
+        sdr.display_aspect = 2.4;
+
+        let dvd_vf = video_filter(&sdr, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, overlaid);
+        assert!(dvd_vf.starts_with(&format!("bwdif=mode=send_frame,crop=1920:800:0:100,{expected_pic},fps=25,")), "{dvd_vf}");
+
+        let bd_vf = bd_video_filter(&sdr, BdRate { fps: (25, 1), fake_interlaced: false }, Resolution::Hd1080, overlaid);
+        assert!(bd_vf.starts_with(&format!("bwdif=mode=send_frame,crop=1920:800:0:100,{expected_pic},fps=25,")), "{bd_vf}");
+
+        let sdr_prev = preview_filter(&sdr, overlaid, 480);
+        assert_eq!(
+            sdr_prev,
+            format!("bwdif=mode=send_frame,crop=1920:800:0:100,{expected_pic},scale=1152:480:flags=bicubic,setsar=1,format=yuv420p")
+        );
+
+        let mut hdr = video(3840, 2160, 16.0 / 9.0, "progressive");
+        hdr.hdr = true;
+        let tm = tonemap_filter(&hdr).unwrap();
+        let hdr_prev = preview_filter(&hdr, overlaid, 480);
+        assert_eq!(
+            hdr_prev,
+            format!("scale=854:480:flags=bicubic,{tm},{expected_pic},setsar=1,format=yuv420p")
+        );
+
+        // Neutral and non-finite values emit no picture filters.
+        let neutral = VideoProcessing {
+            denoise: Some(0.0),
+            brightness: Some(0.0),
+            contrast: Some(1.0),
+            saturation: Some(1.0),
+            ..Default::default()
+        };
+        assert!(!neutral.has_picture_filters());
+        let non_finite = VideoProcessing {
+            denoise: Some(f32::NAN),
+            brightness: Some(f32::INFINITY),
+            contrast: Some(f32::NEG_INFINITY),
+            saturation: Some(f32::NAN),
+            ..Default::default()
+        };
+        assert!(!non_finite.has_picture_filters());
+        assert_eq!(
+            preview_filter(&sdr, neutral, 480),
+            preview_filter(&sdr, VideoProcessing::default(), 480)
+        );
+        assert_eq!(
+            video_filter(&sdr, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, non_finite),
+            video_filter(&sdr, Aspect::Wide, TvStandard::Pal, Resolution::FullD1, VideoProcessing::default())
+        );
+
+        // Out-of-range values are clamped.
+        let clamped = VideoProcessing {
+            denoise: Some(25.0),
+            brightness: Some(-2.5),
+            contrast: Some(5.0),
+            saturation: Some(5.0),
+            ..Default::default()
+        };
+        let clamped_vf = preview_filter(&video(1280, 720, 16.0 / 9.0, "progressive"), clamped, 480);
+        assert!(
+            clamped_vf.starts_with("hqdn3d=12.00:9.00:18.00:13.50,eq=brightness=-1.00:contrast=2.00:saturation=3.00,scale="),
+            "{clamped_vf}"
+        );
+    }
+
+    #[test]
+    fn bd_stream_copy_rejects_picture_filters() {
+        let mut info = bd_info();
+        let v = info.video.as_mut().unwrap();
+        (v.profile, v.level, v.pix_fmt, v.bit_rate) = (Some("High".into()), Some(41), "yuv420p".into(), Some(15_000_000));
+
+        let neutral = VideoProcessing {
+            denoise: Some(0.0),
+            brightness: Some(0.0),
+            contrast: Some(1.0),
+            saturation: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(bd_stream_copy(&info, neutral, 30_000), Ok(15_000));
+
+        for active in [
+            VideoProcessing { denoise: Some(2.0), ..Default::default() },
+            VideoProcessing { brightness: Some(0.1), ..Default::default() },
+            VideoProcessing { contrast: Some(1.1), ..Default::default() },
+            VideoProcessing { saturation: Some(0.9), ..Default::default() },
+        ] {
+            assert_eq!(bd_stream_copy(&info, active, 30_000), Err("picture filters active".into()));
+        }
+    }
+
+    #[test]
+    fn psnr_helpers_parse_verdict_and_args() {
+        let log = "[Parsed_psnr_2 @ 0x1] PSNR y:25.10 u:29.00 v:28.50 average:35.123456 min:30.00 max:40.00\n\
+                   [Parsed_psnr_2 @ 0x2] PSNR y:26.33 u:30.14 v:29.72 average:38.456789 min:31.20 max:45.10\n";
+        assert_eq!(parse_psnr_average(log), Some(38.456789));
+        assert_eq!(parse_psnr_average("[Parsed_psnr_2 @ 0x1] PSNR y:inf u:inf v:inf average:inf min:inf max:inf"), Some(99.9));
+        assert_eq!(parse_psnr_average("PSNR y:inf average:INF"), Some(99.9));
+        assert_eq!(parse_psnr_average("average:38.5 without marker"), None);
+        assert_eq!(parse_psnr_average("PSNR average:NaN"), None);
+        assert_eq!(parse_psnr_average("nothing relevant"), None);
+
+        assert_eq!(psnr_verdict(40.0), "excellent");
+        assert_eq!(psnr_verdict(39.99), "good");
+        assert_eq!(psnr_verdict(36.0), "good");
+        assert_eq!(psnr_verdict(35.99), "fair");
+        assert_eq!(psnr_verdict(32.0), "fair");
+        assert_eq!(psnr_verdict(31.99), "poor");
+
+        let args = joined(&quality_psnr_args(
+            Path::new("sample.mpg"),
+            Path::new("source.mkv"),
+            2,
+            12.5,
+            10.0,
+            "fps=25,scale=720:576",
+        ));
+        assert_eq!(
+            args,
+            format!(
+                "-hide_banner -nostdin -i sample.mpg -ss 12.500 -t 10.000 -i source.mkv \
+                 -lavfi [0:v]setpts=PTS-STARTPTS,format=yuv420p[dist];[1:2]fps=25,scale=720:576,setpts=PTS-STARTPTS[ref];[dist][ref]psnr=shortest=1 \
+                 -f null {NULL_DEVICE}"
+            )
+        );
+    }
+
+    #[test]
+    fn dvd_video_copy_rules() {
+        assert_eq!(DvdVideoMode::default(), DvdVideoMode::Encode);
+        assert_eq!(DvdVideoMode::from_setting("encode"), DvdVideoMode::Encode);
+        assert_eq!(DvdVideoMode::from_setting(" AUTO "), DvdVideoMode::Auto);
+        assert_eq!(DvdVideoMode::from_setting("Strict"), DvdVideoMode::Strict);
+        assert_eq!(DvdVideoMode::from_setting("unknown"), DvdVideoMode::Encode);
+
+        let pal_info = || MediaInfo {
+            path: PathBuf::from("nonexistent_dvd_copy_test.mpg"),
+            duration_secs: 10.0,
+            video: Some(VideoStream {
+                index: 0,
+                codec: "mpeg2video".into(),
+                width: 720,
+                height: 576,
+                display_aspect: 16.0 / 9.0,
+                fps: 25.0,
+                field_order: "progressive".into(),
+                crop: None,
+                hdr: false,
+                profile: Some("Main".into()),
+                level: Some(8),
+                pix_fmt: "yuv420p".into(),
+                bit_rate: Some(6_000_000),
+            }),
+            audio: vec![audio("ac3", 2, Some(192), Some(48_000), None)],
+            subtitles: vec![],
+            chapters: vec![],
+            trim: None,
+            audio_names: Default::default(),
+        };
+
+        // PAL 720x576 & 704x576 @ 25 fps; fallback bytes = 6_000_000 / 8 * 10 = 7_500_000.
+        let base = pal_info();
+        assert_eq!(
+            dvd_video_copy(&base, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 9500),
+            Ok(DvdVideoCopy { kbps: 6000, bytes: 7_500_000 })
+        );
+        let mut pal704 = pal_info();
+        pal704.video.as_mut().unwrap().width = 704;
+        assert!(is_dvd_native_format(pal704.video.as_ref().unwrap(), TvStandard::Pal));
+        assert!(dvd_video_copy(&pal704, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 9500).is_ok());
+
+        // NTSC 720x480 / 704x480 @ 29.97 and 23.976 fps.
+        for (w, fps) in [(720, 30000.0 / 1001.0), (704, 24000.0 / 1001.0), (720, 29.97), (720, 23.976)] {
+            let mut ntsc = pal_info();
+            {
+                let v = ntsc.video.as_mut().unwrap();
+                (v.width, v.height, v.fps) = (w, 480, fps);
+                assert!(is_dvd_native_format(v, TvStandard::Ntsc), "w={w} fps={fps}");
+                assert!(!is_dvd_native_format(v, TvStandard::Pal));
+            }
+            assert!(dvd_video_copy(&ntsc, TvStandard::Ntsc, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 9500).is_ok());
+        }
+
+        // Rejections in order.
+        let mut no_vid = pal_info();
+        no_vid.video = None;
+        assert_eq!(dvd_video_copy(&no_vid, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 9500), Err("no video stream".into()));
+
+        let bad = |f: &dyn Fn(&mut MediaInfo)| {
+            let mut i = pal_info();
+            f(&mut i);
+            dvd_video_copy(&i, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 9500).unwrap_err()
+        };
+        assert!(bad(&|i| i.video.as_mut().unwrap().codec = "h264".into()).contains("needs MPEG-2"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().pix_fmt = "yuv422p".into()).contains("needs yuv420p"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().hdr = true).contains("HDR"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().fps = 29.97).contains("not DVD-compliant for PAL"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().width = 1280).contains("not DVD-compliant for PAL"));
+        assert!(dvd_video_copy(&base, TvStandard::Pal, Resolution::HalfD1, Aspect::Wide, VideoProcessing::default(), 9500).unwrap_err().contains("Half D1"));
+        assert!(dvd_video_copy(&base, TvStandard::Pal, Resolution::FullD1, Aspect::Standard, VideoProcessing::default(), 9500).unwrap_err().contains("title requests 4:3"));
+        assert_eq!(bad(&|i| i.trim = Some(crate::probe::Trim { start: 1.0, end: 5.0 })), "trim active");
+        assert_eq!(bad(&|i| i.video.as_mut().unwrap().crop = Some(crate::probe::CropRect { x: 0, y: 0, w: 700, h: 576 })), "crop active");
+        assert_eq!(
+            dvd_video_copy(&base, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing { deinterlace: Deinterlace::Yadif, ..Default::default() }, 9500).unwrap_err(),
+            "forced deinterlacing"
+        );
+        assert_eq!(
+            dvd_video_copy(&base, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing { scale: ScaleMode::PanScan, ..Default::default() }, 9500).unwrap_err(),
+            "scale override active"
+        );
+        assert_eq!(
+            dvd_video_copy(&base, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing { denoise: Some(2.0), ..Default::default() }, 9500).unwrap_err(),
+            "picture filters active"
+        );
+        assert_eq!(bad(&|i| i.video.as_mut().unwrap().bit_rate = None), "unknown video bitrate");
+        assert!(dvd_video_copy(&base, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 5000).unwrap_err().contains("DVD limit 5000"));
+        assert!(bad(&|i| i.video.as_mut().unwrap().bit_rate = Some(9_900_000)).contains("DVD limit 9500"));
+
+        // MPEG-2 VBR sentinel (>= 0x3FFFF * 400 = 104,857,200) falls back to file size minus audio.
+        let tmp = std::env::temp_dir().join(format!("cx_mpeg2_vbr_{}.mpg", std::process::id()));
+        // 10 s @ 4192 kbps total -> 5_240_000 bytes; minus 192 kbps audio = 4000 kbps video.
+        std::fs::write(&tmp, vec![0u8; 5_240_000]).unwrap();
+        let mut vbr = pal_info();
+        vbr.path = tmp.clone();
+        vbr.video.as_mut().unwrap().bit_rate = Some(0x3FFFF * 400);
+        assert_eq!(source_video_kbps(&vbr), Some(4000));
+        assert_eq!(
+            dvd_video_copy(&vbr, TvStandard::Pal, Resolution::FullD1, Aspect::Wide, VideoProcessing::default(), 9500),
+            Ok(DvdVideoCopy { kbps: 4000, bytes: 5_240_000 })
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn dvd_copy_job_skips_filter_hwaccel_and_two_pass() {
+        let mut info = bd_info();
+        let v = info.video.as_mut().unwrap();
+        (v.codec, v.width, v.height, v.fps, v.pix_fmt) = ("mpeg2video".into(), 720, 576, 25.0, "yuv420p".into());
+        let job = EncodeJob {
+            info: &info,
+            audio: vec![&info.audio[0]],
+            subtitles: vec![],
+            video_kbps: 4500,
+            aspect: Aspect::Wide,
+            dir: PathBuf::from("w"),
+            stem: "title_01".into(),
+            two_pass: true,
+            fast: false,
+            tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
+            video: VideoProcessing::default(),
+            hwaccel: Some("cuda"),
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
+            audio_filters: vec![],
+            copy_video: true,
+        };
+        assert!(!job.uses_two_pass());
+
+        let args = strings(job.encode_args("out.mpg"));
+        assert!(args.starts_with("-y -fflags +genpts -i in.mkv -map 0:0 -c:v copy"), "{args}");
+        assert!(!args.contains("-vf"), "{args}");
+        assert!(!args.contains("-hwaccel"), "{args}");
+        assert!(!args.contains("-pass"), "{args}");
+        assert!(!args.contains("-passlogfile"), "{args}");
+        assert!(!args.contains("-c:v mpeg2video"), "{args}");
+        assert!(args.contains("-map 0:1 -c:a:0"), "{args}");
+        assert!(args.ends_with("-sn -dn -f dvd -muxrate 10080k -packetsize 2048 out.mpg"), "{args}");
+
+        let piped = strings(job.encode_args("pipe:1"));
+        assert!(piped.ends_with("-sn -dn -f dvd -muxrate 10080k -packetsize 2048 pipe:1"), "{piped}");
     }
 
 }

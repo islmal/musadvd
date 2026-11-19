@@ -483,6 +483,121 @@ fn packet_bps(csv: &str, duration_secs: f64) -> Option<u32> {
 }
 
 // ---------------------------------------------------------------------------
+// Scene-change chapter detection
+// ---------------------------------------------------------------------------
+
+/// Default FFmpeg `scene` filter threshold (`gt(scene, threshold)`).
+pub const DEFAULT_SCENE_THRESHOLD: f64 = 0.35;
+/// Default minimum gap in seconds between detected chapter cuts (and from trim start).
+pub const MIN_SCENE_GAP_SECS: f64 = 15.0;
+
+/// Extracts finite non-negative `pts_time` values from FFmpeg `showinfo` log lines and shifts
+/// each timestamp by `offset_secs`.
+pub fn parse_scene_timestamps(log: &str, offset_secs: f64) -> Vec<f64> {
+    log.lines()
+        .filter(|line| line.contains("showinfo"))
+        .filter_map(|line| {
+            let (_, rest) = line.split_once("pts_time:")?;
+            let token = rest.split_whitespace().next()?;
+            let ts: f64 = token.parse().ok()?;
+            (ts.is_finite() && ts >= 0.0).then_some(ts + offset_secs)
+        })
+        .collect()
+}
+
+/// Sorts raw scene-change timestamps, enforces `min_gap_secs` from `trim_start` and between
+/// consecutive chapters as well as a 1 s end margin (`[trim_start + min_gap_secs, trim_end - 1.0]`),
+/// rounds kept timestamps to 0.1 s, and caps at `MAX_CHAPTERS - 1` cuts (leaving slot 1 for start).
+pub fn filter_scene_chapters(raw_secs: &[f64], trim_start: f64, trim_end: f64, min_gap_secs: f64) -> Vec<f64> {
+    let mut sorted: Vec<f64> = raw_secs.iter().copied().filter(|t| t.is_finite()).collect();
+    sorted.sort_by(f64::total_cmp);
+
+    let min_t = trim_start + min_gap_secs;
+    let max_t = trim_end - 1.0;
+    let max_cuts = crate::author::MAX_CHAPTERS.saturating_sub(1);
+    let mut last = trim_start;
+    let mut out = Vec::new();
+    for t in sorted {
+        if t < min_t || t > max_t {
+            continue;
+        }
+        if t - last >= min_gap_secs {
+            out.push((t * 10.0).round() / 10.0);
+            last = t;
+            if out.len() >= max_cuts {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Runs FFmpeg `select='gt(scene,<threshold>)',showinfo` on `path` (optionally trimmed to
+/// `start_secs..end_secs` within `duration_secs`) and returns filtered chapter cut timestamps in
+/// source seconds.
+pub fn detect_scene_chapters(
+    ffmpeg: &Path,
+    path: &Path,
+    start_secs: Option<f64>,
+    end_secs: Option<f64>,
+    duration_secs: f64,
+    threshold: f64,
+    min_gap_secs: f64,
+) -> Result<Vec<f64>, String> {
+    let dur = duration_secs.max(0.0);
+    let trim_start = start_secs.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0).min(dur);
+    let trim_end = end_secs.filter(|v| v.is_finite() && *v > trim_start).unwrap_or(dur).min(dur);
+    if !min_gap_secs.is_finite() || trim_end <= trim_start || trim_end - trim_start < min_gap_secs {
+        return Ok(Vec::new());
+    }
+    if !threshold.is_finite() {
+        return Err("Invalid scene detection threshold".to_string());
+    }
+
+    let mut cmd = crate::tools::blocking_tool_command(ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin"]);
+    let offset = if trim_start > 0.001 {
+        cmd.args(["-ss", &format!("{trim_start:.3}")]);
+        trim_start
+    } else {
+        0.0
+    };
+    if trim_end < duration_secs - 0.001 {
+        cmd.args(["-to", &format!("{trim_end:.3}")]);
+    }
+    cmd.arg("-i").arg(path).args([
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        &format!("select='gt(scene,{threshold})',showinfo"),
+        "-f",
+        "null",
+        "-",
+    ]);
+
+    let out = cmd
+        .output()
+        .map_err(|e| format!("cannot run ffmpeg for scene detection: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
+        let detail: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        return Err(if detail.is_empty() {
+            format!("ffmpeg scene detection failed on {} ({})", path.display(), out.status)
+        } else {
+            format!("ffmpeg scene detection failed on {} ({}):\n{detail}", path.display(), out.status)
+        });
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let raw = parse_scene_timestamps(&stderr, offset);
+    Ok(filter_scene_chapters(&raw, trim_start, trim_end, min_gap_secs))
+}
+
+// ---------------------------------------------------------------------------
 // Languages
 // ---------------------------------------------------------------------------
 
@@ -882,5 +997,117 @@ mod tests {
         assert!(language_matches("de", Some("ger")));
         assert!(!language_matches("en", Some("ger")));
         assert!(!language_matches("de", None));
+    }
+
+    #[test]
+    fn parses_scene_timestamps_from_showinfo_log() {
+        let log = "\
+Input #0, matroska,webm, from 'movie.mkv':
+[Parsed_showinfo_1 @ 000001b67b086d80] config in time_base: 1/1000, frame_rate: 25/1
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   0 pts:  40960 pts_time:4       duration:   1024 duration_time:0.1     fmt:yuv420p
+[Parsed_other_0 @ 0x1234] n: 1 pts_time:99.5 should be ignored
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   1 pts:  12345 pts_time:12.345  duration:   1024
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   2 pts:  NOPTS pts_time:NOPTS   duration:   1024
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   3 pts:     -5 pts_time:-0.5    duration:   1024
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   4 pts:      0 pts_time:nan     duration:   1024
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   5 pts:      0 pts_time:inf     duration:   1024
+[Parsed_showinfo_1 @ 000001b67b086d80] n:   6 pts:      0 pts_time:0       duration:   1024
+[Parsed_showinfo_1 @ 000001b67b086d80] color_range:unknown color_space:unknown
+";
+        assert_eq!(parse_scene_timestamps(log, 0.0), vec![4.0, 12.345, 0.0]);
+        assert_eq!(parse_scene_timestamps(log, 10.5), vec![14.5, 22.845, 10.5]);
+    }
+
+    #[test]
+    fn filters_scene_chapters_with_gap_margin_rounding_and_cap() {
+        // Unsorted, non-finite, too-close, and out-of-range timestamps.
+        let raw = [
+            f64::NAN,
+            f64::INFINITY,
+            5.0,
+            24.99,  // < 10.0 + 15.0
+            60.16,  // kept later -> 60.2
+            25.04,  // >= 25.0 -> kept (25.0), last becomes 25.04
+            40.02,  // 40.02 - 25.04 = 14.98 < 15.0 -> skipped
+            40.05,  // 40.05 - 25.04 = 15.01 >= 15.0 -> kept (40.1), last becomes 40.05
+            99.01,  // > 100.0 - 1.0 -> skipped
+            99.0,   // == 100.0 - 1.0 -> kept (99.0)
+        ];
+        assert_eq!(
+            filter_scene_chapters(&raw, 10.0, 100.0, MIN_SCENE_GAP_SECS),
+            vec![25.0, 40.1, 60.2, 99.0]
+        );
+
+        // Short range where no chapter fits returns empty.
+        assert!(filter_scene_chapters(&[15.0, 16.0], 0.0, 15.5, MIN_SCENE_GAP_SECS).is_empty());
+
+        // Capped at MAX_CHAPTERS - 1 (98 cuts, leaving slot 1 for the start chapter).
+        let many: Vec<f64> = (1..=120).map(|i| i as f64 * 20.0).collect();
+        let capped = filter_scene_chapters(&many, 0.0, 3000.0, MIN_SCENE_GAP_SECS);
+        assert_eq!(capped.len(), crate::author::MAX_CHAPTERS - 1);
+        assert_eq!(capped.first().copied(), Some(20.0));
+        assert_eq!(capped.last().copied(), Some(98.0 * 20.0));
+    }
+
+    #[test]
+    fn detect_scene_chapters_on_synthetic_clip_untrimmed_and_trimmed() {
+        // Short clip skips ffmpeg completely without spawning.
+        let skipped = detect_scene_chapters(
+            Path::new("nonexistent-ffmpeg-binary"),
+            Path::new("nonexistent.mp4"),
+            None,
+            None,
+            10.0,
+            DEFAULT_SCENE_THRESHOLD,
+            MIN_SCENE_GAP_SECS,
+        )
+        .unwrap();
+        assert!(skipped.is_empty());
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Some(ffmpeg) = ["bin/ffmpeg.exe", "bin/ffmpeg"].iter().map(|p| root.join(p)).find(|p| p.is_file()) else {
+            return;
+        };
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDir(std::env::temp_dir().join(format!("cx_scene_detect_{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let clip = dir.0.join("scenes.mp4");
+
+        // 10 s clip at 10 fps with black->white->black->white cuts at 2.0 s, 5.0 s, and 7.5 s.
+        let gen = crate::tools::blocking_tool_command(&ffmpeg)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=160x120:r=10:d=10,format=yuv420p",
+                "-vf",
+                "drawbox=enable='between(t,2.0,4.99)+gte(t,7.5)':color=white:t=fill",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "10",
+            ])
+            .arg(&clip)
+            .output()
+            .unwrap();
+        assert!(gen.status.success(), "synthetic clip failed: {}", String::from_utf8_lossy(&gen.stderr));
+
+        let untrimmed = detect_scene_chapters(&ffmpeg, &clip, None, None, 10.0, DEFAULT_SCENE_THRESHOLD, 2.0).unwrap();
+        assert_eq!(untrimmed, vec![2.0, 5.0, 7.5]);
+
+        let trimmed = detect_scene_chapters(&ffmpeg, &clip, Some(3.0), Some(9.0), 10.0, DEFAULT_SCENE_THRESHOLD, 1.5).unwrap();
+        assert_eq!(trimmed, vec![5.0, 7.5]);
     }
 }

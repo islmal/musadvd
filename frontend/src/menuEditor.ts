@@ -5,9 +5,10 @@
 // texts and pictures look as they will on the TV. Buttons are axis-aligned rectangles (no
 // rotation, at most 36 per menu, no overlaps) – the DVD subpicture only knows `x0 y0 x1 y1`.
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import { audioWaveform, checkLayout, imagePreview, importConvertxTemplate, loadLayout, saveLayout, textLines, titleFrame } from "./api";
+import { audioWaveform, checkLayout, imagePreview, importConvertxTemplate, loadLayout, menuNavigation, saveLayout, textLines, titleFrame, type ButtonNav } from "./api";
 import {
   FONTS,
+  computeNavigationFallback,
   maxButtons,
   OVERLAY_LABELS,
   type GradientOverlay,
@@ -147,6 +148,17 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** Whether the stage was last rendered with the playhead inside the intro (Cell 1). */
   let lastCell1 = false;
 
+  let remoteMode = false;
+  let remoteFocusId: string | null = null;
+  const remoteGraph = new Map<string, ButtonNav>();
+  let remoteHistory: number[] = [];
+  let remotePreview: { title: string; subtitle: string; thumbUrl: string | null } | null = null;
+  let remoteStatus = "";
+  let remoteActivateId: string | null = null;
+  let remoteNavSeq = 0;
+  let remotePreviewSeq = 0;
+  let remoteActivateTimer: number | undefined;
+
   function snapToClosedGop(secs: number): number {
     const isPal = tv.toLowerCase() === "pal";
     const gopSize = isPal ? 15 : 18;
@@ -210,6 +222,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     L = JSON.parse(last);
     const alive = new Set(L.menus.flatMap((m) => m.elements.map((e) => e.id)));
     selIds = selIds.filter((id) => alive.has(id));
+    if (remoteMode) resetRemoteSession();
     renderAll();
   }
 
@@ -457,6 +470,16 @@ export function mountMenuEditor(opts: EditorOptions) {
           "Erweitert (Timeline)",
         ),
       ),
+      el(
+        "button",
+        {
+          type: "button",
+          class: `btn ed-remote-toggle${remoteMode ? " active" : ""}`,
+          title: tr("menuEditor.remoteTestTip"),
+          onclick: () => (remoteMode ? exitRemoteMode() : enterRemoteMode()),
+        },
+        tr("menuEditor.remoteTestBtn"),
+      ),
       el("span", { class: "ed-spacer" }),
       el(
         "button",
@@ -483,6 +506,13 @@ export function mountMenuEditor(opts: EditorOptions) {
           onclick: () => {
             menuIdx = i;
             selIds = [];
+            if (remoteMode) {
+              remotePreviewSeq += 1;
+              remotePreview = null;
+              remoteStatus = "";
+              remoteActivateId = null;
+              loadRemoteNav(true);
+            }
             renderAll();
           },
         },
@@ -529,6 +559,53 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function renderToolbar() {
+    if (remoteMode) {
+      const m = menu();
+      const buttons = m?.elements.filter(isButton) ?? [];
+      const focused = buttons.find((b) => b.id === remoteFocusId) ?? null;
+      const navDisabled = !!remotePreview || buttons.length === 0;
+      const padBtn = (label: string, onclick: () => void, disabled = false, extraClass = "") =>
+        el(
+          "button",
+          {
+            type: "button",
+            class: `btn${extraClass ? ` ${extraClass}` : ""}`,
+            disabled,
+            onclick: (ev: MouseEvent) => {
+              if (ev.detail > 0) (ev.currentTarget as HTMLElement).blur();
+              onclick();
+            },
+          },
+          label,
+        );
+      const canBack = remoteHistory.length > 0 || !!remotePreview;
+      toolbar.replaceChildren(
+        el(
+          "div",
+          { class: "ed-remote-bar" },
+          el(
+            "div",
+            { class: "ed-remote-info" },
+            el("span", { class: "ed-remote-menu" }, m?.name || tr("menuEditor.ohneNamen")),
+            focused ? el("span", { class: "ed-remote-action" }, actionLabel(focused.action)) : null,
+            remoteStatus ? el("span", { class: "ed-remote-status" }, remoteStatus) : null,
+            el("span", { class: "ed-remote-hint" }, buttons.length === 0 ? tr("menuEditor.remoteNoButtons") : tr("menuEditor.remoteHint")),
+          ),
+          el(
+            "div",
+            { class: "ed-remote-pad" },
+            padBtn("↑", () => stepRemote("up"), navDisabled),
+            padBtn("↓", () => stepRemote("down"), navDisabled),
+            padBtn("←", () => stepRemote("left"), navDisabled),
+            padBtn("→", () => stepRemote("right"), navDisabled),
+            padBtn("OK", () => (remotePreview ? remoteBack() : activateRemoteFocus()), !remotePreview && buttons.length === 0, "primary"),
+            canBack ? padBtn(tr("menuEditor.remoteBack"), () => remoteBack()) : null,
+            padBtn(tr("menuEditor.remoteExit"), () => exitRemoteMode()),
+          ),
+        ),
+      );
+      return;
+    }
     const buttons = menu()?.elements.filter(isButton).length ?? 0;
     toolbar.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: addText }, tr("menuEditor.text")),
@@ -603,6 +680,248 @@ export function mountMenuEditor(opts: EditorOptions) {
       (node.firstElementChild as HTMLElement).style.opacity = String(b.opacity);
     }
   }
+  // ---- virtual remote testing -------------------------------------------------------------------
+  function updateRemoteFocusVisuals() {
+    for (const node of stage.querySelectorAll<HTMLElement>(".ed-el")) {
+      const id = node.dataset.id ?? null;
+      node.classList.toggle("remote-focus", remoteMode && id !== null && id === remoteFocusId);
+      node.classList.toggle("remote-activate", remoteMode && id !== null && id === remoteActivateId);
+    }
+    renderToolbar();
+  }
+
+  function loadRemoteNav(focusFirst: boolean) {
+    const m = menu();
+    const seq = ++remoteNavSeq;
+    if (!m) {
+      remoteGraph.clear();
+      remoteFocusId = null;
+      return;
+    }
+    const fallback = computeNavigationFallback(m);
+    remoteGraph.clear();
+    for (const n of fallback) remoteGraph.set(n.id, n);
+    if (focusFirst || !remoteFocusId || !remoteGraph.has(remoteFocusId)) {
+      remoteFocusId = fallback[0]?.id ?? null;
+    }
+    void menuNavigation(m, L.canvas, tv)
+      .then((navs) => {
+        if (closed || seq !== remoteNavSeq || !remoteMode) return;
+        const cur = menu();
+        if (!cur || cur.id !== m.id) return;
+        const prevFocus = remoteFocusId;
+        remoteGraph.clear();
+        for (const n of navs) remoteGraph.set(n.id, n);
+        if (!remoteFocusId || !remoteGraph.has(remoteFocusId)) {
+          remoteFocusId = navs[0]?.id ?? null;
+        }
+        if (prevFocus !== remoteFocusId) renderStage();
+        renderToolbar();
+      })
+      .catch(() => {
+        // Keep synchronous fallback graph when backend navigation is unavailable.
+      });
+  }
+
+  function flashRemoteActivate(id: string) {
+    remoteActivateId = id;
+    window.clearTimeout(remoteActivateTimer);
+    updateRemoteFocusVisuals();
+    remoteActivateTimer = window.setTimeout(() => {
+      if (closed || !remoteMode) return;
+      if (remoteActivateId === id) {
+        remoteActivateId = null;
+        updateRemoteFocusVisuals();
+      }
+    }, 320);
+  }
+
+  function openRemotePreview(heading: string, subtitle: string, titleNum: number, atSecs?: number) {
+    const pSeq = ++remotePreviewSeq;
+    remotePreview = { title: heading, subtitle, thumbUrl: null };
+    remoteStatus = "";
+    renderStage();
+    renderToolbar();
+    if (!titles[titleNum - 1]) return;
+    void frameOf(titleNum, atSecs)
+      .then((url) => {
+        if (closed || !remoteMode || pSeq !== remotePreviewSeq || !remotePreview) return;
+        remotePreview.thumbUrl = url;
+        const img = stage.querySelector<HTMLImageElement>(".ed-remote-overlay-thumb");
+        if (img) {
+          img.src = url;
+          img.hidden = false;
+        } else {
+          renderStage();
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  function stepRemote(dir: "up" | "down" | "left" | "right") {
+    if (remotePreview) return;
+    const m = menu();
+    if (!m) return;
+    const buttons = m.elements.filter(isButton);
+    if (buttons.length === 0) return;
+    if (!remoteFocusId) {
+      remoteFocusId = buttons[0].id;
+      remoteStatus = "";
+      updateRemoteFocusVisuals();
+      return;
+    }
+    const nextId = remoteGraph.get(remoteFocusId)?.[dir] ?? null;
+    if (nextId && buttons.some((b) => b.id === nextId)) {
+      if (nextId !== remoteFocusId) remoteStatus = "";
+      remoteFocusId = nextId;
+    }
+    updateRemoteFocusVisuals();
+  }
+
+  function activateRemoteFocus() {
+    if (remotePreview) {
+      remoteBack();
+      return;
+    }
+    const m = menu();
+    const btn = m?.elements.find((e) => e.id === remoteFocusId && isButton(e));
+    if (!btn || !btn.action) return;
+    const a = btn.action;
+    switch (a.type) {
+      case "menu": {
+        const targetIdx = L.menus.findIndex((x) => x.id === a.menu);
+        if (targetIdx >= 0) {
+          remoteHistory.push(menuIdx);
+          menuIdx = targetIdx;
+          remotePreviewSeq += 1;
+          remotePreview = null;
+          remoteStatus = "";
+          remoteActivateId = null;
+          loadRemoteNav(true);
+          renderAll();
+        } else {
+          remoteStatus = tr("menuEditor.remoteMissingMenu");
+          flashRemoteActivate(btn.id);
+        }
+        return;
+      }
+      case "playTitle":
+        openRemotePreview(tr("menuEditor.remotePreviewTitle", { title: titleName(a.title) }), actionLabel(a), a.title);
+        return;
+      case "playChapter": {
+        const t = titles[a.title - 1];
+        const at = t?.chapterStarts?.[a.chapter - 1] ?? 0;
+        openRemotePreview(
+          tr("menuEditor.remotePreviewChapter", { title: titleName(a.title), chapter: chapterLabel(t, a.chapter) }),
+          actionLabel(a),
+          a.title,
+          at,
+        );
+        return;
+      }
+      case "playAll":
+        openRemotePreview(tr("menuEditor.remotePreviewPlayAll", { count: titles.length }), actionLabel(a), 1);
+        return;
+      case "setAudio":
+        remoteStatus = tr("menuEditor.remoteSetAudio", { track: trackLabel("audio", m?.title, a.source) });
+        flashRemoteActivate(btn.id);
+        return;
+      case "setSubtitle":
+        remoteStatus =
+          a.source === null
+            ? tr("menuEditor.remoteSetSubtitleOff")
+            : tr("menuEditor.remoteSetSubtitle", { track: trackLabel("subtitle", m?.title, a.source) });
+        flashRemoteActivate(btn.id);
+        return;
+      case "customVm":
+        remoteStatus = tr("menuEditor.remoteCustomVm", { script: a.script });
+        flashRemoteActivate(btn.id);
+        return;
+    }
+  }
+
+  function remoteBack() {
+    if (remotePreview) {
+      remotePreviewSeq += 1;
+      remotePreview = null;
+      remoteStatus = "";
+      renderStage();
+      renderToolbar();
+      return;
+    }
+    if (remoteHistory.length > 0) {
+      menuIdx = Math.max(0, Math.min(remoteHistory.pop()!, L.menus.length - 1));
+      remotePreviewSeq += 1;
+      remotePreview = null;
+      remoteStatus = "";
+      remoteActivateId = null;
+      loadRemoteNav(true);
+      renderAll();
+    }
+  }
+
+  function resetRemoteSession() {
+    remotePreviewSeq += 1;
+    remotePreview = null;
+    remoteHistory = [];
+    remoteStatus = "";
+    remoteActivateId = null;
+    loadRemoteNav(true);
+  }
+
+  function enterRemoteMode() {
+    remoteMode = true;
+    isDrawingAabb = false;
+    stage.style.cursor = "";
+    stopPlay();
+    selIds = [];
+    selKey = null;
+    resetRemoteSession();
+    (document.activeElement as HTMLElement | null)?.blur();
+    renderAll();
+  }
+
+  function exitRemoteMode() {
+    remoteMode = false;
+    remoteNavSeq += 1;
+    remotePreviewSeq += 1;
+    window.clearTimeout(remoteActivateTimer);
+    remotePreview = null;
+    remoteFocusId = null;
+    remoteHistory = [];
+    remoteStatus = "";
+    remoteActivateId = null;
+    remoteGraph.clear();
+    renderAll();
+  }
+
+  function handleRemoteKey(ev: KeyboardEvent) {
+    if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      stepRemote("up");
+    } else if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      stepRemote("down");
+    } else if (ev.key === "ArrowLeft") {
+      ev.preventDefault();
+      stepRemote("left");
+    } else if (ev.key === "ArrowRight") {
+      ev.preventDefault();
+      stepRemote("right");
+    } else if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      if (remotePreview) remoteBack();
+      else activateRemoteFocus();
+    } else if (ev.key === "Backspace") {
+      ev.preventDefault();
+      remoteBack();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      if (remotePreview) remoteBack();
+      else exitRemoteMode();
+    }
+  }
+
   function renderElement(e: LayoutElement): HTMLElement {
     const inner = el("div", { class: "ed-inner" });
     inner.style.opacity = String(boxAt(e).opacity);
@@ -647,14 +966,18 @@ export function mountMenuEditor(opts: EditorOptions) {
       src.then((url) => (img.src = url)).catch(() => inner.classList.add("ed-missing"));
       if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${videoLabel(e)}`));
     }
-    const isCell1 = viewMode === "timeline" && isButton(e) && playheadTime < (menu().introSecs ?? 0.0);
+    const isCell1 = !remoteMode && viewMode === "timeline" && isButton(e) && playheadTime < (menu().introSecs ?? 0.0);
+    const isRemoteFocused = remoteMode && remoteFocusId === e.id;
+    const isRemoteActivated = remoteMode && remoteActivateId === e.id;
     const classes = [
       "ed-el",
       isButton(e) ? "is-button" : "",
       e.group ? "in-group" : "",
-      isSel(e.id) ? "selected" : "",
+      !remoteMode && isSel(e.id) ? "selected" : "",
       isCell1 ? "hli-inactive" : "",
       e.easterEgg ? "is-easter-egg" : "",
+      isRemoteFocused ? "remote-focus" : "",
+      isRemoteActivated ? "remote-activate" : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -665,7 +988,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         class: classes,
         title: actionLabel(e.action),
         "data-id": e.id,
-        style: `--ed-hl: ${e.highlight?.color ?? L.highlight.color}`,
+        style: `--ed-hl: ${e.highlight?.color ?? L.highlight.color}; --ed-sel: ${e.highlight?.selectColor ?? L.highlight.selectColor}`,
       },
       inner,
     );
@@ -677,18 +1000,35 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     applyBox(node, boxAt(e));
     // Cell 1 buttons are only dimmed: they stay editable, otherwise a playhead at 0 locks the whole menu.
-    if (isSel(e.id)) {
+    if (!remoteMode && isSel(e.id)) {
       for (const corner of ["nw", "ne", "sw", "se"]) {
         node.append(el("span", { class: `ed-handle ${corner}`, "data-handle": corner }));
       }
     }
-    node.addEventListener("pointerdown", (ev) => startDrag(ev, e));
+    node.addEventListener("pointerdown", (ev) => {
+      if (remoteMode) return;
+      startDrag(ev, e);
+    });
+    node.addEventListener("click", (ev) => {
+      if (!remoteMode || !isButton(e) || remotePreview) return;
+      ev.stopPropagation();
+      remoteFocusId = e.id;
+      remoteStatus = "";
+      updateRemoteFocusVisuals();
+    });
+    node.addEventListener("dblclick", (ev) => {
+      if (!remoteMode || !isButton(e) || remotePreview) return;
+      ev.stopPropagation();
+      remoteFocusId = e.id;
+      activateRemoteFocus();
+    });
     return node;
   }
 
   function renderStage() {
     const m = menu();
     stage.replaceChildren();
+    stage.classList.toggle("remote-mode", remoteMode);
     if (!m) return;
     lastCell1 = viewMode === "timeline" && playheadTime < (m.introSecs ?? 0);
     stage.style.backgroundColor = m.background.color;
@@ -719,6 +1059,41 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (overlay !== "none") stage.append(el("div", { class: `ed-shade shade-${overlay}`, "aria-hidden": "true" }));
     for (const e of m.elements) stage.append(renderElement(e));
     if (showSafe) stage.append(el("div", { class: "ed-safe", "aria-hidden": "true" }));
+    if (remoteMode && remotePreview) {
+      const thumb = remotePreview.thumbUrl
+        ? el("img", { class: "ed-remote-overlay-thumb", src: remotePreview.thumbUrl, alt: "" })
+        : el("img", { class: "ed-remote-overlay-thumb", alt: "", hidden: true });
+      stage.append(
+        el(
+          "div",
+          {
+            class: "ed-remote-overlay",
+            style: `font-size: ${Math.max(12, Math.round(H() * 0.028))}px`,
+            onclick: (ev: MouseEvent) => ev.stopPropagation(),
+          },
+          el(
+            "div",
+            { class: "ed-remote-overlay-card" },
+            el("div", { class: "ed-remote-overlay-media" }, thumb),
+            el(
+              "div",
+              { class: "ed-remote-overlay-body" },
+              el("div", { class: "ed-remote-overlay-title" }, remotePreview.title),
+              el("div", { class: "ed-remote-overlay-sub" }, remotePreview.subtitle),
+              el(
+                "button",
+                {
+                  type: "button",
+                  class: "btn primary ed-remote-overlay-back",
+                  onclick: () => remoteBack(),
+                },
+                tr("menuEditor.remoteBack"),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     layoutStage();
     renderLayers();
   }
@@ -1530,6 +1905,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   /** Drag on the empty stage draws a marquee or an AABB button box; a click without movement clears the selection. */
   stage.addEventListener("pointerdown", (ev) => {
+    if (remoteMode) return;
     const t = ev.target as HTMLElement;
     if (ev.button !== 0 || !(t === stage || t.classList.contains("ed-bg") || t.classList.contains("ed-safe"))) return;
     ev.preventDefault();
@@ -1686,6 +2062,17 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function pickFromList(ids: string[], ev: MouseEvent) {
+    if (remoteMode) {
+      if (ids.length === 1 && !remotePreview) {
+        const target = menu()?.elements.find((e) => e.id === ids[0]);
+        if (target && isButton(target)) {
+          remoteFocusId = target.id;
+          remoteStatus = "";
+          updateRemoteFocusVisuals();
+        }
+      }
+      return;
+    }
     if (ev.shiftKey) selIds = ids.every(isSel) ? selIds.filter((id) => !ids.includes(id)) : [...new Set([...selIds, ...ids])];
     else selIds = ids;
     refreshSelection();
@@ -2726,6 +3113,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     L = draftLayout(titles, tv, opts.heading);
     menuIdx = 0;
     selIds = [];
+    if (remoteMode) resetRemoteSession();
     renderAll();
   }
   /** Rebuilds the draft in a zero-asset preset style; one undo step restores the previous layout. */
@@ -2746,6 +3134,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     L = draftLayout(titles, tv, opts.heading, preset);
     menuIdx = 0;
     selIds = [];
+    if (remoteMode) resetRemoteSession();
     renderAll();
   }
   /** Replaces the layout with a converted ConvertX template (undoable like loading a file). */
@@ -2766,6 +3155,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       menuIdx = 0;
       selIds = [];
       selKey = null;
+      if (remoteMode) resetRemoteSession();
       renderAll();
       flash(warnings.length ? tr("menuEditor.vorlageImportiertHinweise", { n: warnings.length, first: warnings[0] }) : tr("menuEditor.vorlageImportiert"), "ok");
     } catch (e) {
@@ -2781,6 +3171,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       L = loaded;
       menuIdx = 0;
       selIds = [];
+      if (remoteMode) resetRemoteSession();
       renderAll();
       flash(tr("menuEditor.geladen", { p }), "ok");
     } catch (e) {
@@ -2839,6 +3230,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     window.removeEventListener("keydown", onKey, true);
     window.clearTimeout(checkTimer);
     window.clearTimeout(noticeTimer);
+    window.clearTimeout(remoteActivateTimer);
     editor.remove();
     opts.onClose();
     return true;
@@ -2847,6 +3239,10 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   function onKey(ev: KeyboardEvent) {
     if ((ev.target as HTMLElement).matches("input, textarea, select")) return;
+    if (remoteMode) {
+      handleRemoteKey(ev);
+      return;
+    }
     const ctrl = ev.ctrlKey || ev.metaKey;
     const key = ev.key.toLowerCase();
     if (ctrl && key === "z") {

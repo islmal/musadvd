@@ -74,6 +74,11 @@ interface Title {
   bdVideo: "encode" | "copy" | null;
   /** Share of the disc bitrate (null = normal). */
   bdQuality: "low" | "high" | null;
+  /** Picture filters: denoise (hqdn3d luma, null = off) and eq adjustments (null = neutral). */
+  denoise: number | null;
+  brightness: number | null;
+  contrast: number | null;
+  saturation: number | null;
 }
 
 type BdRes = "1080" | "720";
@@ -408,6 +413,10 @@ async function addFiles(paths: string[]) {
         bdRate: null,
         bdVideo: null,
         bdQuality: null,
+        denoise: null,
+        brightness: null,
+        contrast: null,
+        saturation: null,
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
@@ -564,6 +573,10 @@ async function splitByChapters(t: Title) {
     bdRate: t.bdRate,
     bdVideo: t.bdVideo,
     bdQuality: t.bdQuality,
+    denoise: t.denoise,
+    brightness: t.brightness,
+    contrast: t.contrast,
+    saturation: t.saturation,
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   state.titles.splice(i, 1, ...news);
@@ -758,9 +771,15 @@ function audioBadge(t: Title, a: AudioTrack) {
 
 const projectBdRes =(): BdRes => (state.settings?.bd_resolution === "720p" ? "720" : "1080");
 
+const hasPictureFilters = (t: Title) =>
+  (t.denoise ?? 0) > 0 ||
+  Math.abs(t.brightness ?? 0) > 1e-4 ||
+  Math.abs((t.contrast ?? 1) - 1) > 1e-4 ||
+  Math.abs((t.saturation ?? 1) - 1) > 1e-4;
+
 /** Blu-ray/AVCHD video copy verdict of a title (null = the video is encoded anyway). Mirrors
- * the build: the title must keep the source's own format, trim and crop always force a
- * re-encode; the disc's bitrate limit is checked there. `strict`: a failed copy stops the build. */
+ * the build: the title must keep the source's own format; trim, crop and picture filters always
+ * force a re-encode; the disc's bitrate limit is checked there. `strict`: a failed copy stops the build. */
 function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: boolean } | null {
   const v = t.meta.video;
   const mode = t.bdVideo ?? state.bdVideo;
@@ -773,7 +792,15 @@ function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: 
   const changed = !!f && (res !== f.resolution || rate !== f.rate);
   const issue =
     copyIssue ??
-    (changed ? tr("main.bdFormatChanged") : isTrimmed(t) ? tr("main.trimActive") : t.crop ? tr("main.cropActive") : null);
+    (changed
+      ? tr("main.bdFormatChanged")
+      : isTrimmed(t)
+        ? tr("main.trimActive")
+        : t.crop
+          ? tr("main.cropActive")
+          : hasPictureFilters(t)
+            ? tr("main.pictureFiltersActive")
+            : null);
   const strict = mode !== "auto";
   return issue ? { kbps: null, issue, strict } : { kbps: copyKbps, issue: null, strict };
 }
@@ -1105,6 +1132,17 @@ const editHooks = {
   split: () => {
     const t = selectedTitle();
     if (t) void splitByChapters(t);
+  },
+  qualityContext: () => {
+    const t = selectedTitle();
+    const idx = t ? state.titles.indexOf(t) : -1;
+    return {
+      disc: currentDisc(),
+      videoKbps: idx >= 0 ? (state.calc?.titles[idx]?.videoKbps ?? null) : null,
+      audioKbps: t ? audioKbps(t) : 0,
+      bdResolution: t && isBluray() ? t.bdResolution : null,
+      bdRate: t && isBluray() ? t.bdRate : null,
+    };
   },
 };
 
@@ -1778,7 +1816,7 @@ function onEvent(e: BuildEvent) {
   }
 }
 
-/** "Geschätzte Restzeit: ~14 min 20 s (Phase 2/5: Videos encodieren – Video 2 von 4)". */
+/** "Estimated time remaining: ~14 min 20 s (Phase 2/5: Encoding videos - Video 2 of 4)". */
 function showEta(eta: Eta) {
   const phase = tr("main.phase", { phaseNumber: eta.phaseNumber, phaseCount: eta.phaseCount, phaseLabel: eta.phaseLabel, eta: eta.detail ? ` – ${eta.detail}` : "" });
   const remaining =
@@ -1884,6 +1922,10 @@ async function convert() {
         bdRate: isBluray() ? t.bdRate : null,
         bdVideo: isBluray() ? t.bdVideo : null,
         bdQuality: isBluray() ? t.bdQuality : null,
+        denoise: t.denoise,
+        brightness: t.brightness,
+        contrast: t.contrast,
+        saturation: t.saturation,
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
