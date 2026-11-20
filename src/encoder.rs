@@ -1726,8 +1726,21 @@ pub fn trim_pictures(pics: Vec<subpic::Picture>, start: f64, end: f64) -> Vec<su
         .collect()
 }
 
+async fn ffmpeg_subtitle_to_srt(tools: &Toolchain, ext_path: &Path, temp_srt: &Path) -> Result<String, ToolError> {
+    let args = convert_subtitle_to_srt_args(ext_path, temp_srt);
+    if tools.ffmpeg(&args, 0.0, |_| {}).await.is_err() {
+        let mut cp1252: Vec<OsString> = vec!["-y".into(), "-sub_charenc".into(), "CP1252".into()];
+        cp1252.extend(args.into_iter().skip(1));
+        tools.ffmpeg(&cp1252, 0.0, |_| {}).await?;
+    }
+    let normalized = std::fs::read(temp_srt).map_err(|error| ToolError::Io { tool: temp_srt.display().to_string(), error })?;
+    let _ = std::fs::remove_file(temp_srt);
+    Ok(String::from_utf8_lossy(&normalized).trim_start_matches('\u{FEFF}').to_string())
+}
+
 /// Loads cues from a standalone external text subtitle file: UTF-8 `.srt` is parsed directly,
-/// while `.ass`/`.ssa`/`.vtt`/`.sub` (or non-UTF-8 `.srt`) are normalized via ffmpeg first.
+/// while `.ass`/`.ssa`/`.vtt`/`.sub` (or non-UTF-8 `.srt`) are normalized via ffmpeg first (with
+/// automatic `CP1252` fallback for legacy Windows-1252 / Latin-1 subtitle files).
 pub async fn load_external_text_cues(
     tools: &Toolchain,
     ext_path: &Path,
@@ -1740,21 +1753,10 @@ pub async fn load_external_text_cues(
         if let Ok(utf8) = std::str::from_utf8(&bytes) {
             utf8.trim_start_matches('\u{FEFF}').to_string()
         } else {
-            let args = convert_subtitle_to_srt_args(ext_path, temp_srt);
-            if tools.ffmpeg(&args, 0.0, |_| {}).await.is_err() {
-                let mut cp1252: Vec<OsString> = vec!["-y".into(), "-sub_charenc".into(), "CP1252".into()];
-                cp1252.extend(args.into_iter().skip(1));
-                tools.ffmpeg(&cp1252, 0.0, |_| {}).await?;
-            }
-            let normalized = std::fs::read(temp_srt).map_err(|error| ToolError::Io { tool: temp_srt.display().to_string(), error })?;
-            let _ = std::fs::remove_file(temp_srt);
-            String::from_utf8_lossy(&normalized).trim_start_matches('\u{FEFF}').to_string()
+            ffmpeg_subtitle_to_srt(tools, ext_path, temp_srt).await?
         }
     } else {
-        tools.ffmpeg(&convert_subtitle_to_srt_args(ext_path, temp_srt), 0.0, |_| {}).await?;
-        let normalized = std::fs::read(temp_srt).map_err(|error| ToolError::Io { tool: temp_srt.display().to_string(), error })?;
-        let _ = std::fs::remove_file(temp_srt);
-        String::from_utf8_lossy(&normalized).trim_start_matches('\u{FEFF}').to_string()
+        ffmpeg_subtitle_to_srt(tools, ext_path, temp_srt).await?
     };
     let (cues, _skipped) = textsub::parse_srt(&text);
     Ok(match trim {

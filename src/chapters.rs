@@ -28,17 +28,7 @@ pub struct ImportedChapter {
 
 /// Reads and parses a chapter file on disk with path safety checks, BOM handling, and a 4 MB guard.
 pub fn read_chapters_file(path: &Path, fps: Option<f64>) -> Result<Vec<ImportedChapter>, String> {
-    let raw = path.to_string_lossy();
-    if raw.trim().is_empty() {
-        return Err("Chapter file path is empty".to_string());
-    }
-    if crate::menu::is_unc_or_device_path(&raw) {
-        return Err("UNC and device paths are not allowed for chapter files".to_string());
-    }
-    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{}: not a regular file", path.display()));
-    }
+    let meta = crate::probe::validate_input_file_path(path, "chapter file")?;
     if meta.len() > MAX_CHAPTER_FILE_BYTES {
         return Err(format!(
             "{}: chapter file exceeds 4 MB limit ({} bytes)",
@@ -576,7 +566,8 @@ fn parse_plain_line(line: &str) -> Option<ImportedChapter> {
     let first_tok_end = s
         .find(|c: char| c.is_whitespace() || matches!(c, '-' | '–' | '—' | '|'))
         .unwrap_or(s.len());
-    if let Some(secs) = parse_timestamp(&s[..first_tok_end], true) {
+    let first_tok = s[..first_tok_end].trim_end_matches(':');
+    if let Some(secs) = parse_timestamp(first_tok, true) {
         return Some(ImportedChapter {
             start_secs: secs,
             title: clean_title_side(&s[first_tok_end..], true),
@@ -598,7 +589,7 @@ fn parse_plain_line(line: &str) -> Option<ImportedChapter> {
         (&s[..split_at], &s[split_at..])
     };
 
-    let secs = parse_timestamp(ts_raw, true)?;
+    let secs = parse_timestamp(ts_raw.trim_end_matches(':'), true)?;
     Some(ImportedChapter {
         start_secs: secs,
         title: clean_title_side(body, false),
@@ -736,7 +727,23 @@ mod tests {
 
         assert!(read_chapters_file(Path::new(r"\\server\share\ch.txt"), None).is_err());
         assert!(read_chapters_file(Path::new(r"\\?\C:\ch.txt"), None).is_err());
+        assert!(read_chapters_file(Path::new("../chapters.txt"), None).is_err());
+        assert!(read_chapters_file(Path::new(r"a\..\chapters.txt"), None).is_err());
         assert!(read_chapters_file(Path::new("nonexistent_chapters_12345.txt"), None).is_err());
+    }
+
+    #[test]
+    fn parses_youtube_timestamps_with_trailing_colon() {
+        let txt = "0:00:00: Intro\n05:12: Scene 2\n00:10:00: Finale\n";
+        let ch = parse_chapters(txt, None).unwrap();
+        assert_eq!(
+            ch,
+            vec![
+                ImportedChapter { start_secs: 0.0, title: Some("Intro".into()) },
+                ImportedChapter { start_secs: 312.0, title: Some("Scene 2".into()) },
+                ImportedChapter { start_secs: 600.0, title: Some("Finale".into()) },
+            ]
+        );
     }
 
     #[test]

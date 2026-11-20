@@ -822,19 +822,29 @@ pub fn probe_external_subtitle(path: &Path) -> Result<ExternalSubtitleInfo, Stri
     probe_external_subtitle_with_ui(path, TrackLabelMode::SmartMetadata, UiLang::EN)
 }
 
-/// Like [`probe_external_subtitle`], formatted for the caller's label mode and UI language.
-pub fn probe_external_subtitle_with_ui(path: &Path, mode: TrackLabelMode, ui: UiLang) -> Result<ExternalSubtitleInfo, String> {
+pub(crate) fn validate_input_file_path(path: &Path, label: &str) -> Result<std::fs::Metadata, String> {
     let raw = path.to_string_lossy();
     if raw.trim().is_empty() {
-        return Err("Subtitle path is empty".to_string());
+        return Err(format!("{label} path is empty"));
     }
     if crate::menu::is_unc_or_device_path(&raw) {
-        return Err("UNC and device paths are not allowed for subtitle files".to_string());
+        return Err(format!("UNC and device paths are not allowed for {label}s"));
+    }
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        || raw.split(['/', '\\']).any(|seg| seg == "..")
+    {
+        return Err(format!("Parent directory traversal ('..') is not allowed for {label}s"));
     }
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("{}: not a regular file", path.display()));
     }
+    Ok(meta)
+}
+
+/// Like [`probe_external_subtitle`], formatted for the caller's label mode and UI language.
+pub fn probe_external_subtitle_with_ui(path: &Path, mode: TrackLabelMode, ui: UiLang) -> Result<ExternalSubtitleInfo, String> {
+    validate_input_file_path(path, "subtitle file")?;
 
     let ext = path
         .extension()
@@ -1315,6 +1325,8 @@ Input #0, matroska,webm, from 'movie.mkv':
         assert!(probe_external_subtitle(&dir.join("missing.srt")).is_err());
         assert!(probe_external_subtitle(Path::new(r"\\server\share\sub.srt")).is_err());
         assert!(probe_external_subtitle(Path::new(r"\\?\C:\sub.srt")).is_err());
+        assert!(probe_external_subtitle(Path::new("../sub.srt")).is_err());
+        assert!(probe_external_subtitle(&dir.join("..").join("sub.srt")).is_err());
 
         let vobsub = dir.join("binary.sub");
         std::fs::write(&vobsub, b"\x00\x00\x01\xba\x44\x00\x04").unwrap();
