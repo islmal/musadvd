@@ -351,4 +351,30 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn rotated_text_buttons_pass_check_and_compute_navigation() {
+        let pal_layout = CustomLayout::from_json(
+            r##"{"canvas": {"width": 720, "height": 576}, "menus": [{"id": "main", "name": "Main", "role": "title", "elements": [
+                {"id": "play", "type": "text", "text": "Play", "x": 160, "y": 120, "w": 200, "h": 50, "rotation": 45, "action": {"type": "playTitle", "title": 1}},
+                {"id": "next", "type": "rect", "color": "#336699", "x": 160, "y": 320, "w": 200, "h": 50, "rotation": 30, "action": {"type": "playTitle", "title": 1}}
+            ]}]}"##,
+        )
+        .unwrap();
+        let t = vec![EditorTitle {
+            label: "A".into(),
+            path: "a.mkv".into(),
+            chapters: 3,
+            duration_secs: 60.0,
+            chapter_starts: vec![],
+            clip_start_secs: None,
+            audio_tracks: vec![],
+            subtitle_tracks: vec![],
+        }];
+        assert!(check_layout(pal_layout.clone(), t, "PAL".into()).is_empty());
+        let navs = menu_navigation(pal_layout.menus[0].clone(), pal_layout.canvas, "PAL".into());
+        assert_eq!(navs.len(), 2);
+        assert_eq!(navs[0].down.as_deref(), Some("next"));
+        assert_eq!(navs[1].up.as_deref(), Some("play"));
+    }
 }

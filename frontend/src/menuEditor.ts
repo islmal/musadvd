@@ -215,11 +215,49 @@ export function mountMenuEditor(opts: EditorOptions) {
   const H = () => L.canvas.height;
   const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? tr("menuEditor.missing")}`;
   const snap = (v: number) => Math.round(v / SNAP) * SNAP;
-  const clampBox = (e: { x: number; y: number; w: number; h: number }) => {
+  const normalizeAngle = (deg: number) => {
+    if (!Number.isFinite(deg)) return 0;
+    const r = ((deg % 360) + 360) % 360;
+    return r >= 360 || r === 0 ? 0 : r;
+  };
+  const isUnrotated = (deg: number) => {
+    const r = normalizeAngle(deg);
+    return r < 1e-6 || 360 - r < 1e-6;
+  };
+  const rotatedAabbOf = (e: { x: number; y: number; w: number; h: number; rotation?: number; type?: string }) => {
+    const rot = e.rotation ?? 0;
+    if (e.type === "video" || isUnrotated(rot)) {
+      return { x: e.x, y: e.y, w: e.w, h: e.h };
+    }
+    const pa = pixelAspect();
+    const rad = (normalizeAngle(rot) * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const hw = e.w / 2;
+    const hh = e.h / 2;
+    const newHw = Math.abs(hw * cos) + Math.abs((hh / pa) * sin);
+    const newHh = Math.abs(hw * pa * sin) + Math.abs(hh * cos);
+    const cx = e.x + hw;
+    const cy = e.y + hh;
+    return { x: cx - newHw, y: cy - newHh, w: 2 * newHw, h: 2 * newHh };
+  };
+  const clampBox = (e: { x: number; y: number; w: number; h: number; rotation?: number; type?: string }) => {
     e.w = Math.max(8, Math.min(Math.round(e.w), W()));
     e.h = Math.max(8, Math.min(Math.round(e.h), H()));
-    e.x = Math.max(0, Math.min(Math.round(e.x), W() - e.w));
-    e.y = Math.max(0, Math.min(Math.round(e.y), H() - e.h));
+    if (e.type === "video" || isUnrotated(e.rotation ?? 0)) {
+      e.x = Math.max(0, Math.min(Math.round(e.x), W() - e.w));
+      e.y = Math.max(0, Math.min(Math.round(e.y), H() - e.h));
+      return;
+    }
+    const aabb = rotatedAabbOf(e);
+    const minCx = Math.min(aabb.w / 2, W() / 2);
+    const maxCx = Math.max(W() - aabb.w / 2, W() / 2);
+    const minCy = Math.min(aabb.h / 2, H() / 2);
+    const maxCy = Math.max(H() - aabb.h / 2, H() / 2);
+    const cx = Math.max(minCx, Math.min(e.x + e.w / 2, maxCx));
+    const cy = Math.max(minCy, Math.min(e.y + e.h / 2, maxCy));
+    e.x = Math.round(cx - e.w / 2);
+    e.y = Math.round(cy - e.h / 2);
   };
 
   function pushHistory(entry: string | Command) {
@@ -669,15 +707,33 @@ export function mountMenuEditor(opts: EditorOptions) {
     node.style.width = `${e.w}px`;
     node.style.height = `${e.h}px`;
     const inner = node.firstElementChild as HTMLElement | null;
+    if (e.type === "video") {
+      node.style.transform = "";
+      if (inner) {
+        const sideways = e.rotation % 180 === 90;
+        const iw = sideways ? e.h : e.w;
+        const ih = sideways ? e.w : e.h;
+        inner.style.width = `${iw}px`;
+        inner.style.height = `${ih}px`;
+        inner.style.left = `${(e.w - iw) / 2}px`;
+        inner.style.top = `${(e.h - ih) / 2}px`;
+        inner.style.transform = e.rotation ? `rotate(${e.rotation}deg)` : "";
+      }
+      return;
+    }
     if (inner) {
-      const sideways = e.rotation % 180 === 90;
-      const iw = sideways ? e.h : e.w;
-      const ih = sideways ? e.w : e.h;
-      inner.style.width = `${iw}px`;
-      inner.style.height = `${ih}px`;
-      inner.style.left = `${(e.w - iw) / 2}px`;
-      inner.style.top = `${(e.h - ih) / 2}px`;
-      inner.style.transform = e.rotation ? `rotate(${e.rotation}deg)` : "";
+      inner.style.width = `${e.w}px`;
+      inner.style.height = `${e.h}px`;
+      inner.style.left = "0px";
+      inner.style.top = "0px";
+      inner.style.transform = "";
+    }
+    const angle = normalizeAngle(e.rotation);
+    if (isUnrotated(angle)) {
+      node.style.transform = "";
+    } else {
+      const pa = pixelAspect();
+      node.style.transform = Math.abs(pa - 1) < 1e-6 ? `rotate(${angle}deg)` : `scaleX(${1 / pa}) rotate(${angle}deg) scaleX(${pa})`;
     }
   }
 
@@ -976,7 +1032,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       inner.append(img);
       // Fitted with the TV's pixel shape (square-pixel preview), like the build.
       img.addEventListener("load", () => {
-        const sideways = e.rotation % 180 === 90;
+        const sideways = e.type === "video" && e.rotation % 180 === 90;
         const r = fitOnScreen(img.naturalWidth, img.naturalHeight, sideways ? e.h : e.w, sideways ? e.w : e.h, e.fit, sideways);
         Object.assign(img.style, { position: "absolute", objectFit: "fill", width: `${r.w}px`, height: `${r.h}px`, left: `${r.x}px`, top: `${r.y}px` });
       });
@@ -1021,6 +1077,12 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (!remoteMode && isSel(e.id)) {
       for (const corner of ["nw", "ne", "sw", "se"]) {
         node.append(el("span", { class: `ed-handle ${corner}`, "data-handle": corner }));
+      }
+      if (e.type !== "video" && selIds.length === 1) {
+        node.append(
+          el("span", { class: "ed-rotate-stem", "aria-hidden": "true" }),
+          el("span", { class: "ed-rotate-handle", "data-handle": "rotate", title: tr("menuEditor.rotateHandleTip") }),
+        );
       }
     }
     node.addEventListener("pointerdown", (ev) => {
@@ -1781,7 +1843,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   /** Moves `list` by (dx, dy), clamped on the selection's bounding box so relative spacing is kept. */
   function shiftBy(list: LayoutElement[], dx: number, dy: number) {
-    const u = unionBox(list);
+    const u = unionBox(list.map(rotatedAabbOf));
     const ddx = Math.round(Math.max(-u.x, Math.min(dx, W() - u.w - u.x)));
     const ddy = Math.round(Math.max(-u.y, Math.min(dy, H() - u.h - u.y)));
     for (const e of list) {
@@ -1820,6 +1882,42 @@ export function mountMenuEditor(opts: EditorOptions) {
     ev.stopPropagation();
     ev.preventDefault();
     const handle = (ev.target as HTMLElement).dataset.handle;
+    if (handle === "rotate" && !key && e.type !== "video") {
+      const origin = stage.getBoundingClientRect();
+      const cxScreen = origin.left + (e.x + e.w / 2) * scaleX;
+      const cyScreen = origin.top + (e.y + e.h / 2) * scaleY;
+      const pointerAngle = (p: PointerEvent) => (Math.atan2(p.clientX - cxScreen, -(p.clientY - cyScreen)) * 180) / Math.PI;
+      const startPointer = pointerAngle(ev);
+      const startRot = e.rotation;
+      const node = stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(e.id)}"]`);
+      const before = JSON.stringify(L);
+      let moved = false;
+      const onMove = (mv: PointerEvent) => {
+        const delta = ((pointerAngle(mv) - startPointer + 540) % 360) - 180;
+        if (!moved && Math.abs(delta) < 0.5) return;
+        moved = true;
+        let next = startRot + delta;
+        if (mv.shiftKey) next = Math.round(next / 15) * 15;
+        else next = Math.round(next);
+        e.rotation = ((Math.round(next) % 360) + 360) % 360;
+        if (node) applyBox(node, e);
+        const rotInput = props.querySelector<HTMLInputElement>(".ed-rot-input");
+        if (rotInput) rotInput.value = String(e.rotation);
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        if (moved) {
+          pushHistory(before);
+          renderProps();
+          renderHeader();
+          scheduleCheck();
+        }
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      return;
+    }
     // Plain click on an already-selected element: collapse the selection if it was not a drag.
     let collapseTo: string[] | null = null;
     if (key) {
@@ -1846,16 +1944,27 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
     }
     // The stage may have been re-rendered: continue on the fresh nodes.
-    const boxes: { id: string; box: { x: number; y: number; w: number; h: number } }[] = key ? [{ id: e.id, box: key }] : selection().map((t) => ({ id: t.id, box: t }));
-    const targets = boxes.map(({ id, box: t }) => ({ t, node: stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`), x: t.x, y: t.y, w: t.w, h: t.h }));
+    const boxes: { id: string; box: { x: number; y: number; w: number; h: number; rotation?: number; type?: string } }[] = key
+      ? [{ id: e.id, box: key }]
+      : selection().map((t) => ({ id: t.id, box: t }));
+    const targets = boxes.map(({ id, box: t }) => ({
+      t,
+      node: stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`),
+      x: t.x,
+      y: t.y,
+      w: t.w,
+      h: t.h,
+      rot: t.rotation ?? 0,
+      isVideo: t.type === "video",
+    }));
     // Keys may start off-canvas (slide-ins), so only base boxes are clamped to the frame.
-    const clamp = (b: { x: number; y: number; w: number; h: number }) => (key ? undefined : clampBox(b));
+    const clamp = (b: { x: number; y: number; w: number; h: number; rotation?: number; type?: string }) => (key ? undefined : clampBox(b));
     const show = (node: HTMLElement | null, b: { x: number; y: number; w: number; h: number }) => {
       if (!node) return;
       applyBox(node, key ? { ...e, x: b.x, y: b.y, w: b.w, h: b.h } : (b as LayoutElement));
       if (key) renderProps();
     };
-    const union = unionBox(targets.map((s0) => ({ x: s0.x, y: s0.y, w: s0.w, h: s0.h })));
+    const union = unionBox(targets.map((s0) => rotatedAabbOf({ x: s0.x, y: s0.y, w: s0.w, h: s0.h, rotation: s0.rot, type: s0.isVideo ? "video" : "text" })));
     const startX = ev.clientX;
     const startY = ev.clientY;
     const before = JSON.stringify(L);
@@ -1878,6 +1987,41 @@ export function mountMenuEditor(opts: EditorOptions) {
         return;
       }
       for (const s0 of targets) {
+        if (!key && !s0.isVideo && !isUnrotated(s0.rot)) {
+          const pa = pixelAspect();
+          const rad = (normalizeAngle(s0.rot) * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          const dxDisp = dx * pa;
+          const dyDisp = dy;
+          const localDx = (dxDisp * cos + dyDisp * sin) / pa;
+          const localDy = -dxDisp * sin + dyDisp * cos;
+          let w = s0.w;
+          let h = s0.h;
+          if (handle.includes("e")) w += localDx;
+          if (handle.includes("s")) h += localDy;
+          if (handle.includes("w")) w -= localDx;
+          if (handle.includes("n")) h -= localDy;
+          if (mv.shiftKey) {
+            const r = s0.w / s0.h;
+            if (Math.abs(w - s0.w) > Math.abs(h - s0.h)) h = w / r;
+            else w = h * r;
+          }
+          w = snap(Math.max(8, Math.min(w, W())));
+          h = snap(Math.max(8, Math.min(h, H())));
+          const dcLocalX = (handle.includes("e") ? 0.5 : handle.includes("w") ? -0.5 : 0) * (w - s0.w);
+          const dcLocalY = (handle.includes("s") ? 0.5 : handle.includes("n") ? -0.5 : 0) * (h - s0.h);
+          const dcx = (dcLocalX * pa * cos - dcLocalY * sin) / pa;
+          const dcy = dcLocalX * pa * sin + dcLocalY * cos;
+          const cx0 = s0.x + s0.w / 2;
+          const cy0 = s0.y + s0.h / 2;
+          s0.t.w = w;
+          s0.t.h = h;
+          s0.t.x = Math.round(cx0 + dcx - w / 2);
+          s0.t.y = Math.round(cy0 + dcy - h / 2);
+          show(s0.node, s0.t);
+          continue;
+        }
         let { x, y, w, h } = s0;
         if (handle.includes("e")) w = s0.w + dx;
         if (handle.includes("s")) h = s0.h + dy;
@@ -2049,7 +2193,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       const r = rectOf(up);
       const hit = new Set<string>();
       for (const e of menu().elements) {
-        if (e.x < r.x + r.w && e.x + e.w > r.x && e.y < r.y + r.h && e.y + e.h > r.y) for (const g of groupMembers(e)) hit.add(g.id);
+        const b = rotatedAabbOf(e);
+        if (b.x < r.x + r.w && b.x + b.w > r.x && b.y < r.y + r.h && b.y + b.h > r.y) for (const g of groupMembers(e)) hit.add(g.id);
       }
       selIds = up.shiftKey ? [...new Set([...selIds, ...hit])] : [...hit];
       refreshSelection();
@@ -2488,7 +2633,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     const streamTitle = m0.role !== "title" && m0.title ? titles[m0.title - 1] : undefined;
     const setAction = (next: Action | null) => {
       e.action = next;
-      if (next && e.rotation !== 0) e.rotation = 0; // DVD hitboxes cannot rotate
+      if (next && e.type === "video" && e.rotation !== 0) e.rotation = 0; // Video buttons cannot rotate
       followAction(e);
     };
     const out: HTMLElement[] = [
@@ -2869,20 +3014,55 @@ export function mountMenuEditor(opts: EditorOptions) {
           row(tr("menuEditor.breite"), num(e.w, (v) => ((e.w = v), clampBox(e)), { step: "1", min: "8" })),
           row(tr("menuEditor.hoehe"), num(e.h, (v) => ((e.h = v), clampBox(e)), { step: "1", min: "8" })),
         ),
-        row(
-          tr("menuEditor.drehung"),
-          select(
-            [
-              ["0", "0°"],
-              ["90", "90°"],
-              ["180", "180°"],
-              ["270", "270°"],
-            ],
-            String(e.rotation),
-            (v) => (e.rotation = Number(v)),
-            { disabled: isButton(e), title: isButton(e) ? tr("menuEditor.buttonsKoennenNichtGedreht") : undefined },
-          ),
-        ),
+        e.type === "video"
+          ? row(
+              tr("menuEditor.drehung"),
+              select(
+                [
+                  ["0", "0°"],
+                  ["90", "90°"],
+                  ["180", "180°"],
+                  ["270", "270°"],
+                ],
+                String(e.rotation),
+                (v) => (e.rotation = Number(v)),
+                { disabled: isButton(e), title: isButton(e) ? tr("menuEditor.buttonsKoennenNichtGedreht") : undefined },
+              ),
+            )
+          : (() => {
+              const rotVal = Math.round(normalizeAngle(e.rotation) * 10) / 10;
+              const rotInput = num(rotVal, (v) => (e.rotation = normalizeAngle(v)), {
+                min: "-360",
+                max: "360",
+                step: "1",
+                class: "ed-rot-input",
+              });
+              rotInput.addEventListener("change", () => {
+                rotInput.value = String(Math.round(normalizeAngle(e.rotation) * 10) / 10);
+              });
+              const stepRot = (delta: number | null) => {
+                remember();
+                e.rotation = delta === null ? 0 : normalizeAngle(Math.round((e.rotation + delta) * 10) / 10);
+                renderStage();
+                renderProps();
+                renderHeader();
+                scheduleCheck();
+              };
+              return el(
+                "div",
+                { class: "ed-row" },
+                el("span", {}, tr("menuEditor.drehung")),
+                el(
+                  "div",
+                  { class: "ed-rot-controls" },
+                  rotInput,
+                  el("span", { class: "ed-rot-unit" }, "°"),
+                  el("button", { class: "btn ed-rot-btn", type: "button", title: tr("menuEditor.rotateLeft90"), onclick: () => stepRot(-90) }, "−90°"),
+                  el("button", { class: "btn ed-rot-btn", type: "button", title: tr("menuEditor.rotateRight90"), onclick: () => stepRot(90) }, "+90°"),
+                  el("button", { class: "btn ed-rot-btn", type: "button", title: tr("menuEditor.rotateReset"), disabled: isUnrotated(e.rotation), onclick: () => stepRot(null) }, "0°"),
+                ),
+              );
+            })(),
         row(
           tr("menuEditor.deckkraft"),
           bind(el("input", { type: "range", min: "0.1", max: "1", step: "0.05", value: String(e.opacity) }) as HTMLInputElement, (v) => (e.opacity = Number(v)), { live: true }),

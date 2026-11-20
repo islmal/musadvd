@@ -50,7 +50,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         y: 100.0,
         w: 250.0,
         h: 50.0,
-        rotation: 0,
+        rotation: 0.0,
         opacity: 1.0,
         action: Some(Action::Menu {
             menu: "menu2".into(),
@@ -191,7 +191,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         y: 50.0,
         w: 200.0,
         h: 40.0,
-        rotation: 0,
+        rotation: 0.0,
         opacity: 1.0,
         action: Some(Action::Menu {
             menu: "root2".into(),
@@ -220,7 +220,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         y: 120.0,
         w: 200.0,
         h: 40.0,
-        rotation: 0,
+        rotation: 0.0,
         opacity: 1.0,
         action: Some(Action::Menu {
             menu: "main".into(),

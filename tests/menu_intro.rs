@@ -353,7 +353,7 @@ mod build {
     const SLOT: (f64, f64, f64, f64) = (960.0, 300.0, 800.0, 450.0);
 
     fn element(content: Content, (x, y, w, h): (f64, f64, f64, f64), action: Option<Action>, intro: Vec<ElementKey>) -> Element {
-        Element { id: String::new(), content, x, y, w, h, rotation: 0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false }
+        Element { id: String::new(), content, x, y, w, h, rotation: 0.0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false }
     }
 
     fn text(s: &str) -> Content {

@@ -234,7 +234,7 @@ fn custom_layout_fastplay_page_rendering() {
         y: 100.0,
         w: 300.0,
         h: 50.0,
-        rotation: 0,
+        rotation: 0.0,
         opacity: 1.0,
         action: Some(Action::PlayTitle { title: 1 }),
         highlight: None,
