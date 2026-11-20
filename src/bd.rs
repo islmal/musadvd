@@ -32,7 +32,7 @@ use crate::encoder::{self, bd_audio_copy, plan_audio_bd, Aspect, AudioMode, Audi
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
 use crate::i18n::{tr, UiLang};
 use crate::tf;
-use crate::probe::{self, MediaInfo, SubtitleKind, SubtitleStream};
+use crate::probe::{self, ExternalSubtitle, MediaInfo, SubtitleKind, SubtitleStream, EXTERNAL_SUB_SOURCE_BASE};
 use crate::subpic;
 use crate::tools::{ToolError, Toolchain};
 
@@ -176,6 +176,11 @@ fn sub_track(s: &SubtitleStream) -> BdSubTrack {
 /// Both subtitle kinds end up as PGS `.sup` files (text cues are rendered natively).
 const SUB_EXT: &str = "sup";
 
+enum TitleSub<'a> {
+    Embedded(&'a SubtitleStream),
+    External(&'a ExternalSubtitle, SubKind),
+}
+
 /// One input after stream selection.
 struct BdTitle {
     info: MediaInfo,
@@ -184,6 +189,8 @@ struct BdTitle {
     audio: Vec<usize>,
     /// Indices into `info.subtitles` (text and PGS only).
     subs: Vec<usize>,
+    /// Standalone external subtitle files attached after `subs`.
+    external_subtitles: Vec<(ExternalSubtitle, SubKind)>,
     chapters: Vec<f64>,
     stem: String,
     rate: BdRate,
@@ -211,8 +218,32 @@ impl BdTitle {
     }
 
     /// The stream playing the role of disc subtitle track `k` (same kind as the track).
-    fn sub_for(&self, layout: &Layout, k: usize) -> Option<&SubtitleStream> {
-        self.subs.get(k).map(|&i| &self.info.subtitles[i]).filter(|s| sub_track(s).kind == layout.subs[k].kind)
+    fn sub_for(&self, layout: &Layout, k: usize) -> Option<TitleSub<'_>> {
+        if k < self.subs.len() {
+            let s = &self.info.subtitles[self.subs[k]];
+            (sub_track(s).kind == layout.subs[k].kind).then_some(TitleSub::Embedded(s))
+        } else {
+            self.external_subtitles
+                .get(k - self.subs.len())
+                .filter(|(_, kind)| *kind == layout.subs[k].kind)
+                .map(|(ext, kind)| TitleSub::External(ext, *kind))
+        }
+    }
+
+    fn sub_tracks(&self) -> Vec<BdSubTrack> {
+        self.subs
+            .iter()
+            .map(|&s| sub_track(&self.info.subtitles[s]))
+            .chain(self.external_subtitles.iter().map(|(ext, kind)| BdSubTrack { kind: *kind, lang: ext.language.clone() }))
+            .collect()
+    }
+
+    fn subtitle_sources(&self) -> Vec<u32> {
+        self.subs
+            .iter()
+            .map(|&s| self.info.subtitles[s].index as u32)
+            .chain((0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32))
+            .collect()
     }
 
     /// Output plan of every disc audio track (silent filler where this title has none).
@@ -239,8 +270,12 @@ impl BdTitle {
     }
 
     fn subtitle_labels(&self) -> Vec<String> {
-        let all = probe::subtitle_labels(&self.info, self.track_label_mode, self.ui_lang);
-        self.subs.iter().map(|&i| all[i].clone()).collect()
+        let exts: Vec<ExternalSubtitle> = self.external_subtitles.iter().map(|(e, _)| e.clone()).collect();
+        let all = probe::all_subtitle_labels(&self.info, &exts, self.track_label_mode, self.ui_lang);
+        let emb = self.subs.iter().map(|&i| all[i].clone());
+        let ext_start = self.info.subtitles.len();
+        let ext = (0..exts.len()).map(|i| all[ext_start + i].clone());
+        emb.chain(ext).collect()
     }
 }
 
@@ -262,34 +297,39 @@ fn tree_mb(dir: &Path) -> f64 {
     bytes(dir) as f64 / 1024.0 / 1024.0
 }
 
-/// Encodes one title: subtitle files (extracted or placeholders), then H.264 + AC-3 into
-/// `<stem>.mkv`. Returns the report, the hardware decoder used and the real duration.
-#[allow(clippy::too_many_arguments)]
-async fn encode_bd_title(
-    tools: &Toolchain,
-    t: &BdTitle,
-    layout: &Layout,
-    work: &Path,
-    video_kbps: u32,
-    (two_pass, fast, hw_decode): (bool, bool, Option<HwAccelMode>),
-    encoder: BdEncoder,
-    (maxrate_kbps, bufsize_kbit): (u32, u32),
-    progress: JobProgress,
-) -> Result<(TitleReport, Option<&'static str>, f64), BuildError> {
-    let resolution = t.resolution;
-    let hwaccel = match hw_decode {
-        Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
-        None => None,
-    };
+/// Prepares all subtitle `.sup` files (`{stem}_s{k+1}.sup`) for `t` in `work`:
+/// placeholders for missing/mismatched slots, ffmpeg-extracted embedded subtitles, and
+/// external `.srt`/`.ass`/`.ssa`/`.vtt`/`.sub` or `.sup` files.
+async fn prepare_bd_subtitles(tools: &Toolchain, t: &BdTitle, layout: &Layout, work: &Path) -> Result<(), BuildError> {
     let duration = t.info.duration_secs;
-
+    let (w, h) = t.resolution.frame_size(TvStandard::Pal);
     let mut extract: Vec<(usize, &SubtitleStream)> = Vec::new();
+    let mut ext_text: Vec<(usize, &ExternalSubtitle)> = Vec::new();
+
     for k in 0..layout.subs.len() {
         match t.sub_for(layout, k) {
-            Some(s) => extract.push((k, s)),
+            Some(TitleSub::Embedded(s)) => extract.push((k, s)),
+            Some(TitleSub::External(ext, SubKind::Text)) => ext_text.push((k, ext)),
+            Some(TitleSub::External(ext, SubKind::Pgs)) => {
+                let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
+                if let Some(tr) = t.info.trim {
+                    let data = std::fs::read(&ext.path).at(&ext.path)?;
+                    let fps = t.rate.fps;
+                    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, subpic::SubpicError> {
+                        let decoded = subpic::decode_pgs(&data)?;
+                        let pics = encoder::trim_pictures(decoded.pictures, tr.start, tr.end);
+                        Ok(crate::pgs::build_sup_from_pictures(&pics, decoded.canvas, fps))
+                    })
+                    .await
+                    .map_err(|e| ToolError::Failed { tool: "External PGS".into(), status: String::new(), log: e.to_string() })?
+                    .map_err(|e| ToolError::Failed { tool: "External PGS".into(), status: String::new(), log: e.to_string() })?;
+                    std::fs::write(&sup, bytes).at(&sup)?;
+                } else {
+                    std::fs::copy(&ext.path, &sup).at(&sup)?;
+                }
+            }
             None => {
                 let path = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
-                let (w, h) = resolution.frame_size(TvStandard::Pal);
                 std::fs::write(&path, subpic::empty_pgs(w as u16, h as u16, t.rate.fps)).at(&path)?;
             }
         }
@@ -298,7 +338,6 @@ async fn encode_bd_title(
         tools.ffmpeg(&args, duration, |_| {}).await?;
     }
     // Text cues and nonstandard bitmap subtitles become PGS on the title's HD canvas.
-    let (w, h) = resolution.frame_size(TvStandard::Pal);
     for &(k, s) in &extract {
         if sub_track(s).kind == SubKind::Text {
             let srt = work.join(encoder::subtitle_file(&t.stem, k, "srt"));
@@ -344,6 +383,39 @@ async fn encode_bd_title(
             std::fs::write(&sup, bytes).at(&sup)?;
         }
     }
+    for (k, ext) in ext_text {
+        let temp_srt = work.join(encoder::subtitle_file(&t.stem, k, "srt"));
+        let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
+        let cues = encoder::load_external_text_cues(tools, &ext.path, &temp_srt, t.info.trim).await?;
+        let st = &t.subtitle_style;
+        let cues = crate::textsub::apply_offset(cues, st.offset_ms);
+        std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h).with_style(st), t.rate.fps)).at(&sup)?;
+    }
+    Ok(())
+}
+
+/// Encodes one title: subtitle files (extracted or placeholders), then H.264 + AC-3 into
+/// `<stem>.mkv`. Returns the report, the hardware decoder used and the real duration.
+#[allow(clippy::too_many_arguments)]
+async fn encode_bd_title(
+    tools: &Toolchain,
+    t: &BdTitle,
+    layout: &Layout,
+    work: &Path,
+    video_kbps: u32,
+    (two_pass, fast, hw_decode): (bool, bool, Option<HwAccelMode>),
+    encoder: BdEncoder,
+    (maxrate_kbps, bufsize_kbit): (u32, u32),
+    progress: JobProgress,
+) -> Result<(TitleReport, Option<&'static str>, f64), BuildError> {
+    let resolution = t.resolution;
+    let hwaccel = match hw_decode {
+        Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
+        None => None,
+    };
+    let duration = t.info.duration_secs;
+
+    prepare_bd_subtitles(tools, t, layout, work).await?;
 
     let rate = t.rate;
     let audio = t.audio_streams(layout);
@@ -463,7 +535,7 @@ fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>], disc: &Layout) -> 
                     has_audio: !t.info.audio.is_empty(),
                 },
                 audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
-                subtitle_sources: t.subs.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+                subtitle_sources: t.subtitle_sources(),
                 audio_labels: t.audio_labels(disc),
                 subtitle_labels: t.subtitle_labels(),
             }
@@ -657,6 +729,17 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             }
             ok
         });
+        let (ext_raw, ext_notes) = crate::dvd::select_external_subtitles(&sel, opts, subs.len(), &label)?;
+        for note in ext_notes {
+            warn(log, note);
+        }
+        let mut external_subtitles = Vec::with_capacity(ext_raw.len());
+        for ext in ext_raw {
+            let probed = probe::probe_external_subtitle(&ext.path)
+                .map_err(|e| BuildError::Template(format!("{label}: {e}")))?;
+            let kind = if probed.subtitle_kind() == SubtitleKind::Text { SubKind::Text } else { SubKind::Pgs };
+            external_subtitles.push((ext, kind));
+        }
         let chapters = match &sel.chapters {
             Some(starts) => custom_chapters(starts, info.duration_secs),
             None => chapter_starts(&info, opts.chapters.interval_secs, opts.chapters.min_video_secs),
@@ -683,6 +766,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             label,
             audio,
             subs,
+            external_subtitles,
             chapters: chapters.iter().map(|c| c.0).collect(),
             stem: format!("title_{:02}", i + 1),
             rate,
@@ -703,7 +787,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     }
     let groups = crate::dvd::groups(&opts.selections, titles.len());
     for g in &groups {
-        let shapes: Vec<crate::dvd::MemberShape> = titles[g.clone()].iter().map(|t| (t.label.as_str(), t.audio.len(), t.subs.len())).collect();
+        let shapes: Vec<crate::dvd::MemberShape> = titles[g.clone()]
+            .iter()
+            .map(|t| (t.label.as_str(), t.audio.len(), t.subs.len() + t.external_subtitles.len()))
+            .collect();
         crate::dvd::check_group_shapes(&shapes)?;
     }
     let tools = Arc::new(tools.with_priority(opts.process_priority));
@@ -718,12 +805,18 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // 2. Track layout and frame rate ---------------------------------------------------------
     let layout = harmonise(
         &titles.iter().map(|t| t.audio.iter().map(|&a| t.info.audio[a].language.clone()).collect()).collect::<Vec<_>>(),
-        &titles.iter().map(|t| t.subs.iter().map(|&s| sub_track(&t.info.subtitles[s])).collect()).collect::<Vec<_>>(),
+        &titles.iter().map(|t| t.sub_tracks()).collect::<Vec<_>>(),
     );
     for t in &titles {
-        for (k, &s) in t.subs.iter().enumerate() {
-            if k < layout.subs.len() && t.sub_for(&layout, k).is_none() {
-                warn(log, tf!(opts.ui_lang, "bd_sub_kind_mismatch", label = t.label, index = t.info.subtitles[s].index, track = k + 1));
+        let total = t.subs.len() + t.external_subtitles.len();
+        for k in 0..total.min(layout.subs.len()) {
+            if t.sub_for(&layout, k).is_none() {
+                let idx = if k < t.subs.len() {
+                    t.info.subtitles[t.subs[k]].index as u32
+                } else {
+                    EXTERNAL_SUB_SOURCE_BASE + (k - t.subs.len()) as u32
+                };
+                warn(log, tf!(opts.ui_lang, "bd_sub_kind_mismatch", label = t.label, index = idx, track = k + 1));
             }
         }
     }
@@ -1139,5 +1232,100 @@ mod tests {
         // Only the later title has a second track: its language is used.
         let l = harmonise(&[vec![Some("ger".into())], vec![None, Some("fre".into())]], &[vec![], vec![]]);
         assert_eq!(l.audio_langs, vec![Some("ger".to_string()), Some("fre".to_string())]);
+    }
+
+    #[test]
+    fn external_subtitles_integrate_into_bd_planning_and_sup_prep() {
+        let dir = std::env::temp_dir().join(format!("cx_bd_ext_sub_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let srt = dir.join("film.en.srt");
+        std::fs::write(&srt, "1\n00:00:01,000 --> 00:00:02,000\nHello BD\n").unwrap();
+
+        let sup = dir.join("film.de.sup");
+        let sup_bytes = crate::pgs::build_sup(
+            &[crate::textsub::Cue { start: 1.0, end: 2.0, lines: vec!["Hallo BD".into()] }],
+            &crate::textsub::Canvas::hd(1920, 1080),
+            (25, 1),
+        );
+        std::fs::write(&sup, &sup_bytes).unwrap();
+
+        let info = MediaInfo {
+            path: dir.join("movie.mkv"),
+            duration_secs: 10.0,
+            video: Some(probe::VideoStream {
+                index: 0,
+                codec: "h264".into(),
+                width: 1920,
+                height: 1080,
+                display_aspect: 16.0 / 9.0,
+                fps: 25.0,
+                field_order: "progressive".into(),
+                crop: None,
+                hdr: false,
+                profile: None,
+                level: None,
+                pix_fmt: "yuv420p".into(),
+                bit_rate: None,
+            }),
+            audio: vec![],
+            subtitles: vec![],
+            chapters: vec![],
+            trim: None,
+            audio_names: Default::default(),
+        };
+
+        let title = BdTitle {
+            info,
+            label: "Film".into(),
+            audio: vec![],
+            subs: vec![],
+            external_subtitles: vec![
+                (ExternalSubtitle { path: srt, language: Some("eng".into()), title: None, forced: false }, SubKind::Text),
+                (ExternalSubtitle { path: sup.clone(), language: Some("ger".into()), title: None, forced: true }, SubKind::Pgs),
+            ],
+            chapters: vec![0.0],
+            stem: "title_01".into(),
+            rate: BdRate { fps: (25, 1), fake_interlaced: true },
+            audio_mode: AudioMode::Auto,
+            bd_audio: BdAudioMode::Auto,
+            track_label_mode: probe::TrackLabelMode::SmartMetadata,
+            ui_lang: UiLang::EN,
+            video: VideoProcessing::default(),
+            audio_target: AudioTarget::Bluray,
+            loudnorm: false,
+            resolution: Resolution::Hd1080,
+            video_mode: BdVideoMode::Encode,
+            copy_kbps: None,
+            weight: 1.0,
+            subtitle_style: crate::textsub::SubtitleStyle { offset_ms: 500, ..Default::default() },
+        };
+
+        let tracks = title.sub_tracks();
+        assert_eq!(tracks, vec![
+            BdSubTrack { kind: SubKind::Text, lang: Some("eng".into()) },
+            BdSubTrack { kind: SubKind::Pgs, lang: Some("ger".into()) },
+        ]);
+        assert_eq!(title.subtitle_sources(), vec![EXTERNAL_SUB_SOURCE_BASE, EXTERNAL_SUB_SOURCE_BASE + 1]);
+        assert_eq!(title.subtitle_labels(), vec!["English", "German (forced)"]);
+
+        let layout = harmonise(&[vec![]], &[tracks]);
+        let tools = Toolchain {
+            ffmpeg: PathBuf::from("ffmpeg"),
+            ffprobe: PathBuf::from("ffprobe"),
+            notes: vec![],
+            priority: crate::tools::ProcessPriority::Normal,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(prepare_bd_subtitles(&tools, &title, &layout, &dir)).unwrap();
+
+        let out_srt_sup = dir.join("title_01_s1.sup");
+        let out_pgs_sup = dir.join("title_01_s2.sup");
+        assert!(out_srt_sup.is_file());
+        assert_eq!(&std::fs::read(&out_srt_sup).unwrap()[..2], b"PG");
+        assert_eq!(std::fs::read(&out_pgs_sup).unwrap(), sup_bytes);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::bd::BdRate;
 use crate::author::{ClipSource, MenuFrame, Resolution, TvStandard};
-use crate::probe::{AudioStream, Crop, MediaInfo, SubtitleKind, SubtitleStream, VideoStream};
+use crate::probe::{self, AudioStream, Crop, ExternalSubtitle, MediaInfo, SubtitleKind, SubtitleStream, Trim, VideoStream};
 use crate::{subpic, textsub};
 use crate::tools::{FfmpegProgress, ToolError, Toolchain};
 
@@ -1052,6 +1052,17 @@ pub fn extract_subtitle_args(info: &MediaInfo, tracks: &[(usize, &SubtitleStream
 pub async fn run_encode(
     tools: &Toolchain,
     job: &EncodeJob<'_>,
+    progress: impl FnMut(EncodePhase, FfmpegProgress),
+) -> Result<Vec<String>, ToolError> {
+    run_encode_with_external(tools, job, &[], progress).await
+}
+
+/// [`run_encode`] with additional standalone external subtitle files (`external_subtitles`), muxed
+/// immediately after `job.subtitles` in disc stream order.
+pub async fn run_encode_with_external(
+    tools: &Toolchain,
+    job: &EncodeJob<'_>,
+    external_subtitles: &[ExternalSubtitle],
     mut progress: impl FnMut(EncodePhase, FfmpegProgress),
 ) -> Result<Vec<String>, ToolError> {
     let duration = job.info.duration_secs;
@@ -1067,6 +1078,13 @@ pub async fn run_encode(
         } else {
             bitmap_subtitle_xml(tools, job, n, sub).await?
         };
+        std::fs::write(job.dir.join(&xml), text).map_err(io)?;
+        stages.push((xml, n as u32));
+    }
+    for (i, ext) in external_subtitles.iter().enumerate() {
+        let n = job.subtitles.len() + i;
+        let xml = job.subtitle_xml(n);
+        let text = external_subtitle_xml(tools, job, n, ext).await?;
         std::fs::write(job.dir.join(&xml), text).map_err(io)?;
         stages.push((xml, n as u32));
     }
@@ -1669,16 +1687,101 @@ async fn bitmap_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, s
     Ok(xml)
 }
 
-/// Renders text subtitle `n` (its extracted `.srt`) natively into `<stem>_s<n>/` and returns the
-/// spumux XML, like [`bitmap_subtitle_xml`].
-async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) -> Result<String, ToolError> {
-    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: format!("Text subtitle #{}", sub.index), status: String::new(), log: e.to_string() };
-    let path = job.dir.join(job.srt(n));
-    let data = std::fs::read(&path).map_err(|error| ToolError::Io { tool: path.display().to_string(), error })?;
-    let (dir, tv, folder, style) = (job.dir.clone(), job.tv, format!("{}_s{}", job.stem, n + 1), job.subtitle_style.clone());
+/// Arguments converting an external text subtitle file (`.ass`, `.ssa`, `.vtt`, `.sub`, or
+/// non-UTF-8 `.srt`) into normalized UTF-8 `.srt` via ffmpeg.
+pub fn convert_subtitle_to_srt_args(src: &Path, dst: &Path) -> Vec<OsString> {
+    vec![
+        "-y".into(),
+        "-i".into(),
+        src.as_os_str().to_owned(),
+        "-c:s".into(),
+        "srt".into(),
+        "-f".into(),
+        "srt".into(),
+        dst.as_os_str().to_owned(),
+    ]
+}
+
+/// Clips and shifts text subtitle cues to a trimmed title range `[start, end)`.
+pub fn trim_cues(cues: Vec<textsub::Cue>, start: f64, end: f64) -> Vec<textsub::Cue> {
+    cues.into_iter()
+        .filter(|c| c.end > start && c.start < end)
+        .map(|mut c| {
+            c.start = (c.start - start).max(0.0);
+            c.end = c.end.min(end) - start;
+            c
+        })
+        .collect()
+}
+
+/// Clips and shifts decoded bitmap subtitle pictures to a trimmed title range `[start, end)`.
+pub fn trim_pictures(pics: Vec<subpic::Picture>, start: f64, end: f64) -> Vec<subpic::Picture> {
+    pics.into_iter()
+        .filter(|p| p.end > start && p.start < end)
+        .map(|mut p| {
+            p.start = (p.start - start).max(0.0);
+            p.end = p.end.min(end) - start;
+            p
+        })
+        .collect()
+}
+
+async fn ffmpeg_subtitle_to_srt(tools: &Toolchain, ext_path: &Path, temp_srt: &Path) -> Result<String, ToolError> {
+    let args = convert_subtitle_to_srt_args(ext_path, temp_srt);
+    if tools.ffmpeg(&args, 0.0, |_| {}).await.is_err() {
+        let mut cp1252: Vec<OsString> = vec!["-y".into(), "-sub_charenc".into(), "CP1252".into()];
+        cp1252.extend(args.into_iter().skip(1));
+        tools.ffmpeg(&cp1252, 0.0, |_| {}).await?;
+    }
+    let normalized = std::fs::read(temp_srt).map_err(|error| ToolError::Io { tool: temp_srt.display().to_string(), error })?;
+    let _ = std::fs::remove_file(temp_srt);
+    Ok(String::from_utf8_lossy(&normalized).trim_start_matches('\u{FEFF}').to_string())
+}
+
+/// Loads cues from a standalone external text subtitle file: UTF-8 `.srt` is parsed directly,
+/// while `.ass`/`.ssa`/`.vtt`/`.sub` (or non-UTF-8 `.srt`) are normalized via ffmpeg first (with
+/// automatic `CP1252` fallback for legacy Windows-1252 / Latin-1 subtitle files).
+pub async fn load_external_text_cues(
+    tools: &Toolchain,
+    ext_path: &Path,
+    temp_srt: &Path,
+    trim: Option<Trim>,
+) -> Result<Vec<textsub::Cue>, ToolError> {
+    let is_srt = ext_path.extension().is_some_and(|e| e.eq_ignore_ascii_case("srt"));
+    let text = if is_srt {
+        let bytes = std::fs::read(ext_path).map_err(|error| ToolError::Io { tool: ext_path.display().to_string(), error })?;
+        if let Ok(utf8) = std::str::from_utf8(&bytes) {
+            utf8.trim_start_matches('\u{FEFF}').to_string()
+        } else {
+            ffmpeg_subtitle_to_srt(tools, ext_path, temp_srt).await?
+        }
+    } else {
+        ffmpeg_subtitle_to_srt(tools, ext_path, temp_srt).await?
+    };
+    let (cues, _skipped) = textsub::parse_srt(&text);
+    Ok(match trim {
+        Some(t) => trim_cues(cues, t.start, t.end),
+        None => cues,
+    })
+}
+
+async fn render_text_cues_xml(
+    label: String,
+    dir: PathBuf,
+    tv: TvStandard,
+    folder: String,
+    style: textsub::SubtitleStyle,
+    cues: Vec<textsub::Cue>,
+    forced: bool,
+) -> Result<String, ToolError> {
+    let fail = |e: subpic::SubpicError| ToolError::Failed { tool: label.clone(), status: String::new(), log: e.to_string() };
     let (xml, _count) = tokio::task::spawn_blocking(move || {
-        let (cues, _skipped) = textsub::parse_srt(&String::from_utf8_lossy(&data));
-        let decoded = textsub::render_cues_styled(&cues, tv, &style);
+        let mut decoded = textsub::render_cues_styled(&cues, tv, &style);
+        if forced {
+            for p in &mut decoded.pictures {
+                p.forced = true;
+            }
+        }
         let (w, h) = tv.size();
         let whole = subpic::Target { frame: (w, h), area: (0, 0, w, h), source: (0, 0, w, h) };
         subpic::render(&decoded, &whole, tv, &dir, &folder)
@@ -1687,6 +1790,74 @@ async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) 
     .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
     .map_err(fail)?;
     Ok(xml)
+}
+
+/// Renders text subtitle `n` (its extracted `.srt`) natively into `<stem>_s<n>/` and returns the
+/// spumux XML, like [`bitmap_subtitle_xml`].
+async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) -> Result<String, ToolError> {
+    let path = job.dir.join(job.srt(n));
+    let data = std::fs::read(&path).map_err(|error| ToolError::Io { tool: path.display().to_string(), error })?;
+    let (cues, _skipped) = textsub::parse_srt(String::from_utf8_lossy(&data).trim_start_matches('\u{FEFF}'));
+    render_text_cues_xml(
+        format!("Text subtitle #{}", sub.index),
+        job.dir.clone(),
+        job.tv,
+        format!("{}_s{}", job.stem, n + 1),
+        job.subtitle_style.clone(),
+        cues,
+        sub.forced,
+    )
+    .await
+}
+
+/// Renders an external subtitle file (`ext`) at disc subtitle track `n` into `<stem>_s<n+1>/` and
+/// returns the spumux XML.
+async fn external_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize, ext: &ExternalSubtitle) -> Result<String, ToolError> {
+    let info = probe::probe_external_subtitle(&ext.path)
+        .map_err(|log| ToolError::Failed { tool: format!("External subtitle {}", ext.path.display()), status: String::new(), log })?;
+    let folder = format!("{}_s{}", job.stem, n + 1);
+    if info.subtitle_kind() == SubtitleKind::Text {
+        let temp_srt = job.dir.join(job.srt(n));
+        let cues = load_external_text_cues(tools, &ext.path, &temp_srt, job.info.trim).await?;
+        render_text_cues_xml(
+            format!("External subtitle {}", ext.path.display()),
+            job.dir.clone(),
+            job.tv,
+            folder,
+            job.subtitle_style.clone(),
+            cues,
+            ext.forced,
+        )
+        .await
+    } else {
+        let fail = |e: subpic::SubpicError| ToolError::Failed {
+            tool: format!("External PGS subtitle {}", ext.path.display()),
+            status: String::new(),
+            log: e.to_string(),
+        };
+        let data = std::fs::read(&ext.path).map_err(|error| ToolError::Io { tool: ext.path.display().to_string(), error })?;
+        let trim = job.info.trim;
+        let forced = ext.forced;
+        let mut decoded = tokio::task::spawn_blocking(move || subpic::decode_pgs(&data))
+            .await
+            .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+            .map_err(fail)?;
+        if let Some(t) = trim {
+            decoded.pictures = trim_pictures(decoded.pictures, t.start, t.end);
+        }
+        if forced {
+            for p in &mut decoded.pictures {
+                p.forced = true;
+            }
+        }
+        let target = job.subpicture_target(decoded.canvas);
+        let (dir, tv) = (job.dir.clone(), job.tv);
+        let (xml, _count) = tokio::task::spawn_blocking(move || subpic::render(&decoded, &target, tv, &dir, &folder))
+            .await
+            .map_err(|e| fail(subpic::SubpicError::Format(e.to_string())))?
+            .map_err(fail)?;
+        Ok(xml)
+    }
 }
 
 /// Arguments extracting one display-aspect-correct frame at `at_secs` as a PNG thumbnail.
@@ -3609,6 +3780,101 @@ mod tests {
 
         let piped = strings(job.encode_args("pipe:1"));
         assert!(piped.ends_with("-sn -dn -f dvd -muxrate 10080k -packetsize 2048 pipe:1"), "{piped}");
+    }
+
+    #[test]
+    fn convert_subtitle_args_and_trim_helpers() {
+        let args = strings(convert_subtitle_to_srt_args(Path::new("sub.ass"), Path::new("out.srt")));
+        assert_eq!(args, "-y -i sub.ass -c:s srt -f srt out.srt");
+
+        let cues = vec![
+            textsub::Cue { start: 1.0, end: 3.0, lines: vec!["Before".into()] },
+            textsub::Cue { start: 4.0, end: 8.0, lines: vec!["Overlap".into()] },
+            textsub::Cue { start: 12.0, end: 15.0, lines: vec!["After".into()] },
+        ];
+        let trimmed = trim_cues(cues, 5.0, 10.0);
+        assert_eq!(trimmed.len(), 1);
+        assert_eq!((trimmed[0].start, trimmed[0].end), (0.0, 3.0));
+    }
+
+    #[test]
+    fn external_subtitle_xml_renders_srt_and_sup() {
+        let dir = std::env::temp_dir().join(format!("cx_ext_sub_enc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let srt = dir.join("test.en.srt");
+        std::fs::write(&srt, "\u{FEFF}1\n00:00:01,000 --> 00:00:03,000\nHello world\n").unwrap();
+
+        let sup = dir.join("test.de.sup");
+        let sup_bytes = crate::pgs::build_sup(
+            &[textsub::Cue { start: 1.0, end: 2.5, lines: vec!["Hallo".into()] }],
+            &textsub::Canvas::hd(1920, 1080),
+            (25, 1),
+        );
+        std::fs::write(&sup, sup_bytes).unwrap();
+
+        let info = MediaInfo {
+            path: dir.join("movie.mkv"),
+            duration_secs: 20.0,
+            video: Some(VideoStream {
+                index: 0,
+                codec: "h264".into(),
+                width: 1920,
+                height: 1080,
+                display_aspect: 16.0 / 9.0,
+                fps: 25.0,
+                field_order: "progressive".into(),
+                crop: None,
+                hdr: false,
+                profile: None,
+                level: None,
+                pix_fmt: "yuv420p".into(),
+                bit_rate: None,
+            }),
+            audio: vec![],
+            subtitles: vec![],
+            chapters: vec![],
+            trim: None,
+            audio_names: Default::default(),
+        };
+        let job = EncodeJob {
+            info: &info,
+            audio: vec![],
+            subtitles: vec![],
+            video_kbps: 5000,
+            aspect: Aspect::Wide,
+            dir: dir.clone(),
+            stem: "title_01".into(),
+            two_pass: false,
+            fast: true,
+            tv: TvStandard::Pal,
+            resolution: Resolution::FullD1,
+            video: VideoProcessing::default(),
+            hwaccel: None,
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
+            audio_filters: vec![],
+            copy_video: false,
+            subtitle_style: textsub::SubtitleStyle { offset_ms: 500, ..Default::default() },
+        };
+        let tools = Toolchain {
+            ffmpeg: PathBuf::from("ffmpeg"),
+            ffprobe: PathBuf::from("ffprobe"),
+            notes: vec![],
+            priority: crate::tools::ProcessPriority::Normal,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ext_srt = ExternalSubtitle { path: srt, language: Some("eng".into()), title: None, forced: true };
+        let xml_srt = rt.block_on(external_subtitle_xml(&tools, &job, 0, &ext_srt)).unwrap();
+        assert!(xml_srt.contains("force=\"yes\""), "{xml_srt}");
+        assert!(xml_srt.contains("00:00:01.50"), "offset_ms should shift 1.0s to 1.5s: {xml_srt}");
+
+        let ext_sup = ExternalSubtitle { path: sup, language: Some("ger".into()), title: None, forced: false };
+        let xml_sup = rt.block_on(external_subtitle_xml(&tools, &job, 1, &ext_sup)).unwrap();
+        assert!(xml_sup.contains("title_01_s2"), "{xml_sup}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }
