@@ -30,6 +30,8 @@ export interface EditTarget {
   saturation: number | null;
   /** Chapter starts in source seconds (first is 0); edited in place by "Set chapter here". */
   chapters: number[];
+  /** Custom chapter names aligned with `chapters`. */
+  chapterNames?: (string | null)[];
 }
 
 export interface EditHooks {
@@ -141,6 +143,16 @@ export function chapterSegments(chapters: number[], start: number, end: number):
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const even = (v: number) => Math.round(v / 2) * 2;
+
+/** Inserts new chapter timestamps while keeping `t.chapterNames` aligned across sort and cap. */
+function insertChapters(t: EditTarget, additions: number[]) {
+  const paired = t.chapters.map((start, i) => ({ start, name: t.chapterNames?.[i] ?? null }));
+  for (const start of additions) paired.push({ start, name: null });
+  paired.sort((a, b) => a.start - b.start);
+  if (paired.length > MAX_CHAPTERS) paired.length = MAX_CHAPTERS;
+  t.chapters = paired.map((p) => p.start);
+  if (t.chapterNames) t.chapterNames = paired.map((p) => p.name);
+}
 
 export function renderEditTab(t: EditTarget, hooks: EditHooks): HTMLElement {
   const root = h("div", { class: "edit-tab" });
@@ -356,13 +368,18 @@ function renderTrim(t: EditTarget, hooks: EditHooks, onTrimChange?: () => void):
 
   const addChapter = () => {
     const c = Math.round(pos() * 10) / 10;
-    const bad = c <= 0 || c >= dur - 1 || t.chapters.some((x) => Math.abs(x - c) < 0.5) || c < start || c > end;
+    const bad =
+      c <= 0 ||
+      c >= dur - 1 ||
+      t.chapters.length >= MAX_CHAPTERS ||
+      t.chapters.some((x) => Math.abs(x - c) < 0.5) ||
+      c < start ||
+      c > end;
     if (bad) {
       hooks.status(tr("edit.hierKannKeinKapitel"), "error");
       return;
     }
-    t.chapters.push(c);
-    t.chapters.sort((x, y) => x - y);
+    insertChapters(t, [c]);
     paintMarks();
     refreshSplit();
     hooks.changed();
@@ -443,17 +460,16 @@ function renderTrim(t: EditTarget, hooks: EditHooks, onTrimChange?: () => void):
     try {
       const cuts = await detectSceneChapters(t.meta.path, t.trimStart, t.trimEnd);
       if (mine !== detectSeq || !el.isConnected) return;
-      let added = 0;
+      const additions: number[] = [];
       for (const raw of cuts) {
-        if (t.chapters.length >= MAX_CHAPTERS) break;
+        if (t.chapters.length + additions.length >= MAX_CHAPTERS) break;
         const c = Math.round(raw * 10) / 10;
         if (!Number.isFinite(c) || c <= 0 || c >= dur - 1) continue;
-        if (t.chapters.some((x) => Math.abs(x - c) < 0.5)) continue;
-        t.chapters.push(c);
-        added += 1;
+        if (t.chapters.some((x) => Math.abs(x - c) < 0.5) || additions.some((x) => Math.abs(x - c) < 0.5)) continue;
+        additions.push(c);
       }
-      t.chapters.sort((x, y) => x - y);
-      if (t.chapters.length > MAX_CHAPTERS) t.chapters.length = MAX_CHAPTERS;
+      insertChapters(t, additions);
+      const added = additions.length;
       paintMarks();
       refreshSplit();
       hooks.changed();

@@ -210,6 +210,12 @@ select {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+.title-item.drop-target {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
 .title-item.dragging {
   opacity: 0.4;
 }
@@ -2992,4 +2998,115 @@ input.time {
 .missing-list {
   font-family: monospace;
   font-size: 12px;
+}
+
+/* External subtitles, tab drop-zones, chapter editing & paste modal ------ */
+
+.tab-dropzone {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.tab-dropzone .hint {
+  margin: 0;
+  flex: 1 1 220px;
+}
+
+.tab-dropzone.hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.track.track-external {
+  cursor: default;
+}
+
+.track-ext-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.track-ext-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.track-ext-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ext-sub-lang {
+  width: 96px;
+  padding: 3px 7px;
+  font-size: 12.5px;
+}
+
+.ext-sub-title {
+  flex: 1 1 160px;
+  max-width: 240px;
+  padding: 3px 7px;
+  font-size: 12.5px;
+}
+
+.ext-sub-forced {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.track-ext-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chapter-name-input {
+  width: 100%;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.chapter-name-input:hover,
+.chapter-name-input:focus {
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.chapter-paste-area {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: 13px/1.45 Consolas, "Cascadia Mono", monospace;
+}
+
+.chapter-paste-error {
+  margin: 8px 0 0;
+  color: var(--bad);
+  font-size: 12.5px;
 }

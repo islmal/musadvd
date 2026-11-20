@@ -18,12 +18,21 @@ const BD_AUDIO_MODES = ["auto", "encode", "strict"] as const;
 
 export type ProjectDisc = (typeof DISCS)[number];
 
+export interface ProjectExternalSubtitle {
+  path: string;
+  language: string | null;
+  title: string | null;
+  forced: boolean;
+  enabled: boolean;
+}
+
 export interface ProjectTitle {
   path: string;
   audio: number[];
   subs: number[];
   label: string;
   chapters: number[];
+  chapterNames?: (string | null)[];
   trimStart: number | null;
   trimEnd: number | null;
   crop: Crop | null;
@@ -38,6 +47,7 @@ export interface ProjectTitle {
   contrast: number | null;
   saturation: number | null;
   subtitleStyle: SubtitleStyle;
+  externalSubtitles?: ProjectExternalSubtitle[];
 }
 
 export interface ProjectFile {
@@ -104,16 +114,44 @@ function cropOf(v: unknown): Crop | null {
   return top === null || bottom === null || left === null || right === null ? null : { top, bottom, left, right };
 }
 
+function externalSubsOf(v: unknown): ProjectExternalSubtitle[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v
+    .filter((e): e is Record<string, unknown> => isObj(e) && typeof e.path === "string" && e.path.length > 0)
+    .map((e) => ({
+      path: String(e.path),
+      language: nstr(e.language),
+      title: nstr(e.title),
+      forced: e.forced === true,
+      enabled: e.enabled !== false,
+    }));
+}
+
 function titleOf(v: unknown): ProjectTitle | null {
   if (!isObj(v) || typeof v.path !== "string" || !v.path) return null;
   const names: Record<number, string> = {};
   if (isObj(v.audioNames)) for (const [k, n] of Object.entries(v.audioNames)) if (typeof n === "string" && /^\d+$/.test(k)) names[Number(k)] = n;
+  const rawChapters = Array.isArray(v.chapters) ? v.chapters : [];
+  const rawChapterNames = Array.isArray(v.chapterNames) ? v.chapterNames : null;
+  const chapters: number[] = [];
+  const chapterNames: (string | null)[] | undefined = rawChapterNames ? [] : undefined;
+  rawChapters.forEach((c, idx) => {
+    if (typeof c === "number" && Number.isFinite(c) && c >= 0) {
+      chapters.push(c);
+      if (chapterNames && rawChapterNames) {
+        const n = rawChapterNames[idx];
+        chapterNames.push(typeof n === "string" && n.trim() ? n.trim() : null);
+      }
+    }
+  });
+  const externalSubtitles = externalSubsOf(v.externalSubtitles);
   return {
     path: v.path,
     audio: ints(v.audio),
     subs: ints(v.subs),
     label: str(v.label),
-    chapters: Array.isArray(v.chapters) ? v.chapters.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0) : [],
+    chapters,
+    ...(chapterNames ? { chapterNames } : {}),
     trimStart: num(v.trimStart),
     trimEnd: num(v.trimEnd),
     crop: cropOf(v.crop),
@@ -128,6 +166,7 @@ function titleOf(v: unknown): ProjectTitle | null {
     contrast: num(v.contrast),
     saturation: num(v.saturation),
     subtitleStyle: styleOf(v.subtitleStyle),
+    ...(externalSubtitles ? { externalSubtitles } : {}),
   };
 }
 
@@ -207,11 +246,12 @@ export async function pickSavePath(current: string | null, suggestedName: string
   return p.toLowerCase().endsWith(`.${EXT}`) ? p : `${p}.${EXT}`;
 }
 
-/** Lists everything the project referenced that does not exist (titles skipped, layout files flagged). */
-export function showMissing(titlePaths: string[], layoutPaths: string[]) {
+/** Lists everything the project referenced that does not exist (titles/subtitles skipped, layout files flagged). */
+export function showMissing(titlePaths: string[], layoutPaths: string[], externalSubPaths: string[] = []) {
   const body = document.createElement("div");
   for (const [heading, paths] of [
     [tr("project.missingTitles"), titlePaths],
+    [tr("project.missingSubtitles"), externalSubPaths],
     [tr("project.missingLayoutFiles"), layoutPaths],
   ] as const) {
     if (paths.length === 0) continue;

@@ -116,6 +116,30 @@ export interface SubtitleTrack {
   supported: boolean;
 }
 
+export interface ExternalSubtitle {
+  path: string;
+  language: string | null;
+  title: string | null;
+  forced: boolean;
+}
+
+export interface ExternalSubtitleInfo {
+  path: string;
+  codec: string;
+  kind: "text" | "bitmap";
+  language: string | null;
+  languageName: string;
+  displayLabel: string;
+  title: string | null;
+  forced: boolean;
+  supported: boolean;
+}
+
+export interface ImportedChapter {
+  startSecs: number;
+  title: string | null;
+}
+
 export interface ChapterInfo {
   startSecs: number;
   title: string | null;
@@ -202,6 +226,8 @@ export interface InputConfig {
   saturation?: number | null;
   /** Styling and timing offset of the title's text subtitles. */
   subtitleStyle?: SubtitleStyle;
+  /** Standalone external subtitle files attached to this title. */
+  externalSubtitles?: ExternalSubtitle[];
 }
 
 /** Mirrors `textsub::SubtitleStyle`; null/absent fields keep the default look. */
@@ -300,6 +326,11 @@ export interface ConversionDone {
 }
 
 export const probeFile = (path: string) => invoke<VideoMetadata>("probe_file", { path });
+export const probeSubtitleFile = (path: string) => invoke<ExternalSubtitleInfo>("probe_subtitle_file", { path });
+export const importChaptersFile = (path: string, fps?: number | null) =>
+  invoke<ImportedChapter[]>("import_chapters_file", { path, fps: fps ?? null });
+export const parseChaptersText = (text: string, fps?: number | null) =>
+  invoke<ImportedChapter[]>("parse_chapters_text", { text, fps: fps ?? null });
 export const listTemplates = () => invoke<TemplateInfo[]>("list_templates");
 export const templatePreview = (path: string) => invoke<string>("template_preview", { path });
 export const calculateProject = (settings: ProjectSettings) =>

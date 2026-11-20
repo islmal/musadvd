@@ -8,21 +8,25 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
 import { FONTS, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectFile, type ProjectTitle } from "./project";
+import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
 import { moveItem, shapeMismatch } from "./order";
 import { openUpdateDialog } from "./updateDialog";
+import { modal } from "./studio/ui";
 import {
   checkLayout,
   calculateProject,
   cancelConversion,
   onBuildCancelled,
   defaultOutputDir,
+  importChaptersFile,
   listTemplates,
   onBuildDone,
   onBuildEvent,
+  parseChaptersText,
   probeFile,
+  probeSubtitleFile,
   listSystemFonts,
   missingPaths,
   startConversion,
@@ -43,6 +47,7 @@ import {
   type Eta,
   formatRemaining,
   type Disc,
+  type ImportedChapter,
   type SubtitleStyle,
   type SystemFont,
   type TemplateInfo,
@@ -55,7 +60,22 @@ import { applyStatic, fmtNumber, loadLanguage, t as tr } from "./i18n";
 // ---------------------------------------------------------------------------
 
 const MAX_AUDIO = 8;
+const MAX_CHAPTERS = 99;
+const EXTERNAL_SUB_SOURCE_BASE = 10_000;
 const VIDEO_EXTENSIONS = ["mkv", "mp4", "m4v", "avi", "mov", "ts", "m2ts", "mts", "mpg", "mpeg", "vob", "wmv", "webm", "flv", "divx", "ogm"];
+const SUBTITLE_EXTENSIONS = ["srt", "ass", "ssa", "vtt", "sub", "sup"];
+const CHAPTER_EXTENSIONS = ["txt", "xml", "ffmeta", "meta", "chapters"];
+
+interface ExternalSubtitleEntry {
+  path: string;
+  codec: string;
+  kind: "text" | "bitmap";
+  language: string | null;
+  title: string | null;
+  forced: boolean;
+  supported: boolean;
+  enabled: boolean;
+}
 
 interface Title {
   id: number;
@@ -67,6 +87,10 @@ interface Title {
   label: string;
   /** Chapter starts in seconds of the source file (first is 0). */
   chapters: number[];
+  /** Custom chapter names aligned with `chapters` (null = default "Chapter N"). */
+  chapterNames: (string | null)[];
+  /** Standalone external subtitle files attached to this title. */
+  externalSubtitles: ExternalSubtitleEntry[];
   /** Used section in seconds of the source (null = file start / end). */
   trimStart: number | null;
   trimEnd: number | null;
@@ -292,14 +316,107 @@ const isTrimmed = (t: Title) => t.trimStart !== null || t.trimEnd !== null;
 /** Runtime of the used section. */
 const effDuration = (t: Title) => (t.trimEnd ?? t.meta.durationSecs) - (t.trimStart ?? 0);
 
-/** Chapter starts relative to the used section (the engine counts from the section's start). */
-function effChapters(t: Title): number[] {
-  const all = [...t.chapters].sort((a, b) => a - b);
+interface ChapterItem {
+  startSecs: number;
+  name: string | null;
+}
+
+function normalizedChapters(chapters: number[], names: (string | null | undefined)[]): ChapterItem[] {
+  return chapters
+    .map((startSecs, i) => ({
+      startSecs,
+      name: names[i]?.trim() || null,
+    }))
+    .sort((a, b) => a.startSecs - b.startSecs);
+}
+
+/** Chapter starts and names relative to the used section (the engine counts from the section's start). */
+function effChaptersWithNames(t: Title): ChapterItem[] {
+  const all = normalizedChapters(t.chapters, t.chapterNames);
   if (!isTrimmed(t)) return all;
   const start = t.trimStart ?? 0;
   const end = t.trimEnd ?? t.meta.durationSecs;
-  return [0, ...all.filter((c) => c - start > 0.5 && c < end - 1).map((c) => c - start)];
+  let firstName: string | null = null;
+  for (const c of all) {
+    if (c.startSecs <= start + 0.5) firstName = c.name;
+    else break;
+  }
+  return [
+    { startSecs: 0, name: firstName },
+    ...all.filter((c) => c.startSecs - start > 0.5 && c.startSecs < end - 1).map((c) => ({ startSecs: c.startSecs - start, name: c.name })),
+  ];
 }
+
+/** Chapter starts relative to the used section (the engine counts from the section's start). */
+function effChapters(t: Title): number[] {
+  return effChaptersWithNames(t).map((c) => c.startSecs);
+}
+
+const enabledEmbeddedSubs = (t: Title) => t.meta.subtitles.filter((s) => t.subs.has(s.index) && s.supported);
+const enabledExternalSubs = (t: Title) => t.externalSubtitles.filter((e) => e.enabled && e.supported);
+const totalEnabledSubs = (t: Title) => enabledEmbeddedSubs(t).length + enabledExternalSubs(t).length;
+
+const LANG_MAP: Record<string, string> = {};
+for (const [b, term, one] of [
+  ["ger", "deu", "de"], ["eng", "eng", "en"], ["fre", "fra", "fr"], ["spa", "spa", "es"],
+  ["ita", "ita", "it"], ["dut", "nld", "nl"], ["por", "por", "pt"], ["pol", "pol", "pl"],
+  ["rus", "rus", "ru"], ["tur", "tur", "tr"], ["cze", "ces", "cs"], ["slo", "slk", "sk"],
+  ["hun", "hun", "hu"], ["swe", "swe", "sv"], ["dan", "dan", "da"], ["nor", "nor", "no"],
+  ["fin", "fin", "fi"], ["gre", "ell", "el"], ["jpn", "jpn", "ja"], ["chi", "zho", "zh"],
+  ["kor", "kor", "ko"], ["ara", "ara", "ar"], ["heb", "heb", "he"], ["hin", "hin", "hi"],
+  ["ukr", "ukr", "uk"], ["rum", "ron", "ro"], ["bul", "bul", "bg"], ["hrv", "hrv", "hr"],
+  ["srp", "srp", "sr"], ["tha", "tha", "th"], ["vie", "vie", "vi"],
+] as const) {
+  LANG_MAP[b] = one;
+  LANG_MAP[term] = one;
+  LANG_MAP[one] = one;
+}
+
+function languageDisplayName(tag: string | null): string {
+  const clean = tag?.trim();
+  if (!clean) return tr("engine.unknown");
+  const iso2 = LANG_MAP[clean.toLowerCase()];
+  return iso2 ? tr(`lang.${iso2}`) : clean;
+}
+
+/** Computes the disc-menu / GUI label for an external subtitle, matching `probe::all_subtitle_labels`. */
+function externalSubLabel(t: Title, ext: ExternalSubtitleEntry): string {
+  const mode = state.settings?.track_label_mode ?? "smart";
+  const activeExt = enabledExternalSubs(t);
+  const extPool = ext.enabled && ext.supported ? activeExt : [...activeExt, ext];
+  const entries = [
+    ...t.meta.subtitles.map((s) => ({ lang: languageDisplayName(s.language), title: s.title?.trim() || null, forced: s.forced })),
+    ...extPool.map((e) => ({ lang: languageDisplayName(e.language), title: e.title?.trim() || null, forced: e.forced })),
+  ];
+  const posInPool = extPool.indexOf(ext);
+  const idx = t.meta.subtitles.length + (posInPool >= 0 ? posInPool : 0);
+  const item = entries[idx];
+  let base: string;
+  if (mode === "generic") {
+    base = `${tr("engine.subtitle")} ${idx + 1}`;
+  } else if (mode === "language") {
+    base = item.lang;
+  } else if (item.title) {
+    base = `${item.lang} - ${item.title}`;
+  } else {
+    const same = entries.filter((e) => e.lang === item.lang).length;
+    const k = entries.slice(0, idx + 1).filter((e) => e.lang === item.lang).length;
+    base = same > 1 ? `${item.lang} (${k})` : item.lang;
+  }
+  return item.forced ? `${base} (forced)` : base;
+}
+
+function fileExt(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
+function fileBaseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+const samePath = (a: string, b: string) => a.replace(/\\/g, "/").toLowerCase() === b.replace(/\\/g, "/").toLowerCase();
 
 /** What happens to an audio track with the current disc and settings (copy, AC-3 or LPCM). */
 function audioChoice(t: Title, a: AudioTrack): AudioChoice {
@@ -410,13 +527,14 @@ function status(text: string, kind: "info" | "error" = "info") {
 // Adding / removing titles
 // ---------------------------------------------------------------------------
 
-async function addFiles(paths: string[]) {
+async function addFiles(paths: string[]): Promise<Title[]> {
   state.splitUndo = null;
-  const videos = paths.filter((p) => VIDEO_EXTENSIONS.includes(p.split(".").pop()?.toLowerCase() ?? ""));
+  const videos = paths.filter((p) => VIDEO_EXTENSIONS.includes(fileExt(p)));
   if (videos.length === 0) {
     status(tr("main.keineUnterstuetztenVideodateien"), "error");
-    return;
+    return [];
   }
+  const added: Title[] = [];
   state.probing += videos.length;
   renderFooter();
   for (const path of videos) {
@@ -429,13 +547,16 @@ async function addFiles(paths: string[]) {
           : state.customLayoutKey
             ? state.customLayoutKey.split("\n").filter(Boolean)
             : [];
+      const sortedChapters = [...meta.chapters].sort((a, b) => a.startSecs - b.startSecs);
       const title: Title = {
         id: nextId++,
         meta,
         audio: new Set(meta.audio.slice(0, MAX_AUDIO).map((a) => a.index)),
         subs: new Set(meta.subtitles.filter((s) => s.supported).map((s) => s.index)),
         label: cleanTitle(meta.fileName),
-        chapters: meta.chapters.map((c) => c.startSecs),
+        chapters: sortedChapters.map((c) => c.startSecs),
+        chapterNames: sortedChapters.map((c) => c.title ?? null),
+        externalSubtitles: [],
         trimStart: null,
         trimEnd: null,
         crop: null,
@@ -452,6 +573,7 @@ async function addFiles(paths: string[]) {
         subtitleStyle: {},
       };
       state.titles.push(title);
+      added.push(title);
       if (state.selected === null) state.selected = title.id;
       syncMenuAfterChange(oldPaths);
       status(tr("main.hinzugefuegt", { fileName: meta.fileName }));
@@ -463,6 +585,7 @@ async function addFiles(paths: string[]) {
       scheduleCalc();
     }
   }
+  return added;
 }
 
 async function addViaDialog() {
@@ -543,7 +666,7 @@ function mergeMismatches(): Map<number, { audio: number; subs: number; first: Ti
   const counts = groups.map((g) =>
     g.map((t) => ({
       audio: t.meta.audio.filter((a) => t.audio.has(a.index)).length,
-      subs: t.meta.subtitles.filter((s) => t.subs.has(s.index) && s.supported).length,
+      subs: totalEnabledSubs(t),
     })),
   );
   const bad = new Map<number, { audio: number; subs: number; first: Title }>();
@@ -571,28 +694,34 @@ async function splitByChapters(t: Title) {
   if (segs.length < 2 || i < 0) return;
   const text = tr("main.inTitelAufteilenMit", { label: t.label, length: segs.length });
   if (!(await ask(text, { title: tr("main.titelAufteilen"), kind: "info" }))) return;
-  const news: Title[] = segs.map((s, k) => ({
-    id: nextId++,
-    meta: t.meta,
-    audio: new Set(t.audio),
-    subs: new Set(t.subs),
-    label: t.meta.chapters.find((c) => Math.abs(c.startSecs - s.chapter) < 0.5)?.title || tr("main.kapitel", { label: t.label, k: k + 1 }),
-    chapters: [0],
-    trimStart: s.start > 0.05 ? s.start : null,
-    trimEnd: s.end < dur - 0.05 ? s.end : null,
-    crop: t.crop ? { ...t.crop } : null,
-    mergeWithPrevious: false,
-    audioNames: { ...t.audioNames },
-    bdResolution: t.bdResolution,
-    bdRate: t.bdRate,
-    bdVideo: t.bdVideo,
-    bdQuality: t.bdQuality,
-    denoise: t.denoise,
-    brightness: t.brightness,
-    contrast: t.contrast,
-    saturation: t.saturation,
-    subtitleStyle: { ...t.subtitleStyle },
-  }));
+  const chapterItems = normalizedChapters(t.chapters, t.chapterNames);
+  const news: Title[] = segs.map((s, k) => {
+    const customName = chapterItems.find((c) => Math.abs(c.startSecs - s.chapter) < 0.5)?.name ?? null;
+    return {
+      id: nextId++,
+      meta: t.meta,
+      audio: new Set(t.audio),
+      subs: new Set(t.subs),
+      label: customName || tr("main.kapitel", { label: t.label, k: k + 1 }),
+      chapters: [0],
+      chapterNames: [customName],
+      externalSubtitles: t.externalSubtitles.map((e) => ({ ...e })),
+      trimStart: s.start > 0.05 ? s.start : null,
+      trimEnd: s.end < dur - 0.05 ? s.end : null,
+      crop: t.crop ? { ...t.crop } : null,
+      mergeWithPrevious: false,
+      audioNames: { ...t.audioNames },
+      bdResolution: t.bdResolution,
+      bdRate: t.bdRate,
+      bdVideo: t.bdVideo,
+      bdQuality: t.bdQuality,
+      denoise: t.denoise,
+      brightness: t.brightness,
+      contrast: t.contrast,
+      saturation: t.saturation,
+      subtitleStyle: { ...t.subtitleStyle },
+    };
+  });
   news[0].mergeWithPrevious = t.mergeWithPrevious;
   const oldGroupPaths = editorTitles().map((x) => x.path);
   state.titles.splice(i, 1, ...news);
@@ -716,7 +845,7 @@ function calcInput() {
     titles: state.titles.map((t) => ({
       durationSecs: effDuration(t),
       audioKbps: audioKbps(t),
-      subtitleStreams: t.subs.size,
+      subtitleStreams: totalEnabledSubs(t),
       copyVideoKbps: bdCopy(t)?.kbps ?? null,
       weight: isBluray() && t.bdQuality ? QUALITY_WEIGHT[t.bdQuality] : 1,
     })),
@@ -931,7 +1060,8 @@ function renderTitleList() {
         .filter((a) => t.audio.has(a.index))
         .map((a) => audioLabel(t, a))
         .join(", ") || tr("main.keinTon");
-    const subsSummary = t.subs.size > 0 ? tr("main.untertitel", { size: t.subs.size }) : "";
+    const subCount = totalEnabledSubs(t);
+    const subsSummary = subCount > 0 ? tr("main.untertitel", { size: subCount }) : "";
     const quality = calc ? calc.qualityPercent : 0;
     const qualityClass = calc ? calc.quality : "medium";
 
@@ -1324,58 +1454,331 @@ function subtitleStyleControls(t: Title) {
   );
 }
 
+async function attachExternalSubtitles(t: Title, paths: string[]) {
+  if (paths.length === 0) return;
+  let added = 0;
+  for (const path of paths) {
+    try {
+      const info = await probeSubtitleFile(path);
+      if (t.externalSubtitles.some((e) => samePath(e.path, info.path))) {
+        status(tr("main.extSubAlreadyAdded", { name: fileBaseName(info.path) }));
+        continue;
+      }
+      t.externalSubtitles.push({
+        path: info.path,
+        codec: info.codec,
+        kind: info.kind,
+        language: info.language,
+        title: info.title,
+        forced: info.forced,
+        supported: info.supported,
+        enabled: info.supported,
+      });
+      added++;
+      status(tr("main.extSubAdded", { name: fileBaseName(info.path) }));
+    } catch (e) {
+      status(`${fileBaseName(path)}: ${e}`, "error");
+    }
+  }
+  if (added > 0) {
+    if (!state.customLayoutEdited) syncMenuAfterChange(null);
+    renderAll();
+    scheduleCalc();
+  }
+}
+
+async function addSubtitlesViaDialog(t: Title) {
+  const picked = await open({
+    multiple: true,
+    title: tr("main.addSubtitleDialogTitle"),
+    filters: [{ name: tr("main.subtitleFilesFilter"), extensions: SUBTITLE_EXTENSIONS }],
+  });
+  if (picked) await attachExternalSubtitles(t, Array.isArray(picked) ? picked : [picked]);
+}
+
 function renderSubtitleTab(t: Title) {
-  if (t.meta.subtitles.length === 0) return h("div", { class: "empty" }, tr("main.diesesVideoHatKeine2"));
-  return h(
+  const hasTextSub = t.meta.subtitles.some((s) => s.kind === "text") || t.externalSubtitles.some((e) => e.kind === "text");
+  const hasAnySub = t.meta.subtitles.length > 0 || t.externalSubtitles.length > 0;
+  let extEnabledCounter = 0;
+
+  const dropBox = h(
     "div",
-    { class: "track-list" },
-    h("p", { class: "hint" }, tr("main.textUntertitelSrtAss")),
-    subtitleStyleControls(t),
-    ...t.meta.subtitles.map((s) =>
+    { class: "tab-dropzone sub-dropzone" },
+    h(
+      "button",
+      {
+        class: "btn",
+        type: "button",
+        disabled: state.converting,
+        onclick: () => void addSubtitlesViaDialog(t),
+      },
+      tr("main.addSubtitleBtn"),
+    ),
+    h("span", { class: "hint" }, tr("main.subDropHint")),
+  );
+
+  const embeddedRows = t.meta.subtitles.map((s) =>
+    h(
+      "label",
+      { class: `track${s.supported ? "" : " disabled"}` },
+      h(
+        "span",
+        { class: "switch" },
+        h("input", {
+          type: "checkbox",
+          checked: t.subs.has(s.index),
+          disabled: !s.supported,
+          onchange: (e: Event) => {
+            if ((e.target as HTMLInputElement).checked) t.subs.add(s.index);
+            else t.subs.delete(s.index);
+            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            renderAll();
+            scheduleCalc();
+          },
+        }),
+        h("span"),
+      ),
+      h(
+        "div",
+        { class: "track-main" },
+        h("span", { class: "track-lang" }, s.displayLabel),
+        s.forced ? h("span", { class: "badge" }, "Forced") : null,
+      ),
+      h("span", { class: "track-detail" }, `#${s.index} · ${s.codec}${s.supported ? "" : tr("main.nichtUnterstuetzt")}`),
+    ),
+  );
+
+  const externalLabelRefs: { ext: ExternalSubtitleEntry; labelEl: HTMLElement }[] = [];
+  const externalRows = t.externalSubtitles.map((ext, idx) => {
+    const virtualIndex = ext.enabled && ext.supported ? EXTERNAL_SUB_SOURCE_BASE + extEnabledCounter++ : null;
+    const labelEl = h("span", { class: "track-lang" }, externalSubLabel(t, ext));
+    externalLabelRefs.push({ ext, labelEl });
+    const forcedBadge = h("span", { class: "badge", hidden: !ext.forced }, tr("main.extSubForced"));
+    const syncExtMeta = () => {
+      for (const item of externalLabelRefs) item.labelEl.textContent = externalSubLabel(t, item.ext);
+      forcedBadge.hidden = !ext.forced;
+      if (!state.customLayoutEdited) syncMenuAfterChange(null);
+      if (state.menuMode === "custom") void refreshLayoutCheck();
+      touchAutosave();
+    };
+    const detailText =
+      (virtualIndex !== null ? `#${virtualIndex} · ` : "") +
+      `${ext.codec} · ${fileBaseName(ext.path)}${ext.supported ? "" : tr("main.nichtUnterstuetzt")}`;
+    return h(
+      "div",
+      { class: `track track-external${ext.supported ? "" : " disabled"}` },
       h(
         "label",
-        { class: `track${s.supported ? "" : " disabled"}` },
+        { class: "switch" },
+        h("input", {
+          type: "checkbox",
+          checked: ext.enabled,
+          disabled: !ext.supported,
+          onchange: (e: Event) => {
+            ext.enabled = (e.target as HTMLInputElement).checked;
+            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            renderAll();
+            scheduleCalc();
+          },
+        }),
+        h("span"),
+      ),
+      h(
+        "div",
+        { class: "track-ext-main" },
         h(
-          "span",
-          { class: "switch" },
+          "div",
+          { class: "track-ext-header" },
+          labelEl,
+          h("span", { class: "badge" }, tr("main.extSubBadge")),
+          forcedBadge,
+        ),
+        h(
+          "div",
+          { class: "track-ext-controls" },
           h("input", {
-            type: "checkbox",
-            checked: t.subs.has(s.index),
-            disabled: !s.supported,
-            onchange: (e: Event) => {
-              if ((e.target as HTMLInputElement).checked) t.subs.add(s.index);
-              else t.subs.delete(s.index);
+            type: "text",
+            class: "ext-sub-lang",
+            maxLength: 10,
+            value: ext.language ?? "",
+            placeholder: tr("main.extSubLangPlaceholder"),
+            title: tr("main.extSubLangTitle"),
+            spellcheck: false,
+            oninput: (e: Event) => {
+              const v = (e.target as HTMLInputElement).value.trim().toLowerCase();
+              ext.language = v || null;
+              syncExtMeta();
+            },
+          }),
+          h("input", {
+            type: "text",
+            class: "ext-sub-title",
+            maxLength: 60,
+            value: ext.title ?? "",
+            placeholder: tr("main.extSubTitlePlaceholder"),
+            spellcheck: false,
+            oninput: (e: Event) => {
+              const v = (e.target as HTMLInputElement).value.trim();
+              ext.title = v || null;
+              syncExtMeta();
+            },
+          }),
+          h(
+            "label",
+            { class: "ext-sub-forced" },
+            h("input", {
+              type: "checkbox",
+              checked: ext.forced,
+              onchange: (e: Event) => {
+                ext.forced = (e.target as HTMLInputElement).checked;
+                syncExtMeta();
+              },
+            }),
+            tr("main.extSubForced"),
+          ),
+        ),
+      ),
+      h(
+        "div",
+        { class: "track-ext-right" },
+        h("span", { class: "track-detail", title: ext.path }, detailText),
+        h(
+          "button",
+          {
+            class: "btn icon",
+            type: "button",
+            title: tr("main.extSubRemove"),
+            onclick: () => {
+              t.externalSubtitles.splice(idx, 1);
               if (!state.customLayoutEdited) syncMenuAfterChange(null);
               renderAll();
               scheduleCalc();
             },
-          }),
-          h("span"),
+          },
+          "✕",
         ),
-        h(
-          "div",
-          { class: "track-main" },
-          h("span", { class: "track-lang" }, s.displayLabel),
-          s.forced ? h("span", { class: "badge" }, "Forced") : null,
-        ),
-        h("span", { class: "track-detail" }, `#${s.index} · ${s.codec}${s.supported ? "" : tr("main.nichtUnterstuetzt")}`),
       ),
-    ),
+    );
+  });
+
+  return h(
+    "div",
+    { class: "track-list" },
+    dropBox,
+    hasAnySub ? h("p", { class: "hint" }, tr("main.textUntertitelSrtAss")) : h("div", { class: "empty" }, tr("main.extSubNoTracks")),
+    hasTextSub ? subtitleStyleControls(t) : null,
+    ...embeddedRows,
+    ...externalRows,
   );
 }
 
+function setChapters(t: Title, items: ChapterItem[]) {
+  const sorted = [...items].sort((a, b) => a.startSecs - b.startSecs).slice(0, MAX_CHAPTERS);
+  t.chapters = sorted.map((c) => c.startSecs);
+  t.chapterNames = sorted.map((c) => c.name);
+  if (!state.customLayoutEdited) syncMenuAfterChange(null);
+  renderAll();
+  scheduleCalc();
+}
+
+function applyImportedChapters(t: Title, imported: ImportedChapter[]) {
+  const dur = t.meta.durationSecs;
+  const upper = dur > 1.01 ? dur - 1.01 : 0;
+  const raw = imported
+    .filter((c) => Number.isFinite(c.startSecs))
+    .map((c) => ({
+      startSecs: Math.min(upper, Math.max(0, c.startSecs)),
+      name: c.title?.trim() || null,
+    }))
+    .sort((a, b) => a.startSecs - b.startSecs);
+
+  const deduped: ChapterItem[] = [];
+  if (raw.length === 0) {
+    deduped.push({ startSecs: 0, name: null });
+  } else {
+    if (raw[0].startSecs > 0) {
+      if (raw[0].startSecs < 0.5) {
+        deduped.push({ startSecs: 0, name: raw[0].name });
+        raw.shift();
+      } else {
+        deduped.push({ startSecs: 0, name: null });
+      }
+    }
+    for (const ch of raw) {
+      const last = deduped[deduped.length - 1];
+      if (last && ch.startSecs - last.startSecs < 0.5) {
+        if (!last.name && ch.name) last.name = ch.name;
+      } else {
+        deduped.push(ch);
+      }
+    }
+  }
+  setChapters(t, deduped.slice(0, MAX_CHAPTERS));
+  status(tr("main.chaptersImported", { count: t.chapters.length, title: t.label }));
+}
+
+async function importChaptersForTitle(t: Title, path: string) {
+  try {
+    const imported = await importChaptersFile(path, t.meta.video?.fps ?? null);
+    applyImportedChapters(t, imported);
+  } catch (e) {
+    status(tr("main.chaptersImportFailed", { e }), "error");
+  }
+}
+
+async function importChaptersViaDialog(t: Title) {
+  const picked = await open({
+    multiple: false,
+    title: tr("main.importChaptersTitle"),
+    filters: [{ name: tr("main.chapterFilesFilter"), extensions: CHAPTER_EXTENSIONS }],
+  });
+  if (typeof picked === "string") await importChaptersForTitle(t, picked);
+}
+
+function openPasteChaptersModal(t: Title) {
+  const area = h("textarea", {
+    class: "chapter-paste-area",
+    rows: 10,
+    placeholder: tr("main.pasteChaptersPlaceholder"),
+    spellcheck: false,
+  }) as HTMLTextAreaElement;
+  const errEl = h("p", { class: "chapter-paste-error", hidden: true }) as HTMLParagraphElement;
+  const body = h("div", {}, h("p", { class: "hint" }, tr("main.pasteChaptersHint")), area, errEl);
+  modal(
+    tr("main.pasteChaptersTitle"),
+    body,
+    [
+      { label: tr("main.pasteChaptersCancel") },
+      {
+        label: tr("main.pasteChaptersApply"),
+        primary: true,
+        onClick: async () => {
+          errEl.hidden = true;
+          errEl.textContent = "";
+          try {
+            const imported = await parseChaptersText(area.value, t.meta.video?.fps ?? null);
+            applyImportedChapters(t, imported);
+            return true;
+          } catch (e) {
+            errEl.textContent = String(e);
+            errEl.hidden = false;
+            return false;
+          }
+        },
+      },
+    ],
+    true,
+  );
+  queueMicrotask(() => area.focus());
+}
+
 function renderChapterTab(t: Title) {
-  const sorted = [...t.chapters].sort((a, b) => a - b);
-  const sourceTitle = (secs: number) => t.meta.chapters.find((c) => Math.abs(c.startSecs - secs) < 0.5)?.title ?? null;
+  const items = normalizedChapters(t.chapters, t.chapterNames);
+  t.chapters = items.map((c) => c.startSecs);
+  t.chapterNames = items.map((c) => c.name);
   const intervalInput = h("input", { type: "number", min: "1", max: "60", value: "5", class: "small" }) as HTMLInputElement;
 
-  const update = (chapters: number[]) => {
-    t.chapters = chapters;
-    if (!state.customLayoutEdited) syncMenuAfterChange(null);
-    renderAll();
-  };
-
-  const rows = sorted.map((start, i) =>
+  const rows = items.map((item, i) =>
     h(
       "tr",
       {},
@@ -1388,26 +1791,53 @@ function renderChapterTab(t: Title) {
           : h("input", {
               type: "text",
               class: "mono time",
-              value: fmtTime(start),
+              value: fmtTime(item.startSecs),
               onchange: (e: Event) => {
                 const input = e.target as HTMLInputElement;
                 const v = parseTime(input.value);
                 if (v === null || v <= 0 || v >= t.meta.durationSecs - 1) {
-                  input.value = fmtTime(start);
+                  input.value = fmtTime(item.startSecs);
                   status(tr("main.ungueltigeKapitelzeit"), "error");
                   return;
                 }
-                update(sorted.map((s, j) => (j === i ? v : s)));
+                setChapters(
+                  t,
+                  items.map((c, j) => (j === i ? { ...c, startSecs: v } : c)),
+                );
               },
             }),
       ),
-      h("td", {}, sourceTitle(start) ?? tr("main.kapitel3", { i: i + 1 })),
+      h(
+        "td",
+        {},
+        h("input", {
+          type: "text",
+          class: "chapter-name-input",
+          maxLength: 80,
+          value: item.name ?? "",
+          placeholder: tr("main.kapitel3", { i: i + 1 }),
+          title: tr("main.chapterNameTip"),
+          spellcheck: false,
+          oninput: (e: Event) => {
+            const v = (e.target as HTMLInputElement).value.trim();
+            t.chapterNames[i] = v || null;
+            touchAutosave();
+          },
+          onchange: (e: Event) => {
+            const v = (e.target as HTMLInputElement).value.trim();
+            t.chapterNames[i] = v || null;
+            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            if (state.menuMode === "custom") void refreshLayoutCheck();
+            touchAutosave();
+          },
+        }),
+      ),
       h(
         "td",
         { class: "actions" },
         i === 0
           ? null
-          : h("button", { class: "btn icon", title: tr("main.kapitelEntfernen"), onclick: () => update(sorted.filter((_, j) => j !== i)) }, "✕"),
+          : h("button", { class: "btn icon", title: tr("main.kapitelEntfernen"), onclick: () => setChapters(t, items.filter((_, j) => j !== i)) }, "✕"),
       ),
     ),
   );
@@ -1417,15 +1847,30 @@ function renderChapterTab(t: Title) {
     { class: "chapters" },
     h(
       "div",
+      { class: "tab-dropzone chapter-dropzone" },
+      h(
+        "button",
+        { class: "btn", type: "button", disabled: state.converting, onclick: () => void importChaptersViaDialog(t) },
+        tr("main.importChaptersBtn"),
+      ),
+      h(
+        "button",
+        { class: "btn", type: "button", disabled: state.converting, onclick: () => openPasteChaptersModal(t) },
+        tr("main.pasteChaptersBtn"),
+      ),
+      h("span", { class: "hint" }, tr("main.chapterDropHint")),
+    ),
+    h(
+      "div",
       { class: "chapter-tools" },
       h(
         "button",
         {
           class: "btn",
           onclick: () => {
-            const last = sorted[sorted.length - 1] ?? 0;
+            const last = items[items.length - 1]?.startSecs ?? 0;
             const next = Math.min(last + 300, t.meta.durationSecs - 2);
-            if (next > last + 1) update([...sorted, next]);
+            if (next > last + 1) setChapters(t, [...items, { startSecs: next, name: null }]);
           },
         },
         tr("main.kapitel4"),
@@ -1440,15 +1885,22 @@ function renderChapterTab(t: Title) {
           class: "btn",
           onclick: () => {
             const step = Math.max(1, Number(intervalInput.value) || 5) * 60;
-            const out = [0];
-            for (let s = step; s < t.meta.durationSecs - 1; s += step) out.push(s);
-            update(out.slice(0, 99));
+            const out: ChapterItem[] = [{ startSecs: 0, name: null }];
+            for (let s = step; s < t.meta.durationSecs - 1; s += step) out.push({ startSecs: s, name: null });
+            setChapters(t, out.slice(0, MAX_CHAPTERS));
           },
         },
         tr("main.rasterErzeugen"),
       ),
       t.meta.hasSourceChapters
-        ? h("button", { class: "btn", onclick: () => update(t.meta.chapters.map((c) => c.startSecs)) }, tr("main.kapitelDerQuelle"))
+        ? h(
+            "button",
+            {
+              class: "btn",
+              onclick: () => setChapters(t, t.meta.chapters.map((c) => ({ startSecs: c.startSecs, name: c.title ?? null }))),
+            },
+            tr("main.kapitelDerQuelle"),
+          )
         : null,
     ),
     h(
@@ -1460,7 +1912,7 @@ function renderChapterTab(t: Title) {
     h(
       "p",
       { class: "hint" },
-      tr("main.vonHoechstens99Kapiteln", { length: sorted.length, fmtTime: fmtTime(t.meta.durationSecs) }),
+      tr("main.vonHoechstens99Kapiteln", { length: items.length, fmtTime: fmtTime(t.meta.durationSecs) }),
       isTrimmed(t) ? tr("main.zeitenDerQuelldateiIm", { fmtTime: fmtTime(t.trimStart ?? 0), fmtTime2: fmtTime(t.trimEnd ?? t.meta.durationSecs), effChapters: effChapters(t).length }) : "",
     ),
   );
@@ -1476,9 +1928,9 @@ function editorTitles(): EditorTitle[] {
     const starts: number[] = [];
     const names: (string | null)[] = [];
     for (const m of members) {
-      const own = effChapters(m);
-      starts.push(...own.map((s) => s + offset));
-      names.push(...own.map((s) => m.meta.chapters.find((c) => Math.abs(c.startSecs - s - (m.trimStart ?? 0)) < 0.5)?.title ?? null));
+      const own = effChaptersWithNames(m);
+      starts.push(...own.map((c) => c.startSecs + offset));
+      names.push(...own.map((c) => c.name));
       offset += effDuration(m);
     }
     return {
@@ -1494,9 +1946,13 @@ function editorTitles(): EditorTitle[] {
       audioTracks: t.meta.audio
         .filter((a) => t.audio.has(a.index))
         .map((a) => ({ source: a.index, label: audioLabel(t, a) })),
-      subtitleTracks: t.meta.subtitles
-        .filter((s) => t.subs.has(s.index) && s.supported)
-        .map((s) => ({ source: s.index, label: s.displayLabel })),
+      subtitleTracks: [
+        ...enabledEmbeddedSubs(t).map((s) => ({ source: s.index, label: s.displayLabel })),
+        ...enabledExternalSubs(t).map((e, idx) => ({
+          source: EXTERNAL_SUB_SOURCE_BASE + idx,
+          label: externalSubLabel(t, e),
+        })),
+      ],
     };
   });
 }
@@ -2123,6 +2579,12 @@ async function convert() {
         contrast: t.contrast,
         saturation: t.saturation,
         subtitleStyle: t.subtitleStyle,
+        externalSubtitles: enabledExternalSubs(t).map((e) => ({
+          path: e.path,
+          language: e.language,
+          title: e.title,
+          forced: e.forced,
+        })),
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
@@ -2185,6 +2647,7 @@ function snapshotProject(): ProjectFile {
       subs: [...t.subs],
       label: t.label,
       chapters: [...t.chapters],
+      chapterNames: [...t.chapterNames],
       trimStart: t.trimStart,
       trimEnd: t.trimEnd,
       crop: t.crop ? { ...t.crop } : null,
@@ -2199,6 +2662,13 @@ function snapshotProject(): ProjectFile {
       contrast: t.contrast,
       saturation: t.saturation,
       subtitleStyle: { ...t.subtitleStyle },
+      externalSubtitles: t.externalSubtitles.map((e) => ({
+        path: e.path,
+        language: e.language,
+        title: e.title,
+        forced: e.forced,
+        enabled: e.enabled,
+      })),
     })),
   };
 }
@@ -2210,7 +2680,19 @@ function titleFromProject(p: ProjectTitle, meta: VideoMetadata, afterSkipped: bo
   if (audio.length === 0) audio = meta.audio.slice(0, MAX_AUDIO).map((a) => a.index);
   const subsOk = new Set(meta.subtitles.filter((s) => s.supported).map((s) => s.index));
   const dur = meta.durationSecs;
-  const chapters = p.chapters.filter((c) => c < dur);
+  const pairedChapters: ChapterItem[] = [];
+  p.chapters.forEach((c, idx) => {
+    if (c < dur) {
+      const savedName = p.chapterNames
+        ? (p.chapterNames[idx]?.trim() || null)
+        : (meta.chapters.find((mc) => Math.abs(mc.startSecs - c) < 0.5)?.title ?? null);
+      pairedChapters.push({ startSecs: c, name: savedName });
+    }
+  });
+  const finalChapters =
+    pairedChapters.length > 0
+      ? pairedChapters.sort((a, b) => a.startSecs - b.startSecs)
+      : [...meta.chapters].sort((a, b) => a.startSecs - b.startSecs).map((c) => ({ startSecs: c.startSecs, name: c.title ?? null }));
   return {
     ...p,
     id: nextId++,
@@ -2218,13 +2700,46 @@ function titleFromProject(p: ProjectTitle, meta: VideoMetadata, afterSkipped: bo
     audio: new Set(audio),
     subs: new Set(p.subs.filter((i) => subsOk.has(i))),
     label: p.label || cleanTitle(meta.fileName),
-    chapters: chapters.length > 0 ? chapters : meta.chapters.map((c) => c.startSecs),
+    chapters: finalChapters.map((c) => c.startSecs),
+    chapterNames: finalChapters.map((c) => c.name),
+    externalSubtitles: [],
     // A changed source can be shorter than the saved section: use the whole file then.
     trimStart: p.trimStart !== null && p.trimStart < dur ? p.trimStart : null,
     trimEnd: p.trimEnd !== null && p.trimEnd <= dur ? p.trimEnd : null,
     mergeWithPrevious: p.mergeWithPrevious && !afterSkipped,
     audioNames: Object.fromEntries(Object.entries(p.audioNames).filter(([k]) => audioIdx.has(Number(k)))),
   };
+}
+
+async function restoreExternalSubtitles(
+  entries: ProjectExternalSubtitle[] | undefined,
+  gone: Set<string>,
+  lostSubs: string[],
+): Promise<ExternalSubtitleEntry[]> {
+  if (!entries || entries.length === 0) return [];
+  const out: ExternalSubtitleEntry[] = [];
+  for (const ext of entries) {
+    if (gone.has(ext.path)) {
+      lostSubs.push(ext.path);
+      continue;
+    }
+    try {
+      const info = await probeSubtitleFile(ext.path);
+      out.push({
+        path: info.path,
+        codec: info.codec,
+        kind: info.kind,
+        language: ext.language,
+        title: ext.title,
+        forced: ext.forced,
+        supported: info.supported,
+        enabled: info.supported ? ext.enabled : false,
+      });
+    } catch (e) {
+      lostSubs.push(`${ext.path} (${e})`);
+    }
+  }
+  return out;
 }
 
 /** Pushes the restored state into the footer controls. */
@@ -2242,10 +2757,16 @@ async function applyProject(data: ProjectFile, path: string | null) {
   projectBusy = true;
   try {
     const gone = new Set(
-      await missingPaths([...data.titles.map((t) => t.path), ...layoutFiles(data.customLayout), ...layoutFiles(data.customLayoutBd)]).catch(() => [] as string[]),
+      await missingPaths([
+        ...data.titles.map((t) => t.path),
+        ...data.titles.flatMap((t) => (t.externalSubtitles ?? []).map((e) => e.path)),
+        ...layoutFiles(data.customLayout),
+        ...layoutFiles(data.customLayoutBd),
+      ]).catch(() => [] as string[]),
     );
     const loaded: Title[] = [];
     const lostTitles: string[] = [];
+    const lostSubs: string[] = [];
     let afterSkipped = false;
     state.probing += data.titles.length;
     renderFooter();
@@ -2258,7 +2779,9 @@ async function applyProject(data: ProjectFile, path: string | null) {
         }
         status(tr("main.analysiere", { path: p.path }));
         try {
-          loaded.push(titleFromProject(p, await probeFile(p.path), afterSkipped));
+          const title = titleFromProject(p, await probeFile(p.path), afterSkipped);
+          title.externalSubtitles = await restoreExternalSubtitles(p.externalSubtitles, gone, lostSubs);
+          loaded.push(title);
           afterSkipped = false;
         } catch (e) {
           lostTitles.push(`${p.path} (${e})`);
@@ -2324,9 +2847,10 @@ async function applyProject(data: ProjectFile, path: string | null) {
     if (path) void clearAutosave();
     const name = path ? (path.split(/[\\/]/).pop() ?? path) : tr("project.recovered");
     const layoutLost = [...layoutFiles(data.customLayout), ...layoutFiles(data.customLayoutBd)].filter((p) => gone.has(p));
-    if (lostTitles.length > 0 || layoutLost.length > 0) {
-      showMissing(lostTitles, layoutLost);
-      status(tr("project.openedPartial", { name, count: loaded.length, missing: lostTitles.length + layoutLost.length }) + note, "error");
+    const totalMissing = lostTitles.length + layoutLost.length + lostSubs.length;
+    if (totalMissing > 0) {
+      showMissing(lostTitles, layoutLost, lostSubs);
+      status(tr("project.openedPartial", { name, count: loaded.length, missing: totalMissing }) + note, "error");
     } else {
       status(tr("project.opened", { name, count: loaded.length }) + note);
     }
@@ -2549,11 +3073,107 @@ async function init() {
 
   // Native drag & drop delivers file paths (HTML5 drop events do not).
   const dropzone = $("dropzone");
+  const clearDropHighlights = () => {
+    dropzone.classList.remove("hover");
+    document.querySelectorAll(".title-item.drop-target").forEach((el) => el.classList.remove("drop-target"));
+    document.querySelectorAll(".tab-dropzone.hover").forEach((el) => el.classList.remove("hover"));
+  };
+  const hitTestDropTarget = (pos: { x: number; y: number }) => {
+    const dpr = window.devicePixelRatio || 1;
+    const x = pos.x / dpr;
+    const y = pos.y / dpr;
+    const els = document.elementsFromPoint(x, y);
+    const titleCard = els.find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains("title-item")) ?? null;
+    const subZone = els.find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains("sub-dropzone")) ?? null;
+    const chapterZone = els.find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains("chapter-dropzone")) ?? null;
+    const videoZone = els.find((el): el is HTMLElement => el === dropzone) ?? null;
+    return { titleCard, subZone, chapterZone, videoZone };
+  };
+  let dragKinds = { hasVideo: false, hasSub: false, hasChapter: false };
+  const handleDroppedPaths = async (paths: string[], pos: { x: number; y: number }) => {
+    const videos: string[] = [];
+    const subs: string[] = [];
+    const chapters: string[] = [];
+    const unknown: string[] = [];
+    for (const path of paths) {
+      const ext = fileExt(path);
+      if (VIDEO_EXTENSIONS.includes(ext)) videos.push(path);
+      else if (SUBTITLE_EXTENSIONS.includes(ext)) subs.push(path);
+      else if (CHAPTER_EXTENSIONS.includes(ext)) chapters.push(path);
+      else unknown.push(path);
+    }
+
+    const { titleCard } = hitTestDropTarget(pos);
+    const hoveredTitle = titleCard ? state.titles.find((t) => t.id === Number(titleCard.dataset.id)) ?? null : null;
+
+    let addedVideos: Title[] = [];
+    if (videos.length > 0) {
+      addedVideos = await addFiles(videos);
+    }
+    const target = hoveredTitle ?? (addedVideos.length > 0 ? addedVideos[0] : selectedTitle());
+
+    if (subs.length > 0) {
+      if (!target) {
+        status(tr("main.dropSubNoTitle"), "error");
+      } else {
+        if (state.selected !== target.id) {
+          state.selected = target.id;
+          renderAll();
+        }
+        await attachExternalSubtitles(target, subs);
+      }
+    }
+
+    if (chapters.length > 0) {
+      if (!target) {
+        status(tr("main.dropChaptersNoTitle"), "error");
+      } else {
+        if (state.selected !== target.id) {
+          state.selected = target.id;
+          renderAll();
+        }
+        await importChaptersForTitle(target, chapters[0]);
+      }
+    }
+
+    if (unknown.length > 0) {
+      status(tr("main.dropUnknownFiles", { files: unknown.map(fileBaseName).join(", ") }), "error");
+    }
+  };
+
   await getCurrentWebview().onDragDropEvent((e) => {
     const p = e.payload;
-    if (p.type === "enter" || p.type === "over") dropzone.classList.add("hover");
-    else dropzone.classList.remove("hover");
-    if (p.type === "drop" && !state.converting) void addFiles(p.paths);
+    if (p.type === "enter") {
+      dragKinds = {
+        hasVideo: p.paths.some((f) => VIDEO_EXTENSIONS.includes(fileExt(f))),
+        hasSub: p.paths.some((f) => SUBTITLE_EXTENSIONS.includes(fileExt(f))),
+        hasChapter: p.paths.some((f) => CHAPTER_EXTENSIONS.includes(fileExt(f))),
+      };
+    }
+    if (p.type === "enter" || p.type === "over") {
+      clearDropHighlights();
+      if (state.converting) return;
+      const { titleCard, subZone, chapterZone, videoZone } = hitTestDropTarget(p.position);
+      if (titleCard && (dragKinds.hasSub || dragKinds.hasChapter || !dragKinds.hasVideo)) {
+        titleCard.classList.add("drop-target");
+      } else if (subZone) {
+        subZone.classList.add("hover");
+      } else if (chapterZone) {
+        chapterZone.classList.add("hover");
+      } else if (videoZone || dragKinds.hasVideo) {
+        dropzone.classList.add("hover");
+      }
+      return;
+    }
+    clearDropHighlights();
+    if (p.type === "leave") {
+      dragKinds = { hasVideo: false, hasSub: false, hasChapter: false };
+      return;
+    }
+    if (p.type === "drop") {
+      dragKinds = { hasVideo: false, hasSub: false, hasChapter: false };
+      if (!state.converting) void handleDroppedPaths(p.paths, p.position);
+    }
   });
 
   await onBuildEvent(onEvent);
