@@ -177,10 +177,16 @@ function loadSettings() {
     slots.bd.mode = s.menuModeBd === "template" ? "template" : "custom";
     for (const m of ["dvd", "bd"] as const) {
       const layout = localStorage.getItem(slotKey(m));
-      if (layout) slots[m].layout = JSON.parse(layout) as CustomLayout;
-      slots[m].key = localStorage.getItem(`${slotKey(m)}-titles`);
       const editedRaw = localStorage.getItem(`${slotKey(m)}-edited`);
-      slots[m].edited = slots[m].layout ? (editedRaw === null ? true : editedRaw === "1") : false;
+      if (layout && editedRaw !== "0") {
+        slots[m].layout = JSON.parse(layout) as CustomLayout;
+        slots[m].key = localStorage.getItem(`${slotKey(m)}-titles`);
+        slots[m].edited = editedRaw === null ? true : editedRaw === "1";
+      } else {
+        slots[m].layout = null;
+        slots[m].key = null;
+        slots[m].edited = false;
+      }
     }
     const live = slots[mediumOf(state.disc)];
     [state.menuMode, state.customLayout, state.customLayoutKey, state.customLayoutEdited] = [live.mode, live.layout, live.key, live.edited];
@@ -2306,7 +2312,7 @@ async function applyProject(data: ProjectFile, path: string | null) {
         note = " " + String(e);
       }
     }
-    if (state.titles.length === 0 || (state.menuMode === "custom" && !state.customLayoutEdited && !state.customLayout)) {
+    if (state.titles.length === 0 || (state.menuMode === "custom" && !state.customLayoutEdited && (!state.customLayout || layoutIsStale()))) {
       syncMenuAfterChange(null);
     }
     saveSettings();

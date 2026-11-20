@@ -585,11 +585,8 @@ function buildTitleSubmenus(
         e.shadow = style.shadow;
       }
     }
-    if (isBd) {
-      scaleMenuToBluray(m, baseCanvas, canvas);
-    } else {
-      for (const e of m.elements) if (e.type === "text") e.size = fitSize(e.text, e.size, e.w, e.font, e.bold);
-    }
+    if (isBd) scaleMenuToBluray(m, baseCanvas, canvas);
+    for (const e of m.elements) if (e.type === "text") e.size = fitSize(e.text, e.size, e.w, e.font, e.bold);
   }
   return out;
 }
@@ -1118,16 +1115,24 @@ export function syncLayoutWithTitles(
     page.id = allocId("m");
     page.background = { color: style.bgColor, image: null, video: null, blur: 0, gradientOverlay: style.bgGradient };
     const hs = style.heading;
+    const headingFitsAboveGrid = hs && hs.y + hs.h <= Math.round(112 * sy);
     const titleText = hs
-      ? text(hs.x, hs.y, hs.w, hs.h, heading || "DVD", {
-          font: hs.font,
-          size: hs.size,
-          color: hs.color,
-          align: hs.align,
-          bold: hs.bold,
-          italic: hs.italic,
-          shadow: hs.shadow,
-        })
+      ? text(
+          headingFitsAboveGrid ? hs.x : Math.round(60 * sx),
+          headingFitsAboveGrid ? hs.y : Math.round(36 * sy),
+          headingFitsAboveGrid ? hs.w : W - Math.round(120 * sx),
+          headingFitsAboveGrid ? hs.h : Math.round(56 * sy),
+          heading || "DVD",
+          {
+            font: hs.font,
+            size: headingFitsAboveGrid ? hs.size : Math.round(40 * (isBd ? sy : 1)),
+            color: hs.color,
+            align: hs.align,
+            bold: hs.bold,
+            italic: hs.italic,
+            shadow: hs.shadow,
+          },
+        )
       : text(
           Math.round(60 * sx),
           Math.round(36 * sy),

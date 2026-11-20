@@ -326,6 +326,27 @@ for (const tv of ["PAL", "NTSC", "BD1080"]) {
   }
 }
 
+// Enlarged/moved heading overlapping slot rows on page 1 must clamp to default heading box on page 2.
+{
+  const six = Array.from({ length: 6 }, (_, i) => makeTitle(i + 1, `/v/${i + 1}.mp4`));
+  const layout6 = draftLayout(six, "PAL", "Big Heading");
+  const head1 = layout6.menus[0].elements.find((e) => e.type === "text" && !e.action);
+  head1.font = "Georgia";
+  head1.color = "#E8C872";
+  head1.y = 30;
+  head1.h = 400; // extends deep into the 3x2 grid
+  const seven = [...six, makeTitle(7, "/v/7.mp4", { label: "Seventh" })];
+  const synced7 = syncLayoutWithTitles(layout6, six.map((t) => t.path), seven, "PAL", "Big Heading");
+  assertValidLayout(synced7, seven, "PAL", "enlarged heading pagination");
+  const page2 = synced7.menus.filter((m) => m.role === "title")[1];
+  const head2 = page2.elements.find((e) => e.type === "text" && !e.action && e.text === "Big Heading");
+  assert.ok(head2, "page 2 heading created");
+  assert.equal(head2.font, "Georgia");
+  assert.equal(head2.color, "#E8C872");
+  assert.ok(head2.y + head2.h <= 112, "page 2 heading clamped above slot grid");
+  assert.ok(page2.elements.some((e) => e.type === "video" && e.title === 7), "title 7 placed on page 2");
+}
+
 // ---------------------------------------------------------------------------
 // (d) Removing a video cleans up VTSM menus, buttons, captions & dangling links
 // ---------------------------------------------------------------------------
