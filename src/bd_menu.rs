@@ -19,7 +19,8 @@ use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
-    bd_button_rect, button_colors, clip_of, element_name, video_clip, fit_image, frame_box, frame_font_size, parse_color, rect_border, rect_image, rotate, Action,
+    bd_button_rect, button_colors, clip_of, element_name, fit_image, frame_box, frame_font_size, is_unrotated,
+    parse_color, rect_border, rect_image, rotate_coverage, rotate_rgba, video_clip, video_rotation_deg, Action,
     Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
 use crate::menu;
@@ -655,56 +656,61 @@ fn render_page(
     let mut pending: Vec<Pending> = Vec::new();
     for (n, e) in menu.elements.iter().enumerate() {
         let (x, y, w, h) = frame_box(e, canvas, frame);
-        let (bw, bh) = if e.rotation % 180 == 90 { (h, w) } else { (w, h) };
+        let unrotated = is_unrotated(e.rotation);
         let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let mut text_cov = None;
+        let mut text_cov: Option<(menu::Coverage, i64, i64)> = None;
         // Sprite of this element: its keys only apply to unrotated elements.
-        let sprite = |pixels: Pixels| {
-            let keys = if e.rotation == 0 { e.intro.iter().map(|k| frame_key(k, canvas, frame)).collect() } else { Vec::new() };
-            Sprite { pixels, rect: (x as f64, y as f64, w as f64, h as f64), opacity: e.opacity, keys }
+        let sprite = |pixels: Pixels, rx: i64, ry: i64, rw: u32, rh: u32| {
+            let keys = if unrotated { e.intro.iter().map(|k| frame_key(k, canvas, frame)).collect() } else { Vec::new() };
+            Sprite { pixels, rect: (rx as f64, ry as f64, rw as f64, rh as f64), opacity: e.opacity, keys }
         };
         let visible = e.opacity > 0.0 || !e.intro.is_empty();
         match &e.content {
             Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
-                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, frame), *bold, *italic, *wrap, align, bw, bh);
-                let mut img = RgbaImage::new(bw, bh);
+                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, frame), *bold, *italic, *wrap, align, w, h);
+                let mut img = RgbaImage::new(w, h);
                 let [r, g, b] = parse_color(color).unwrap_or([255, 255, 255]);
                 if *shadow {
                     menu::blend_coverage(&mut img, &cov, [0, 0, 0, 170], 2, 2, 255);
                 }
                 menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
-                let img = rotate(img, e.rotation);
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                let (img, rx, ry) = rotate_rgba(img, e.rotation, frame.pixel_aspect, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
                 if d.intro && visible {
-                    sprites.push(sprite(Pixels::Image(img)));
+                    sprites.push(sprite(Pixels::Image(img), rx, ry, rw, rh));
                 }
-                text_cov = Some(cov);
+                text_cov = Some(rotate_coverage(cov, e.rotation, frame.pixel_aspect, (x, y)));
             }
             Content::Image { src, fit } => {
                 let src_img = image::open(src).map_err(|err| io_err(Path::new(src), &err))?.to_rgba8();
-                let fitted = fit_image(&src_img, bw, bh, *fit, frame.pixel_aspect, e.rotation % 180 == 90);
+                let fitted = fit_image(&src_img, w, h, *fit, frame.pixel_aspect, false);
                 // An invisible image button is a template overlay mask: its bright, opaque pixels are the highlight.
                 if e.action.is_some() && e.opacity == 0.0 {
-                    text_cov = mask_coverage(&fitted);
+                    text_cov = mask_coverage(&fitted).map(|cov| rotate_coverage(cov, e.rotation, frame.pixel_aspect, (x, y)));
                 }
-                let img = rotate(fitted, e.rotation);
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                let (img, rx, ry) = rotate_rgba(fitted, e.rotation, frame.pixel_aspect, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
                 if d.intro && visible {
-                    sprites.push(sprite(Pixels::Image(img)));
+                    sprites.push(sprite(Pixels::Image(img), rx, ry, rw, rh));
                 }
             }
             Content::Rect { color, border_color, border_width } => {
                 let fill = parse_color(color).unwrap_or([255, 255, 255]);
-                let img = rotate(rect_image(fill, rect_border(border_color, border_width, canvas, frame, bw, bh), bw, bh, 255), e.rotation);
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                let raw = rect_image(fill, rect_border(border_color, border_width, canvas, frame, w, h), w, h, 255);
+                let (img, rx, ry) = rotate_rgba(raw, e.rotation, frame.pixel_aspect, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
                 if d.intro && visible {
-                    sprites.push(sprite(Pixels::Image(img)));
+                    sprites.push(sprite(Pixels::Image(img), rx, ry, rw, rh));
                 }
             }
             Content::Video { title, start_secs, fit, path } => {
+                let vid_rot = video_rotation_deg(e.rotation).unwrap_or(0);
                 flush(&mut current, &mut layers)?;
                 if d.intro && visible {
-                    sprites.push(sprite(Pixels::Slot { index: slots.len(), width: w, height: h }));
+                    sprites.push(sprite(Pixels::Slot { index: slots.len(), width: w, height: h }, x, y, w, h));
                     slots.push(layers.len());
                 }
                 layers.push(MenuLayer::Video {
@@ -713,7 +719,7 @@ fn render_page(
                     y: y.max(0) as u32,
                     width: w,
                     height: h,
-                    rotation: e.rotation,
+                    rotation: vid_rot,
                     fit: *fit,
                     opacity: e.opacity,
                 });
@@ -727,11 +733,14 @@ fn render_page(
             continue;
         };
         let (hl, sel) = button_colors(layout, e);
-        let cov = text_cov.as_ref();
+        let (cov, origin) = match &text_cov {
+            Some((c, ox, oy)) => (Some(c), (*ox, *oy)),
+            None => (None, (x, y)),
+        };
         pending.push(Pending {
             rect,
-            selected: highlight_image(rect, cov, (x, y), hl, alpha),
-            activated: highlight_image(rect, cov, (x, y), sel, alpha),
+            selected: highlight_image(rect, cov, origin, hl, alpha),
+            activated: highlight_image(rect, cov, origin, sel, alpha),
             element: n,
         });
     }
@@ -892,7 +901,7 @@ mod tests {
             y,
             w: 400.0,
             h: 100.0,
-            rotation: 0,
+            rotation: 0.0,
             opacity: 1.0,
             highlight: None,
             group: None,
@@ -1395,6 +1404,49 @@ mod tests {
         assert_eq!(cropped.rects[0], Rect { x0: 103, y0: 52, x1: 106, y1: 54 });
         assert_eq!(uncropped.rects[0], p.rect);
         assert_eq!((cropped.objects[0].width, cropped.objects[0].height), (3, 2));
+    }
+
+    #[test]
+    fn rotated_text_and_rect_buttons_render_into_bd_igs() {
+        let mut l = layout();
+        let mut tbtn = button(400.0, 200.0, Action::PlayTitle { title: 1 });
+        tbtn.w = 320.0;
+        tbtn.h = 80.0;
+        tbtn.rotation = 45.0;
+        let mut rbtn = button(1100.0, 400.0, Action::PlayAll);
+        rbtn.w = 240.0;
+        rbtn.h = 80.0;
+        rbtn.rotation = 30.0;
+        rbtn.content = Content::Rect { color: "#224466".into(), border_color: Some("#FFFFFF".into()), border_width: Some(4.0) };
+        l.menus[0].elements = vec![tbtn.clone(), rbtn.clone()];
+
+        let frame = MenuFrame::square(1920, 1080);
+        let t = [title(5), title(5)];
+        crate::layout::validate_bd(&l, &t, frame).unwrap();
+
+        let rect_t = bd_button_rect(&tbtn, l.canvas, frame).unwrap();
+        assert!(rect_t.y0 < 200 && rect_t.y1 > 280, "BD button rect expands for 45° rotation: {rect_t:?}");
+
+        let tr = traits(&l, &t, frame);
+        let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let dir = std::env::temp_dir().join(format!("bdmenu-rot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let pages = render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ig = pages[0].igs.as_ref().unwrap();
+        assert_eq!(ig.buttons.len(), 2);
+        assert_eq!((ig.buttons[0].x as u32, ig.buttons[0].y as u32), (rect_t.x0, rect_t.y0));
+        assert!(igs::build_sup(ig).len() > 100);
+
+        // Two rotated BD buttons that overlap in rotated AABB must fail validate_bd.
+        let mut b2 = tbtn.clone();
+        b2.y = 330.0;
+        l.menus[0].elements.push(b2);
+        let err = crate::layout::validate_bd(&l, &t, frame).unwrap_err().0.join("\n");
+        assert!(err.contains("overlaps"), "{err}");
     }
 
 }

@@ -251,9 +251,9 @@ pub struct Element {
     pub y: f64,
     pub w: f64,
     pub h: f64,
-    /// Clockwise, multiple of 90; buttons must stay at 0.
+    /// Clockwise in degrees; `Video` elements only support 90° steps (0 on video buttons).
     #[serde(default)]
-    pub rotation: u32,
+    pub rotation: f64,
     #[serde(default = "one")]
     pub opacity: f32,
     #[serde(default)]
@@ -480,28 +480,110 @@ pub fn parse_color(s: &str) -> Option<[u8; 3]> {
     }
 }
 
+/// Normalizes a finite rotation angle in degrees into `[0.0, 360.0)`.
+pub(crate) fn normalize_angle(deg: f64) -> f64 {
+    if !deg.is_finite() {
+        return 0.0;
+    }
+    let r = deg.rem_euclid(360.0);
+    if r >= 360.0 || r == 0.0 { 0.0 } else { r }
+}
+
+/// True when `deg` is finite and effectively `0.0` modulo 360°.
+pub(crate) fn is_unrotated(deg: f64) -> bool {
+    if !deg.is_finite() {
+        return false;
+    }
+    let r = normalize_angle(deg);
+    r < 1e-6 || (360.0 - r) < 1e-6
+}
+
+/// Exact 90-degree step (`0`, `90`, `180`, `270`) if `deg` is finite and within epsilon of one.
+pub(crate) fn video_rotation_deg(deg: f64) -> Option<u32> {
+    if !deg.is_finite() {
+        return None;
+    }
+    let norm = normalize_angle(deg);
+    let step = ((norm / 90.0).round() as u32 * 90) % 360;
+    let diff = (norm - step as f64).abs().min((360.0 - norm).abs());
+    (diff < 1e-6).then_some(step)
+}
+
+/// Half-extents `(half_w, half_h)` of an unrotated `w`×`h` box rotated clockwise around its center
+/// by `angle_deg`, compensating for non-square `pixel_aspect` (`display_w / display_h` per pixel).
+pub(crate) fn rotated_half_extents(w: f64, h: f64, angle_deg: f64, pixel_aspect: f64) -> (f64, f64) {
+    if is_unrotated(angle_deg) {
+        return (w / 2.0, h / 2.0);
+    }
+    let pa = pixel_aspect.max(1e-6);
+    let (sin, cos) = normalize_angle(angle_deg).to_radians().sin_cos();
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    let new_hw = (hw * cos).abs() + ((hh / pa) * sin).abs();
+    let new_hh = (hw * pa * sin).abs() + (hh * cos).abs();
+    (new_hw, new_hh)
+}
+
+/// Axis-aligned bounding box `(x, y, w, h)` of `(x, y, w, h)` rotated clockwise around its center
+/// by `angle_deg`, compensating for `pixel_aspect`.
+pub(crate) fn rotated_aabb(x: f64, y: f64, w: f64, h: f64, angle_deg: f64, pixel_aspect: f64) -> (f64, f64, f64, f64) {
+    if is_unrotated(angle_deg) {
+        return (x, y, w, h);
+    }
+    let (new_hw, new_hh) = rotated_half_extents(w, h, angle_deg, pixel_aspect);
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    (cx - new_hw, cy - new_hh, 2.0 * new_hw, 2.0 * new_hh)
+}
+
+/// Pixel aspect ratio in `canvas` units when displayed on `frame`.
+pub(crate) fn canvas_pixel_aspect(canvas: Canvas, frame: MenuFrame) -> f64 {
+    let sx = frame.width as f64 / canvas.width.max(1) as f64;
+    let sy = frame.height as f64 / canvas.height.max(1) as f64;
+    frame.pixel_aspect * sx / sy.max(1e-9)
+}
+
 /// Button rectangle of `e` on the TV frame (even y, clipped).
 pub(crate) fn button_rect(e: &Element, canvas: Canvas, frame: impl Into<MenuFrame>) -> Option<Rect> {
     let frame = frame.into();
     let (w, h) = (frame.width, frame.height);
-    Rect::from_template(
-        e.x.round() as i32,
-        e.y.round() as i32,
-        e.w.round().max(1.0) as u32,
-        e.h.round().max(1.0) as u32,
-        canvas.width,
-        canvas.height,
-        w,
-        h,
-    )
+    if matches!(e.content, Content::Video { .. }) || is_unrotated(e.rotation) {
+        return Rect::from_template(
+            e.x.round() as i32,
+            e.y.round() as i32,
+            e.w.round().max(1.0) as u32,
+            e.h.round().max(1.0) as u32,
+            canvas.width,
+            canvas.height,
+            w,
+            h,
+        );
+    }
+    let sx = w as f64 / canvas.width.max(1) as f64;
+    let sy = h as f64 / canvas.height.max(1) as f64;
+    let (ax, ay, aw, ah) = rotated_aabb(e.x * sx, e.y * sy, e.w * sx, e.h * sy, e.rotation, frame.pixel_aspect);
+    let clamp = |v: f64, max: u32| v.round().clamp(0.0, max as f64) as u32;
+    let x0 = clamp(ax, w);
+    let x1 = clamp(ax + aw, w);
+    let y0 = clamp(ay, h) & !1;
+    let y1 = (clamp(ay + ah, h) + 1).min(h) & !1;
+    (x1 > x0 && y1 > y0).then_some(Rect { x0, y0, x1, y1 })
 }
 
 /// Button rectangle on a Blu-ray frame: the element's box, rounded and clipped (no field rule).
 pub(crate) fn bd_button_rect(e: &Element, canvas: Canvas, frame: MenuFrame) -> Option<Rect> {
-    let (x, y, w, h) = frame_box(e, canvas, frame);
     let clamp = |v: i64, max: u32| v.clamp(0, max as i64) as u32;
-    let (x0, y0) = (clamp(x, frame.width), clamp(y, frame.height));
-    let (x1, y1) = (clamp(x + w as i64, frame.width), clamp(y + h as i64, frame.height));
+    if matches!(e.content, Content::Video { .. }) || is_unrotated(e.rotation) {
+        let (x, y, w, h) = frame_box(e, canvas, frame);
+        let (x0, y0) = (clamp(x, frame.width), clamp(y, frame.height));
+        let (x1, y1) = (clamp(x + w as i64, frame.width), clamp(y + h as i64, frame.height));
+        return (x1 > x0 && y1 > y0).then_some(Rect { x0, y0, x1, y1 });
+    }
+    let sx = frame.width as f64 / canvas.width.max(1) as f64;
+    let sy = frame.height as f64 / canvas.height.max(1) as f64;
+    let (ax, ay, aw, ah) = rotated_aabb(e.x * sx, e.y * sy, e.w * sx, e.h * sy, e.rotation, frame.pixel_aspect);
+    let clamp_f = |v: f64, max: u32| v.round().clamp(0.0, max as f64) as u32;
+    let (x0, y0) = (clamp_f(ax, frame.width), clamp_f(ay, frame.height));
+    let (x1, y1) = (clamp_f(ax + aw, frame.width), clamp_f(ay + ah, frame.height));
     (x1 > x0 && y1 > y0).then_some(Rect { x0, y0, x1, y1 })
 }
 
@@ -545,8 +627,7 @@ fn color_pairs(layout: &CustomLayout, menu: &CustomMenu) -> Vec<([u8; 3], [u8; 3
 pub fn element_text_lines(e: &Element, canvas: Canvas, tv: impl Into<MenuFrame> + Copy) -> Option<Vec<String>> {
     let Content::Text { text, font, size, bold, italic, wrap, .. } = &e.content else { return None };
     let (_, _, w, h) = frame_box(e, canvas, tv);
-    let (bw, bh) = if e.rotation % 180 == 90 { (h, w) } else { (w, h) };
-    Some(menu::text_lines(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, bw, bh))
+    Some(menu::text_lines(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, w, h))
 }
 
 /// Computes remote-control directional navigation links (`(element_id, Navigation)`) for all
@@ -677,16 +758,25 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
             }
         }
         let mut rects: Vec<(String, Rect)> = Vec::new();
+        let canvas_pa = canvas_pixel_aspect(c, frame);
         for (n, e) in m.elements.iter().enumerate() {
             let el = |msg: &str| menu(format!("{}: {msg}", element_name(e, n)));
+            let is_video = matches!(e.content, Content::Video { .. });
             if e.w < 1.0 || e.h < 1.0 {
                 errs.push(el("Width and height must be at least 1"));
             }
-            if e.x < -0.5 || e.y < -0.5 || e.x + e.w > c.width as f64 + 0.5 || e.y + e.h > c.height as f64 + 0.5 {
-                errs.push(el("lies (partly) outside the canvas"));
-            }
-            if e.rotation % 90 != 0 || e.rotation >= 360 {
+            if !e.rotation.is_finite() {
+                errs.push(el("Rotation must be a finite number"));
+            } else if is_video && video_rotation_deg(e.rotation).is_none() {
                 errs.push(el("Rotation only in 90° steps (0, 90, 180, 270)"));
+            }
+            let (ax, ay, aw, ah) = if is_video || !e.rotation.is_finite() {
+                (e.x, e.y, e.w, e.h)
+            } else {
+                rotated_aabb(e.x, e.y, e.w, e.h, e.rotation, canvas_pa)
+            };
+            if ax < -0.5 || ay < -0.5 || ax + aw > c.width as f64 + 0.5 || ay + ah > c.height as f64 + 0.5 {
+                errs.push(el("lies (partly) outside the canvas"));
             }
             if !(0.0..=1.0).contains(&e.opacity) {
                 errs.push(el("Opacity must be between 0 and 1"));
@@ -735,8 +825,8 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 }
             }
             let Some(action) = &e.action else { continue };
-            if e.rotation != 0 {
-                errs.push(el(&format!("Buttons cannot be rotated ({medium} hitboxes are axis-aligned rectangles)")));
+            if is_video && video_rotation_deg(e.rotation).unwrap_or(0) != 0 {
+                errs.push(el(&format!("Video buttons cannot be rotated ({medium} video layers are axis-aligned rectangles)")));
             }
             match action {
                 Action::PlayTitle { title } if !title_ok(*title) => errs.push(el(&format!("plays title {title}, which does not exist"))),
@@ -1255,13 +1345,139 @@ pub(crate) fn fit_image(img: &RgbaImage, w: u32, h: u32, fit: Fit, pixel_aspect:
     }
 }
 
-pub(crate) fn rotate(img: RgbaImage, rotation: u32) -> RgbaImage {
-    match rotation % 360 {
-        90 => imageops::rotate90(&img),
-        180 => imageops::rotate180(&img),
-        270 => imageops::rotate270(&img),
-        _ => img,
+fn rotated_grid(
+    src_w: u32,
+    src_h: u32,
+    angle_deg: f64,
+    pixel_aspect: f64,
+    origin: (i64, i64),
+) -> (u32, u32, i64, i64, impl Fn(u32, u32) -> (f64, f64)) {
+    let (new_hw, new_hh) = rotated_half_extents(src_w as f64, src_h as f64, angle_deg, pixel_aspect);
+    let rw = (2.0 * new_hw).ceil().max(1.0) as u32 + 2;
+    let rh = (2.0 * new_hh).ceil().max(1.0) as u32 + 2;
+    let cx = origin.0 as f64 + src_w as f64 / 2.0;
+    let cy = origin.1 as f64 + src_h as f64 / 2.0;
+    let rx = (cx - rw as f64 / 2.0).round() as i64;
+    let ry = (cy - rh as f64 / 2.0).round() as i64;
+    let pa = pixel_aspect.max(1e-6);
+    let (sin, cos) = normalize_angle(angle_deg).to_radians().sin_cos();
+    let (src_cx, src_cy) = (src_w as f64 / 2.0, src_h as f64 / 2.0);
+    let map = move |qx: u32, qy: u32| -> (f64, f64) {
+        let dx_dst = (rx as f64 + qx as f64 + 0.5) - cx;
+        let dy_dst = (ry as f64 + qy as f64 + 0.5) - cy;
+        let dx_src = dx_dst * cos + (dy_dst / pa) * sin;
+        let dy_src = -(dx_dst * pa) * sin + dy_dst * cos;
+        (src_cx + dx_src - 0.5, src_cy + dy_src - 0.5)
+    };
+    (rw, rh, rx, ry, map)
+}
+
+fn sample_rgba_bilinear_premul(img: &RgbaImage, sx: f64, sy: f64) -> image::Rgba<u8> {
+    let (w, h) = img.dimensions();
+    if sx <= -1.0 || sy <= -1.0 || sx >= w as f64 || sy >= h as f64 {
+        return image::Rgba([0, 0, 0, 0]);
     }
+    let x0 = sx.floor() as i64;
+    let y0 = sy.floor() as i64;
+    let fx = (sx - x0 as f64) as f32;
+    let fy = (sy - y0 as f64) as f32;
+    let get = |px: i64, py: i64| -> [f32; 4] {
+        if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
+            [0.0; 4]
+        } else {
+            let p = img.get_pixel(px as u32, py as u32).0;
+            let a = p[3] as f32 / 255.0;
+            [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a, a]
+        }
+    };
+    let p00 = get(x0, y0);
+    let p10 = get(x0 + 1, y0);
+    let p01 = get(x0, y0 + 1);
+    let p11 = get(x0 + 1, y0 + 1);
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+    let out_a = p00[3] * w00 + p10[3] * w10 + p01[3] * w01 + p11[3] * w11;
+    if out_a <= 1e-5 {
+        return image::Rgba([0, 0, 0, 0]);
+    }
+    let ch = |c: usize| -> u8 {
+        ((p00[c] * w00 + p10[c] * w10 + p01[c] * w01 + p11[c] * w11) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    image::Rgba([ch(0), ch(1), ch(2), (out_a * 255.0).round().clamp(0.0, 255.0) as u8])
+}
+
+fn sample_coverage_bilinear(cov: &menu::Coverage, sx: f64, sy: f64) -> f32 {
+    if sx <= -1.0 || sy <= -1.0 || sx >= cov.width as f64 || sy >= cov.height as f64 {
+        return 0.0;
+    }
+    let x0 = sx.floor() as i64;
+    let y0 = sy.floor() as i64;
+    let fx = (sx - x0 as f64) as f32;
+    let fy = (sy - y0 as f64) as f32;
+    let p00 = cov.at(x0, y0);
+    let p10 = cov.at(x0 + 1, y0);
+    let p01 = cov.at(x0, y0 + 1);
+    let p11 = cov.at(x0 + 1, y0 + 1);
+    (p00 * (1.0 - fx) * (1.0 - fy)
+        + p10 * fx * (1.0 - fy)
+        + p01 * (1.0 - fx) * fy
+        + p11 * fx * fy)
+        .clamp(0.0, 1.0)
+}
+
+/// Rotates `img` clockwise around its center by `angle_deg`, compensating for `pixel_aspect`.
+/// Returns `(rotated_image, frame_x, frame_y)`; at `0°` returns the input unchanged at `origin`.
+pub(crate) fn rotate_rgba(
+    img: RgbaImage,
+    angle_deg: f64,
+    pixel_aspect: f64,
+    origin: (i64, i64),
+) -> (RgbaImage, i64, i64) {
+    if is_unrotated(angle_deg) {
+        return (img, origin.0, origin.1);
+    }
+    let (w, h) = img.dimensions();
+    let (rw, rh, rx, ry, map) = rotated_grid(w, h, angle_deg, pixel_aspect, origin);
+    let mut out = RgbaImage::new(rw, rh);
+    for qy in 0..rh {
+        for qx in 0..rw {
+            let (sx, sy) = map(qx, qy);
+            let px = sample_rgba_bilinear_premul(&img, sx, sy);
+            if px.0[3] > 0 {
+                out.put_pixel(qx, qy, px);
+            }
+        }
+    }
+    (out, rx, ry)
+}
+
+/// Rotates glyph/mask `cov` clockwise around its center by `angle_deg`, compensating for `pixel_aspect`.
+/// Returns `(rotated_coverage, frame_x, frame_y)`; at `0°` returns the input unchanged at `origin`.
+pub(crate) fn rotate_coverage(
+    cov: menu::Coverage,
+    angle_deg: f64,
+    pixel_aspect: f64,
+    origin: (i64, i64),
+) -> (menu::Coverage, i64, i64) {
+    if is_unrotated(angle_deg) {
+        return (cov, origin.0, origin.1);
+    }
+    let (rw, rh, rx, ry, map) = rotated_grid(cov.width, cov.height, angle_deg, pixel_aspect, origin);
+    let mut out = menu::Coverage::new(rw, rh);
+    for qy in 0..rh {
+        for qx in 0..rw {
+            let (sx, sy) = map(qx, qy);
+            let v = sample_coverage_bilinear(&cov, sx, sy);
+            if v > 0.0 {
+                out.data[(qy * rw + qx) as usize] = v;
+            }
+        }
+    }
+    (out, rx, ry)
 }
 
 /// An element's box on the TV frame: `(x, y, w, h)`.
@@ -1373,54 +1589,60 @@ fn render_custom_page(
 
     for (n, e) in menu.elements.iter().enumerate() {
         let (x, y, w, h) = frame_box(e, canvas, tv);
-        // Unrotated content size.
-        let (bw, bh) = if e.rotation % 180 == 90 { (h, w) } else { (w, h) };
+        let unrotated = is_unrotated(e.rotation);
         let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-        // Glyph coverage of a text button, for its highlight shape.
-        let mut text_cov = None;
+        // Rotated glyph coverage `(cov, origin_x, origin_y)` of a text button, for its highlight shape.
+        let mut text_cov: Option<(menu::Coverage, i64, i64)> = None;
 
-        let sprite = |pixels: menu_anim::Pixels| {
-            let keys = if e.rotation == 0 { e.intro.iter().map(|k| frame_key(k, canvas, tv)).collect() } else { Vec::new() };
-            menu_anim::Sprite { pixels, rect: (x as f64, y as f64, w as f64, h as f64), opacity: e.opacity, keys }
+        let sprite = |pixels: menu_anim::Pixels, rx: i64, ry: i64, rw: u32, rh: u32| {
+            let keys = if unrotated { e.intro.iter().map(|k| frame_key(k, canvas, tv)).collect() } else { Vec::new() };
+            menu_anim::Sprite { pixels, rect: (rx as f64, ry as f64, rw as f64, rh as f64), opacity: e.opacity, keys }
         };
         let visible = e.opacity > 0.0 || !e.intro.is_empty();
+        let pa = tv.menu_pixel_aspect();
 
         match &e.content {
             Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
-                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, align, bw, bh);
-                let mut img = RgbaImage::new(bw, bh);
+                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, align, w, h);
+                let mut img = RgbaImage::new(w, h);
                 let [r, g, b] = parse_color(color).unwrap_or([255, 255, 255]);
                 if *shadow {
                     menu::blend_coverage(&mut img, &cov, [0, 0, 0, 170], 2, 2, 255);
                 }
                 menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
-                let img = rotate(img, e.rotation);
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                let (img, rx, ry) = rotate_rgba(img, e.rotation, pa, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
                 if has_intro && visible {
-                    sprites.push(sprite(menu_anim::Pixels::Image(img)));
+                    sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
-                text_cov = Some(cov);
+                text_cov = Some(rotate_coverage(cov, e.rotation, pa, (x, y)));
             }
             Content::Image { src, fit } => {
                 let src_img = image::open(src).map_err(|err| io(Path::new(src), &err))?.to_rgba8();
-                let img = rotate(fit_image(&src_img, bw, bh, *fit, tv.menu_pixel_aspect(), e.rotation % 180 == 90), e.rotation);
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                let fitted = fit_image(&src_img, w, h, *fit, pa, false);
+                let (img, rx, ry) = rotate_rgba(fitted, e.rotation, pa, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
                 if has_intro && visible {
-                    sprites.push(sprite(menu_anim::Pixels::Image(img)));
+                    sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
             }
             Content::Rect { color, border_color, border_width } => {
                 let fill = parse_color(color).unwrap_or([255, 255, 255]);
-                let img = rotate(rect_image(fill, rect_border(border_color, border_width, canvas, tv, bw, bh), bw, bh, 255), e.rotation);
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, x, y, opacity);
+                let raw = rect_image(fill, rect_border(border_color, border_width, canvas, tv, w, h), w, h, 255);
+                let (img, rx, ry) = rotate_rgba(raw, e.rotation, pa, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
                 if has_intro && visible {
-                    sprites.push(sprite(menu_anim::Pixels::Image(img)));
+                    sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
             }
             Content::Video { title, start_secs, fit, path } => {
+                let vid_rot = video_rotation_deg(e.rotation).unwrap_or(0);
                 flush(&mut current, &mut layers)?;
                 if has_intro && visible {
-                    sprites.push(sprite(menu_anim::Pixels::Slot { index: slots.len(), width: w, height: h }));
+                    sprites.push(sprite(menu_anim::Pixels::Slot { index: slots.len(), width: w, height: h }, x, y, w, h));
                     slots.push(layers.len());
                 }
                 layers.push(MenuLayer::Video {
@@ -1429,7 +1651,7 @@ fn render_custom_page(
                     y: y.max(0) as u32,
                     width: w,
                     height: h,
-                    rotation: e.rotation,
+                    rotation: vid_rot,
                     fit: *fit,
                     opacity: e.opacity,
                 });
@@ -1446,7 +1668,12 @@ fn render_custom_page(
         // Highlight shape: the glyphs of a text button, a frame around everything else. Skip if Easter Egg.
         if !e.easter_egg {
             match &text_cov {
-                Some(cov) => {
+                Some((cov, cov_rx, cov_ry)) => {
+                    let (min_x, min_y, max_x, max_y) = if unrotated {
+                        (0i64, 0i64, fw as i64, fh as i64)
+                    } else {
+                        (rect.x0 as i64, rect.y0 as i64, rect.x1 as i64, rect.y1 as i64)
+                    };
                     for py in 0..cov.height {
                         for px in 0..cov.width {
                             let v = cov.at(px as i64, py as i64);
@@ -1457,8 +1684,8 @@ fn render_custom_page(
                             } else {
                                 0
                             };
-                            let (tx, ty) = (x + px as i64, y + py as i64);
-                            if idx > 0 && tx >= 0 && ty >= 0 && (tx as u32) < fw && (ty as u32) < fh {
+                            let (tx, ty) = (cov_rx + px as i64, cov_ry + py as i64);
+                            if idx > 0 && tx >= min_x && ty >= min_y && tx < max_x && ty < max_y {
                                 let i = (ty as u32 * fw + tx as u32) as usize;
                                 highlight.pixels[i] = idx;
                                 select.pixels[i] = idx;
@@ -1916,7 +2143,7 @@ mod tests {
             y,
             w: 300.0,
             h: 50.0,
-            rotation: 0,
+            rotation: 0.0,
             opacity: 1.0,
             action,
             highlight: None,
@@ -2003,14 +2230,16 @@ mod tests {
 
     #[test]
     fn validation_catches_dvd_limits() {
-        let mut rotated = text(10.0, 10.0, "A", Some(Action::PlayTitle { title: 1 }));
-        rotated.rotation = 90;
-        let mut odd = text(10.0, 300.0, "B", None);
-        odd.rotation = 45;
+        let mut rotated_video = text(10.0, 10.0, "", Some(Action::PlayTitle { title: 1 }));
+        rotated_video.content = Content::Video { title: 1, start_secs: None, fit: Fit::Cover, path: None };
+        rotated_video.rotation = 90.0;
+        let mut odd_video = text(10.0, 300.0, "", None);
+        odd_video.content = Content::Video { title: 1, start_secs: None, fit: Fit::Cover, path: None };
+        odd_video.rotation = 45.0;
         let l = layout(vec![
             menu("m", MenuRole::Title, None, vec![
-                rotated,
-                odd,
+                rotated_video,
+                odd_video,
                 text(10.0, 100.0, "C", Some(Action::PlayChapter { title: 1, chapter: 9 })),
                 text(10.0, 120.0, "D", Some(Action::menu("nope"))),
                 text(500.0, 500.0, "E", Some(Action::PlayTitle { title: 3 })),
@@ -2289,7 +2518,7 @@ mod tests {
         picture.h = 100.0;
         let mut video = text(60.0, 200.0, "", None);
         video.content = Content::Video { title: 1, start_secs: Some(42.0), fit: Fit::Cover, path: None };
-        video.rotation = 90;
+        video.rotation = 90.0;
         let caption = text(60.0, 470.0, "Film abspielen", Some(Action::PlayTitle { title: 1 }));
         let l = layout(vec![
             menu("main", MenuRole::Title, None, vec![picture, video, caption]),
@@ -2529,5 +2758,136 @@ mod tests {
         assert_eq!(bd_native[4].0, "btn_offscreen");
         assert_eq!(bd_native[2].1.right.as_deref(), Some("btn_offscreen"));
         assert_eq!(bd_native[4].1.left.as_deref(), Some("btn_mid_right"));
+    }
+
+    #[test]
+    fn arbitrary_angle_rotation_json_and_normalization() {
+        let int_el: Element = serde_json::from_str(
+            r#"{"id":"a","type":"text","text":"Hi","x":10,"y":10,"w":100,"h":40,"rotation":90}"#,
+        )
+        .unwrap();
+        assert_eq!(int_el.rotation, 90.0);
+
+        let frac_el: Element = serde_json::from_str(
+            r#"{"id":"b","type":"text","text":"Hi","x":10,"y":10,"w":100,"h":40,"rotation":37.5}"#,
+        )
+        .unwrap();
+        assert_eq!(frac_el.rotation, 37.5);
+
+        assert_eq!(normalize_angle(-45.0), 315.0);
+        assert_eq!(normalize_angle(360.0), 0.0);
+        assert_eq!(normalize_angle(725.5), 5.5);
+        assert!(is_unrotated(0.0) && is_unrotated(360.0) && !is_unrotated(0.5));
+
+        let mut nan_el = text(100.0, 100.0, "NaN", None);
+        nan_el.rotation = f64::NAN;
+        let err = validate(&layout(vec![menu("m", MenuRole::Title, None, vec![nan_el])]), &titles(1), TvStandard::Pal).unwrap_err();
+        assert!(err.0.iter().any(|e| e.contains("finite")), "{err:?}");
+    }
+
+    #[test]
+    fn rotated_text_and_rect_buttons_validate_aabb_and_render() {
+        let ts = titles(1);
+        let canvas = Canvas::default();
+        // 45° rotated text button inside canvas, plus a 30° rotated rect button.
+        let mut tbtn = text(100.0, 120.0, "Play Film", Some(Action::PlayTitle { title: 1 }));
+        tbtn.w = 180.0;
+        tbtn.h = 44.0;
+        tbtn.rotation = 45.0;
+
+        let mut rbtn = rect(400.0, 260.0, "#336699", Some(("#FFFFFF", 2.0)), Some(Action::PlayAll));
+        rbtn.w = 140.0;
+        rbtn.h = 60.0;
+        rbtn.rotation = 30.0;
+
+        let l = layout(vec![menu("m", MenuRole::Title, None, vec![tbtn.clone(), rbtn.clone()])]);
+        validate(&l, &ts, TvStandard::Pal).unwrap();
+
+        // button_rect uses rotated AABB with even y bounds.
+        let trect = button_rect(&tbtn, canvas, TvStandard::Pal).unwrap();
+        assert!(trect.y0 % 2 == 0 && trect.y1 % 2 == 0);
+        assert!(trect.y0 < 120 && trect.y1 > 164, "rotated height expands past unrotated 120..164: {trect:?}");
+
+        // Two buttons whose unrotated boxes do NOT overlap, but whose 45° rotated AABBs DO overlap.
+        let mut b1 = text(200.0, 200.0, "One", Some(Action::PlayTitle { title: 1 }));
+        b1.w = 200.0;
+        b1.h = 40.0;
+        b1.rotation = 45.0;
+        let mut b2 = text(200.0, 270.0, "Two", Some(Action::PlayAll));
+        b2.w = 200.0;
+        b2.h = 40.0;
+        b2.rotation = 45.0;
+        let overlap_err = validate(&layout(vec![menu("m", MenuRole::Title, None, vec![b1, b2])]), &ts, TvStandard::Pal)
+            .unwrap_err()
+            .0
+            .join("\n");
+        assert!(overlap_err.contains("overlaps"), "{overlap_err}");
+
+        // Element whose unrotated box fits inside 720x576, but 45° rotation pushes a corner outside.
+        let mut edge = text(600.0, 200.0, "Edge", None);
+        edge.w = 110.0;
+        edge.h = 110.0;
+        edge.rotation = 45.0;
+        let edge_err = validate(&layout(vec![menu("m", MenuRole::Title, None, vec![edge])]), &ts, TvStandard::Pal)
+            .unwrap_err()
+            .0
+            .join("\n");
+        assert!(edge_err.contains("outside"), "{edge_err}");
+
+        // element_text_lines keeps unrotated (w, h) wrapping even at 90°.
+        let mut wrapped = text(50.0, 50.0, "WordOne WordTwo WordThree WordFour", None);
+        wrapped.w = 180.0;
+        wrapped.h = 200.0;
+        if let Content::Text { wrap, .. } = &mut wrapped.content {
+            *wrap = true;
+        }
+        let lines_0 = element_text_lines(&wrapped, canvas, TvStandard::Pal).unwrap();
+        wrapped.rotation = 90.0;
+        let lines_90 = element_text_lines(&wrapped, canvas, TvStandard::Pal).unwrap();
+        assert_eq!(lines_0, lines_90);
+
+        // Rendering: rotated glyphs appear in both the background layer and highlight/select masks.
+        let dir = std::env::temp_dir().join(format!("cx_layout_rot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = build_custom_menus(&l, &ts, TvStandard::Pal, &dir, 10.0).unwrap();
+        let (spec, files) = &out.pages[0];
+        assert_eq!(spec.buttons.len(), 2);
+        let hl = image::open(&files.highlight).unwrap().to_rgba8();
+        let sel = image::open(&files.select).unwrap().to_rgba8();
+        let lit_top = (trect.x0..trect.x1).flat_map(|x| (trect.y0..120).map(move |y| (x, y))).filter(|&(x, y)| hl.get_pixel(x, y).0[3] > 0).count();
+        let lit_bot = (trect.x0..trect.x1).flat_map(|x| (164..trect.y1).map(move |y| (x, y))).filter(|&(x, y)| hl.get_pixel(x, y).0[3] > 0).count();
+        assert!(lit_top > 0 && lit_bot > 0, "rotated text glyphs extend above and below unrotated box: top={lit_top}, bot={lit_bot}");
+        assert!(sel.pixels().any(|p| p.0[3] > 0));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn non_square_pixel_aspect_rotation_and_zero_fast_path() {
+        let pal_pa = TvStandard::Pal.menu_pixel_aspect();
+        // A 120x12 bar rotated 45° on PAL should have equal physical display width and height:
+        // aabb_w * pal_pa == aabb_h.
+        let (_, _, aw, ah) = rotated_aabb(100.0, 100.0, 120.0, 12.0, 45.0, pal_pa);
+        assert!((aw * pal_pa - ah).abs() < 1e-6, "aw={aw}, ah={ah}, pa={pal_pa}");
+
+        // Rasterized 120x4 horizontal stripe rotated 45° on PAL: lit pixels lie along dy / (dx * pal_pa) == 1.0.
+        let src = RgbaImage::from_pixel(120, 4, image::Rgba([255, 255, 255, 255]));
+        let (rot, rx, ry) = rotate_rgba(src.clone(), 45.0, pal_pa, (100, 100));
+        let (cx, cy) = (100.0 + 60.0, 100.0 + 2.0);
+        let max_err = rot
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p.0[3] >= 200)
+            .map(|(qx, qy, _)| {
+                let dx_disp = (rx as f64 + qx as f64 + 0.5 - cx) * pal_pa;
+                let dy_disp = ry as f64 + qy as f64 + 0.5 - cy;
+                (dy_disp - dx_disp).abs()
+            })
+            .fold(0.0f64, f64::max);
+        assert!(max_err < 3.5, "45° stripe on PAL should stay aligned in display space: max_err={max_err}");
+
+        // 0° fast path returns byte-identical pixels and exact origin.
+        let (fast, fx, fy) = rotate_rgba(src.clone(), 0.0, pal_pa, (42, 84));
+        assert_eq!((fx, fy), (42, 84));
+        assert_eq!(fast.as_raw(), src.as_raw());
     }
 }
