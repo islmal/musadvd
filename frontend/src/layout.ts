@@ -19,7 +19,11 @@ export type Action =
   /** Source stream index of the subtitle, `null` = subtitles off. */
   | { type: "setSubtitle"; source: number | null }
   /** Custom conditional VM script (e.g. "if (g4 == 1) link button 2; else jump menu 3;"). */
-  | { type: "customVm"; script: string };
+  | { type: "customVm"; script: string }
+  /** Disc-wide audio choice: 1-based track position, applied to every title that has it; any menu. */
+  | { type: "setGlobalAudio"; track: number }
+  /** Disc-wide subtitle choice: 1-based track position, `null` = off; any menu. */
+  | { type: "setGlobalSubtitle"; track: number | null };
 
 export type VideoAssetSource =
   | { source: "title"; title: number; startSecs?: number | null }
@@ -74,10 +78,31 @@ export interface TextElement extends ElementBase {
   wrap?: boolean;
 }
 
+/** Source rectangle of a picture, normalized 0..1 of its natural size. */
+export interface CropRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ImageElement extends ElementBase {
   type: "image";
   src: string;
   fit: Fit;
+  /** Non-destructive crop applied before fitting; null/omitted = whole picture. */
+  crop?: CropRect | null;
+}
+
+/** Built-in vector symbols (`assets/icons/<name>.svg`, drawn in `currentColor`). */
+export type IconName = "next" | "prev" | "home" | "play" | "subtitles" | "audio" | "back";
+export const ICON_NAMES: IconName[] = ["next", "prev", "home", "play", "subtitles", "audio", "back"];
+
+/** A built-in symbol, fitted (contain) into its box and filled with `color`. */
+export interface IconElement extends ElementBase {
+  type: "icon";
+  icon: IconName;
+  color: string;
 }
 
 export interface VideoElement extends ElementBase {
@@ -99,7 +124,7 @@ export interface RectElement extends ElementBase {
   borderWidth?: number;
 }
 
-export type LayoutElement = TextElement | ImageElement | VideoElement | RectElement;
+export type LayoutElement = TextElement | ImageElement | VideoElement | RectElement | IconElement;
 
 export type MenuSound = { type: "none" } | { type: "title"; title: number; startSecs?: number | null } | { type: "file"; path: string };
 
@@ -121,6 +146,8 @@ export interface CustomMenu {
   durationSecs?: number | null;
   audio: MenuSound;
   introSecs?: number | null;
+  /** Editor-only sidebar group ("main", "episodes", "chapters", "settings"); null = derived from the role. */
+  group?: string | null;
   elements: LayoutElement[];
 }
 
@@ -140,8 +167,16 @@ export interface CustomLayout {
   canvas: { width: number; height: number };
   highlight: { color: string; selectColor: string; opacity: number };
   fastPlay?: FastPlayConfig | null;
+  /** Draft metadata (ignored by the build): theme and settings-menu structure it was made with. */
+  theme?: MenuTheme;
+  settingsMode?: SettingsMode;
   menus: CustomMenu[];
 }
+
+/** `landing` = retail single-screen main menu (default); `classic` = 6-thumbnail grid. */
+export type MenuTheme = "landing" | "classic";
+/** `global` = one shared audio/subtitle menu for the disc; `perTitle` = one per title. */
+export type SettingsMode = "global" | "perTitle";
 
 /** A selected audio track or subtitle of a title: source stream index and a label. */
 export interface TrackRef {
@@ -384,6 +419,11 @@ export function rect(x: number, y: number, w: number, h: number, color: string, 
   return { id: newId("r"), type: "rect", color, x, y, w, h, rotation: 0, opacity: 1, action: null, ...extra };
 }
 
+/** A built-in symbol; `color` defaults to white (the default text colour). */
+export function icon(x: number, y: number, w: number, h: number, name: IconName, color = "#FFFFFF", extra: Partial<IconElement> = {}): IconElement {
+  return { id: newId("i"), type: "icon", icon: name, color, x, y, w, h, rotation: 0, opacity: 1, action: null, ...extra };
+}
+
 function video(x: number, y: number, w: number, h: number, title: number, startSecs: number | null, action: Action | null): VideoElement {
   return { id: newId("v"), type: "video", title, startSecs, fit: "cover", x, y, w, h, rotation: 0, opacity: 1, action };
 }
@@ -487,6 +527,43 @@ interface SubmenuStyle {
   shadow: boolean;
 }
 
+/** How a submenu synthesis follows the draft: theme, settings structure, id of the title's settings menu. */
+interface SubNav {
+  theme?: MenuTheme;
+  settingsMode?: SettingsMode;
+  settingsId?: string;
+}
+
+/** Home icon at `homeX` plus round prev/next arrows on the right, as buttons on a 720-wide base canvas. */
+function navIcons(W: number, y: number, h: number, homeX: number, home: string, prev: string | null, next: string | null): IconElement[] {
+  const out = [icon(homeX, y, 44, h, "home", "#FFFFFF", { action: { type: "menu", menu: home } })];
+  if (prev) out.push(icon(W - 172, y, 44, h, "prev", "#FFFFFF", { action: { type: "menu", menu: prev } }));
+  if (next) out.push(icon(W - 104, y, 44, h, "next", "#FFFFFF", { action: { type: "menu", menu: next } }));
+  return out;
+}
+
+/** Audio column (left) and subtitle column (right, "Off" first) of a settings menu; entries beyond the rows are dropped. */
+function fillSettings(s: CustomMenu, Y: (v: number) => number, audio: [string, Action][], subs: [string, Action][], off: Action): void {
+  const rows = 8;
+  const step = Y(38);
+  const top = Y(150);
+  if (audio.length > 0) {
+    s.elements.push(text(60, Y(110), 300, Y(32), tr("layout.tonspur"), { size: 22, bold: true, align: "left", color: "#FFD200" }));
+    audio.slice(0, rows).forEach(([label, action], k) => {
+      s.elements.push(text(60, top + k * step, 300, Y(34), label, { size: 20, align: "left", action }));
+    });
+  }
+  if (subs.length > 0) {
+    s.elements.push(text(380, Y(110), 280, Y(32), tr("layout.untertitel"), { size: 22, bold: true, align: "left", color: "#FFD200" }));
+    const entries: [string, Action][] = [[tr("layout.aus"), off], ...subs];
+    const twoColumns = entries.length > rows;
+    entries.slice(0, rows * 2).forEach(([label, action], k) => {
+      const col = Math.floor(k / rows);
+      s.elements.push(text(twoColumns ? 380 + col * 145 : 380, top + (k % rows) * step, twoColumns ? 135 : 280, Y(34), label, { size: 20, align: "left", action }));
+    });
+  }
+}
+
 /** Synthesizes the VTSM root (chapter) pages and optional settings menu for one title. */
 function buildTitleSubmenus(
   t: EditorTitle,
@@ -496,14 +573,17 @@ function buildTitleSubmenus(
   rootId: string,
   allocId: (prefix: string) => string = newId,
   style?: SubmenuStyle,
+  nav: SubNav = {},
 ): CustomMenu[] {
+  const landing = nav.theme === "landing";
+  const global = nav.settingsMode === "global";
   const isBd = isBdFrame(tv) || canvas.width > 720;
   const baseCanvas = isBd ? { width: 720, height: 576 } : canvas;
   const { width: W, height: H } = baseCanvas;
   const sy = H / 576;
   const Y = (v: number) => Math.round(v * sy);
   const n = t.index;
-  const settingsId = needsSettings(t) ? allocId("m") : null;
+  const settingsId = !global && needsSettings(t) ? (nav.settingsId ?? allocId("m")) : null;
   const shaded: Background = style?.flatBg
     ? { color: style.bgColor, image: null, video: null, blur: 0, gradientOverlay: "none" }
     : { color: style?.bgColor ?? "#14192B", image: null, video: { title: n, startSecs: null }, blur: 14 };
@@ -516,6 +596,7 @@ function buildTitleSubmenus(
     const name = t.chapters > 1 ? (pages > 1 ? tr("layout.kapitel3", { label: t.label, p: p + 1 }) : tr("layout.kapitel4", { label: t.label })) : tr("layout.menue2", { label: t.label });
     const m = emptyMenu(name, "root", n);
     m.id = p === 0 ? rootId : allocId("m");
+    m.group = "chapters";
     m.background = style?.flatBg ? { ...shaded } : { ...shaded, gradientOverlay: "bottomDark" };
     rootMenus.push(m);
   }
@@ -534,6 +615,10 @@ function buildTitleSubmenus(
     const bottom = Y(490);
     const row: TextElement[] = [text(60, bottom, 170, Y(36), tr("layout.filmAbspielen"), { size: 20, align: "left", action: { type: "playTitle", title: n } })];
     if (settingsId) row.push(text(240, bottom, 160, Y(36), tr("layout.einstellungen"), { size: 20, action: { type: "menu", menu: settingsId } }));
+    if (landing) {
+      m.elements.push(...row, ...navIcons(W, bottom, Y(44), 420, mainMenuId, p > 0 ? rootMenus[p - 1].id : null, p < pages - 1 ? rootMenus[p + 1].id : null));
+      return;
+    }
     row.push(text(410, bottom, 130, Y(36), tr("layout.hauptmenue2"), { size: 20, action: { type: "menu", menu: mainMenuId } }));
     if (p > 0) row.push(text(550, bottom, 50, Y(36), "‹", { size: 24, action: { type: "menu", menu: rootMenus[p - 1].id } }));
     if (p < pages - 1) row.push(text(610, bottom, 50, Y(36), "›", { size: 24, action: { type: "menu", menu: rootMenus[p + 1].id } }));
@@ -546,38 +631,20 @@ function buildTitleSubmenus(
     s.id = settingsId;
     s.background = style?.flatBg ? { ...shaded } : { ...shaded, gradientOverlay: "dim" };
     s.elements.push(text(60, Y(36), W - 120, Y(50), tr("layout.einstellungen2", { label: t.label }), { size: 32, bold: true }));
-    const rows = 8;
-    const step = Y(38);
-    const top = Y(150);
-    const audio = t.audioTracks ?? [];
-    if (audio.length > 0) {
-      s.elements.push(text(60, Y(110), 300, Y(32), tr("layout.tonspur"), { size: 22, bold: true, align: "left", color: "#FFD200" }));
-      audio.slice(0, rows).forEach((a, k) => {
-        s.elements.push(text(60, top + k * step, 300, Y(34), a.label, { size: 20, align: "left", action: { type: "setAudio", source: a.source } }));
-      });
-    }
-    const subs = t.subtitleTracks ?? [];
-    if (subs.length > 0) {
-      s.elements.push(text(380, Y(110), 280, Y(32), tr("layout.untertitel"), { size: 22, bold: true, align: "left", color: "#FFD200" }));
-      const entries: [string, number | null][] = [[tr("layout.aus"), null], ...subs.map((x): [string, number | null] => [x.label, x.source])];
-      const twoColumns = entries.length > rows;
-      entries.slice(0, rows * 2).forEach(([label, source], k) => {
-        const col = Math.floor(k / rows);
-        const x = twoColumns ? 380 + col * 145 : 380;
-        const w = twoColumns ? 135 : 280;
-        s.elements.push(text(x, top + (k % rows) * step, w, Y(34), label, { size: 20, align: "left", action: { type: "setSubtitle", source } }));
-      });
-    }
+    s.group = "settings";
+    fillSettings(s, Y, (t.audioTracks ?? []).map((a): [string, Action] => [a.label, { type: "setAudio", source: a.source }]), (t.subtitleTracks ?? []).map((x): [string, Action] => [x.label, { type: "setSubtitle", source: x.source }]), { type: "setSubtitle", source: null });
     const bottom = Y(490);
     s.elements.push(text(60, bottom, 170, Y(36), tr("layout.zurueck"), { size: 20, align: "left", action: { type: "menu", menu: rootId } }));
     s.elements.push(text(240, bottom, 160, Y(36), tr("layout.filmAbspielen"), { size: 20, action: { type: "playTitle", title: n } }));
-    s.elements.push(text(410, bottom, 130, Y(36), tr("layout.hauptmenue2"), { size: 20, action: { type: "menu", menu: mainMenuId } }));
+    if (landing) s.elements.push(icon(420, bottom, 44, Y(44), "home", "#FFFFFF", { action: { type: "menu", menu: mainMenuId } }));
+    else s.elements.push(text(410, bottom, 130, Y(36), tr("layout.hauptmenue2"), { size: 20, action: { type: "menu", menu: mainMenuId } }));
     out.push(s);
   }
 
   for (const m of out) {
     if (style) {
       for (const e of m.elements) {
+        if (e.type === "icon") e.color = style.textColor;
         if (e.type !== "text") continue;
         e.color = e.color === "#FFD200" ? style.accentColor : style.textColor;
         e.font = style.font;
@@ -591,44 +658,104 @@ function buildTitleSubmenus(
   return out;
 }
 
+export interface DraftOptions {
+  /** Default `landing`. */
+  theme?: MenuTheme;
+  /** Default `global` for several titles on the landing theme, else `perTitle`. */
+  settingsMode?: SettingsMode;
+}
+
+const ITEMS_PER_PAGE = 6;
+
+/** Group of a menu in the editor sidebar: its own `group`, else derived from the role. */
+export function menuGroup(m: CustomMenu): string {
+  return m.group ?? (m.role === "root" ? "chapters" : m.role === "settings" ? "settings" : "main");
+}
+
 /**
- * A first draft for the project's actual titles (addressed by their 1-based `index`):
- * - title menu pages: per title a video button (its clip, plays it) and a caption with its
- *   label (6 per page), "Alle abspielen", page arrows;
- * - per title with chapters: chapter pages (6 per page) with a moving thumbnail starting at
- *   each chapter's start and the chapter name below (both play the chapter), over the title's
- *   blurred clip darkened towards the bottom;
- * - per title with several audio tracks or subtitles: an "Einstellungen" menu with one button
- *   per track and subtitle (plus "Aus"), linked from the title's root menu.
+ * A first draft for the project's actual titles (addressed by their 1-based `index`).
+ * Landing theme (default): one retail main screen (heading, text button stack, key-art frame with
+ * title 1's clip), paginated "episodes" pages (6 thumbnails + captions, round arrows, home icon),
+ * and chapter pages per title with chapters. Classic theme: the 6-thumbnail grid as main menu
+ * ("Alle abspielen", text arrows). Audio and subtitles: one disc-wide menu (`global`) or one
+ * settings menu per title (`perTitle`). Every drafted menu carries its sidebar `group`.
  */
-export function draftLayout(titles: EditorTitle[], tv: string, heading: string, preset?: MenuPreset): CustomLayout {
-  if (isBdFrame(tv)) return toBluray(draftLayout(titles, "PAL", heading, preset), canvasSize(tv));
+export function draftLayout(titles: EditorTitle[], tv: string, heading: string, preset?: MenuPreset, opts: DraftOptions = {}): CustomLayout {
+  if (isBdFrame(tv)) return toBluray(draftLayout(titles, "PAL", heading, preset, opts), canvasSize(tv));
+  const theme = opts.theme ?? "landing";
+  const settingsMode = opts.settingsMode ?? (theme === "landing" && titles.length > 1 ? "global" : "perTitle");
+  const global = settingsMode === "global" && titles.some(needsSettings);
   const canvas = canvasSize(tv);
   const { width: W, height: H } = canvas;
   const sy = H / 576;
   const Y = (v: number) => Math.round(v * sy);
+  const landing = theme === "landing";
   const menus: CustomMenu[] = [];
-  const perPage = 6;
-  const titlePages = Math.max(1, Math.ceil(titles.length / perPage));
-  // A title gets VTSM menus when it has chapters to choose or streams to select.
-  const rootIds = titles.map((t) => (t.chapters > 1 || needsSettings(t) ? newId("m") : null));
+  const pageCount = Math.max(1, Math.ceil(titles.length / ITEMS_PER_PAGE));
+  // A title gets VTSM menus when it has chapters to choose or (per-title mode) streams to select.
+  const needsRoot = (t: EditorTitle) => t.chapters > 1 || (settingsMode === "perTitle" && needsSettings(t));
+  const rootIds = titles.map((t) => (needsRoot(t) ? newId("m") : null));
+  const settingsIds = titles.map((t) => (settingsMode === "perTitle" && needsSettings(t) ? newId("m") : null));
 
+  const landingMenu = landing ? emptyMenu(tr("layout.hauptmenue2"), "title") : null;
   const pageMenus: CustomMenu[] = [];
-  for (let p = 0; p < titlePages; p++) {
-    pageMenus.push(emptyMenu(titlePages > 1 ? tr("layout.hauptmenue", { p: p + 1 }) : tr("layout.hauptmenue2"), "title"));
+  for (let p = 0; p < pageCount; p++) {
+    const name = landing
+      ? pageCount > 1 ? tr("layout.episodesPage", { p: p + 1 }) : tr("layout.episodes")
+      : pageCount > 1 ? tr("layout.hauptmenue", { p: p + 1 }) : tr("layout.hauptmenue2");
+    pageMenus.push(emptyMenu(name, "title"));
   }
-  pageMenus.forEach((menu, p) => {
-    menu.elements.push(text(60, Y(36), W - 120, Y(56), heading || "DVD", { size: 40, bold: true }));
-    const slice = titles.slice(p * perPage, (p + 1) * perPage);
-    slice.forEach((t, i) => {
+  const mainId = (landingMenu ?? pageMenus[0]).id;
+  // The landing theme has episodes pages only for several titles.
+  const pages = landing && titles.length < 2 ? [] : pageMenus;
+  const settingsMenu = global ? emptyMenu(tr("layout.globalSettings"), "title") : null;
+
+  const thumbs = (menu: CustomMenu, p: number) => {
+    titles.slice(p * ITEMS_PER_PAGE, (p + 1) * ITEMS_PER_PAGE).forEach((t, i) => {
       const n = t.index;
       const x = 60 + (i % 3) * 210;
       const y = Y(120 + Math.floor(i / 3) * 180);
       menu.elements.push(video(x, y, 180, Y(112), n, null, { type: "playTitle", title: n }));
-      const root = rootIds[p * perPage + i];
+      const root = rootIds[p * ITEMS_PER_PAGE + i];
       const caption = root ? `${t.label} · ${t.chapters > 1 ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
       menu.elements.push(text(x, y + Y(118), 180, Y(30), caption, { size: 18, action: root ? { type: "menu", menu: root } : null }));
     });
+  };
+
+  if (landingMenu) {
+    const m = landingMenu;
+    m.group = "main";
+    // Left column: logo slot (the heading) over a clean button stack.
+    m.elements.push(text(48, Y(60), 290, Y(120), heading || "DVD", { size: 40, bold: true, align: "left", wrap: true }));
+    const buttons: [string, Action][] = [];
+    if (titles.length === 1) buttons.push([tr("layout.play"), { type: "playTitle", title: titles[0].index }]);
+    else if (titles.length > 1) buttons.push([tr("layout.alleAbspielen"), { type: "playAll" }]);
+    if (titles.length > 1) buttons.push([tr("layout.episodes"), { type: "menu", menu: pageMenus[0].id }]);
+    if (titles.length === 1 && rootIds[0] && titles[0].chapters > 1) buttons.push([tr("layout.kapitel2"), { type: "menu", menu: rootIds[0] }]);
+    if (settingsMenu) buttons.push([tr("layout.subsAudio"), { type: "menu", menu: settingsMenu.id }]);
+    else if (titles.length === 1 && settingsIds[0]) buttons.push([tr("layout.subsAudio"), { type: "menu", menu: settingsIds[0] }]);
+    buttons.forEach(([label, action], i) => {
+      m.elements.push(text(48, Y(210 + i * 54), 290, Y(42), label, { size: 26, align: "left", action }));
+    });
+    // Key art: a user-replaceable frame with title 1's clip inside.
+    m.elements.push(rect(350, Y(70), 322, Y(430), "#0B0F1E", { borderColor: "#FFFFFF", borderWidth: 2 }));
+    if (titles.length > 0) m.elements.push(video(358, Y(78), 306, Y(414), titles[0].index, null, null));
+    menus.push(m);
+  }
+
+  pageMenus.forEach((menu, p) => {
+    const last = p === pageCount - 1;
+    if (landing) {
+      if (pages.length === 0) return;
+      menu.group = "episodes";
+      menu.elements.push(text(60, Y(36), W - 120, Y(56), pageCount > 1 ? tr("layout.episodesPage", { p: p + 1 }) : tr("layout.episodes"), { size: 34, bold: true }));
+      thumbs(menu, p);
+      menu.elements.push(...navIcons(W, Y(490), Y(44), 60, mainId, p > 0 ? pageMenus[p - 1].id : null, last ? null : pageMenus[p + 1].id));
+      return;
+    }
+    menu.group = "main";
+    menu.elements.push(text(60, Y(36), W - 120, Y(56), heading || "DVD", { size: 40, bold: true }));
+    thumbs(menu, p);
     const bottom = Y(490);
     if (titles.length > 1 && p === 0) {
       menu.elements.push(text(60, bottom, 220, Y(36), tr("layout.alleAbspielen"), { size: 22, align: "left", action: { type: "playAll" } }));
@@ -636,26 +763,83 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
     if (p > 0) {
       menu.elements.push(text(300, bottom, 140, Y(36), tr("layout.zurueck"), { size: 22, action: { type: "menu", menu: pageMenus[p - 1].id } }));
     }
-    if (p < titlePages - 1) {
+    if (!last) {
       menu.elements.push(text(W - 220, bottom, 160, Y(36), tr("layout.weiter"), { size: 22, align: "right", action: { type: "menu", menu: pageMenus[p + 1].id } }));
     }
   });
-  menus.push(...pageMenus);
+  menus.push(...pages);
+
+  if (settingsMenu) {
+    const s = settingsMenu;
+    s.group = "settings";
+    s.elements.push(text(60, Y(36), W - 120, Y(50), tr("layout.globalSettings"), { size: 32, bold: true }));
+    // The title with the most tracks defines the list; a track is addressed by its position.
+    const richest = (count: (t: EditorTitle) => number) => titles.reduce((a, t) => (count(t) > count(a) ? t : a), titles[0]);
+    const audio = richest((t) => t.audioTracks?.length ?? 0).audioTracks ?? [];
+    const subs = richest((t) => t.subtitleTracks?.length ?? 0).subtitleTracks ?? [];
+    fillSettings(
+      s,
+      Y,
+      audio.length > 1 ? audio.map((a, k): [string, Action] => [a.label, { type: "setGlobalAudio", track: k + 1 }]) : [],
+      subs.map((x, k): [string, Action] => [x.label, { type: "setGlobalSubtitle", track: k + 1 }]),
+      { type: "setGlobalSubtitle", track: null },
+    );
+    s.elements.push(icon(60, Y(490), 44, Y(44), "home", "#FFFFFF", { action: { type: "menu", menu: mainId } }));
+    menus.push(s);
+  }
 
   titles.forEach((t, i) => {
     const rootId = rootIds[i];
     if (!rootId) return;
-    const main = pageMenus[Math.floor(i / perPage)].id;
-    menus.push(...buildTitleSubmenus(t, main, canvas, tv, rootId));
+    const main = landing ? mainId : pageMenus[Math.floor(i / ITEMS_PER_PAGE)].id;
+    menus.push(...buildTitleSubmenus(t, main, canvas, tv, rootId, newId, undefined, { theme, settingsMode, settingsId: settingsIds[i] ?? undefined }));
   });
 
-  const layout: CustomLayout = { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, menus };
+  const layout: CustomLayout = { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, theme, settingsMode, menus };
   if (preset) applyPreset(layout, preset);
   // After the preset: it may change the font, and thus the text width.
   for (const m of layout.menus) {
     for (const e of m.elements) if (e.type === "text") e.size = fitSize(e.text, e.size, e.w, e.font, e.bold);
   }
   return layout;
+}
+
+/**
+ * Copies the look of menu `menuId` (fonts, text and icon colours, bold/italic/shadow, button
+ * highlight, background colour and overlay) to every other menu of its group; positions, texts,
+ * actions and pictures stay. Returns how many menus changed.
+ */
+export function applyStyleToSimilar(layout: CustomLayout, menuId: string): number {
+  const src = layout.menus.find((m) => m.id === menuId);
+  if (!src) return 0;
+  type Kind = "heading" | "label" | "button";
+  const topY = (m: CustomMenu) => Math.min(...m.elements.filter((e) => e.type === "text" && !e.action).map((e) => e.y));
+  const kindOf = (m: CustomMenu, e: TextElement): Kind => (e.action ? "button" : e.y === topY(m) ? "heading" : "label");
+  const texts = (m: CustomMenu) => m.elements.filter((e): e is TextElement => e.type === "text");
+  const srcText = new Map<Kind, TextElement>();
+  for (const e of texts(src)) if (!srcText.has(kindOf(src, e))) srcText.set(kindOf(src, e), e);
+  const srcIcon = src.elements.find((e): e is IconElement => e.type === "icon");
+  const srcButton = src.elements.find(isButton);
+  let changed = 0;
+  for (const m of layout.menus) {
+    if (m === src || menuGroup(m) !== menuGroup(src)) continue;
+    const before = JSON.stringify(m);
+    for (const e of texts(m)) {
+      const from = srcText.get(kindOf(m, e));
+      if (from) Object.assign(e, { font: from.font, color: from.color, bold: from.bold, italic: from.italic, shadow: from.shadow });
+    }
+    for (const e of m.elements) {
+      if (e.type === "icon" && srcIcon) e.color = srcIcon.color;
+      if (isButton(e) && srcButton) {
+        if (srcButton.highlight) e.highlight = { ...srcButton.highlight };
+        else delete e.highlight;
+      }
+    }
+    m.background.color = src.background.color;
+    m.background.gradientOverlay = src.background.gradientOverlay;
+    if (JSON.stringify(m) !== before) changed++;
+  }
+  return changed;
 }
 
 export type MenuPreset = "swiss" | "cinema" | "midnight";
@@ -732,6 +916,7 @@ function applyPreset(layout: CustomLayout, preset: MenuPreset): void {
   for (const m of layout.menus) {
     m.background = { color: st.bg, image: null, video: null, blur: 0, gradientOverlay: "none" };
     for (const e of m.elements) {
+      if (e.type === "icon") e.color = st.text;
       if (e.type !== "text") continue;
       // The default's yellow marks the settings column headings.
       e.color = e.color === "#FFD200" ? st.accent : st.text;
@@ -759,7 +944,12 @@ function scaleMenuToBluray(m: CustomMenu, fromCanvas: { width: number; height: n
     e.w = Math.round(e.w * sx);
     e.h = Math.round(e.h * sy);
     if (e.type === "text") e.size = Math.round(e.size * sy);
-    if (e.type === "video") [e.w, e.h] = [vidW, vidH];
+    // Thumbnail buttons become 16:9; an action-less video (landing key art) just scales.
+    if (e.type === "video" && e.action) [e.w, e.h] = [vidW, vidH];
+    if (e.type === "icon") {
+      const side = Math.min(e.w, e.h);
+      [e.x, e.y, e.w, e.h] = [e.x + Math.round((e.w - side) / 2), e.y + Math.round((e.h - side) / 2), side, side];
+    }
     if (e.type === "rect" && e.borderWidth) e.borderWidth = Math.round(e.borderWidth * sy);
   }
   m.elements.forEach((e, i) => {
@@ -1110,9 +1300,37 @@ export function syncLayoutWithTitles(
   const sy = H / 576;
   const isBd = isBdFrame(tv) || W > 720;
 
+  const landingTheme = out.theme === "landing";
+  const landingMenu = landingTheme ? out.menus.find((m) => m.role === "title" && menuGroup(m) === "main") : undefined;
+  const iconSide = Math.round(44 * Math.min(sx, sy));
+  const navIcon = (name: IconName, x: number, target: string): IconElement =>
+    icon(Math.round(x * sx), Math.round(490 * sy), iconSide, iconSide, name, style.textColor, { id: allocId("i"), action: { type: "menu", menu: target } });
+
   const createTitlePage = (pageNum: number): CustomMenu => {
+    if (landingTheme) {
+      // Landing theme: an episodes page (heading, home icon), styled like the landing screen.
+      const label = pageNum > 1 ? tr("layout.episodesPage", { p: pageNum }) : tr("layout.episodes");
+      const page = emptyMenu(label, "title");
+      page.id = allocId("m");
+      page.group = "episodes";
+      page.background = { color: style.bgColor, image: null, video: null, blur: 0, gradientOverlay: style.bgGradient };
+      const head = text(Math.round(60 * sx), Math.round(36 * sy), W - Math.round(120 * sx), Math.round(56 * sy), label, {
+        id: allocId("t"),
+        font: style.font,
+        size: Math.round(34 * (isBd ? sy : 1)),
+        color: style.textColor,
+        bold: true,
+        italic: style.italic,
+        shadow: style.shadow,
+      });
+      head.size = fitSize(head.text, head.size, head.w, head.font, head.bold);
+      page.elements.push(head);
+      if (landingMenu) page.elements.push(navIcon("home", 60, landingMenu.id));
+      return page;
+    }
     const page = emptyMenu(tr("layout.hauptmenue", { p: pageNum }), "title");
     page.id = allocId("m");
+    page.group = out.theme === "landing" ? "episodes" : "main";
     page.background = { color: style.bgColor, image: null, video: null, blur: 0, gradientOverlay: style.bgGradient };
     const hs = style.heading;
     const headingFitsAboveGrid = hs && hs.y + hs.h <= Math.round(112 * sy);
@@ -1158,10 +1376,33 @@ export function syncLayoutWithTitles(
     out.menus.unshift(createTitlePage(1));
   }
 
+  // A landing layout needs an episodes page as soon as there are several titles: the thumbnails
+  // never go onto the landing screen. It gets an "Episodes" button under the existing stack.
+  if (landingMenu && newTitles.length > 1 && !out.menus.some((m) => menuGroup(m) === "episodes")) {
+    const page = createTitlePage(1);
+    out.menus.splice(out.menus.indexOf(landingMenu) + 1, 0, page);
+    const stack = landingMenu.elements.filter((e): e is TextElement => e.type === "text" && !!e.action && e.x < W / 2);
+    const lowest = stack.reduce<TextElement | null>((a, e) => (!a || e.y > a.y ? e : a), null);
+    if (lowest) {
+      const y = lowest.y + Math.round(54 * sy);
+      if (y + lowest.h <= H) {
+        landingMenu.elements.push({ ...structuredClone(lowest), id: allocId("t"), y, text: tr("layout.episodes"), action: { type: "menu", menu: page.id } });
+      }
+    }
+    const play = stack.find((e) => e.action?.type === "playTitle" && e.text === tr("layout.play"));
+    if (play) {
+      play.text = tr("layout.alleAbspielen");
+      play.action = { type: "playAll" };
+    }
+  }
+
   const hasPlayTitle = (titleIdx: number) =>
     out.menus.some((m) => m.role === "title" && m.elements.some((e) => e.action?.type === "playTitle" && e.action.title === titleIdx));
   const hasRootMenu = (titleIdx: number) => out.menus.some((m) => m.role === "root" && m.title === titleIdx);
 
+  // Layouts from before the themes are classic with per-title settings.
+  const nav: SubNav = { theme: out.theme ?? "classic", settingsMode: out.settingsMode ?? "perTitle" };
+  const globalSettings = nav.settingsMode === "global";
   const btnLimit = maxButtons(tv);
   const subStyle: SubmenuStyle = {
     bgColor: style.bgColor,
@@ -1177,15 +1418,15 @@ export function syncLayoutWithTitles(
     const needsAdd = !matchedNew.has(t.index) || (!hasPlayTitle(t.index) && !hasRootMenu(t.index));
     if (!needsAdd) continue;
 
-    const needsVtsm = t.chapters > 1 || needsSettings(t);
+    const needsVtsm = t.chapters > 1 || (!globalSettings && needsSettings(t));
     const neededBtns = needsVtsm ? 2 : 1;
 
+    // New thumbnails go to the last episodes page (landing) or title page (classic), never to
+    // the landing screen or the global settings menu while another page exists.
     const findLastTitlePageIdx = () => {
-      let idx = -1;
-      out.menus.forEach((m, i) => {
-        if (m.role === "title") idx = i;
-      });
-      return idx;
+      const last = (ok: (m: CustomMenu) => boolean) => out.menus.reduce((idx, m, i) => (m.role === "title" && ok(m) ? i : idx), -1);
+      const episodes = last((m) => menuGroup(m) === "episodes");
+      return episodes >= 0 ? episodes : last((m) => menuGroup(m) !== "settings");
     };
 
     const pickSlotOn = (page: CustomMenu): TitleSlot | null => {
@@ -1207,11 +1448,15 @@ export function syncLayoutWithTitles(
     let slot = pickSlotOn(targetPage);
 
     if (!slot) {
-      const titleCount = out.menus.filter((m) => m.role === "title").length;
+      const titleCount = out.menus.filter((m) => m.role === "title" && (!landingTheme || menuGroup(m) === "episodes")).length;
       const newPage = createTitlePage(titleCount + 1);
       out.menus.splice(pageIdx + 1, 0, newPage);
 
-      if (targetPage.elements.filter(isButton).length < btnLimit) {
+      if (landingTheme) {
+        targetPage.elements.push(navIcon("next", 616, newPage.id));
+        newPage.elements.push(navIcon("prev", 548, targetPage.id));
+      }
+      if (!landingTheme && targetPage.elements.filter(isButton).length < btnLimit) {
         const nextPos = placeNavButton(targetPage, out.canvas, tv, true);
         if (nextPos) {
           const nextBtn = text(nextPos.x, nextPos.y, nextPos.w, nextPos.h, tr("layout.weiter"), {
@@ -1229,7 +1474,7 @@ export function syncLayoutWithTitles(
       }
 
       const backPos = placeNavButton(newPage, out.canvas, tv, false);
-      if (backPos) {
+      if (!landingTheme && backPos) {
         const backBtn = text(backPos.x, backPos.y, backPos.w, backPos.h, tr("layout.zurueck"), {
           id: allocId("t"),
           font: style.font,
@@ -1252,7 +1497,7 @@ export function syncLayoutWithTitles(
     let rootId: string | null = null;
     if (needsVtsm) {
       rootId = allocId("m");
-      const submenus = buildTitleSubmenus(t, targetPage.id, out.canvas, tv, rootId, allocId, subStyle);
+      const submenus = buildTitleSubmenus(t, targetPage.id, out.canvas, tv, rootId, allocId, subStyle, nav);
       out.menus.push(...submenus);
     }
 

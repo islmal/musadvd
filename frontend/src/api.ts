@@ -526,6 +526,8 @@ export const textLines = (element: LayoutElement, canvas: { width: number; heigh
 export const saveLayout = (path: string, layout: CustomLayout) => invoke<void>("save_layout", { path, layout });
 /** A picture file as data URL. */
 export const imagePreview = (path: string) => invoke<string>("image_preview", { path });
+/** Saves a pasted picture (base64 PNG/JPEG bytes) under the app's menu-assets folder; returns its path. */
+export const saveClipboardImage = (data: string, ext: "png" | "jpg") => invoke<string>("save_clipboard_image", { data, ext });
 /** A frame of a video as data URL. */
 export const titleFrame = (path: string, atSecs: number) => invoke<string>("title_frame", { path, atSecs });
 /** Audio peaks 0–255, 40 per second (`encoder::WAVEFORM_PEAKS_PER_SEC`). */

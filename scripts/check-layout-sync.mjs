@@ -33,10 +33,13 @@ registerHooks({
   },
 });
 
-const { draftLayout, syncLayoutWithTitles, isButton, maxButtons, isBdFrame, titlesKey } = await import(
+const { draftLayout: draftAnyLayout, syncLayoutWithTitles, isButton, maxButtons, isBdFrame, titlesKey } = await import(
   "../frontend/src/layout.ts"
 );
 const { parseProject, PROJECT_FORMAT, PROJECT_VERSION } = await import("../frontend/src/project.ts");
+
+// The sync scenarios below edit the classic 6-thumbnail grid; the landing theme gets its own checks at the end.
+const draftLayout = (titles, tv, heading, preset) => draftAnyLayout(titles, tv, heading, preset, { theme: "classic" });
 
 function makeTitle(index, path, opts = {}) {
   const chapters = opts.chapters ?? 1;
@@ -465,6 +468,23 @@ for (const tv of ["PAL", "NTSC", "BD1080"]) {
 
   const parsedExplicitFalse = parseProject({ ...baseProject, layoutEdited: false });
   assert.equal(parsedExplicitFalse.layoutEdited, false, "explicit layoutEdited: false is preserved");
+}
+
+// Landing theme drafts (default) are valid on every frame, with and without global settings.
+for (const tv of ["PAL", "NTSC", "BD1080"]) {
+  for (const count of [1, 3, 9]) {
+    const titles = Array.from({ length: count }, (_, i) =>
+      makeTitle(i + 1, `/movies/l${i + 1}.mp4`, {
+        chapters: i === 0 ? 3 : 1,
+        audioTracks: [{ source: 1, label: "English" }, { source: 2, label: "German" }],
+        subtitleTracks: [{ source: 3, label: "English Subs" }],
+      }),
+    );
+    for (const settingsMode of ["global", "perTitle"]) {
+      const layout = draftAnyLayout(titles, tv, "Landing", undefined, { settingsMode });
+      assertValidLayout(layout, titles, tv, `landing ${tv} n=${count} ${settingsMode}`);
+    }
+  }
 }
 
 console.log("check-layout-sync: ok");
