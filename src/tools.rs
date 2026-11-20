@@ -580,25 +580,55 @@ impl Toolchain {
         Ok(value)
     }
 
+    async fn try_hwaccel_probe(&self, input: &Path, hw: &str, encoder: Option<BdEncoder>) -> Result<(), String> {
+        let mut cmd = self.command(&self.ffmpeg);
+        cmd.args(probe_hwaccel_args(input, hw, encoder)).stdout(Stdio::null()).stderr(Stdio::piped());
+        let run = cmd.output();
+        let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(30), run).await else {
+            return Err("probe timed out".into());
+        };
+        let raw_log = String::from_utf8_lossy(&out.stderr);
+        let log = raw_log.to_ascii_lowercase();
+        // ffmpeg silently falls back to software decoding when the hwaccel fails to set up.
+        if out.status.success() && !log.contains("failed") && !log.contains("error") {
+            return Ok(());
+        }
+        let reason = raw_log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("probe failed").trim();
+        Err(reason.into())
+    }
+
     /// Hardware decoder that works for the video of `input` (tried for 2 s of decoding), or
     /// `None` to decode on the CPU.
     pub async fn probe_hwaccel(&self, input: &Path, mode: HwAccelMode) -> Option<&'static str> {
+        self.probe_hwaccel_for(input, mode, None).await.0
+    }
+
+    /// Hardware decoder that works for `input` paired with `encoder` (when it is a GPU encoder),
+    /// returning `(Some(hwaccel), None)` on success or `(None, Some(reason))` on fallback to CPU.
+    pub async fn probe_hwaccel_for(
+        &self,
+        input: &Path,
+        mode: HwAccelMode,
+        encoder: Option<BdEncoder>,
+    ) -> (Option<&'static str>, Option<String>) {
+        let paired = encoder.filter(|e| e.is_hw());
+        let mut last_err = None;
         for &hw in hwaccel_candidates(mode) {
-            let mut cmd = self.command(&self.ffmpeg);
-            cmd.args(["-hide_banner", "-nostdin", "-loglevel", "warning", "-hwaccel", hw, "-t", "2", "-i"])
-                .arg(input)
-                .args(["-map", "0:v:0", "-f", "null", "-"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            let run = cmd.output();
-            let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(30), run).await else { continue };
-            let log = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
-            // ffmpeg silently falls back to software decoding when the hwaccel fails to set up.
-            if out.status.success() && !log.contains("failed") && !log.contains("error") {
-                return Some(hw);
+            match self.try_hwaccel_probe(input, hw, paired).await {
+                Ok(()) => return (Some(hw), None),
+                Err(e) => {
+                    last_err = Some(format!("{hw}: {e}"));
+                    if cfg!(windows) && hw == "d3d11va" && paired == Some(BdEncoder::Amf) {
+                        for &adapter in D3D11VA_ADAPTERS {
+                            if self.try_hwaccel_probe(input, adapter, paired).await.is_ok() {
+                                return (Some(adapter), None);
+                            }
+                        }
+                    }
+                }
             }
         }
-        None
+        (None, last_err)
     }
 
     /// Checks that a hardware encoder works with the Blu-ray options (10 test frames); `Err` is a
@@ -623,6 +653,37 @@ impl Toolchain {
         } else {
             log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error").trim().into()
         })
+    }
+
+    /// Probes all GPU encoders concurrently and returns the first available vendor (`Nvidia`,
+    /// `Intel`, `Amd`), or `None` when only CPU encoding works.
+    pub async fn detect_hw_accel(&self) -> HwAccelMode {
+        let (nv, qsv, amf) = tokio::join!(
+            self.probe_hw_encoder(BdEncoder::Nvenc),
+            self.probe_hw_encoder(BdEncoder::Qsv),
+            self.probe_hw_encoder(BdEncoder::Amf),
+        );
+        if nv.is_ok() {
+            HwAccelMode::Nvidia
+        } else if qsv.is_ok() {
+            HwAccelMode::Intel
+        } else if amf.is_ok() {
+            HwAccelMode::Amd
+        } else {
+            HwAccelMode::None
+        }
+    }
+
+    /// Keeps `current` if it is `None` or its GPU encoder still works; otherwise switches to the
+    /// first available GPU vendor from [`Toolchain::detect_hw_accel`].
+    pub async fn resolve_hw_accel(&self, current: HwAccelMode) -> HwAccelMode {
+        let Some(enc) = current.bd_encoder() else {
+            return HwAccelMode::None;
+        };
+        if self.probe_hw_encoder(enc).await.is_ok() {
+            return current;
+        }
+        self.detect_hw_accel().await
     }
 }
 
@@ -651,6 +712,43 @@ impl IntoOwnedFile for std::io::PipeReader {
         #[cfg(unix)]
         return Ok(std::os::fd::OwnedFd::from(self).into());
     }
+}
+
+/// Explicit D3D11VA adapter indices tried on Windows when default `d3d11va` fails to pair
+/// with `h264_amf` (e.g. multi-GPU systems where adapter 0 is non-AMD).
+const D3D11VA_ADAPTERS: &[&str] = &["d3d11va:0", "d3d11va:1", "d3d11va:2", "d3d11va:3"];
+
+/// ffmpeg input flags for a hardware decoder token (`"cuda"`, `"d3d11va"`, or `"d3d11va:1"`).
+pub fn hwaccel_input_args(hw: &str) -> Vec<std::ffi::OsString> {
+    if let Some((backend, dev)) = hw.split_once(':') {
+        vec![
+            "-init_hw_device".into(),
+            format!("{backend}=hw:{dev}").into(),
+            "-hwaccel".into(),
+            backend.into(),
+            "-hwaccel_device".into(),
+            "hw".into(),
+        ]
+    } else {
+        vec!["-hwaccel".into(), hw.into()]
+    }
+}
+
+fn probe_hwaccel_args(input: &Path, hw: &str, encoder: Option<BdEncoder>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> =
+        ["-hide_banner", "-nostdin", "-loglevel", "warning"].into_iter().map(Into::into).collect();
+    args.extend(hwaccel_input_args(hw));
+    args.extend(["-t".into(), "2".into(), "-i".into(), input.as_os_str().to_os_string(), "-map".into(), "0:v:0".into()]);
+    if let Some(enc) = encoder.filter(|e| e.is_hw()) {
+        args.extend(
+            ["-frames:v", "5", "-vf", "format=yuv420p", "-c:v", enc.codec(), "-profile:v", "high", "-level:v", "4.1"]
+                .into_iter()
+                .map(Into::into),
+        );
+        args.extend(enc.bd_options().into_iter().map(Into::into));
+    }
+    args.extend(["-f".into(), "null".into(), "-".into()]);
+    args
 }
 
 /// Hardware decoders tried for a GPU vendor, in order, falling back to any other available
@@ -771,6 +869,113 @@ mod tests {
         assert_eq!(ProcessPriority::Normal.creation_flag(), None);
         assert_eq!(ProcessPriority::BelowNormal.creation_flag(), Some(0x4000));
         assert_eq!(ProcessPriority::Idle.creation_flag(), Some(0x40));
+    }
+
+    #[test]
+    fn hwaccel_args_and_paired_probe() {
+        let s = |v: Vec<std::ffi::OsString>| v.into_iter().map(|x| x.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(s(hwaccel_input_args("cuda")), ["-hwaccel", "cuda"]);
+        assert_eq!(
+            s(hwaccel_input_args("d3d11va:1")),
+            ["-init_hw_device", "d3d11va=hw:1", "-hwaccel", "d3d11va", "-hwaccel_device", "hw"]
+        );
+
+        let paired = s(probe_hwaccel_args(Path::new("in.mkv"), "d3d11va", Some(BdEncoder::Amf))).join(" ");
+        assert!(paired.contains("-c:v h264_amf") && paired.contains("-vf format=yuv420p") && paired.contains("-f null -"), "{paired}");
+
+        let cpu = s(probe_hwaccel_args(Path::new("in.mkv"), "d3d11va", Some(BdEncoder::X264))).join(" ");
+        assert!(!cpu.contains("-c:v"), "{cpu}");
+    }
+
+    #[test]
+    fn paired_probe_falls_back_when_decode_encode_mismatch() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = std::env::temp_dir().join(format!("cx_hwprobe_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.mp4");
+        std::fs::write(&input, b"").unwrap();
+
+        #[cfg(windows)]
+        let fake_ffmpeg = {
+            let p = dir.join("fake_ffmpeg.cmd");
+            std::fs::write(
+                &p,
+                "@echo off\r\nsetlocal\r\nset args=%*\r\necho %args% | findstr /C:\"h264_amf\" >nul\r\nif errorlevel 1 exit /b 0\r\necho %args% | findstr /C:\"d3d11va=hw:1\" >nul\r\nif not errorlevel 1 exit /b 0\r\n>&2 echo [D3D11VA] AMF failed to initialise on the given D3D11 device: 4.\r\nexit /b 1\r\n",
+            )
+            .unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let fake_ffmpeg = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("fake_ffmpeg.sh");
+            std::fs::write(
+                &p,
+                "#!/bin/sh\ncase \"$*\" in *h264_amf*) echo '[D3D11VA] AMF failed to initialise on the given D3D11 device: 4.' >&2; exit 1 ;; *) exit 0 ;; esac\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+
+        let tools = Toolchain { ffmpeg: fake_ffmpeg.clone(), ffprobe: fake_ffmpeg.clone(), priority: ProcessPriority::Normal, notes: Vec::new() };
+        assert_eq!(rt.block_on(tools.probe_hwaccel(&input, HwAccelMode::Amd)), Some(if cfg!(windows) { "d3d11va" } else { "vaapi" }));
+
+        if cfg!(windows) {
+            // Adapter 1 succeeds when default d3d11va fails to pair with h264_amf.
+            assert_eq!(rt.block_on(tools.probe_hwaccel_for(&input, HwAccelMode::Amd, Some(BdEncoder::Amf))), (Some("d3d11va:1"), None));
+
+            // When no adapter pairs, probe_hwaccel_for falls back to CPU decode with a diagnostic.
+            std::fs::write(
+                &fake_ffmpeg,
+                "@echo off\r\n>&2 echo [D3D11VA] AMF failed to initialise on the given D3D11 device: 4.\r\nexit /b 1\r\n",
+            )
+            .unwrap();
+        }
+
+        let (hw, reason) = rt.block_on(tools.probe_hwaccel_for(&input, HwAccelMode::Amd, Some(BdEncoder::Amf)));
+        assert_eq!(hw, None);
+        assert!(reason.as_deref().unwrap_or("").contains("AMF failed to initialise"), "{reason:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detect_and_resolve_hw_accel_switches_from_unavailable_vendor() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = std::env::temp_dir().join(format!("cx_hwdetect_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        #[cfg(windows)]
+        let fake_ffmpeg = {
+            let p = dir.join("fake_ffmpeg.cmd");
+            std::fs::write(
+                &p,
+                "@echo off\r\necho %* | findstr /C:\"h264_qsv\" >nul\r\nif not errorlevel 1 exit /b 0\r\n>&2 echo encoder unavailable\r\nexit /b 1\r\n",
+            )
+            .unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let fake_ffmpeg = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("fake_ffmpeg.sh");
+            std::fs::write(
+                &p,
+                "#!/bin/sh\ncase \"$*\" in *h264_qsv*) exit 0 ;; *) echo 'encoder unavailable' >&2; exit 1 ;; esac\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+
+        let tools = Toolchain { ffmpeg: fake_ffmpeg.clone(), ffprobe: fake_ffmpeg, priority: ProcessPriority::Normal, notes: Vec::new() };
+        assert_eq!(rt.block_on(tools.detect_hw_accel()), HwAccelMode::Intel);
+        assert_eq!(rt.block_on(tools.resolve_hw_accel(HwAccelMode::Nvidia)), HwAccelMode::Intel);
+        assert_eq!(rt.block_on(tools.resolve_hw_accel(HwAccelMode::Intel)), HwAccelMode::Intel);
+        assert_eq!(rt.block_on(tools.resolve_hw_accel(HwAccelMode::None)), HwAccelMode::None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

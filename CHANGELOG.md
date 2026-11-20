@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-20
+
+### Added
+
+- **Automatic GPU vendor detection on startup**: both the desktop GUI (on startup and "Reset to defaults") and the CLI (when `--hw-accel` is omitted) probe available hardware encoders (`nvenc`, `qsv`, `amf`) and switch away from an unavailable default/configured vendor automatically instead of always starting on NVIDIA.
+
+### Fixed
+
+- **Paired hardware decode/encode probe & multi-GPU AMD AMF**: `probe_hwaccel_for` now tests candidate `-hwaccel` decoders paired with the selected GPU encoder (`-vf format=yuv420p -c:v <encoder>`) instead of in isolation, preventing mismatched decode/encode failures (such as `d3d11va` + `h264_amf` on multi-GPU Windows systems or `qsv` decode + `-vf` on Linux). On Windows, `h264_amf` also probes explicit `d3d11va:0..3` adapters before falling back to CPU decoding.
+
 ## [1.0.2] - 2026-11-20
 
 ### Changed

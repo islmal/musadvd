@@ -407,11 +407,11 @@ async fn encode_bd_title(
     encoder: BdEncoder,
     (maxrate_kbps, bufsize_kbit): (u32, u32),
     progress: JobProgress,
-) -> Result<(TitleReport, Option<&'static str>, f64), BuildError> {
+) -> Result<(TitleReport, Option<&'static str>, Option<String>, f64), BuildError> {
     let resolution = t.resolution;
-    let hwaccel = match hw_decode {
-        Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
-        None => None,
+    let (hwaccel, hwaccel_note) = match hw_decode {
+        Some(mode) => tools.probe_hwaccel_for(&t.info.path, mode, Some(encoder)).await,
+        None => (None, None),
     };
     let duration = t.info.duration_secs;
 
@@ -480,7 +480,7 @@ async fn encode_bd_title(
         subtitles,
         chapters: t.chapters.len(),
     };
-    Ok((report, hwaccel, real))
+    Ok((report, hwaccel, hwaccel_note, real))
 }
 
 /// Menu stage result: the navigation and how many menus (= first playlists) there are.
@@ -996,7 +996,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let vbv = (limits.vbv_maxrate_kbps, limits.vbv_bufsize_kbit);
     let layout = Arc::new(layout);
     let titles: Vec<Arc<BdTitle>> = titles.into_iter().map(Arc::new).collect();
-    let jobs: Vec<Job<(TitleReport, Option<&'static str>, f64)>> = titles
+    let jobs: Vec<Job<(TitleReport, Option<&'static str>, Option<String>, f64)>> = titles
         .iter()
         .zip(&encoders)
         .map(|(t, &encoder)| {
@@ -1065,15 +1065,21 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let mut reports = Vec::new();
     let mut real_durations = Vec::new();
     let mut hwaccels = Vec::new();
-    for (report, hw, real) in results {
+    let mut hwaccel_notes = Vec::new();
+    for (report, hw, note, real) in results {
         reports.push(report);
         hwaccels.push(hw);
+        hwaccel_notes.push(note);
         real_durations.push(real);
     }
     if let Some(hw) = hwaccels.iter().flatten().next() {
         log(Event::Step(tf!(opts.ui_lang, "gpu_decode", hw = hw)));
     } else if opts.hw_decode {
-        log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
+        if let Some(reason) = hwaccel_notes.into_iter().flatten().next() {
+            log(Event::Step(format!("{} ({reason})", tr(opts.ui_lang, "gpu_unavailable"))));
+        } else {
+            log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
+        }
     }
 
     // 6. Mux ----------------------------------------------------------------------------------

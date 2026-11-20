@@ -57,6 +57,8 @@ struct AppState {
     settings_note: Mutex<Option<String>>,
     /// Cancel handle of the running conversion.
     cancel: Arc<Mutex<Option<CancelToken>>>,
+    /// Startup hardware-acceleration auto-detection ran once.
+    hw_accel_checked: OnceCell<()>,
 }
 
 impl AppState {
@@ -70,11 +72,36 @@ impl AppState {
             settings_path,
             settings_note: Mutex::new(note),
             cancel: Arc::default(),
+            hw_accel_checked: OnceCell::new(),
         }
     }
 
     fn settings(&self) -> AppSettings {
         self.settings.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// On startup, if the configured GPU vendor is unavailable on this machine, switch to the
+    /// available one (or `None`) and persist it.
+    async fn ensure_hw_accel_detected(&self) {
+        self.hw_accel_checked
+            .get_or_init(|| async {
+                let current = self.settings().hw_accel_mode;
+                if current == musadvd::config::HwAccelMode::None {
+                    return;
+                }
+                let Ok(tools) = toolchain(self).await else {
+                    return;
+                };
+                let resolved = tools.resolve_hw_accel(current).await;
+                if resolved != current {
+                    let mut guard = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.hw_accel_mode == current {
+                        guard.hw_accel_mode = resolved;
+                        let _ = guard.save(&self.settings_path);
+                    }
+                }
+            })
+            .await;
     }
 }
 
@@ -869,13 +896,18 @@ fn cancel_conversion(state: State<'_, AppState>) -> bool {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn get_settings(state: State<'_, AppState>) -> AppSettings {
-    state.settings()
+async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    state.ensure_hw_accel_detected().await;
+    Ok(state.settings())
 }
 
 #[tauri::command]
-fn default_settings() -> AppSettings {
-    AppSettings::default()
+async fn default_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let mut s = AppSettings::default();
+    if let Ok(tools) = toolchain(&state).await {
+        s.hw_accel_mode = tools.detect_hw_accel().await;
+    }
+    Ok(s)
 }
 
 /// Stores the settings (sanitized) and returns what was actually saved.

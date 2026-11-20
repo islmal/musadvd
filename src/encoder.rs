@@ -906,7 +906,7 @@ impl EncodeJob<'_> {
         if self.copy_video {
             a.extend(["-fflags".into(), "+genpts".into()]);
         } else if let Some(hw) = self.hwaccel {
-            a.extend(["-hwaccel".into(), hw.into()]);
+            a.extend(crate::tools::hwaccel_input_args(hw));
         }
         a.extend(self.info.input_args());
         a.extend(["-map".into(), format!("0:{}", v.index).into()]);
@@ -1551,7 +1551,7 @@ impl BdEncodeJob<'_> {
         let v = self.info.video.as_ref().expect("probed file has video");
         let mut a: Vec<OsString> = vec!["-y".into()];
         if let Some(hw) = self.hwaccel.filter(|_| !self.copy_video) {
-            a.extend(["-hwaccel".into(), hw.into()]);
+            a.extend(crate::tools::hwaccel_input_args(hw));
         }
         a.extend(self.info.input_args());
         if with_audio && self.silence_count() > 0 {

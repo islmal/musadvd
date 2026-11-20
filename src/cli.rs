@@ -147,10 +147,10 @@ enum Command {
         /// Disable GPU source decoding and force CPU decoding.
         #[arg(long)]
         no_hw_decode: bool,
-        /// GPU vendor for Blu-ray H.264 encoding and the GPU decoder order (falls back to
-        /// x264/CPU when the GPU does not work).
-        #[arg(long, value_enum, default_value = "nvidia")]
-        hw_accel: HwAccelArg,
+        /// GPU vendor for Blu-ray H.264 encoding and the GPU decoder order (auto-detected when
+        /// omitted; falls back to x264/CPU when the GPU does not work).
+        #[arg(long, value_enum)]
+        hw_accel: Option<HwAccelArg>,
         /// Same as --hw-accel none (wins over --hw-accel).
         #[arg(long)]
         no_hw_encode: bool,
@@ -952,7 +952,7 @@ fn dispatch(cli: Cli) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let opts = BuildOptions {
+            let mut opts = BuildOptions {
                 inputs: input,
                 disc,
                 template: template.unwrap_or_default(),
@@ -985,7 +985,11 @@ fn dispatch(cli: Cli) -> ExitCode {
                 selections,
                 parallel_jobs: jobs.map(usize::from),
                 hw_decode: !no_hw_decode,
-                hw_accel: if no_hw_encode { HwAccelArg::None } else { hw_accel }.into(),
+                hw_accel: if no_hw_encode {
+                    crate::config::HwAccelMode::None
+                } else {
+                    hw_accel.map_or(crate::config::HwAccelMode::Nvidia, Into::into)
+                },
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
                 dvd_video: dvd_video.into(),
@@ -1074,6 +1078,11 @@ fn dispatch(cli: Cli) -> ExitCode {
                     eprintln!("warning: {w}");
                 }
             };
+            if !no_hw_encode && hw_accel.is_none() {
+                if let Ok(tools) = runtime.block_on(crate::tools::Toolchain::detect()) {
+                    opts.hw_accel = runtime.block_on(tools.detect_hw_accel());
+                }
+            }
             match runtime.block_on(dvd::build_dvd(&opts, &mut on_event)) {
                 Ok(r) => {
                     eprintln!();
