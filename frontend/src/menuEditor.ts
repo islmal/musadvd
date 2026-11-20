@@ -1903,6 +1903,8 @@ export function mountMenuEditor(opts: EditorOptions) {
         if (node) applyBox(node, e);
         const rotInput = props.querySelector<HTMLInputElement>(".ed-rot-input");
         if (rotInput) rotInput.value = String(e.rotation);
+        const resetBtn = props.querySelector<HTMLButtonElement>(".ed-rot-reset");
+        if (resetBtn) resetBtn.disabled = isUnrotated(e.rotation);
       };
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
@@ -2019,6 +2021,7 @@ export function mountMenuEditor(opts: EditorOptions) {
           s0.t.h = h;
           s0.t.x = Math.round(cx0 + dcx - w / 2);
           s0.t.y = Math.round(cy0 + dcy - h / 2);
+          clamp(s0.t);
           show(s0.node, s0.t);
           continue;
         }
@@ -3031,15 +3034,6 @@ export function mountMenuEditor(opts: EditorOptions) {
             )
           : (() => {
               const rotVal = Math.round(normalizeAngle(e.rotation) * 10) / 10;
-              const rotInput = num(rotVal, (v) => (e.rotation = normalizeAngle(v)), {
-                min: "-360",
-                max: "360",
-                step: "1",
-                class: "ed-rot-input",
-              });
-              rotInput.addEventListener("change", () => {
-                rotInput.value = String(Math.round(normalizeAngle(e.rotation) * 10) / 10);
-              });
               const stepRot = (delta: number | null) => {
                 remember();
                 e.rotation = delta === null ? 0 : normalizeAngle(Math.round((e.rotation + delta) * 10) / 10);
@@ -3048,6 +3042,34 @@ export function mountMenuEditor(opts: EditorOptions) {
                 renderHeader();
                 scheduleCheck();
               };
+              const resetBtn = el(
+                "button",
+                {
+                  class: "btn ed-rot-btn ed-rot-reset",
+                  type: "button",
+                  title: tr("menuEditor.rotateReset"),
+                  disabled: isUnrotated(e.rotation),
+                  onclick: () => stepRot(null),
+                },
+                "0°",
+              ) as HTMLButtonElement;
+              const rotInput = num(
+                rotVal,
+                (v) => {
+                  e.rotation = normalizeAngle(v);
+                  resetBtn.disabled = isUnrotated(e.rotation);
+                },
+                {
+                  min: "-360",
+                  max: "360",
+                  step: "1",
+                  class: "ed-rot-input",
+                },
+              );
+              rotInput.addEventListener("change", () => {
+                rotInput.value = String(Math.round(normalizeAngle(e.rotation) * 10) / 10);
+                resetBtn.disabled = isUnrotated(e.rotation);
+              });
               return el(
                 "div",
                 { class: "ed-row" },
@@ -3059,7 +3081,7 @@ export function mountMenuEditor(opts: EditorOptions) {
                   el("span", { class: "ed-rot-unit" }, "°"),
                   el("button", { class: "btn ed-rot-btn", type: "button", title: tr("menuEditor.rotateLeft90"), onclick: () => stepRot(-90) }, "−90°"),
                   el("button", { class: "btn ed-rot-btn", type: "button", title: tr("menuEditor.rotateRight90"), onclick: () => stepRot(90) }, "+90°"),
-                  el("button", { class: "btn ed-rot-btn", type: "button", title: tr("menuEditor.rotateReset"), disabled: isUnrotated(e.rotation), onclick: () => stepRot(null) }, "0°"),
+                  resetBtn,
                 ),
               );
             })(),
