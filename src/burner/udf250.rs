@@ -809,7 +809,7 @@ mod tests {
         let at = plan.file_sector("BDMV/index.bdmv").unwrap() as usize;
         assert_eq!(&sec(at)[..24], b"INDX0200 some index data");
         let at = plan.file_sector("BDMV/STREAM/00000.m2ts").unwrap() as usize;
-        assert_eq!(sec(at)[250], 250 % 251);
+        assert_eq!(sec(at)[250], 250);
         // LVID: number of files/dirs and revisions.
         let lvid = sec(64);
         assert_eq!((le16(lvid, 0), le32(lvid, 120), le32(lvid, 124)), (9, 3, 7));

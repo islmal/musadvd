@@ -50,7 +50,9 @@ fn ts_time(b: &[u8]) -> u64 {
 }
 
 fn pes_starts(m2ts: &[u8]) -> Vec<PesStart> {
-    m2ts.chunks_exact(192)
+    m2ts.as_chunks::<192>()
+        .0
+        .iter()
         .enumerate()
         .filter_map(|(spn, pkt)| {
             let p = &pkt[4..];
@@ -236,7 +238,7 @@ fn check_clip_of(bdmv: &Path, n: usize, ig_pid: u16, t90: u64) -> (String, Vec<S
     // Arrival of the IG display set relative to the keyframe at T (27 MHz ATS, wraps after 2^30).
     let ms = |ats: u64| video.map_or(0.0, |v| (ats.wrapping_sub(v.ats) & 0x3FFF_FFFF) as f64 / 27_000.0);
     let ig_bytes = ig.len();
-    let last_ig_packet = m2ts.chunks_exact(192).enumerate().filter(|(_, p)| (be(&p[4..], 1, 2) & 0x1FFF) as u16 == ig_pid).last();
+    let last_ig_packet = m2ts.as_chunks::<192>().0.iter().enumerate().rfind(|(_, p)| (be(&p[4..], 1, 2) & 0x1FFF) as u16 == ig_pid);
     // Buttons are ready on the first loop frame only if the whole display set has arrived before
     // the frame at the mark is presented.
     if let Some((spn, _)) = last_ig_packet {
@@ -458,7 +460,7 @@ mod build {
         }
         let out = cmd.arg("-i").arg(input).args(["-map", stream, "-ac", "1", "-ar", "48000", "-f", "f32le", "-"]).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        out.stdout.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+        out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
     }
 
     /// Mean absolute difference of two frames inside / outside the box (in frame fractions).
@@ -713,9 +715,11 @@ mod dvd {
 
     fn nav_packs(vob: &[u8]) -> Vec<Vobu> {
         let be = |s: &[u8], at: usize, n: usize| s[at..at + n].iter().fold(0u32, |v, &b| v << 8 | b as u32);
-        vob.chunks_exact(2048)
+        vob.as_chunks::<2048>()
+            .0
+            .iter()
             .filter(|s| s[0x26..0x2A] == [0, 0, 1, 0xBF] && s[0x2C] == 0x00 && s[0x400..0x404] == [0, 0, 1, 0xBF])
-            .map(|s| Vobu { vob: be(s, 0x41F - 0, 2) as u16, cell: s[0x422], ptm: be(s, 0x39, 4), hli_ss: be(s, 0x8D, 2) as u16 & 3 })
+            .map(|s| Vobu { vob: be(s, 0x41F, 2) as u16, cell: s[0x422], ptm: be(s, 0x39, 4), hli_ss: be(s, 0x8D, 2) as u16 & 3 })
             .collect()
     }
 

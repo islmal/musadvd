@@ -49,14 +49,14 @@ fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
         if rest.len() % 2 != 0 {
             return Err("invalid UTF-16 LE byte length".to_string());
         }
-        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         return String::from_utf16(&units).map_err(|e| format!("invalid UTF-16 LE: {e}"));
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         if rest.len() % 2 != 0 {
             return Err("invalid UTF-16 BE byte length".to_string());
         }
-        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
         return String::from_utf16(&units).map_err(|e| format!("invalid UTF-16 BE: {e}"));
     }
     String::from_utf8(bytes.to_vec()).map_err(|e| format!("invalid UTF-8: {e}"))

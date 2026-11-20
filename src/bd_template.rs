@@ -212,8 +212,8 @@ impl Nav<'_> {
             (_, "ML_GO_SERIES_EPISODES_MENU") => None,
             (Kind::Titles | Kind::Root, "ML_GO_BONUS_MENU") if self.bonus_pages > 0 => menu(menu_id(Kind::Bonus, 0, 1)),
             (_, "ML_GO_BONUS_MENU") => None,
-            (_, "ML_GO_CHAPTER_MENU") => (self.chapter_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Chapters, t, 1)).and_then(|id| menu(id)),
-            (_, "ML_GO_SETTINGS_MENU") => (self.settings_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Settings, t, 1)).and_then(|id| menu(id)),
+            (_, "ML_GO_CHAPTER_MENU") => (self.chapter_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Chapters, t, 1)).and_then(menu),
+            (_, "ML_GO_SETTINGS_MENU") => (self.settings_pages[t as usize - 1] > 0).then(|| menu_id(Kind::Settings, t, 1)).and_then(menu),
             (_, other) => {
                 warnings.push(format!("Button '{}': action {other} is not supported on Blu-ray, the button does nothing", b.name));
                 Some(Mapped::default())
@@ -425,6 +425,7 @@ impl Nav<'_> {
 /// for title `i + 1` (video slots show the moving clip without one); `chapter_starts[i][c]` is the
 /// source time of chapter `c + 1`'s sample frame of title `i + 1`. Texts follow `ui`. Returns the layout and
 /// German warnings.
+#[allow(clippy::too_many_arguments)] // mirrors the template inputs; a params struct would churn every caller
 pub fn layout_from_template(
     template: &Template,
     template_path: &Path,
@@ -815,7 +816,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bdtpl-mask-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = |name: &str| image::RgbaImage::from_pixel(4, 3, image::Rgba([255, 255, 255, 255])).save(dir.join(name)).unwrap();
-        (png("icon.png"), png("mask.png"));
+        png("icon.png");
+        png("mask.png");
         let ini = "[CXT]\n[CXT\\pages\\Item0]\nname=P\nstyle=MNUS_TITLE\nWidth=720\nHeight=576\n\
             [CXT\\pages\\Item0\\buttons\\Item0]\nname=b\nvalue=mask.png\nLeft=10\nTop=10\nWidth=154\nHeight=120\nlocation=ML_PLAY_ALL\n\
             [CXT\\pages\\Item0\\blocks\\Item0\\Gfx\\Item0]\nvalue=icon.png\ngfx_type=GT_BITMAP\nLocation=ML_PLAY_ALL\nLeft=10\nTop=10\nWidth=154\nHeight=120\nPaddingMethod=letterbox\n";

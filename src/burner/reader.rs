@@ -133,7 +133,7 @@ pub(crate) fn read_resilient(
     if attempt(src, lba, buf, retries, cancel)?.is_ok() {
         return Ok(());
     }
-    for (i, sector) in buf.chunks_exact_mut(S).enumerate() {
+    for (i, sector) in buf.as_chunks_mut::<S>().0.iter_mut().enumerate() {
         let at = lba + i as u64;
         if let Err(e) = attempt(src, at, sector, retries, cancel)? {
             if !ignore {

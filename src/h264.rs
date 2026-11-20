@@ -108,7 +108,7 @@ impl BitWriter {
     }
 
     pub fn bit(&mut self, b: bool) {
-        if self.bits % 8 == 0 {
+        if self.bits.is_multiple_of(8) {
             self.out.push(0);
         }
         if b {
@@ -135,7 +135,7 @@ impl BitWriter {
     }
 
     pub fn byte_aligned(&self) -> bool {
-        self.bits % 8 == 0
+        self.bits.is_multiple_of(8)
     }
 
     /// `rbsp_trailing_bits`: a one, then zeros to the byte boundary.
@@ -222,12 +222,15 @@ impl Hrd {
     }
 }
 
+/// `video_format`, `video_full_range_flag`, optional colour description.
+type Signal = (u32, bool, Option<(u32, u32, u32)>);
+
 /// VUI fields that survive a rewrite unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Vui {
     aspect: Option<(u32, u32, u32)>,
     overscan: Option<bool>,
-    signal: Option<(u32, bool, Option<(u32, u32, u32)>)>,
+    signal: Option<Signal>,
     chroma_loc: Option<(u32, u32)>,
     /// `num_units_in_tick`, `time_scale`, `fixed_frame_rate_flag`.
     pub timing: Option<(u32, u32, bool)>,

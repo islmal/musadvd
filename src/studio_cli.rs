@@ -222,7 +222,7 @@ pub fn ifo_layerbreak(a: IfoLayerbreak) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(list) => {
-            println!("{:>4} {:>4} {:>4} {:>4} {:>10} {:>10} {:>10} {:>6} {:<9} {}", "VTS", "TTN", "PGC", "Cell", "Start", "L0", "L1", "L0 %", "seamless", "Padding sectors");
+            println!(" VTS  TTN  PGC Cell      Start         L0         L1   L0 % seamless  Padding sectors");
             for c in list {
                 println!(
                     "{:>4} {:>4} {:>4} {:>4} {:>10} {:>10} {:>10} {:>5.1}% {:<9} {}{}",

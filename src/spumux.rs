@@ -165,7 +165,7 @@ pub fn parse_xml(xml: &str, dir: &Path) -> Result<Vec<SpuDef>, SpumuxError> {
                         name: attr(b, "name").ok_or_else(|| bad("button without a name"))?,
                         rect: [coord("x0")?, coord("y0")?, coord("x1")?, coord("y1")?],
                         nav: ["up", "down", "left", "right"].map(|n| attr(b, n)),
-                        autoaction: attr(b, "autoaction").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("autoaction")),
+                        autoaction: attr(b, "autoaction").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("autoaction")),
                     });
                 }
                 Some(MenuDef { highlight: dir.join(h), select: dir.join(s), buttons })
@@ -535,6 +535,8 @@ fn default_target(buttons: &[ButtonDef], me: usize, toward: i32) -> String {
     best.map_or(buttons[me].name.clone(), |b| b.2.to_string())
 }
 
+type ButtonColors = (Vec<[u32; 4]>, Vec<u8>);
+
 /// Result of the button group search (`FUN_140007080`): per group the slots, per button its group.
 fn pick_groups(
     packed: &dyn Fn(usize, usize, bool) -> u32,
@@ -543,7 +545,7 @@ fn pick_groups(
     groups: usize,
     use_img: bool,
     budget: &mut u64,
-) -> Result<Option<(Vec<[u32; 4]>, Vec<u8>)>, SpumuxError> {
+) -> Result<Option<ButtonColors>, SpumuxError> {
     // Distinct packed values under each button, at most four.
     let mut per_button: Vec<Vec<u32>> = Vec::new();
     for r in rects {
@@ -640,9 +642,11 @@ fn pick_groups(
     Ok(None)
 }
 
+type PreparedMenu = (Prepared, u32, u32, Vec<[u8; 3]>, MenuData);
+
 /// Mask pair + buttons → SPU picture and `dvdauthor-data` button info. `Ok(None)` when spumux
 /// would reject the input (it then skips the subpicture).
-fn prepare_menu(menu: &MenuDef, x: u32, y: u32) -> Result<Option<(Prepared, u32, u32, Vec<[u8; 3]>, MenuData)>, SpumuxError> {
+fn prepare_menu(menu: &MenuDef, x: u32, y: u32) -> Result<Option<PreparedMenu>, SpumuxError> {
     let (hl, sel) = (load_png(&menu.highlight)?, load_png(&menu.select)?);
     if (hl.width, hl.height) != (sel.width, sel.height) || hl.width % 2 != 0 || hl.height % 2 != 0 {
         return Err(SpumuxError::Unsupported("Masks differ in size or are odd-sized".into()));
@@ -1048,7 +1052,7 @@ impl<W: Write> Mux<W> {
                             | (h[3] as u64) << 5
                             | (h[4] as u64 >> 3);
                         self.scr = base * 300 + ((h[4] as u64 & 3) << 7 | h[5] as u64 >> 1);
-                        if self.scr != 0 && self.offset.is_some() && self.written % SECTOR as u64 == 0 {
+                        if self.scr != 0 && self.offset.is_some() && self.written.is_multiple_of(SECTOR as u64) {
                             self.insert(false)?;
                         }
                         self.scr = self.scr.max(self.next_min);

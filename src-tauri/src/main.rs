@@ -8,7 +8,7 @@
 //! - `preview_stream`, `preview_stop`  live player of the edit tab (see `preview.rs`)
 //! - `source_frame`, `detect_crop`  crop inspector (frame preview, black bar detection)
 //! - `start_conversion`   run the full pipeline in the background; progress arrives as
-//!                        `convert-event` events, the result as one `convert-done` event
+//!   `convert-event` events, the result as one `convert-done` event
 //! - `default_output_dir` suggestion for the output folder
 //! - burning (see `burn.rs`): `list_drives`, `disc_needs`, `probe_media`, `start_burn`,
 //!   `cancel_burn`

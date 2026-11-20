@@ -392,7 +392,7 @@ fn create_tmapt(titles: &PgcSet) -> Vec<u8> {
                 let vobu2 = global_find_vobu(titles, i, (j + 2) * units * denom);
                 let (sector, cell1) = vobu1.expect("time map entry inside the title");
                 let mut e = sector as u32;
-                if vobu2.map_or(true, |(_, c2)| c2 != cell1) {
+                if vobu2.is_none_or(|(_, c2)| c2 != cell1) {
                     e |= 0x8000_0000;
                 }
                 out.extend_from_slice(&e.to_be_bytes());
@@ -401,7 +401,7 @@ fn create_tmapt(titles: &PgcSet) -> Vec<u8> {
         }
     }
     let pad = (-(size_tmapt(titles) as i64)) & 2047;
-    out.extend(std::iter::repeat(0u8).take(pad as usize));
+    out.extend(std::iter::repeat_n(0u8, pad as usize));
     out
 }
 
@@ -452,7 +452,7 @@ fn create_vobuad(vg: &VobGroup) -> Vec<u8> {
         }
     }
     let pad = (-(4 + nv as i64 * 4)) & 2047;
-    out.extend(std::iter::repeat(0u8).take(pad as usize));
+    out.extend(std::iter::repeat_n(0u8, pad as usize));
     out
 }
 
@@ -794,7 +794,7 @@ pub fn write_vmg_ifo(menus: &PgcSet, fpc: Option<&dvdvm::Program>, titlesets: &[
     }
     let pad = 2048 - (j & 2047);
     if pad < 2048 {
-        out.extend(std::iter::repeat(0u8).take(pad));
+        out.extend(std::iter::repeat_n(0u8, pad));
     }
     if forcemenus {
         out.extend(adt.expect("menu address table"));

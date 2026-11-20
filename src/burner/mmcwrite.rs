@@ -162,7 +162,7 @@ impl Kind {
 /// current or maximum capacity.
 pub(crate) fn format_capacities(b: &[u8]) -> Vec<(u32, u8)> {
     let n = (*b.get(3).unwrap_or(&0) as usize).min(b.len().saturating_sub(4));
-    b.get(4..4 + n).unwrap_or(&[]).chunks_exact(8).map(|d| (u32::from_be_bytes([d[0], d[1], d[2], d[3]]), d[4] >> 2)).collect()
+    b.get(4..4 + n).unwrap_or(&[]).as_chunks::<8>().0.iter().map(|d| (u32::from_be_bytes([d[0], d[1], d[2], d[3]]), d[4] >> 2)).collect()
 }
 
 /// The commands with retry, cancel and optional data.

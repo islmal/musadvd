@@ -317,7 +317,9 @@ fn rgb(hex: &str) -> [u8; 3] {
 /// Button colours of the first VMGM menu as a player sees them: for colour group 1 of the
 /// first NAV pack's PCI the (selected, activated) RGB of pixel values 1..=3 (palette of the
 /// VMGM PGC, YCrCb → RGB), and the colour group of every button.
-fn disc_button_colours(video_ts: &Path) -> (Vec<([u8; 3], [u8; 3])>, Vec<u8>) {
+type ButtonColours = Vec<([u8; 3], [u8; 3])>;
+
+fn disc_button_colours(video_ts: &Path) -> (ButtonColours, Vec<u8>) {
     let vob = std::fs::read(video_ts.join("VIDEO_TS.VOB")).unwrap();
     let ifo = std::fs::read(video_ts.join("VIDEO_TS.IFO")).unwrap();
     let be32 = |b: &[u8], at: usize| u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as usize;

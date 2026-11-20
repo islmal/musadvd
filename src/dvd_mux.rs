@@ -928,12 +928,12 @@ impl ColorRemap {
         }
         // When all 16 palette entries of the PGC are used, map to the closest
         // existing entry in YCbCr color space instead of failing the build.
-        let (y0, c1_0, c2_0) = (((nc >> 16) & 0xff) as i32, ((nc >> 8) & 0xff) as i32, (nc & 0xff) as i32);
+        let (y0, c1_0, c2_0) = ((nc >> 16) & 0xff, (nc >> 8) & 0xff, nc & 0xff);
         let best = (0..16)
             .filter(|&i| colors[i] != COLOR_UNUSED)
             .min_by_key(|&i| {
                 let c = colors[i] & 0xff_ffff;
-                let (y, c1, c2) = (((c >> 16) & 0xff) as i32, ((c >> 8) & 0xff) as i32, (c & 0xff) as i32);
+                let (y, c1, c2) = ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
                 let dy = y0 - y;
                 let dc1 = c1_0 - c1;
                 let dc2 = c2_0 - c2;
@@ -2100,9 +2100,9 @@ pub fn fix_vobus(files: &VobFiles, set: &PgcSet, ctx_for: &dyn Fn(usize) -> dvdv
                 buf[0x9e] = pg.buttons.len() as u8;
                 buf[0x9f] = pg.buttons.len() as u8;
                 buf[0xa3..0xa3 + 24].copy_from_slice(&vob.buttoncoli);
-                for grp in 0..nrgrps {
+                for (grp, &idm) in idmap.iter().enumerate().take(nrgrps) {
                     let mut boffs = 0xbb + 18 * (grp * 36 / nrgrps);
-                    let sid = (pg.subpmap[0][idmap[grp]] & 127) as i32;
+                    let sid = (pg.subpmap[0][idm] & 127) as i32;
                     for (j, b) in pg.buttons.iter().enumerate() {
                         let Some(bi) = b.streams.iter().find(|s| s.substreamid == sid) else {
                             continue;
@@ -2157,7 +2157,7 @@ pub fn fix_vobus(files: &VobFiles, set: &PgcSet, ctx_for: &dyn Fn(usize) -> dvdv
                 }
                 let v: u32 = if s >= 0 {
                     let mut s = s - vobu.sector;
-                    if s > 0x1fff || s < -0x1fff {
+                    if !(-0x1fff..=0x1fff).contains(&s) {
                         s = 0;
                     }
                     if s < 0 {
@@ -2303,8 +2303,8 @@ mod tests {
     fn remapcolor_falls_back_to_closest_when_palette_full() {
         let mut cr = ColorRemap::new();
         let mut colors = [0i32; 16];
-        for i in 0..16 {
-            colors[i] = (i as i32 * 10) << 16 | 0x8080;
+        for (i, c) in colors.iter_mut().enumerate() {
+            *c = (i as i32 * 10) << 16 | 0x8080;
         }
         // Exact match
         cr.newcolors[0] = COLOR_UNUSED | (50 << 16) | 0x8080;

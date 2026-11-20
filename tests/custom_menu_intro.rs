@@ -234,7 +234,6 @@ fn easter_egg_transparent_mask() {
 #[test]
 fn external_video_files_reach_menu_args_with_their_offsets() {
     use musadvd::encoder::{self, Fit, MenuBackground, MenuLayer};
-    use std::ffi::OsString;
 
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dvdauthor");
     let (bg_file, el_file) = (fixtures.join("in_ntsc_3s.mpg"), fixtures.join("in_ac3_dts_3s.mpg"));
@@ -328,7 +327,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
     // The ffmpeg command: each file is an input seeked to its own start.
     let args = encoder::custom_menu_args(TvStandard::Pal, media, 6.0, None, None, &dir.join("m.mpg"));
     let seeks = |file: &std::path::Path, start: &str| {
-        args.windows(6).any(|w| w[0] == "-ss" && w[1] == start && w[4] == "-i" && w[5] == OsString::from(file))
+        args.windows(6).any(|w| w[0] == "-ss" && w[1] == start && w[4] == "-i" && w[5] == file)
     };
     assert!(seeks(&bg_file, "1.000"), "background input: {args:?}");
     assert!(seeks(&el_file, "2.000"), "element input: {args:?}");

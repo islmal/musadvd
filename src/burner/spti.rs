@@ -291,7 +291,7 @@ impl ScsiResult {
 
     /// The command succeeded (no check condition).
     pub fn ok(&self) -> bool {
-        self.status == 0 && self.sense.map_or(true, |s| s.key == 0 || s.key == 1)
+        self.status == 0 && self.sense.is_none_or(|s| s.key == 0 || s.key == 1)
     }
 
     pub fn into_result(self, what: &str) -> Result<ScsiResult, BurnError> {
@@ -685,7 +685,7 @@ pub fn parse_configuration(b: &[u8]) -> Option<(u16, Vec<Profile>)> {
         let code = be16(b, at)?;
         let len = *b.get(at + 3)? as usize;
         if code == 0 {
-            for p in b.get(at + 4..(at + 4 + len).min(total))?.chunks_exact(4) {
+            for p in b.get(at + 4..(at + 4 + len).min(total))?.as_chunks::<4>().0 {
                 let c = u16::from_be_bytes([p[0], p[1]]);
                 profiles.push(Profile { code: c, name: profile_name(c), current: p[2] & 1 != 0 || c == current });
             }

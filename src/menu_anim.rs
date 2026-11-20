@@ -112,7 +112,7 @@ pub fn dvd_intro_frames(secs: f64, tv: TvStandard) -> usize {
 pub fn intro_frames(secs: f64, rate: BdRate) -> usize {
     let (num, den) = (rate.fps.0 as u64, rate.fps.1 as u64);
     let mut n = ((secs * num as f64 / den as f64).round() as u64).max(2);
-    while (n * den * 90_000) % num != 0 {
+    while !(n * den * 90_000).is_multiple_of(num) {
         n += 1;
     }
     n as usize
@@ -169,7 +169,7 @@ fn draw(dst: &mut [u8], fw: u32, fh: u32, src: &RgbaImage, rect: Rect, opacity: 
     for y in cy0..cy1 {
         let s_row = &raw[(y - y0) as usize * stride..][..stride];
         let d_row = &mut dst[(y as usize * fw as usize + cx0 as usize) * 4..][..(cx1 - cx0) as usize * 4];
-        for (i, d) in d_row.chunks_exact_mut(4).enumerate() {
+        for (i, d) in d_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let s = &s_row[((cx0 - x0) as usize + i) * 4..][..4];
             let a = (s[3] as u32 * op + 127) / 255;
             if a == 0 {

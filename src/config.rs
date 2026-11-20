@@ -901,9 +901,7 @@ mod tests {
     #[test]
     fn roundtrip_and_partial_files() {
         let path = temp("roundtrip");
-        let mut s = AppSettings::default();
-        s.loop_playback = true;
-        s.process_priority = "Idle".into();
+        let s = AppSettings { loop_playback: true, process_priority: "Idle".into(), ..AppSettings::default() };
         s.save(&path).unwrap();
         assert_eq!(AppSettings::load(&path).unwrap(), s);
         assert!(!path.with_extension("json.tmp").exists());

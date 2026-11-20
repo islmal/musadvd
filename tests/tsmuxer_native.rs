@@ -9,6 +9,7 @@
 //!   offsets of the EP map (they depend on how many bytes the video NAL units have: tsMuxeR also
 //!   rewrote the SPS VUI), the EP map's PTS values are compared,
 //! * the same summary of the m2ts.
+//!
 //! The m2ts itself is checked on its own (packet structure, arrival times, PCR / PAT / PMT
 //! cadence, seek points) and with ffprobe.
 //!
@@ -136,7 +137,9 @@ struct Pkt<'a> {
 
 fn packets(m2ts: &[u8]) -> Vec<Pkt<'_>> {
     assert_eq!(m2ts.len() % PACKET, 0);
-    m2ts.chunks_exact(PACKET)
+    m2ts.as_chunks::<PACKET>()
+        .0
+        .iter()
         .map(|p| {
             let t = &p[4..];
             assert_eq!(t[0], 0x47);
@@ -228,10 +231,6 @@ fn oracle_meta(c: &Case) -> String {
             Codec::Ac3 => "A_AC3",
             Codec::Dts => "A_DTS",
             _ => "A_LPCM",
-        };
-        let l = match l {
-            "deu" => "deu",
-            other => other,
         };
         m += &format!("{name}, \"in.mkv\", track={}, lang={l}\n", 2 + k);
     }

@@ -22,7 +22,7 @@ pub fn pes_scrambled(sector: &[u8]) -> bool {
         return false;
     }
     // Pack start code 00 00 01 BA
-    if &sector[0..4] != [0x00, 0x00, 0x01, 0xBA] {
+    if sector[0..4] != [0x00, 0x00, 0x01, 0xBA] {
         return false;
     }
     // Pack stuffing length in the low 3 bits of byte 13
@@ -32,7 +32,7 @@ pub fn pes_scrambled(sector: &[u8]) -> bool {
     if pes + 7 > sector.len() {
         return false;
     }
-    if &sector[pes..pes + 3] != [0x00, 0x00, 0x01] {
+    if sector[pes..pes + 3] != [0x00, 0x00, 0x01] {
         return false;
     }
     let stream_id = sector[pes + 3];
@@ -47,13 +47,13 @@ pub fn pes_scrambled(sector: &[u8]) -> bool {
 
 fn is_title_vob(path: &str) -> bool {
     let p = path.to_ascii_uppercase();
-    let file = p.split('/').last().unwrap_or(&p);
+    let file = p.split('/').next_back().unwrap_or(&p);
     let Some(stem) = file.strip_suffix(".VOB") else { return false };
     let parts: Vec<&str> = stem.split('_').collect();
     if parts.len() != 3 || parts[0] != "VTS" {
         return false;
     }
-    parts[2].parse::<u32>().map_or(false, |m| m >= 1)
+    parts[2].parse::<u32>().is_ok_and(|m| m >= 1)
 }
 
 /// Checks whether an ISO image contains CSS-scrambled sectors in any of its title VOBs.

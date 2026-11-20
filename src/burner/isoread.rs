@@ -70,7 +70,7 @@ pub struct IsoImage<R: Read + Seek> {
 }
 
 fn ucs2(b: &[u8]) -> String {
-    char::decode_utf16(b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]))).map(|r| r.unwrap_or('?')).collect()
+    char::decode_utf16(b.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]]))).map(|r| r.unwrap_or('?')).collect()
 }
 
 fn le32(b: &[u8], at: usize) -> u32 {

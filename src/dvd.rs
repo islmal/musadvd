@@ -889,7 +889,7 @@ impl TitlePlan {
 
     fn audio_labels(&self) -> Vec<String> {
         let all = probe::audio_labels(&self.info, self.track_label_mode, self.ui_lang);
-        self.audio.iter().zip(self.audio_outs()).map(|(&i, out)| probe::with_layout(&all[i], &out.layout_label(), self.track_label_mode)).collect()
+        self.audio.iter().zip(self.audio_outs()).map(|(&i, out)| probe::with_layout(&all[i], out.layout_label(), self.track_label_mode)).collect()
     }
 
     fn subtitle_labels(&self) -> Vec<String> {
@@ -901,7 +901,7 @@ impl TitlePlan {
     }
 
     fn subtitle_sources(&self) -> Vec<u32> {
-        let emb = self.subtitles.iter().map(|&s| self.info.subtitles[s].index as u32);
+        let emb = self.subtitles.iter().map(|&s| self.info.subtitles[s].index);
         let ext = (0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32);
         emb.chain(ext).collect()
     }
@@ -1306,7 +1306,7 @@ pub(crate) fn select_external_subtitles(
 pub async fn build_dvd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) -> Result<BuildReport, BuildError> {
     let result = if opts.disc.is_bluray() { crate::bd::build_bd(opts, log).await } else { build_dvd_inner(opts, log).await };
     if matches!(result, Err(BuildError::Cancelled)) {
-        log(Event::Step(tr(opts.ui_lang, "cancelled_cleanup").into()));
+        log(Event::Step(tr(opts.ui_lang, "cancelled_cleanup")));
         if let Ok(out) = std::fs::canonicalize(&opts.output) {
             let work = work_dir(&display_path(out), opts);
             if work.join(WORK_DIR).is_file() {
@@ -1363,10 +1363,10 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     std::fs::write(work.join(WORK_DIR), "temporary files of musadvd, safe to delete\n").at(&work)?;
     let tv = opts.tv_standard;
     if tv == TvStandard::Ntsc {
-        log(Event::Step(tr(opts.ui_lang, "tv_ntsc").into()));
+        log(Event::Step(tr(opts.ui_lang, "tv_ntsc")));
     }
     if opts.audio_mode == AudioMode::Lpcm {
-        warn(log, tr(opts.ui_lang, "lpcm_dvd_warn").into());
+        warn(log, tr(opts.ui_lang, "lpcm_dvd_warn"));
     }
 
     // 1. Probe and select streams ------------------------------------------------------------
@@ -1484,7 +1484,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 chapters: members.iter().map(|m| m.chapters.len()).sum(),
                 duration_secs: members.iter().map(|m| m.info.duration_secs).sum(),
                 clip: t.clip(),
-                audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
+                audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index).collect(),
                 subtitle_sources: t.subtitle_sources(),
                 audio_labels: t.audio_labels(),
                 subtitle_labels: t.subtitle_labels(),
@@ -1584,7 +1584,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         // 4. Menus (rendered in parallel) --------------------------------------------------------------
         cancel.check()?;
         log(Event::Phase(BuildPhase::Menus));
-        log(Event::Step(tr(opts.ui_lang, "render_menus").into()));
+        log(Event::Step(tr(opts.ui_lang, "render_menus")));
         let ui = opts.ui_lang;
         let chapter_word = tr(ui, "chapter");
         // A single video can do without the main (title) menu.
@@ -1647,7 +1647,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             let links = MenuLinks { first: 0, root: root_no, chapters: chap_no, settings: set_no, main_menu: has_main_menu.then(|| main_pages[i]), bonus: None, episodes: None, title1_chapters: None, title1_settings: None };
 
             let mut rendered = Vec::new();
-            let jobs: [(Option<&Page>, Option<u32>, MenuKind, Option<&PathBuf>, String, &str); 3] = [
+            type MenuJob<'a> = (Option<&'a Page>, Option<u32>, MenuKind<'a>, Option<&'a PathBuf>, String, &'a str);
+            let jobs: [MenuJob<'_>; 3] = [
                 (root_page, root_no, MenuKind::Root, root_src.as_ref().map(|s| &s.1), t.label.clone(), "root"),
                 (chap_page, chap_no, chap_kind, chap_src.as_ref().map(|s| &s.1), format!("{} – {chapter_word}", t.label), "chap"),
                 (set_page, set_no, set_kind, set_src.as_ref().map(|s| &s.1), format!("{} – {settings_word}", t.label), "set"),
@@ -1796,7 +1797,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             }
             main_menu
     } else {
-            log(Event::Step(tr(opts.ui_lang, "no_title_menu").into()));
+            log(Event::Step(tr(opts.ui_lang, "no_title_menu")));
             RenderedMenu { pages: vec![], warnings: vec![] }
         };
         for w in &vmgm.warnings {
@@ -1804,8 +1805,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         }
         let sound_note = Some(match (&main_menu_audio, titles_have_sound) {
             (Some(a), _) => tf!(opts.ui_lang, "menu_sound_file", file = a.path.file_name().unwrap_or_default().to_string_lossy()),
-            (None, true) => tr(opts.ui_lang, "menu_sound_titles").into(),
-            (None, false) => tr(opts.ui_lang, "menu_sound_silent").into(),
+            (None, true) => tr(opts.ui_lang, "menu_sound_titles"),
+            (None, false) => tr(opts.ui_lang, "menu_sound_silent"),
         });
         MenuStage {
             pages: vmgm.pages.iter().chain(ts_menus.iter().flatten().flat_map(|m| m.pages.iter())).cloned().collect(),
@@ -2067,7 +2068,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     if let Some(hw) = hwaccels.iter().flatten().next() {
         log(Event::Step(tf!(opts.ui_lang, "gpu_decode", hw = hw)));
     } else if opts.hw_decode && titles.iter().any(|t| t.copy_kbps.is_none()) {
-        log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
+        log(Event::Step(tr(opts.ui_lang, "gpu_unavailable")));
     }
 
     // 8. dvdauthor --------------------------------------------------------------------------------
@@ -2135,7 +2136,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .unwrap_or(expected_bytes);
     let burn_estimate = Some(eta::image_and_burn_secs(eta::Medium::Dvd, vob_bytes, eta::default_speed_x(eta::Medium::Dvd, dual_layer), true, dual_layer));
     log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Authoring, None, Some(eta::authoring_secs(vob_bytes)), burn_estimate)));
-    log(Event::Step(tr(opts.ui_lang, "authoring_created").into()));
+    log(Event::Step(tr(opts.ui_lang, "authoring_created")));
     cancel.check()?;
     let authoring_log = {
         let (work, dest) = (work.clone(), work.join(&layout.dest));

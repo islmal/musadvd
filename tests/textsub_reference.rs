@@ -8,7 +8,8 @@ use musadvd::author::TvStandard;
 use musadvd::textsub::{parse_srt, render_cue};
 
 /// (x0, y0, x1, y1 of the visible pixels, fill pixels, outline pixels) from spumux.
-const REFERENCE: [((u32, u32, u32, u32), u32, u32); 3] =
+type Box4 = (u32, u32, u32, u32);
+const REFERENCE: [(Box4, u32, u32); 3] =
     [((245, 497, 470, 528), 1344, 2546), ((283, 463, 432, 522), 1563, 3212), ((99, 395, 618, 522), 9428, 18718)];
 
 const SRT: &str = "1\n00:00:01,000 --> 00:00:03,000\nHallo Welt gjpq\n\n2\n00:00:04,000 --> 00:00:06,000\nZeile eins\nZeile zwei\n\n\

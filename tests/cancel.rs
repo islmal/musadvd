@@ -66,11 +66,11 @@ fn cancel_during_encoding() {
     let token = cancel.clone();
     let result = rt.block_on(dvd::build_dvd(&opts, &mut |e| match e {
         Event::Phase(BuildPhase::Encoding { index: 0, .. }) => encoding_running = true,
-        Event::Progress { label, fraction } if encoding_running && label.starts_with("Encoding") && fraction > 0.01 => {
-            if cancelled_at.is_none() {
-                cancelled_at = Some(Instant::now());
-                token.cancel();
-            }
+        Event::Progress { label, fraction }
+            if encoding_running && label.starts_with("Encoding") && fraction > 0.01 && cancelled_at.is_none() =>
+        {
+            cancelled_at = Some(Instant::now());
+            token.cancel();
         }
         _ => {}
     }));

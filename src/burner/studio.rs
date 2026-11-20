@@ -752,6 +752,7 @@ pub fn read(ctx: &Ctx, drive: &DriveInfo, out: &Path) -> Result<Outcome, String>
                 &samples,
                 s.graph.sample_ms,
             );
+            #[allow(clippy::drop_non_drop)] // the guard has a real Drop on Windows only
             drop(_lock);
             eject_if(ctx, drive, s.io.eject_after.read);
             let mut o = Outcome::ok(if report.bad.is_empty() {
@@ -817,6 +818,7 @@ pub fn verify(ctx: &Ctx, drive: &DriveInfo, image: Option<&Path>) -> Result<Outc
         &samples,
         s.graph.sample_ms,
     );
+    #[allow(clippy::drop_non_drop)] // the guard has a real Drop on Windows only
     drop(_lock);
     eject_if(ctx, drive, s.io.eject_after.verify);
     // Name the files of the first miscompares when the image is an ISO 9660 one.

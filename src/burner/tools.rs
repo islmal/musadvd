@@ -81,7 +81,7 @@ fn read_dstring(b: &[u8], at: usize, len: usize) -> String {
     let body = &b[at + 1..at + used];
     match b[at] {
         8 => body.iter().map(|&c| c as char).collect(),
-        16 => char::decode_utf16(body.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]))).map(|r| r.unwrap_or('?')).collect(),
+        16 => char::decode_utf16(body.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]]))).map(|r| r.unwrap_or('?')).collect(),
         _ => String::new(),
     }
 }
@@ -163,8 +163,10 @@ fn udf_descriptors(img: &mut Img) -> Result<Vec<(u64, Vec<u8>)>, LabelError> {
     Ok(out)
 }
 
+type VdsSeq = Vec<(u64, Vec<u8>)>;
+
 /// Both volume descriptor sequences (main, reserve) from the anchor.
-fn vds_sequences(img: &mut Img) -> Result<Vec<Vec<(u64, Vec<u8>)>>, LabelError> {
+fn vds_sequences(img: &mut Img) -> Result<Vec<VdsSeq>, LabelError> {
     if img.sectors <= ANCHOR {
         return Ok(vec![]);
     }
@@ -244,7 +246,7 @@ fn patch_all(img: &mut Img, new: &str) -> Result<String, LabelError> {
         let mut b = img.read(lba)?;
         if joliet {
             let ucs: Vec<u8> = new.chars().take(16).flat_map(|c| (c as u16).to_be_bytes()).collect();
-            for (i, pair) in b[40..72].chunks_exact_mut(2).enumerate() {
+            for (i, pair) in b[40..72].as_chunks_mut::<2>().0.iter_mut().enumerate() {
                 pair.copy_from_slice(ucs.get(2 * i..2 * i + 2).unwrap_or(&[0, 0x20]));
             }
         } else {
@@ -346,9 +348,11 @@ fn be16(b: &[u8], at: usize) -> Option<usize> {
     b.get(at..at + 2).map(|s| u16::from_be_bytes([s[0], s[1]]) as usize)
 }
 
+type CellRow = (u32, u32, u32, u8, u32, u32);
+
 /// Cells of one VTS IFO as `(ttn, pgc, cell, flags, first, last)` (sectors relative to the title
 /// VOBs) plus the VTS_VOBS offset. Damaged tables end the walk silently.
-fn walk_cells(ifo: &[u8]) -> Option<(u32, Vec<(u32, u32, u32, u8, u32, u32)>)> {
+fn walk_cells(ifo: &[u8]) -> Option<(u32, Vec<CellRow>)> {
     if !ifo.starts_with(b"DVDVIDEO-VTS") {
         return None;
     }

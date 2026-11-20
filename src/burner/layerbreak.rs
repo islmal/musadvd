@@ -66,7 +66,7 @@ impl std::fmt::Display for LayerBreakError {
 impl std::error::Error for LayerBreakError {}
 
 pub(crate) fn fits(l0: u32, total: u32, caps: Capacities) -> bool {
-    l0 % 16 == 0 && l0 >= total - l0 && l0 <= caps.layer && total - l0 <= caps.layer
+    l0.is_multiple_of(16) && l0 >= total - l0 && l0 <= caps.layer && total - l0 <= caps.layer
 }
 
 /// Chooses the layer break for an image of `total` sectors. `None` = fits a single layer.
@@ -260,7 +260,7 @@ mod tests {
         let lb = choose_layer_break(1100, &cells(&[100, 544, 560, 592]), CAPS).unwrap().unwrap();
         assert_eq!(lb, LayerBreak { l0_sectors: 560, padding: None });
         let l0 = lb.l0_sectors;
-        assert!(l0 >= 1100 - l0 && l0 % 16 == 0);
+        assert!(l0 >= 1100 - l0 && l0.is_multiple_of(16));
     }
 
     #[test]
@@ -271,8 +271,6 @@ mod tests {
         // The smallest padding wins (590 + 2).
         let lb = choose_layer_break(1100, &cells(&[100, 555, 590]), CAPS).unwrap().unwrap();
         assert_eq!(lb, LayerBreak { l0_sectors: 592, padding: Some((2, 2)) });
-        // With padding the image grows: L0 still ≥ L1.
-        assert!(560 >= 1105 - 560);
     }
 
     #[test]

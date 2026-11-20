@@ -4,6 +4,7 @@
 //!   ffmpeg's own rendering of the source).
 //! - VobSub: a DVD built from an SRT (natively rendered subpictures) is used as the input of a
 //!   second build; every subtitle must survive with its timing.
+//!
 //! Skipped (with a message) when tools or templates are missing.
 
 use std::path::{Path, PathBuf};

@@ -1040,7 +1040,7 @@ pub fn compile_str(src: &str, ctx: &Context, domain: Domain) -> Result<Vec<[u8; 
     let prog = parse(src)?;
     let mut code = Vec::new();
     let end = compile(&mut code, 0, 0, &prog, ctx, domain)?;
-    Ok(code[..end].chunks_exact(8).map(|c| c.try_into().expect("8-byte chunk")).collect())
+    Ok(code[..end].as_chunks::<8>().0.to_vec())
 }
 
 #[cfg(test)]

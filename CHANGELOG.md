@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Continuous integration**: a GitHub Actions `CI` workflow builds the frontend, runs the `vitest` suites and runs `cargo check --workspace --tests` and `cargo test --lib` on Windows and Linux for every push and pull request, so Linux-only code (`burner/unix.rs`, `SG_IO`, self-update) is compiled on each commit.
+- **Frontend unit tests**: `vitest` suites for `layout.ts` and `project.ts` (`npm test`).
+- **Clippy enforcement**: CI runs `cargo clippy --workspace --all-targets -- -D warnings`; existing lints across the workspace were fixed.
+
+### Changed
+
+- **Releases are gated behind CI**: the release workflow runs the CI workflow first, so nightly and versioned builds are only built and published when every check is green.
+
+### Removed
+
+- The always-empty `UNSUPPORTED_CHOICES` plumbing and its locale key.
+
+### Fixed
+
+- The disc image builder (`burner/builder.rs`) returns an error instead of panicking when the source folder changes between detection and planning.
+- Poisoned locks in the Windows burner and the i18n catalogs are recovered instead of panicking when a thread exited while holding them.
+
 ## [1.0.3] - 2026-11-20
 
 ### Added

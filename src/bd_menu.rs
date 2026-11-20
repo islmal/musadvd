@@ -235,7 +235,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
             };
             let cmds = match action {
                 Action::PlayAll => go(to_title(1), 0, 1),
-                Action::PlayTitle { title } => go(to_title(first_file(*title as u32)), 0, 0),
+                Action::PlayTitle { title } => go(to_title(first_file(*title)), 0, 0),
                 Action::PlayChapter { title, chapter } => {
                     // Chapters run across the merged files: find the file and its local mark.
                     let mut local = chapter - 1;
@@ -247,7 +247,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                         }
                         local -= n as u32;
                     }
-                    go(to_title(first_file(*title as u32) + file as u32), local, 0)
+                    go(to_title(first_file(*title) + file as u32), local, 0)
                 }
                 Action::Menu { menu, .. } if intro => {
                     let target = by_id(menu);

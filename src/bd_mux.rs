@@ -1150,7 +1150,7 @@ mod tests {
         // Arrival times rise; the PCR packet's equals its PCR (the first PCR is 500 ms before the first PTS).
         let ats = |n: usize| u32::from_be_bytes(out[n * 192..n * 192 + 4].try_into().unwrap());
         assert!((1..packets as usize).all(|n| ats(n) >= ats(n - 1)));
-        assert_eq!(ats(3) as i64, (BASE_PTS - VBV_LEN) * 300 & 0x3FFF_FFFF);
+        assert_eq!(ats(3) as i64, ((BASE_PTS - VBV_LEN) * 300) & 0x3FFF_FFFF);
         // The padding is null packets on PID 0x1FFF.
         assert_eq!(pid(packets as usize - 1), 0x1FFF);
     }

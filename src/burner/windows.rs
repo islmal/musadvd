@@ -319,6 +319,8 @@ pub fn is_imapi_write_feature_current(drive_id: &str) -> bool {
     is_write_feature_current(&rec)
 }
 
+type RingProducer = std::thread::JoinHandle<Result<Box<dyn SectorSource>, String>>;
+
 /// Where the bytes of the image come from.
 enum Feed {
     /// An image file: IMAPI may seek in it.
@@ -359,7 +361,7 @@ impl ImageStream {
     }
 
     fn send(&self, p: BurnProgress) {
-        let _ = self.tx.lock().unwrap().send(p);
+        let _ = self.tx.lock().unwrap_or_else(|e| e.into_inner()).send(p);
     }
 }
 
@@ -369,7 +371,7 @@ impl ISequentialStream_Impl for ImageStream_Impl {
             return E_ABORT;
         }
         let buf = unsafe { std::slice::from_raw_parts_mut(pv as *mut u8, cb as usize) };
-        let mut feed = self.feed.lock().unwrap();
+        let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
         let mut n = 0;
         while n < buf.len() {
             match feed.read(&mut buf[n..]) {
@@ -407,7 +409,7 @@ impl ISequentialStream_Impl for ImageStream_Impl {
 
 impl IStream_Impl for ImageStream_Impl {
     fn Seek(&self, dlibmove: i64, dworigin: STREAM_SEEK, plibnewposition: *mut u64) -> windows::core::Result<()> {
-        let mut feed = self.feed.lock().unwrap();
+        let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
         let pos = match &mut *feed {
             Feed::File(file) => {
                 let target = match dworigin {
@@ -535,10 +537,10 @@ impl WriteEvents {
         };
         let Some(p) = p else { return };
         let key = (p.phase, (p.fraction * 1000.0) as u32);
-        let mut last = self.last.lock().unwrap();
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
         if *last != Some(key) {
             *last = Some(key);
-            let _ = self.tx.lock().unwrap().send(p);
+            let _ = self.tx.lock().unwrap_or_else(|e| e.into_inner()).send(p);
         }
     }
 }
@@ -728,7 +730,7 @@ impl OpticalBurner for ImapiBurner {
         }
         // A source with a ring of its own (image built on the fly) is read directly; any other
         // gets a producer thread and a ring buffer.
-        let (feed, stats, producer): (Feed, Option<RingStats>, Option<std::thread::JoinHandle<Result<Box<dyn SectorSource>, String>>>) =
+        let (feed, stats, producer): (Feed, Option<RingStats>, Option<RingProducer>) =
             if let Some(stats) = source.ring_stats() {
                 (Feed::Reader(Box::new(SourceReader::new(source))), Some(stats), None)
             } else {

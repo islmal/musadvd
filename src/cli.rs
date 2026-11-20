@@ -21,6 +21,8 @@ struct Cli {
     command: Command,
 }
 
+// clap argument enum built once per process; boxing variants would only obscure the derive.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Parse a ConvertX template .ini and print its pages and buttons.

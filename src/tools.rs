@@ -157,6 +157,9 @@ pub struct RawStream {
     pub frame_bytes: usize,
 }
 
+/// Per-frame compositor: frame index + input planes to output frame bytes.
+type ComposeFn = Arc<dyn Fn(usize, &[&[u8]]) -> Vec<u8> + Send + Sync>;
+
 #[derive(Debug, Clone)]
 pub struct Toolchain {
     pub ffmpeg: PathBuf,
@@ -389,7 +392,7 @@ impl Toolchain {
         streams: &[RawStream],
         frames: usize,
         duration_secs: f64,
-        compose: Arc<dyn Fn(usize, &[&[u8]]) -> Vec<u8> + Send + Sync>,
+        compose: ComposeFn,
         mut progress: impl FnMut(FfmpegProgress),
     ) -> Result<(), ToolError> {
         const CHUNK: usize = 8;
@@ -502,7 +505,7 @@ impl Toolchain {
             ffmpeg.stdout(Stdio::piped());
         }
         let mut ff_child = ffmpeg.spawn().map_err(io("ffmpeg"))?;
-        let mut upstream = ff_child.stdout.take().map(|s| owned_file(s)).transpose().map_err(io("ffmpeg"))?;
+        let mut upstream = ff_child.stdout.take().map(owned_file).transpose().map_err(io("ffmpeg"))?;
         let mut spumux = Vec::new();
         for (n, (xml, stream)) in stages.iter().enumerate() {
             let last = n + 1 == stages.len();

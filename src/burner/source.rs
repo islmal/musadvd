@@ -85,7 +85,7 @@ impl Read for SourceReader {
 }
 
 fn check(buf: &[u8]) {
-    assert!(buf.len() % S == 0, "sector reads are multiples of {S} bytes");
+    assert!(buf.len().is_multiple_of(S), "sector reads are multiples of {S} bytes");
 }
 
 /// An image file (or a raw device opened as a file). A last partial sector reads zero-padded.
@@ -195,7 +195,7 @@ impl SectorSource for Bin2352Source {
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> io::Result<()> {
         check(buf);
         let mut raw = [0u8; RAW as usize];
-        for (i, out) in buf.chunks_exact_mut(S).enumerate() {
+        for (i, out) in buf.as_chunks_mut::<S>().0.iter_mut().enumerate() {
             let at = lba + i as u64;
             if at >= self.sectors {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past the end"));
@@ -392,7 +392,7 @@ pub(crate) mod fake {
             let at = lba as usize * S;
             let src = self.data.get(at..at + buf.len()).ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Ende"))?;
             buf.copy_from_slice(src);
-            for (i, sector) in buf.chunks_exact_mut(S).enumerate() {
+            for (i, sector) in buf.as_chunks_mut::<S>().0.iter_mut().enumerate() {
                 if self.corrupt.contains(&(lba + i as u64)) {
                     sector[7] ^= 0xFF;
                 }

@@ -491,7 +491,7 @@ pub(crate) fn subtitle_font_chain_for(family: Option<&str>) -> Vec<FontArc> {
     // The arial.ttf last-resort guess of `font_candidates` must not masquerade as the chosen font.
     let chosen = font_candidates(&style)
         .iter()
-        .filter(|p| key == "arial" || p.file_name().map_or(true, |n| !n.eq_ignore_ascii_case("arial.ttf")))
+        .filter(|p| key == "arial" || p.file_name().is_none_or(|n| !n.eq_ignore_ascii_case("arial.ttf")))
         .find_map(|p| load_font(p));
     let mut chain: Vec<FontArc> = chosen.into_iter().collect();
     chain.extend(subtitle_font_chain());
@@ -1874,7 +1874,7 @@ mod tests {
         // Fits after shrinking: no ellipsis, at least 70 % size.
         let (placed, em) = fit_text(&fonts, "Episode 02", 27.0, text_width(&fonts, &place_chars(&fonts, "Episode 02"), 27.0) * 0.9, MIN_TEXT_SCALE);
         assert_eq!(placed.len(), 10);
-        assert!(em >= 27.0 * MIN_TEXT_SCALE - 1e-3 && em < 27.0);
+        assert!((27.0 * MIN_TEXT_SCALE - 1e-3..27.0).contains(&em));
 
         let long = "Очень длинное название фильма про приключения в Санкт-Петербурге и Москве 2025 01";
         let (placed, em) = fit_text(&fonts, long, 27.0, 548.0, MIN_TEXT_SCALE);

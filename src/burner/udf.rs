@@ -328,8 +328,9 @@ fn fid_name(name: &str) -> Vec<u8> {
 fn invalid(msg: String) -> ImageError {
     ImageError::Invalid(msg)
 }
+type NodeTree = (Vec<Node>, Vec<ImageFile>, Vec<usize>);
 
-fn build_nodes(entries: &[TreeEntry]) -> Result<(Vec<Node>, Vec<ImageFile>, Vec<usize>), ImageError> {
+fn build_nodes(entries: &[TreeEntry]) -> Result<NodeTree, ImageError> {
     let new_node = |name: &str, parent: usize, dir: bool| Node {
         name: name.to_string(),
         parent,
@@ -1020,7 +1021,7 @@ impl<W: Write> SectorWriter<W> {
 /// Text field of a volume descriptor: spaces, then the text (UCS-2BE in a Joliet descriptor).
 fn vd_text(b: &mut [u8], at: usize, len: usize, s: &str, joliet: bool) {
     if joliet {
-        for pair in b[at..at + len].chunks_exact_mut(2) {
+        for pair in b[at..at + len].as_chunks_mut::<2>().0.iter_mut() {
             pair.copy_from_slice(&[0, b' ']);
         }
         for (i, c) in s.chars().take(len / 2).enumerate() {

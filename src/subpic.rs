@@ -239,7 +239,7 @@ pub fn decode_pgs(sup: &[u8]) -> Result<Decoded, SubpicError> {
                 let Some(&id) = p.first() else { continue };
                 let hd = canvas.1 > 576;
                 let pal = palettes.entry(id).or_insert([[0; 4]; 256]);
-                for e in p.get(2..).unwrap_or(&[]).chunks_exact(5) {
+                for e in p.get(2..).unwrap_or(&[]).as_chunks::<5>().0 {
                     let [r, g, b] = ycbcr_to_rgb(e[1], e[3], e[2], hd);
                     pal[e[0] as usize] = [r, g, b, e[4]];
                 }
@@ -319,8 +319,10 @@ fn compose_pgs(pcs: &Pcs, objects: &HashMap<u16, PgsObject>, palette: Option<&[[
 // VobSub (DVD subpicture units)
 // ---------------------------------------------------------------------------------------------
 
+type IdxPalette = [[u8; 3]; 16];
+
 /// `palette:` (16 RGB colours) and `size:` from a VobSub `.idx` header (Matroska CodecPrivate).
-pub fn parse_idx_header(text: &str) -> (Option<[[u8; 3]; 16]>, Option<(u32, u32)>) {
+pub fn parse_idx_header(text: &str) -> (Option<IdxPalette>, Option<(u32, u32)>) {
     let mut palette = None;
     let mut size = None;
     for line in text.lines() {
@@ -355,7 +357,7 @@ struct Nibbles<'a> {
 impl Nibbles<'_> {
     fn next(&mut self) -> u16 {
         let b = self.data.get(self.pos / 2).copied().unwrap_or(0);
-        let v = if self.pos % 2 == 0 { b >> 4 } else { b & 0x0F };
+        let v = if self.pos.is_multiple_of(2) { b >> 4 } else { b & 0x0F };
         self.pos += 1;
         v as u16
     }
@@ -695,8 +697,8 @@ fn representatives(colors: &[[u8; 3]]) -> Vec<[u8; 3]> {
             sums[k][3] += 1;
         }
         for (center, s) in centers.iter_mut().zip(&sums) {
-            if s[3] > 0 {
-                *center = [(s[0] / s[3]) as u8, (s[1] / s[3]) as u8, (s[2] / s[3]) as u8];
+            if let Some(r) = s[0].checked_div(s[3]) {
+                *center = [r as u8, (s[1] / s[3]) as u8, (s[2] / s[3]) as u8];
             }
         }
     }
@@ -732,8 +734,8 @@ fn choose_reps(pixels: &[[u8; 4]]) -> Vec<[u8; 4]> {
                 sums[k][4] += 1;
             }
             for (center, s) in centers.iter_mut().zip(&sums) {
-                if s[4] > 0 {
-                    *center = [(s[0] / s[4]) as u8, (s[1] / s[4]) as u8, (s[2] / s[4]) as u8, (s[3] / s[4]) as u8];
+                if let Some(r) = s[0].checked_div(s[4]) {
+                    *center = [r as u8, (s[1] / s[4]) as u8, (s[2] / s[4]) as u8, (s[3] / s[4]) as u8];
                 }
             }
         }

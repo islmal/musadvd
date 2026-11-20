@@ -133,10 +133,10 @@ fn check(name: &str, layout: &DvdLayout, work: &Path) {
 /// those empty, so the reference is reduced the same way (the former post-pass of `dvd.rs`).
 fn strip_intro_buttons(vob: &mut [u8]) {
     const HLI: std::ops::Range<usize> = 0x8D..0x8D + 189;
-    let is_nav = |s: &[u8]| s[0x26..0x2A] == [0, 0, 1, 0xBF] && s[0x2C] == 0 && s[0x400..0x404] == [0, 0, 1, 0xBF];
-    let id = |s: &[u8]| (u16::from_be_bytes([s[0x41F], s[0x420]]), s[0x422]);
-    let with_intro: std::collections::HashSet<u16> = vob.chunks_exact(2048).filter(|s| is_nav(s)).map(id).filter(|&(_, cell)| cell > 1).map(|(v, _)| v).collect();
-    for s in vob.chunks_exact_mut(2048).filter(|s| is_nav(s)) {
+    let is_nav = |s: &[u8; 2048]| s[0x26..0x2A] == [0, 0, 1, 0xBF] && s[0x2C] == 0 && s[0x400..0x404] == [0, 0, 1, 0xBF];
+    let id = |s: &[u8; 2048]| (u16::from_be_bytes([s[0x41F], s[0x420]]), s[0x422]);
+    let with_intro: std::collections::HashSet<u16> = vob.as_chunks::<2048>().0.iter().filter(|s| is_nav(s)).map(id).filter(|&(_, cell)| cell > 1).map(|(v, _)| v).collect();
+    for s in vob.as_chunks_mut::<2048>().0.iter_mut().filter(|s| is_nav(s)) {
         let (v, cell) = id(s);
         if cell == 1 && with_intro.contains(&v) {
             s[HLI].fill(0);

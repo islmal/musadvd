@@ -36,6 +36,8 @@ use crate::probe::{self, ExternalSubtitle, MediaInfo, SubtitleKind, SubtitleStre
 use crate::subpic;
 use crate::tools::{ToolError, Toolchain};
 
+type TitleJob = (TitleReport, Option<&'static str>, Option<String>, f64);
+
 /// Parallel hardware encodes. Measured 2026-11-17 (RTX 4070 SUPER, 1080p25 NVENC p5 `-multipass
 /// fullres`, 1000 frames per job): 1 job 206 fps, 2 jobs 212, 4 jobs 216, 8 jobs 218 in total, so
 /// the encoder is saturated by one job; the second only overlaps the CPU side (decode, filters,
@@ -241,7 +243,7 @@ impl BdTitle {
     fn subtitle_sources(&self) -> Vec<u32> {
         self.subs
             .iter()
-            .map(|&s| self.info.subtitles[s].index as u32)
+            .map(|&s| self.info.subtitles[s].index)
             .chain((0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32))
             .collect()
     }
@@ -534,7 +536,7 @@ fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>], disc: &Layout) -> 
                     start_secs: t.info.trim_start() + (t.info.duration_secs * 0.1).clamp(0.0, 300.0).min((t.info.duration_secs - 1.0).max(0.0)),
                     has_audio: !t.info.audio.is_empty(),
                 },
-                audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
+                audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index).collect(),
                 subtitle_sources: t.subtitle_sources(),
                 audio_labels: t.audio_labels(disc),
                 subtitle_labels: t.subtitle_labels(),
@@ -812,7 +814,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         for k in 0..total.min(layout.subs.len()) {
             if t.sub_for(&layout, k).is_none() {
                 let idx = if k < t.subs.len() {
-                    t.info.subtitles[t.subs[k]].index as u32
+                    t.info.subtitles[t.subs[k]].index
                 } else {
                     EXTERNAL_SUB_SOURCE_BASE + (k - t.subs.len()) as u32
                 };
@@ -907,7 +909,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             let tpl = crate::template::Template::load(&opts.template)
                 .map_err(|e| BuildError::Template(format!("Menu template {}: {e}", opts.template.display())))?;
             if tpl.pages.is_empty() {
-                log(Event::Step(tr(opts.ui_lang, "bd_template_no_pages").into()));
+                log(Event::Step(tr(opts.ui_lang, "bd_template_no_pages")));
                 None
             } else {
                 let aspect = if opts.aspect_policy == crate::dvd::AspectPolicy::Standard { Aspect::Standard } else { Aspect::Wide };
@@ -926,15 +928,15 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let menus = match menu_layout {
         Some(layout) => {
             log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Menus, None, None, None)));
-            let stage = build_menus(&tools, layout, &titles, &groups, &disc_layout, opts, menu_rate, &work, heavy_jobs, log).await?;
+            let stage = build_menus(&tools, layout, &titles, &groups, disc_layout, opts, menu_rate, &work, heavy_jobs, log).await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
             }
             Some(stage)
         }
         None => {
-            log(Event::Eta(Eta { phase_label: tr(opts.ui_lang, "phase_bd_no_menu").into(), ..Eta::new(JobPhase::Menus, None, None, None) }));
-            log(Event::Step(tr(opts.ui_lang, "bd_no_menu").into()));
+            log(Event::Eta(Eta { phase_label: tr(opts.ui_lang, "phase_bd_no_menu"), ..Eta::new(JobPhase::Menus, None, None, None) }));
+            log(Event::Step(tr(opts.ui_lang, "bd_no_menu")));
             None
         }
     };
@@ -996,7 +998,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let vbv = (limits.vbv_maxrate_kbps, limits.vbv_bufsize_kbit);
     let layout = Arc::new(layout);
     let titles: Vec<Arc<BdTitle>> = titles.into_iter().map(Arc::new).collect();
-    let jobs: Vec<Job<(TitleReport, Option<&'static str>, Option<String>, f64)>> = titles
+    let jobs: Vec<Job<TitleJob>> = titles
         .iter()
         .zip(&encoders)
         .map(|(t, &encoder)| {
@@ -1078,7 +1080,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         if let Some(reason) = hwaccel_notes.into_iter().flatten().next() {
             log(Event::Step(format!("{} ({reason})", tr(opts.ui_lang, "gpu_unavailable"))));
         } else {
-            log(Event::Step(tr(opts.ui_lang, "gpu_unavailable").into()));
+            log(Event::Step(tr(opts.ui_lang, "gpu_unavailable")));
         }
     }
 
@@ -1104,10 +1106,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let menu_count = menus.as_ref().map_or(0, |m| m.count);
     log(Event::Phase(BuildPhase::Authoring));
     log(Event::Eta(Eta {
-        phase_label: tr(opts.ui_lang, "phase_bd_authoring").into(),
+        phase_label: tr(opts.ui_lang, "phase_bd_authoring"),
         ..Eta::new(JobPhase::Authoring, None, Some(authoring_estimate), burn_estimate)
     }));
-    log(Event::Step(tr(opts.ui_lang, "bd_mux").into()));
+    log(Event::Step(tr(opts.ui_lang, "bd_mux")));
     cancel.check()?;
     // One mux run (playlist + clip) per title after the menus (which are already in BD/).
     let bd_root = work.join("BD");

@@ -105,13 +105,13 @@ fn be32(v: &mut Vec<u8>, x: u32) {
 }
 
 fn pad4(v: &mut Vec<u8>) {
-    while v.len() % 4 != 0 {
+    while !v.len().is_multiple_of(4) {
         v.push(0);
     }
 }
 
 fn pad2(v: &mut Vec<u8>) {
-    if v.len() % 2 != 0 {
+    if !v.len().is_multiple_of(2) {
         v.push(0);
     }
 }

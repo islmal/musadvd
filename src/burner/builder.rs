@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(fix_title_sectors(p, &mut copy), 1, "synthetic TT_SRPT has start sector 0");
         assert_eq!(be32(&copy, 2048 + 8 + 8), Some(p.file("VTS_01_0.IFO").unwrap().lba - vmg.lba));
         assert_eq!(fix_title_sectors(p, &mut copy), 0, "idempotent");
-        assert_eq!(fix_title_sectors(p, &mut vec![0u8; 100]), 0, "not a VMG");
+        assert_eq!(fix_title_sectors(p, &mut [0u8; 100]), 0, "not a VMG");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -742,7 +742,7 @@ mod tests {
         let plan = plan_build(&input(&dir), &cfg).unwrap();
         let out = dir.join("out.iso");
         let report = build_to_file(&plan, &out, Split::Gb2, false, "auto", &AtomicBool::new(false), |_| {}).unwrap();
-        assert_eq!(report.files, [out.clone()], "small image: one file, plain name");
+        assert_eq!(report.files, std::slice::from_ref(&out), "small image: one file, plain name");
         // Layout file for a dual-layer build.
         let mut with_break = plan;
         with_break.layer_break = Some(LayerBreak { l0_sectors: 640, padding: None });

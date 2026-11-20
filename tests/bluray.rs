@@ -46,7 +46,7 @@ fn headers(tools: &Toolchain, file: &Path) -> String {
         .filter(|l| l.starts_with("[trace_headers"))
         .filter_map(|l| {
             // "[trace_headers @ 0x..] 167   nal_hrd_parameters_present_flag   0 = 0"
-            let mut parts = l.splitn(2, ']').nth(1)?.split_whitespace().skip(1);
+            let mut parts = l.split_once(']')?.1.split_whitespace().skip(1);
             let name = parts.next()?;
             let value = l.rsplit('=').next()?.trim();
             let name = if name.starts_with("last_payload_type_byte") { "payload_type" } else { name };
@@ -199,7 +199,7 @@ fn two_clips_make_two_playlists_with_their_own_rates() {
             .unwrap();
         let log = String::from_utf8_lossy(&out.stderr).into_owned();
         let at = log.find("max_volume:").unwrap_or_else(|| panic!("no volumedetect in {log}"));
-        log[at + 11..].trim_start().split_whitespace().next().unwrap().parse().unwrap()
+        log[at + 11..].split_whitespace().next().unwrap().parse().unwrap()
     };
     assert!(max_volume(&ma, 1.0) > -40.0, "A's stereo track is audible");
     assert!(max_volume(&mb, 1.0) < -80.0, "B's filler track is silent");
@@ -693,7 +693,9 @@ mod menus {
     /// First segment type of every PES that starts on `pid`.
     fn first_segment_types(m2ts: &Path, pid: u16) -> Vec<u8> {
         let d = std::fs::read(m2ts).unwrap();
-        d.chunks_exact(192)
+        d.as_chunks::<192>()
+            .0
+            .iter()
             .filter_map(|pkt| {
                 let p = &pkt[4..];
                 let this = (u16::from_be_bytes([p[1], p[2]])) & 0x1FFF;

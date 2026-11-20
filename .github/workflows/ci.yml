@@ -6,12 +6,14 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # github.workflow is the caller's name in a workflow_call, so a call from release.yml never shares a group with the push run.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,6 +31,8 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Linux Tauri dependencies
@@ -45,4 +49,5 @@ jobs:
       - run: npm test
 
       - run: cargo check --workspace --tests
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --lib

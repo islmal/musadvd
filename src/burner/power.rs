@@ -223,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::drop_non_drop)] // the guard is a no-op type off Windows
     fn standby_guard_nests() {
         let a = StandbyGuard::new();
         let b = StandbyGuard::default();

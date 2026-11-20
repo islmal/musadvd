@@ -25,7 +25,7 @@ impl UiLang {
     /// `code` as a language, without checking that a locale file exists. Each distinct code is leaked once.
     pub fn new(code: &str) -> Self {
         static CODES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-        let mut codes = CODES.lock().unwrap();
+        let mut codes = CODES.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&known) = codes.iter().find(|&&c| c == code) {
             return UiLang(known);
         }
@@ -121,17 +121,17 @@ static CATALOGS: LazyLock<RwLock<HashMap<String, Arc<Catalog>>>> = LazyLock::new
 
 /// Cached catalog of `code`, loaded on first use; [`reload`] drops it and the last user frees it.
 fn catalog(code: &str) -> Option<Arc<Catalog>> {
-    if let Some(cat) = CATALOGS.read().unwrap().get(code) {
+    if let Some(cat) = CATALOGS.read().unwrap_or_else(|e| e.into_inner()).get(code) {
         return Some(cat.clone());
     }
     let cat = Arc::new(load(code).ok()?);
-    CATALOGS.write().unwrap().insert(code.to_string(), cat.clone());
+    CATALOGS.write().unwrap_or_else(|e| e.into_inner()).insert(code.to_string(), cat.clone());
     Some(cat)
 }
 
 /// Drops the cache so edited or added locale files are picked up on the next lookup.
 pub fn reload() {
-    CATALOGS.write().unwrap().clear();
+    CATALOGS.write().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// `full` in the language's catalog, then in English.
