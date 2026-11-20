@@ -111,14 +111,7 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
             render();
           },
         },
-        ...options.map(([value, text]) => {
-          const unsupported = info.unsupported.includes(value);
-          return el(
-            "option",
-            { value, selected: draft[key] === value, disabled: unsupported && draft[key] !== value },
-            unsupported ? t("settings.nochNichtUnterstuetzt", { text }) : text,
-          );
-        }),
+        ...options.map(([value, text]) => el("option", { value, selected: draft[key] === value }, text)),
         // A stored value that is not in the list stays visible.
         options.some(([v]) => v === draft[key]) ? null : el("option", { value: draft[key], selected: true }, draft[key]),
       ),

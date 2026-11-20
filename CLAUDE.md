@@ -21,6 +21,7 @@ Toolchain: rustup host `x86_64-pc-windows-gnu` (MinGW from scoop needed for `dll
 cargo check --workspace
 cargo test --workspace                       # ~3 min, needs bin/ tools + ConvertX templates
 npm run build                                # frontend → dist/ (tsc + vite)
+npm test                                     # vitest: pure TS modules (layout.ts, project.ts)
 cargo build --release -p musadvd-gui --features tauri/custom-protocol   # GUI exe with embedded frontend
 cargo build --release                        # CLI
 cargo check --lib --tests --target x86_64-unknown-linux-gnu             # Unix burner compile check

@@ -438,7 +438,6 @@
  "settings.audio": "Audio",
  "settings.brennen": "Brennen",
  "settings.einstellungsbereiche": "Einstellungsbereiche",
- "settings.nochNichtUnterstuetzt": "{text} (noch nicht unterstützt)",
  "settings.formatMSsZwischen": "{label}: Format m:ss, zwischen {fmtDuration} und {fmtDuration2}.",
  "settings.min": "Min.",
  "settings.verarbeitung": "Verarbeitung",

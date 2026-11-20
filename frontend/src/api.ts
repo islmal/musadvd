@@ -390,8 +390,6 @@ export interface AppSettings {
 export interface SettingsInfo {
   path: string;
   loadProblem: string | null;
-  /** Choices that are stored but not implemented by the engine yet. */
-  unsupported: string[];
   cpuCount: number;
 }
 

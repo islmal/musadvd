@@ -31,7 +31,7 @@ use musadvd::author::Resolution;
 use musadvd::bd::{bd_frame_rate, BdRate};
 use musadvd::calculator::{Clamp, DiscType, EncodingProfile, Quality};
 use musadvd::chapters::{self, ImportedChapter};
-use musadvd::config::{AppSettings, UNSUPPORTED_CHOICES};
+use musadvd::config::AppSettings;
 use musadvd::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
 use musadvd::encoder::{
     self, ac3_settings, max_video_rate, parse_psnr_average, plan_audio, psnr_verdict,
@@ -943,8 +943,6 @@ struct SettingsInfo {
     path: String,
     /// Problem while loading the file at startup (corrupt file was backed up).
     load_problem: Option<String>,
-    /// Choices that are stored but not implemented by the engine yet.
-    unsupported: Vec<String>,
     cpu_count: usize,
 }
 
@@ -967,7 +965,6 @@ fn settings_info(state: State<'_, AppState>) -> SettingsInfo {
     SettingsInfo {
         path: state.settings_path.to_string_lossy().into_owned(),
         load_problem: state.settings_note.lock().unwrap_or_else(|e| e.into_inner()).take(),
-        unsupported: UNSUPPORTED_CHOICES.iter().map(|c| c.to_string()).collect(),
         cpu_count: dvd::available_cpus(),
     }
 }

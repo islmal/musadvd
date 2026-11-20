@@ -438,7 +438,6 @@
  "settings.audio": "Аудио",
  "settings.brennen": "Запись",
  "settings.einstellungsbereiche": "Разделы настроек",
- "settings.nochNichtUnterstuetzt": "{text} (пока не поддерживается)",
  "settings.formatMSsZwischen": "{label}: формат м:сс, между {fmtDuration} и {fmtDuration2}.",
  "settings.min": "мин",
  "settings.verarbeitung": "Обработка",

@@ -40,10 +40,6 @@ pub const DEINTERLACE_MODES: &[&str] = &["auto", "yadif", "off"];
 /// the nearest speed the drive offers).
 pub const BURN_SPEEDS: &[&str] = &["auto", "max", "16", "12", "8", "6", "4", "2.4"];
 
-/// Choices that are stored but not implemented by the engine yet (none since Half D1, SIF and
-/// the SP/MP/LP profiles were added; kept for the GUI's "noch nicht unterstützt" marks).
-pub const UNSUPPORTED_CHOICES: &[&str] = &[];
-
 /// GPU vendor for Blu-ray/AVCHD encoding and GPU decoding. Unknown values in a settings file
 /// become the default instead of failing the whole file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1018,7 +1014,6 @@ mod tests {
         let s = AppSettings { menu_audio: "silence".into(), ..AppSettings::default() };
         s.apply_to(&mut o);
         assert_eq!(o.motion_audio, MenuAudio::Silence);
-        assert!(UNSUPPORTED_CHOICES.is_empty());
         assert_eq!((o.resolution, o.encoding_profile), (Resolution::FullD1, EncodingProfile::Auto), "defaults");
         let s = AppSettings { dvd_resolution: "Half D1".into(), encoding_profile: "LP_Long".into(), ..AppSettings::default() };
         s.apply_to(&mut o);

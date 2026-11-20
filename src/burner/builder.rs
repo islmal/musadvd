@@ -355,7 +355,11 @@ pub fn plan_build(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, Bu
     let timestamp = Timestamp::now();
     match content {
         Content::DvdVideo => {
-            let video_ts = find_video_ts(single_dir.as_deref().expect("detected from a folder")).expect("detected");
+            // The folder can change between `detect` and here (disc ejected, folder deleted): an error, not a panic.
+            let video_ts = single_dir
+                .as_deref()
+                .and_then(find_video_ts)
+                .ok_or_else(|| ImageError::NotDvdVideo("the VIDEO_TS folder disappeared".into()))?;
             let label = label(None);
             let (mut image, layer_break) = match input.dvd_caps {
                 Some(caps) => {
@@ -372,10 +376,11 @@ pub fn plan_build(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, Bu
             Ok(BuildPlan { content, label, image: BuiltImage::Udf(image), layer_break, skipped: vec![], warnings, timestamp })
         }
         Content::Bluray => {
-            let root = find_bd_root(single_dir.as_deref().expect("detected from a folder")).expect("detected");
+            let gone = || ImageError::NotBluray("the BDMV folder disappeared".into());
+            let root = single_dir.as_deref().and_then(find_bd_root).ok_or_else(gone)?;
             let label = label(cfg.bd.read_bdmt.then(|| read_bdmt_label(&root)).flatten());
             let mut entries = Vec::new();
-            scan(&child(&root, "BDMV").expect("detected"), "BDMV", &mut entries)?;
+            scan(&child(&root, "BDMV").ok_or_else(gone)?, "BDMV", &mut entries)?;
             match child(&root, "CERTIFICATE") {
                 Some(cert) => scan(&cert, "CERTIFICATE", &mut entries)?,
                 None if cfg.bd.create_certificate => {
@@ -425,7 +430,7 @@ fn fix_dvd_sectors(
     warnings: &mut Vec<String>,
 ) -> Result<ImagePlan, BuildError> {
     let read = |name: &str| -> Result<Vec<u8>, ImageError> {
-        let f = image.file(name).expect("checked by the planner");
+        let f = image.file(name).ok_or_else(|| ImageError::NotDvdVideo(format!("{name} is missing from the image")))?;
         Ok(match &f.data {
             Some(d) => d.clone(),
             None => std::fs::read(&f.source).map_err(udf::io(&f.source))?,
