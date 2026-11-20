@@ -1292,7 +1292,7 @@ input.time {
 
 .ed-body {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 310px;
+  grid-template-columns: var(--ed-menus-w, 240px) 6px minmax(0, 1fr) 6px var(--ed-props-w, 310px);
   min-height: 0;
 }
 
@@ -1419,6 +1419,7 @@ input.time {
 /* The stage keeps its logical TV size; this box has the displayed (scaled) size. */
 .ed-viewport > .ed-stage {
   position: absolute;
+  /* left/top are set in px by layoutStage (zoom-aware); the calc is the first-paint fallback. */
   left: calc(50% - var(--ed-disp-w, 640px) / 2);
   top: calc(50% - var(--ed-disp-h, 480px) / 2);
   transform-origin: 0 0;
@@ -3110,3 +3111,176 @@ input.time {
   color: var(--bad);
   font-size: 12.5px;
 }
+
+/* ---- menu editor: splitters, zoom, sidebar groups and drag reorder, context menu ---- */
+.ed-splitter {
+  position: relative;
+  cursor: col-resize;
+  background: var(--border);
+  touch-action: none;
+}
+
+.ed-splitter::after {
+  content: "";
+  position: absolute;
+  inset: 0 -3px;
+}
+
+.ed-splitter:hover,
+.ed-splitter:focus-visible,
+.ed-splitter.dragging {
+  background: var(--accent);
+  outline: none;
+}
+
+.ed-viewport.zoomed {
+  overflow: auto;
+}
+
+.ed-zoom-pad {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.ed-zoom-readout {
+  min-width: 3.5em;
+  text-align: right;
+}
+
+.ed-menus-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ed-group-toggle {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.ed-menu-list {
+  position: relative;
+}
+
+.ed-menu-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ed-menu-group-head:hover {
+  color: var(--text);
+}
+
+.ed-menu-group-name {
+  flex: 1;
+}
+
+.ed-menu-group-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.ed-menu-item.dragging {
+  opacity: 0.5;
+}
+
+.ed-menu-list.reordering {
+  cursor: grabbing;
+}
+
+.ed-menu-drop-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ed-bg-card.ed-drop {
+  outline: 3px dashed var(--accent, #4da3ff);
+  outline-offset: 2px;
+}
+
+.ed-ctx {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  min-width: 170px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.ed-ctx-item {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ed-ctx-item:hover,
+.ed-ctx-item:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.ed-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: 4px;
+}
+
+.ed-icon-pop .ed-icon-grid {
+  grid-template-columns: repeat(4, 40px);
+}
+
+.ed-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ed-icon-btn svg {
+  width: 100%;
+  height: 100%;
+}
+
+.ed-icon-btn:hover,
+.ed-icon-btn:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.ed-icon-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+

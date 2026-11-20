@@ -6,12 +6,13 @@ import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
-import { FONTS, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
+import { cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
 import { moveItem, shapeMismatch } from "./order";
+import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
 import { modal } from "./studio/ui";
 import {
@@ -27,7 +28,6 @@ import {
   parseChaptersText,
   probeFile,
   probeSubtitleFile,
-  listSystemFonts,
   missingPaths,
   startConversion,
   getSettings,
@@ -49,7 +49,6 @@ import {
   type Disc,
   type ImportedChapter,
   type SubtitleStyle,
-  type SystemFont,
   type TemplateInfo,
   type VideoMetadata,
 } from "./api";
@@ -1375,26 +1374,6 @@ function audioDetail(t: Title, a: AudioTrack): string {
   return `#${a.index} · ${a.codec.toUpperCase()} ${a.channels} ch → ${audioCopies(t, a) ? tr("main.unveraendertKopiert", { target }) : target}`;
 }
 
-let fontsLoaded: Promise<SystemFont[]> | null = null;
-const systemFonts = () => (fontsLoaded ??= listSystemFonts());
-
-/** Font family choices: default, curated menu fonts, a divider, then every installed family (loaded once). */
-function fontSelect(current: string | null, on: (family: string | null) => void) {
-  const sel = h("select", { id: "sub-font", onchange: () => on(sel.value || null) }) as HTMLSelectElement;
-  const add = (family: string) => sel.append(h("option", { value: family, selected: family === current }, family));
-  sel.append(h("option", { value: "", selected: !current }, tr("main.subStyleFontDefault")));
-  FONTS.forEach(add);
-  // A font from another machine's project stays selectable.
-  if (current && !FONTS.includes(current)) add(current);
-  void systemFonts().then((all) => {
-    const rest = all.map((f) => f.family).filter((f) => !FONTS.includes(f) && f !== current);
-    if (rest.length === 0) return;
-    sel.append(h("option", { disabled: true }, "------"));
-    rest.forEach(add);
-  });
-  return sel;
-}
-
 /** Per-title styling of text subtitles; an empty field keeps the default. */
 function subtitleStyleControls(t: Title) {
   const st = t.subtitleStyle;
@@ -1427,11 +1406,11 @@ function subtitleStyleControls(t: Title) {
       "label",
       { class: "sub-style-field" },
       h("span", {}, tr("main.subStyleFont")),
-      fontSelect(st.fontFamily ?? null, (family) => {
+      fontPicker({ value: st.fontFamily ?? "", defaultOption: tr("main.subStyleFontDefault"), onChange: (family) => {
         if (family) st.fontFamily = family;
         else delete st.fontFamily;
         touchAutosave();
-      }),
+      } }),
     ),
     field("fontSizePct", tr("main.subStyleSize"), 50, 200, 5),
     field("outlinePx", tr("main.subStyleOutline"), 0, 6, 1),

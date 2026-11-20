@@ -6,10 +6,17 @@
 // rotation, at most 36 per menu, no overlaps) – the DVD subpicture only knows `x0 y0 x1 y1`.
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import { audioWaveform, bundledMenuSound, checkLayout, listSystemFonts, imagePreview, importConvertxTemplate, loadLayout, menuNavigation, saveLayout, textLines, titleFrame, type ButtonNav } from "./api";
+import { audioWaveform, bundledMenuSound, checkLayout, imagePreview, importConvertxTemplate, loadLayout, menuNavigation, saveClipboardImage, saveLayout, textLines, titleFrame, type ButtonNav } from "./api";
 import {
-  FONTS,
   computeNavigationFallback,
+  ICON_NAMES,
+  icon as newIcon,
+  menuGroup,
+  applyStyleToSimilar,
+  type IconName,
+  type ImageElement,
+  type MenuTheme,
+  type SettingsMode,
   maxButtons,
   OVERLAY_LABELS,
   type GradientOverlay,
@@ -39,6 +46,9 @@ import {
   type TextElement,
 } from "./layout";
 import { currentLanguage, t as tr } from "./i18n";
+import { fontPicker } from "./fontPicker";
+import { iconDataUrl, iconSvg } from "./icons";
+import { alphaBounds, clampCrop, trimmedBox } from "./imageCrop";
 
 type Child = Node | string | null | undefined | false;
 /** A field-level undo step; `execute` re-applies it (for a future redo), `undo` reverts and re-renders. */
@@ -87,22 +97,6 @@ export interface EditorOptions extends EditorInit {
 const IMAGE_FILTER = [{ name: tr("menuEditor.bilder"), extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }];
 const AUDIO_FILTER = [{ name: tr("menuEditor.audio"), extensions: ["mp3", "wav", "flac", "ogg", "ac3", "m4a", "aac", "opus"] }];
 const VIDEO_FILTER = [{ name: "Videos", extensions: ["mp4", "mkv", "avi", "mov", "mpg", "mpeg", "ts", "m2ts"] }];
-const FONT_DIVIDER = "--divider";
-let systemFonts: string[] = [];
-void listSystemFonts().then((l) => {
-  systemFonts = [...new Set(l.map((f) => f.family))].sort((a, b) => a.localeCompare(b));
-});
-
-/** Curated fonts, a disabled divider, then every installed family; the current font is never dropped. */
-function fontOptions(current: string): [string, string][] {
-  const curated = new Set<string>(FONTS);
-  const rest = systemFonts.filter((f) => !curated.has(f));
-  const opts: [string, string][] = FONTS.map((f) => [f, f]);
-  if (current && !curated.has(current) && !rest.includes(current)) opts.push([current, current]);
-  if (rest.length) opts.push([FONT_DIVIDER, "------"], ...rest.map((f): [string, string] => [f, f]));
-  return opts;
-}
-
 const LAYOUT_FILTER = [{ name: tr("menuEditor.menueLayout"), extensions: ["json"] }];
 const TEMPLATE_FILTER = [{ name: tr("menuEditor.convertxVorlage"), extensions: ["ini"] }];
 const FIT_LABELS: [Fit, string][] = [
@@ -111,6 +105,32 @@ const FIT_LABELS: [Fit, string][] = [
   ["stretch", tr("menuEditor.strecken")],
 ];
 const SNAP = 2;
+const PANES_KEY = "musadvd-editor-panes";
+const GROUPS_KEY = "musadvd-editor-groups";
+/** Splitter limits in px: [min, max, default]. */
+const PANE_LIMITS = { menus: [160, 480, 240], props: [240, 560, 310] } as const;
+type PaneKey = keyof typeof PANE_LIMITS;
+const MENU_GROUPS = ["main", "episodes", "chapters", "settings"];
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 4;
+const ZOOM_PRESETS = [0.5, 0.75, 1];
+
+/** localStorage can throw (private mode, blocked data); preferences are a convenience only. */
+function readPref<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function writePref(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore: the preference just is not remembered
+  }
+}
 
 /** Intro key state at `t` like `menu_anim::lerp`: held before the first and after the last key, linear between. */
 export function interpolateKeyframes(keys: ElementKey[], t: number): ElementKey {
@@ -143,10 +163,26 @@ export function mountMenuEditor(opts: EditorOptions) {
   const stale = !!opts.layout && madeForOtherTitles(opts.layout, opts.layoutTitlesKey, titles);
   let L: CustomLayout = structuredClone(opts.layout ?? draftLayout(titles, tv, opts.heading));
   let menuIdx = 0;
+  // Draft options offered next to "new draft" / presets; preselected from the layout's own metadata.
+  let draftTheme: MenuTheme = L.theme ?? "landing";
+  let draftSettings: SettingsMode = L.settingsMode ?? (titles.length > 1 ? "global" : "perTitle");
+  const draftOpts = () => ({ theme: draftTheme, settingsMode: draftSettings });
   let selIds: string[] = [];
   let closed = false;
   let clipboard: LayoutElement[] = [];
   const collapsedGroups = new Set<string>();
+  const groupPrefs = readPref<{ collapsed?: string[]; show?: boolean }>(GROUPS_KEY, {});
+  const collapsedMenuGroups = new Set<string>(Array.isArray(groupPrefs.collapsed) ? groupPrefs.collapsed : []);
+  let showMenuGroups = groupPrefs.show === true;
+  /** Menu whose group was last auto-expanded; header clicks must not be undone on every render. */
+  let lastActiveMenuId = "";
+  /** Set right after a sidebar drag so the click that ends it does not select a card. */
+  let suppressMenuClick = false;
+  /** Zoom as a factor of the canvas height in screen px ("fit" = fill the viewport). */
+  let zoom: "fit" | number = "fit";
+  let dispWpx = 0;
+  let dispHpx = 0;
+  let ctxMenu: HTMLElement | null = null;
   let errors: string[] = [];
   let dirty = false;
   let confirmClose = false;
@@ -389,6 +425,35 @@ export function mountMenuEditor(opts: EditorOptions) {
     return { w, h, x: (bw - w) / 2, y: (bh - h) / 2 };
   }
 
+  /**
+   * Places a media <img> inside its element box from the natural size cached in its dataset. A crop
+   * is fitted as if it were the whole picture; the full image is then scaled so the crop rect fills
+   * the fitted box and clipped to it (clip-path), so the box never shows pixels outside the crop.
+   */
+  function placeMedia(img: HTMLImageElement, e: { type: string; fit?: Fit; w: number; h: number; rotation: number; crop?: { x: number; y: number; w: number; h: number } | null }) {
+    const nw = Number(img.dataset.nw);
+    const nh = Number(img.dataset.nh);
+    if (!(nw > 0 && nh > 0)) return;
+    const crop = e.type === "image" ? (e.crop ?? null) : null;
+    const sideways = e.type === "video" && e.rotation % 180 === 90;
+    const r = fitOnScreen(nw * (crop?.w ?? 1), nh * (crop?.h ?? 1), sideways ? e.h : e.w, sideways ? e.w : e.h, e.fit ?? "contain", sideways);
+    if (!crop) {
+      Object.assign(img.style, { position: "absolute", objectFit: "fill", width: `${r.w}px`, height: `${r.h}px`, left: `${r.x}px`, top: `${r.y}px`, clipPath: "" });
+      return;
+    }
+    const iw = r.w / crop.w;
+    const ih = r.h / crop.h;
+    Object.assign(img.style, {
+      position: "absolute",
+      objectFit: "fill",
+      width: `${iw}px`,
+      height: `${ih}px`,
+      left: `${r.x - crop.x * iw}px`,
+      top: `${r.y - crop.y * ih}px`,
+      clipPath: `inset(${crop.y * ih}px ${(1 - crop.x - crop.w) * iw}px ${(1 - crop.y - crop.h) * ih}px ${crop.x * iw}px)`,
+    });
+  }
+
   function actionLabel(a: Action | null | undefined): string {
     if (!a) return "";
     switch (a.type) {
@@ -406,6 +471,10 @@ export function mountMenuEditor(opts: EditorOptions) {
         return a.source === null ? tr("menuEditor.untertitelAus") : tr("menuEditor.untertitel", { trackLabel: trackLabel("subtitle", menu()?.title, a.source) });
       case "customVm":
         return `VM: ${a.script}`;
+      case "setGlobalAudio":
+        return tr("editor.globalAudioLabel", { track: a.track });
+      case "setGlobalSubtitle":
+        return a.track === null ? tr("menuEditor.untertitelAus") : tr("editor.globalSubtitleLabel", { track: a.track });
     }
   }
 
@@ -439,14 +508,24 @@ export function mountMenuEditor(opts: EditorOptions) {
   const props = el("aside", { class: "ed-props", "aria-label": tr("menuEditor.eigenschaften") });
   const status = el("footer", { class: "ed-status", role: "status" });
   const headerButtons = el("div", { class: "ed-header-actions" });
+  const panes: Record<PaneKey, number> = { menus: PANE_LIMITS.menus[2], props: PANE_LIMITS.props[2] };
+  const savedPanes = readPref<Partial<Record<PaneKey, number>>>(PANES_KEY, {});
+  for (const k of Object.keys(panes) as PaneKey[]) {
+    const v = savedPanes[k];
+    if (typeof v === "number" && Number.isFinite(v)) panes[k] = Math.max(PANE_LIMITS[k][0], Math.min(PANE_LIMITS[k][1], v));
+  }
+  const zoomPad = el("div", { class: "ed-zoom-pad", "aria-hidden": "true" });
+  viewport.append(zoomPad);
+  const edBody = el("div", { class: "ed-body" }, menusPane, makeSplitter("menus"), centerSection, makeSplitter("props"), props);
   const editor = el(
     "div",
     { class: "ed", role: "dialog", "aria-modal": "true", "aria-label": tr("menuEditor.menueEditor") },
     el("header", { class: "ed-header" }, el("h2", {}, tr("menuEditor.menueEditor")), headerButtons),
-    el("div", { class: "ed-body" }, menusPane, centerSection, props),
+    edBody,
     status,
   );
   document.body.append(editor);
+  applyPanes();
 
   // ---- stage scaling (TV frame shown at 4:3) ----------------------------------------------------
   let scaleX = 1;
@@ -456,15 +535,109 @@ export function mountMenuEditor(opts: EditorOptions) {
     const vw = viewport.clientWidth - pad;
     const vh = viewport.clientHeight - pad;
     const aspect = isBdFrame(tv) ? 16 / 9 : 4 / 3;
-    const dispH = Math.max(100, Math.min(vh, vw / aspect));
+    const dispH = zoom === "fit" ? Math.max(100, Math.min(vh, vw / aspect)) : H() * zoom;
     const dispW = dispH * aspect;
+    dispWpx = dispW;
+    dispHpx = dispH;
+    // All pointer math divides by these, so zoom needs no other special case.
     scaleX = dispW / W();
     scaleY = dispH / H();
     stage.style.width = `${W()}px`;
     stage.style.height = `${H()}px`;
     stage.style.transform = `scale(${scaleX}, ${scaleY})`;
+    // Pixel offsets (not 50% calc) so a zoomed stage never starts at a negative, unscrollable offset.
+    const left = Math.max(pad / 2, (viewport.clientWidth - dispW) / 2);
+    const top = Math.max(pad / 2, (viewport.clientHeight - dispH) / 2);
+    stage.style.left = `${left}px`;
+    stage.style.top = `${top}px`;
+    zoomPad.style.left = `${left + dispW + pad / 2}px`;
+    zoomPad.style.top = `${top + dispH + pad / 2}px`;
+    viewport.classList.toggle("zoomed", zoom !== "fit");
     stage.parentElement!.style.setProperty("--ed-disp-w", `${dispW}px`);
     stage.parentElement!.style.setProperty("--ed-disp-h", `${dispH}px`);
+    const readout = toolbar.querySelector(".ed-zoom-readout");
+    if (readout) readout.textContent = `${Math.round((dispH / H()) * 100)}%`;
+  }
+  /** Sets the zoom, keeping the stage point under `anchor` (client coords; default the viewport centre) in place. */
+  function setZoom(next: "fit" | number, anchor?: { x: number; y: number }) {
+    const prev = stage.getBoundingClientRect();
+    const vp = viewport.getBoundingClientRect();
+    zoom = next === "fit" ? "fit" : Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next));
+    layoutStage();
+    if (zoom === "fit") {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    } else if (prev.width > 0 && prev.height > 0) {
+      const ax = anchor?.x ?? vp.left + vp.width / 2;
+      const ay = anchor?.y ?? vp.top + vp.height / 2;
+      const fx = Math.max(0, Math.min(1, (ax - prev.left) / prev.width));
+      const fy = Math.max(0, Math.min(1, (ay - prev.top) / prev.height));
+      viewport.scrollLeft = parseFloat(stage.style.left) + fx * dispWpx - (ax - vp.left);
+      viewport.scrollTop = parseFloat(stage.style.top) + fy * dispHpx - (ay - vp.top);
+    }
+    renderToolbar();
+  }
+  viewport.addEventListener(
+    "wheel",
+    (ev) => {
+      if (!ev.ctrlKey) return;
+      ev.preventDefault();
+      setZoom((dispHpx / H()) * Math.exp(-ev.deltaY * 0.002), { x: ev.clientX, y: ev.clientY });
+    },
+    { passive: false },
+  );
+
+  // ---- resizable panes ----------------------------------------------------------------------------
+  function applyPanes() {
+    edBody.style.setProperty("--ed-menus-w", `${panes.menus}px`);
+    edBody.style.setProperty("--ed-props-w", `${panes.props}px`);
+  }
+  function makeSplitter(k: PaneKey): HTMLElement {
+    const [min, max, def] = PANE_LIMITS[k];
+    // The sidebar grows when the handle moves right, the inspector when it moves left.
+    const dir = k === "menus" ? 1 : -1;
+    const sep = el("div", {
+      class: "ed-splitter",
+      role: "separator",
+      "aria-orientation": "vertical",
+      "aria-label": tr(k === "menus" ? "editor.resizeMenus" : "editor.resizeProps"),
+      "aria-valuemin": String(min),
+      "aria-valuemax": String(max),
+      "aria-valuenow": String(panes[k]),
+      tabindex: "0",
+    });
+    const set = (w: number, persist: boolean) => {
+      panes[k] = Math.max(min, Math.min(max, Math.round(w)));
+      sep.setAttribute("aria-valuenow", String(panes[k]));
+      applyPanes();
+      if (persist) writePref(PANES_KEY, panes);
+    };
+    sep.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      sep.setPointerCapture(ev.pointerId);
+      sep.classList.add("dragging");
+      const x0 = ev.clientX;
+      const w0 = panes[k];
+      const move = (mv: PointerEvent) => set(w0 + dir * (mv.clientX - x0), false);
+      const up = () => {
+        sep.removeEventListener("pointermove", move);
+        sep.removeEventListener("pointerup", up);
+        sep.removeEventListener("pointercancel", up);
+        sep.classList.remove("dragging");
+        writePref(PANES_KEY, panes);
+      };
+      sep.addEventListener("pointermove", move);
+      sep.addEventListener("pointerup", up);
+      sep.addEventListener("pointercancel", up);
+    });
+    sep.addEventListener("dblclick", () => set(def, true));
+    sep.addEventListener("keydown", (ev) => {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      ev.preventDefault();
+      set(panes[k] + dir * (ev.key === "ArrowRight" ? 16 : -16), true);
+    });
+    return sep;
   }
   const ro = new ResizeObserver(() => layoutStage());
   ro.observe(viewport);
@@ -485,6 +658,18 @@ export function mountMenuEditor(opts: EditorOptions) {
   function renderHeader() {
     headerButtons.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
+      el(
+        "select",
+        { class: "btn", title: tr("editor.themeTip"), "aria-label": tr("editor.themeTip"), onchange: (ev: Event) => (draftTheme = (ev.target as HTMLSelectElement).value as MenuTheme) },
+        el("option", { value: "landing", selected: draftTheme === "landing" }, tr("editor.themeLanding")),
+        el("option", { value: "classic", selected: draftTheme === "classic" }, tr("editor.themeClassic")),
+      ),
+      el(
+        "select",
+        { class: "btn", title: tr("editor.settingsModeTip"), "aria-label": tr("editor.settingsModeTip"), onchange: (ev: Event) => (draftSettings = (ev.target as HTMLSelectElement).value as SettingsMode) },
+        el("option", { value: "global", selected: draftSettings === "global" }, tr("editor.settingsGlobal")),
+        el("option", { value: "perTitle", selected: draftSettings === "perTitle" }, tr("editor.settingsPerTitle")),
+      ),
       el(
         "select",
         { class: "btn", title: tr("menuEditor.presetTitle"), onchange: (ev: Event) => void applyPresetFromSelect(ev.target as HTMLSelectElement) },
@@ -559,7 +744,10 @@ export function mountMenuEditor(opts: EditorOptions) {
         {
           class: `ed-menu-item${i === menuIdx ? " active" : ""}`,
           type: "button",
+          "data-idx": String(i),
+          onpointerdown: (ev: PointerEvent) => startMenuDrag(ev, i),
           onclick: () => {
+            if (suppressMenuClick) return;
             menuIdx = i;
             selIds = [];
             if (remoteMode) {
@@ -584,9 +772,66 @@ export function mountMenuEditor(opts: EditorOptions) {
       );
     });
     const m = menu();
+    const grouped = showMenuGroups || L.menus.length > 8;
+    // Auto-expand only when the active menu changes, so a header click can still collapse its group.
+    if (m && m.id !== lastActiveMenuId) {
+      lastActiveMenuId = m.id;
+      collapsedMenuGroups.delete(menuGroup(m));
+    }
+    let listChildren: Node[] = items;
+    if (grouped) {
+      const byGroup = new Map<string, number[]>();
+      L.menus.forEach((x, i) => {
+        const g = menuGroup(x);
+        byGroup.set(g, [...(byGroup.get(g) ?? []), i]);
+      });
+      const order = [...MENU_GROUPS.filter((g) => byGroup.has(g)), ...[...byGroup.keys()].filter((g) => !MENU_GROUPS.includes(g))];
+      listChildren = order.flatMap((g) => {
+        const idxs = byGroup.get(g) ?? [];
+        const open = !collapsedMenuGroups.has(g);
+        const head = el(
+          "button",
+          {
+            type: "button",
+            class: "ed-menu-group-head",
+            "aria-expanded": String(open),
+            onclick: () => {
+              if (open) collapsedMenuGroups.add(g);
+              else collapsedMenuGroups.delete(g);
+              writePref(GROUPS_KEY, { collapsed: [...collapsedMenuGroups], show: showMenuGroups });
+              renderMenus();
+            },
+          },
+          el("span", { class: "ed-chev", "aria-hidden": "true" }, open ? "▾" : "▸"),
+          el("span", { class: "ed-menu-group-name" }, MENU_GROUPS.includes(g) ? tr(`editor.group_${g}`) : g),
+          el("span", { class: "ed-menu-group-count" }, String(idxs.length)),
+        );
+        return [head, ...(open ? idxs.map((i) => items[i]) : [])];
+      });
+    }
     const parts: Child[] = [
-      el("h3", {}, tr("menuEditor.menues")),
-      el("div", { class: "ed-menu-list" }, ...items),
+      el(
+        "div",
+        { class: "ed-menus-head" },
+        el("h3", {}, tr("menuEditor.menues")),
+        el(
+          "button",
+          {
+            type: "button",
+            class: `btn ed-group-toggle${grouped ? " active" : ""}`,
+            "aria-pressed": String(grouped),
+            disabled: L.menus.length > 8,
+            title: tr("editor.groupsToggleTip"),
+            onclick: () => {
+              showMenuGroups = !showMenuGroups;
+              writePref(GROUPS_KEY, { collapsed: [...collapsedMenuGroups], show: showMenuGroups });
+              renderMenus();
+            },
+          },
+          tr("editor.groupsToggle"),
+        ),
+      ),
+      el("div", { class: "ed-menu-list" }, ...listChildren),
       el(
         "div",
         { class: "ed-menu-actions" },
@@ -667,6 +912,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       el("button", { class: "btn", type: "button", onclick: addText }, tr("menuEditor.text")),
       el("button", { class: "btn", type: "button", onclick: addRect }, tr("menuEditor.rectangle")),
       el("button", { class: "btn", type: "button", onclick: () => void addImage() }, tr("menuEditor.bild")),
+      el("button", { class: "btn", type: "button", "aria-haspopup": "true", onclick: (ev: MouseEvent) => openIconPopup(ev.currentTarget as HTMLElement) }, tr("editor.addIcon")),
       el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addVideo() }, tr("menuEditor.video")),
       el("button", { class: "btn", type: "button", onclick: () => void addExternalVideo() }, tr("menuEditor.externesVideo")),
       el(
@@ -684,6 +930,19 @@ export function mountMenuEditor(opts: EditorOptions) {
         tr("menuEditor.addButtonArea"),
       ),
       el("span", { class: "ed-spacer" }),
+      el(
+        "div",
+        { class: "ed-seg ed-zoom", role: "group", "aria-label": tr("editor.zoom") },
+        el("button", { type: "button", class: `btn${zoom === "fit" ? " active" : ""}`, onclick: () => setZoom("fit") }, tr("editor.zoomFit")),
+        ...ZOOM_PRESETS.map((z) =>
+          el(
+            "button",
+            { type: "button", class: `btn${zoom !== "fit" && Math.abs(dispHpx / H() - z) < 0.005 ? " active" : ""}`, onclick: () => setZoom(z) },
+            `${Math.round(z * 100)}%`,
+          ),
+        ),
+      ),
+      el("span", { class: "ed-zoom-readout ed-counter", title: tr("editor.zoomTip") }, `${Math.round((dispHpx / H()) * 100)}%`),
       el(
         "label",
         { class: "ed-check" },
@@ -718,6 +977,8 @@ export function mountMenuEditor(opts: EditorOptions) {
         inner.style.left = `${(e.w - iw) / 2}px`;
         inner.style.top = `${(e.h - ih) / 2}px`;
         inner.style.transform = e.rotation ? `rotate(${e.rotation}deg)` : "";
+        const img = inner.querySelector<HTMLImageElement>("img.ed-media");
+        if (img) placeMedia(img, e);
       }
       return;
     }
@@ -727,6 +988,10 @@ export function mountMenuEditor(opts: EditorOptions) {
       inner.style.left = "0px";
       inner.style.top = "0px";
       inner.style.transform = "";
+    }
+    if (e.type === "image" || e.type === "icon") {
+      const img = inner?.querySelector<HTMLImageElement>("img.ed-media");
+      if (img) placeMedia(img, e);
     }
     const angle = normalizeAngle(e.rotation);
     if (isUnrotated(angle)) {
@@ -911,6 +1176,11 @@ export function mountMenuEditor(opts: EditorOptions) {
         remoteStatus = tr("menuEditor.remoteCustomVm", { script: a.script });
         flashRemoteActivate(btn.id);
         return;
+      case "setGlobalAudio":
+      case "setGlobalSubtitle":
+        remoteStatus = actionLabel(a);
+        flashRemoteActivate(btn.id);
+        return;
     }
   }
 
@@ -1027,14 +1297,21 @@ export function mountMenuEditor(opts: EditorOptions) {
         boxSizing: "border-box",
         border: e.borderWidth ? `${e.borderWidth}px solid ${e.borderColor ?? "#FFFFFF"}` : "none",
       });
+    } else if (e.type === "icon") {
+      // A vector symbol: natural size 1:1 so placeMedia keeps it square on the TV like the build.
+      const img = el("img", { class: "ed-media", alt: "", draggable: false, src: iconDataUrl(e.icon, e.color) }) as HTMLImageElement;
+      img.dataset.nw = "1";
+      img.dataset.nh = "1";
+      inner.append(img);
     } else {
       const img = el("img", { class: `ed-media fit-${e.fit}`, alt: "", draggable: false }) as HTMLImageElement;
       inner.append(img);
-      // Fitted with the TV's pixel shape (square-pixel preview), like the build.
+      // Fitted with the TV's pixel shape (square-pixel preview), like the build. `placeMedia` repeats
+      // this whenever the box changes (resize drag), using the natural size cached on the img.
       img.addEventListener("load", () => {
-        const sideways = e.type === "video" && e.rotation % 180 === 90;
-        const r = fitOnScreen(img.naturalWidth, img.naturalHeight, sideways ? e.h : e.w, sideways ? e.w : e.h, e.fit, sideways);
-        Object.assign(img.style, { position: "absolute", objectFit: "fill", width: `${r.w}px`, height: `${r.h}px`, left: `${r.x}px`, top: `${r.y}px` });
+        img.dataset.nw = String(img.naturalWidth);
+        img.dataset.nh = String(img.naturalHeight);
+        placeMedia(img, e);
       });
       const src = e.type === "image" ? imageOf(e.src) : frameOfVideo(e);
       src.then((url) => (img.src = url)).catch(() => inner.classList.add("ed-missing"));
@@ -1438,7 +1715,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     // NLE order: the top row is the frontmost layer (last in `elements`)
     for (const e of [...m.elements].reverse()) {
       const name =
-        e.type === "text" ? e.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlText") : e.type === "image" ? tr("menuEditor.bild2") : e.type === "rect" ? tr("menuEditor.rectangle2") : videoLabel(e);
+        e.type === "text" ? e.text.replace(/\s+/g, " ").trim() || tr("menuEditor.tlText") : e.type === "image" ? tr("menuEditor.bild2") : e.type === "rect" ? tr("menuEditor.rectangle2") : e.type === "icon" ? e.icon : videoLabel(e);
       rows.push({
         label: e.type !== "text" && isButton(e) ? actionLabel(e.action) : name,
         h: TL_BTN_H,
@@ -2214,6 +2491,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     if (e.type === "image") return fileName(e.src);
     if (e.type === "rect") return tr("menuEditor.rectangle2");
+    if (e.type === "icon") return e.icon;
     return videoLabel(e);
   }
 
@@ -2368,7 +2646,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   const select = (options: [string, string][], value: string, set: (v: string) => void, attrs: Record<string, unknown> = {}) =>
     bind(
-      el("select", attrs, ...options.map(([v, label]) => el("option", { value: v, selected: v === value, disabled: v === FONT_DIVIDER }, label))) as HTMLSelectElement,
+      el("select", attrs, ...options.map(([v, label]) => el("option", { value: v, selected: v === value }, label))) as HTMLSelectElement,
       set,
       { rerender: true },
     );
@@ -2457,6 +2735,11 @@ export function mountMenuEditor(opts: EditorOptions) {
     ];
   }
 
+  /** Marks the Background group as the drop target for background / menu-audio files. */
+  const bgCard = (g: HTMLElement) => {
+    g.classList.add("ed-bg-card");
+    return g;
+  };
   function menuProps(m: CustomMenu): HTMLElement[] {
     const bg = m.background;
     const bgKind = bg.video ? (bg.video.path ? "videoFile" : "video") : bg.image ? "image" : "color";
@@ -2496,8 +2779,28 @@ export function mountMenuEditor(opts: EditorOptions) {
           ),
         ),
         el("p", { class: "ed-hint" }, isMoving(m) ? tr("menuEditor.bewegtesMenueWirdAls") : tr("menuEditor.standbildKeineVideosKein")),
+        el(
+          "button",
+          {
+            class: "btn",
+            type: "button",
+            title: tr("editor.styleSimilarTip"),
+            onclick: () => {
+              const before = JSON.stringify(L);
+              const n = applyStyleToSimilar(L, m.id);
+              if (n === 0) {
+                flash(tr("editor.styleNothing"), "ok");
+                return;
+              }
+              pushHistory(before);
+              renderAll();
+              flash(tr("editor.styleApplied", { n }), "ok");
+            },
+          },
+          tr("editor.styleSimilar"),
+        ),
       ),
-      group(
+      bgCard(group(
         tr("menuEditor.hintergrund"),
         row(
           tr("menuEditor.art"),
@@ -2566,7 +2869,8 @@ export function mountMenuEditor(opts: EditorOptions) {
               }),
             )
           : null,
-      ),
+        el("p", { class: "ed-hint" }, tr("editor.dropHint")),
+      )),
       group(
         tr("menuEditor.ton"),
         row(
@@ -2652,6 +2956,9 @@ export function mountMenuEditor(opts: EditorOptions) {
             ["customVm", "VM-Skript (DVD VM)"],
             // Streams belong to a titleset: only in a title's root/settings menus.
             ...(streamTitle ? ([["setAudio", tr("menuEditor.tonspurWaehlen")], ["setSubtitle", tr("menuEditor.untertitelWaehlen")]] as [string, string][]) : []),
+            // Disc-wide choices work in any menu (applied to every title that has the track).
+            ["setGlobalAudio", tr("editor.actGlobalAudio")],
+            ["setGlobalSubtitle", tr("editor.actGlobalSubtitle")],
           ],
           type,
           (v) => {
@@ -2673,7 +2980,11 @@ export function mountMenuEditor(opts: EditorOptions) {
                           ? { type: "setAudio", source: streamTitle?.audioTracks?.[0]?.source ?? 0 }
                           : v === "setSubtitle"
                             ? { type: "setSubtitle", source: null }
-                            : null,
+                            : v === "setGlobalAudio"
+                              ? { type: "setGlobalAudio", track: 1 }
+                              : v === "setGlobalSubtitle"
+                                ? { type: "setGlobalSubtitle", track: null }
+                                : null,
             );
           },
         ),
@@ -2689,6 +3000,36 @@ export function mountMenuEditor(opts: EditorOptions) {
           bind(el("input", { type: "text", value: a.script }) as HTMLInputElement, (v) => setAction({ type: "customVm", script: v }), { live: true }),
         ),
         el("p", { class: "ed-hint" }, tr("menuEditor.vmCommandsHint")),
+      );
+    }
+    // 1-based track positions over all titles; the label comes from the first title that has that track.
+    const trackCount = (kind: "audio" | "subtitle") => Math.max(1, ...titles.map((t) => (kind === "audio" ? t.audioTracks : t.subtitleTracks)?.length ?? 0));
+    const globalLabel = (kind: "audio" | "subtitle", n: number) => {
+      const label = titles.map((t) => (kind === "audio" ? t.audioTracks : t.subtitleTracks)?.[n - 1]?.label).find(Boolean);
+      return label ? `${n}: ${label}` : String(n);
+    };
+    if (a?.type === "setGlobalAudio") {
+      out.push(
+        row(
+          tr("menuEditor.tonspur2"),
+          select(
+            Array.from({ length: trackCount("audio") }, (_, i): [string, string] => [String(i + 1), globalLabel("audio", i + 1)]),
+            String(a.track),
+            (v) => setAction({ type: "setGlobalAudio", track: Number(v) }),
+          ),
+        ),
+      );
+    }
+    if (a?.type === "setGlobalSubtitle") {
+      out.push(
+        row(
+          tr("menuEditor.untertitel2"),
+          select(
+            [["off", tr("menuEditor.aus")], ...Array.from({ length: trackCount("subtitle") }, (_, i): [string, string] => [String(i + 1), globalLabel("subtitle", i + 1)])],
+            a.track === null ? "off" : String(a.track),
+            (v) => setAction({ type: "setGlobalSubtitle", track: v === "off" ? null : Number(v) }),
+          ),
+        ),
       );
     }
     if (a?.type === "setAudio" && streamTitle) {
@@ -2839,8 +3180,90 @@ export function mountMenuEditor(opts: EditorOptions) {
     return out;
   }
 
+  /** Crop fields (percent of the picture) plus reset and "trim transparency". */
+  function cropControls(img: ImageElement): HTMLElement[] {
+    const whole = { x: 0, y: 0, w: 1, h: 1 };
+    const field = (k: "x" | "y" | "w" | "h", label: string) =>
+      row(
+        label,
+        num(
+          Math.round((img.crop?.[k] ?? whole[k]) * 1000) / 10,
+          (v) => {
+            const c = clampCrop({ ...(img.crop ?? whole), [k]: v / 100 });
+            img.crop = c.x === 0 && c.y === 0 && c.w === 1 && c.h === 1 ? null : c;
+          },
+          { min: "0", max: "100", step: "0.1" },
+        ),
+      );
+    return [
+      field("x", tr("editor.cropX")),
+      field("y", tr("editor.cropY")),
+      field("w", tr("editor.cropW")),
+      field("h", tr("editor.cropH")),
+      el(
+        "div",
+        { class: "ed-menu-actions" },
+        el(
+          "button",
+          {
+            class: "btn",
+            type: "button",
+            disabled: !img.crop,
+            onclick: () => {
+              remember();
+              img.crop = null;
+              renderAll();
+            },
+          },
+          tr("editor.cropReset"),
+        ),
+        el("button", { class: "btn", type: "button", title: tr("editor.trimTip"), onclick: () => void trimTransparency(img) }, tr("editor.trim")),
+      ),
+    ];
+  }
+  /** Crops the picture to its non-transparent pixels and resizes the box around the same centre. */
+  async function trimTransparency(img: ImageElement) {
+    try {
+      const url = await imageOf(img.src);
+      const im = new Image();
+      await new Promise<void>((resolve, reject) => {
+        im.onload = () => resolve();
+        im.onerror = () => reject(new Error("image load failed"));
+        im.src = url;
+      });
+      // Bounds are normalised, so a downscaled copy keeps big pictures cheap.
+      const k = Math.min(1, 1024 / Math.max(im.naturalWidth, im.naturalHeight));
+      const cw = Math.max(1, Math.round(im.naturalWidth * k));
+      const ch = Math.max(1, Math.round(im.naturalHeight * k));
+      const canvas = document.createElement("canvas");
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("no 2d context");
+      ctx.drawImage(im, 0, 0, cw, ch);
+      const b = alphaBounds(ctx.getImageData(0, 0, cw, ch).data, cw, ch);
+      if (!b) {
+        flash(tr("editor.trimEmpty"), "error");
+        return;
+      }
+      const eps = 1 / Math.max(cw, ch);
+      if (b.x < eps && b.y < eps && b.w > 1 - 2 * eps && b.h > 1 - 2 * eps) {
+        flash(tr("editor.trimNothing"), "ok");
+        return;
+      }
+      remember();
+      img.crop = clampCrop(b);
+      // The box is in canvas px; a canvas pixel is `pixelAspect` wider than a picture pixel on the TV.
+      Object.assign(img, trimmedBox(img, im.naturalWidth / pixelAspect(), im.naturalHeight, img.crop));
+      clampBox(img);
+      renderAll();
+    } catch (e) {
+      flash(tr("editor.trimFailed", { e }), "error");
+    }
+  }
+
   function elementProps(m: CustomMenu, e: LayoutElement): HTMLElement[] {
-    const kind = e.type === "text" ? tr("menuEditor.text2") : e.type === "image" ? tr("menuEditor.bild2") : e.type === "rect" ? tr("menuEditor.rectangle2") : tr("menuEditor.video2");
+    const kind = e.type === "text" ? tr("menuEditor.text2") : e.type === "image" ? tr("menuEditor.bild2") : e.type === "rect" ? tr("menuEditor.rectangle2") : e.type === "icon" ? tr("editor.icon") : tr("menuEditor.video2");
     const typeGroup: Child[] = [];
     if (e.type === "text") {
       const t = e;
@@ -2848,7 +3271,18 @@ export function mountMenuEditor(opts: EditorOptions) {
         group(
           tr("menuEditor.text2"),
           bind(el("textarea", { rows: 3, class: "ed-textarea" }, t.text) as HTMLTextAreaElement, (v) => (t.text = v), { live: true }),
-          row(tr("menuEditor.schrift"), select(fontOptions(t.font), t.font, (v) => (t.font = v))),
+          row(
+            tr("menuEditor.schrift"),
+            fontPicker({
+              value: t.font,
+              onChange: (v) => {
+                remember();
+                t.font = v;
+                renderStage();
+                scheduleCheck();
+              },
+            }),
+          ),
           row(tr("menuEditor.groessePx"), num(t.size, (v) => (t.size = Math.max(4, Math.min(300, v))), { min: "4", max: "300", step: "1" })),
           row(tr("menuEditor.farbe"), bind(el("input", { type: "color", value: t.color }) as HTMLInputElement, (v) => (t.color = v.toUpperCase()), { live: true })),
           el(
@@ -2921,6 +3355,7 @@ export function mountMenuEditor(opts: EditorOptions) {
             tr("menuEditor.anderesBild"),
           ),
           row(tr("menuEditor.anpassung"), select(FIT_LABELS, img.fit, (v) => (img.fit = v as Fit))),
+          ...cropControls(img),
         ),
       );
     } else if (e.type === "rect") {
@@ -2931,6 +3366,24 @@ export function mountMenuEditor(opts: EditorOptions) {
           row(tr("menuEditor.rectFill"), bind(el("input", { type: "color", value: r.color }) as HTMLInputElement, (v) => (r.color = v.toUpperCase()), { live: true })),
           row(tr("menuEditor.rectBorderColor"), bind(el("input", { type: "color", value: r.borderColor ?? "#FFFFFF" }) as HTMLInputElement, (v) => (r.borderColor = v.toUpperCase()), { live: true })),
           row(tr("menuEditor.rectBorderWidth"), num(r.borderWidth ?? 0, (v) => (r.borderWidth = Math.max(0, Math.min(100, v))), { min: "0", max: "100", step: "1" })),
+        ),
+      );
+    } else if (e.type === "icon") {
+      const ic = e;
+      typeGroup.push(
+        group(
+          tr("editor.icon"),
+          iconGrid(
+            ic.icon,
+            (n) => {
+              remember();
+              ic.icon = n;
+              renderStage();
+              renderProps();
+            },
+            "",
+          ),
+          row(tr("menuEditor.farbe"), bind(el("input", { type: "color", value: ic.color }) as HTMLInputElement, (v) => (ic.color = v.toUpperCase()), { live: true })),
         ),
       );
     } else {
@@ -3164,7 +3617,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (!p) return;
     addElement({ id: newId("i"), type: "image", src: p, fit: "contain", x: Math.round(W() / 2 - 100), y: Math.round(H() / 2 - 75), w: 200, h: 150, rotation: 0, opacity: 1, action: null });
   }
-  function addVideo(path?: string) {
+  function addVideo(path?: string, box?: { x: number; y: number; w: number; h: number }) {
     addElement({
       id: newId("v"),
       type: "video",
@@ -3172,10 +3625,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       startSecs: null,
       fit: "cover",
       ...(path ? { path } : {}),
-      x: Math.round(W() / 2 - 120),
-      y: Math.round(H() / 2 - 68),
-      w: 240,
-      h: 136,
+      ...(box ?? { x: Math.round(W() / 2 - 120), y: Math.round(H() / 2 - 68), w: 240, h: 136 }),
       rotation: 0,
       opacity: 1,
       // An external clip has no title to play; it becomes a button only when given an action.
@@ -3186,6 +3636,178 @@ export function mountMenuEditor(opts: EditorOptions) {
     const p = await chooseFile(VIDEO_FILTER);
     if (p) addVideo(p);
   }
+  /** Natural size of a picture URL (preview data URL). */
+  function urlSize(url: string): Promise<{ w: number; h: number }> {
+    return new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+      im.onerror = () => reject(new Error("image load failed"));
+      im.src = url;
+    });
+  }
+  /** Box centred on (cx, cy) with the picture's TV aspect, at most 40 % of the canvas (images: never above natural size). */
+  function boxForPicture(nw: number, nh: number, cx: number, cy: number, capNatural: boolean) {
+    const wc = nw / pixelAspect();
+    const k = Math.min((0.4 * W()) / wc, (0.4 * H()) / nh, capNatural ? 1 : Infinity);
+    const w = Math.max(8, Math.round(wc * k));
+    const h = Math.max(8, Math.round(nh * k));
+    return { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h };
+  }
+  /** New image layer (fit contain) centred on (cx, cy) in canvas px; selected, one undo step. */
+  async function addImageLayer(path: string, cx = W() / 2, cy = H() / 2) {
+    let nat = { w: 4, h: 3 };
+    try {
+      nat = await urlSize(await imageOf(path));
+    } catch {
+      // unreadable preview: keep a 4:3 placeholder box, the missing-file marker shows on the stage
+    }
+    addElement({ id: newId("i"), type: "image", src: path, fit: "contain", ...boxForPicture(nat.w, nat.h, cx, cy, true), rotation: 0, opacity: 1, action: null });
+  }
+  async function addVideoLayer(path: string, cx: number, cy: number) {
+    let nat = { w: 16, h: 9 };
+    try {
+      nat = await urlSize(await frameOfVideo({ title: 0, path }));
+    } catch {
+      // no preview frame: assume 16:9
+    }
+    addVideo(path, boxForPicture(nat.w, nat.h, cx, cy, false));
+  }
+  /** Moves `list` to the very front or back of the z-order; one undo step. */
+  function moveToEdge(list: LayoutElement[], front: boolean) {
+    const all = menu().elements;
+    const picked = all.filter((x) => list.includes(x));
+    const rest = all.filter((x) => !list.includes(x));
+    const next = front ? [...rest, ...picked] : [...picked, ...rest];
+    if (next.every((x, i) => x === all[i])) return;
+    remember();
+    menu().elements = next;
+    renderAll();
+  }
+  function setBackgroundImage(src: string) {
+    remember();
+    const bg = menu().background;
+    bg.image = src;
+    bg.video = null;
+    renderAll();
+  }
+
+  // ---- context menu -------------------------------------------------------------------------------
+  const ctxOutside = (ev: Event) => {
+    if (ctxMenu && !ctxMenu.contains(ev.target as Node)) closeCtx();
+  };
+  function closeCtx() {
+    ctxMenu?.remove();
+    ctxMenu = null;
+    document.removeEventListener("pointerdown", ctxOutside, true);
+    window.removeEventListener("blur", closeCtx);
+  }
+  function openCtx(at: { x: number; y: number }, e: LayoutElement) {
+    if (!isSel(e.id)) {
+      selIds = groupMembers(e).map((x) => x.id);
+      refreshSelection();
+    }
+    const sel = selection();
+    const only = sel.length === 1 ? sel[0] : undefined;
+    const items: [string, () => void][] = [];
+    if (only?.type === "image") {
+      const src = only.src;
+      items.push([tr("editor.ctxSetBackground"), () => setBackgroundImage(src)]);
+    }
+    items.push(
+      [tr("menuEditor.duplizieren"), () => addCopies(sel)],
+      [tr("editor.ctxFront"), () => moveToEdge(sel, true)],
+      [tr("editor.ctxBack"), () => moveToEdge(sel, false)],
+      [tr("menuEditor.loeschen"), () => removeElements(sel)],
+    );
+    const node = el(
+      "div",
+      { class: "ed-ctx", role: "menu", "aria-label": tr("editor.ctxLabel") },
+      ...items.map(([label, run]) =>
+        el(
+          "button",
+          {
+            type: "button",
+            role: "menuitem",
+            class: "ed-ctx-item",
+            onclick: () => {
+              closeCtx();
+              run();
+            },
+          },
+          label,
+        ),
+      ),
+    );
+    showPopup(node, at);
+  }
+  /** Shows a keyboard-navigable popup (items carry `.ed-ctx-item`) at a client position. */
+  function showPopup(node: HTMLElement, at: { x: number; y: number }) {
+    closeCtx();
+    node.addEventListener("keydown", (ev) => {
+      const btns = [...node.querySelectorAll<HTMLElement>(".ed-ctx-item")];
+      const i = btns.indexOf(document.activeElement as HTMLElement);
+      if (ev.key === "Escape" || ev.key === "Tab") {
+        ev.preventDefault();
+        closeCtx();
+      } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+        ev.preventDefault();
+        const step = ev.key === "ArrowDown" || ev.key === "ArrowRight" ? 1 : -1;
+        btns[(i + step + btns.length) % btns.length].focus();
+      }
+    });
+    document.body.append(node);
+    node.style.left = `${Math.max(4, Math.min(at.x, window.innerWidth - node.offsetWidth - 4))}px`;
+    node.style.top = `${Math.max(4, Math.min(at.y, window.innerHeight - node.offsetHeight - 4))}px`;
+    ctxMenu = node;
+    document.addEventListener("pointerdown", ctxOutside, true);
+    window.addEventListener("blur", closeCtx);
+    node.querySelector<HTMLElement>(".ed-ctx-item")?.focus();
+  }
+  /** Grid of the built-in icons with live previews (drawn in the text colour via currentColor). */
+  function iconGrid(current: IconName | null, pick: (n: IconName) => void, itemClass: string): HTMLElement {
+    return el(
+      "div",
+      { class: "ed-icon-grid", role: "group", "aria-label": tr("editor.iconPalette") },
+      ...ICON_NAMES.map((n) => {
+        const b = el("button", { type: "button", class: `${itemClass} ed-icon-btn${n === current ? " active" : ""}`, title: tr(`editor.icon_${n}`), "aria-label": tr(`editor.icon_${n}`), "aria-pressed": String(n === current), onclick: () => pick(n) });
+        b.innerHTML = iconSvg(n, "currentColor");
+        return b;
+      }),
+    );
+  }
+  function openIconPopup(anchor: HTMLElement) {
+    const r = anchor.getBoundingClientRect();
+    const node = el("div", { class: "ed-ctx ed-icon-pop", role: "dialog", "aria-label": tr("editor.iconPalette") });
+    node.append(
+      iconGrid(
+        null,
+        (n) => {
+          closeCtx();
+          addIcon(n);
+        },
+        "ed-ctx-item",
+      ),
+    );
+    showPopup(node, { x: r.left, y: r.bottom + 4 });
+  }
+  /** Most frequent text colour of the current menu, so a new icon matches its labels. */
+  function dominantTextColor(): string {
+    const counts = new Map<string, number>();
+    for (const e of menu()?.elements ?? []) if (e.type === "text") counts.set(e.color.toUpperCase(), (counts.get(e.color.toUpperCase()) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "#FFFFFF";
+  }
+  function addIcon(name: IconName) {
+    addElement(newIcon(Math.round(W() / 2 - 32), Math.round(H() / 2 - 32), 64, 64, name, dominantTextColor()));
+  }
+  stage.addEventListener("contextmenu", (ev) => {
+    if (remoteMode) return;
+    const node = (ev.target as HTMLElement).closest<HTMLElement>(".ed-el");
+    const e = node ? menu()?.elements.find((x) => x.id === node.dataset.id) : undefined;
+    if (!e) return;
+    ev.preventDefault();
+    openCtx({ x: ev.clientX, y: ev.clientY }, e);
+  });
+
   function removeElements(list: LayoutElement[]) {
     if (list.length === 0) return;
     remember();
@@ -3197,6 +3819,10 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** Copies of `src` (new ids, groups re-mapped to fresh ids), offset by 16 px, on top and selected. */
   function addCopies(src: LayoutElement[]) {
     if (src.length === 0) return;
+    if (menu().elements.filter(isButton).length + src.filter(isButton).length > maxButtons(tv)) {
+      flash(tr("editor.pasteTooManyButtons", { max: maxButtons(tv) }), "error");
+      return;
+    }
     remember();
     const gmap = new Map<string, string>();
     const copies = src.map((e) => {
@@ -3277,13 +3903,91 @@ export function mountMenuEditor(opts: EditorOptions) {
     selIds = [];
     renderAll();
   }
+  /** Moves menu `from` so it lands before the menu that is at `ins` now (`ins` = length: to the end); one undo step. */
+  function moveMenuTo(from: number, ins: number) {
+    const to = ins > from ? ins - 1 : ins;
+    if (to === from || from < 0 || from >= L.menus.length) return;
+    const cur = menu();
+    remember();
+    const [moved] = L.menus.splice(from, 1);
+    L.menus.splice(to, 0, moved);
+    menuIdx = L.menus.indexOf(cur);
+    renderAll();
+  }
   function moveMenu(dir: number) {
     const j = menuIdx + dir;
     if (j < 0 || j >= L.menus.length) return;
-    remember();
-    [L.menus[menuIdx], L.menus[j]] = [L.menus[j], L.menus[menuIdx]];
-    menuIdx = j;
-    renderAll();
+    moveMenuTo(menuIdx, dir > 0 ? j + 1 : j);
+  }
+
+  /** Pointer-drag reordering of the sidebar cards with an insert line and edge auto-scroll. */
+  function startMenuDrag(ev: PointerEvent, from: number) {
+    const list = menusPane.querySelector<HTMLElement>(".ed-menu-list");
+    if (ev.button !== 0 || remoteMode || !list) return;
+    const card = ev.currentTarget as HTMLElement;
+    const x0 = ev.clientX;
+    const y0 = ev.clientY;
+    let lastY = y0;
+    let dragging = false;
+    let ins = from;
+    let raf = 0;
+    const line = el("div", { class: "ed-menu-drop-line", "aria-hidden": "true" });
+    const updateDrop = () => {
+      const cards = [...list.querySelectorAll<HTMLElement>(".ed-menu-item")];
+      const lr = list.getBoundingClientRect();
+      let top = 0;
+      ins = cards.length ? Number(cards[cards.length - 1].dataset.idx) + 1 : 0;
+      let found = false;
+      for (const c of cards) {
+        const r = c.getBoundingClientRect();
+        if (lastY < r.top + r.height / 2) {
+          ins = Number(c.dataset.idx);
+          top = r.top - lr.top - 3;
+          found = true;
+          break;
+        }
+      }
+      if (!found && cards.length) top = cards[cards.length - 1].getBoundingClientRect().bottom - lr.top + 3;
+      line.style.top = `${top}px`;
+    };
+    const tick = () => {
+      const r = menusPane.getBoundingClientRect();
+      const zone = 40;
+      // Speed grows with how deep the pointer is inside the edge zone (or beyond it).
+      if (lastY < r.top + zone) menusPane.scrollTop -= (1 - Math.max(0, lastY - r.top) / zone) * 18;
+      else if (lastY > r.bottom - zone) menusPane.scrollTop += (1 - Math.max(0, r.bottom - lastY) / zone) * 18;
+      updateDrop();
+      raf = requestAnimationFrame(tick);
+    };
+    const onMove = (mv: PointerEvent) => {
+      lastY = mv.clientY;
+      if (dragging) return;
+      if (Math.hypot(mv.clientX - x0, mv.clientY - y0) < 5) return;
+      dragging = true;
+      card.classList.add("dragging");
+      list.classList.add("reordering");
+      list.append(line);
+      raf = requestAnimationFrame(tick);
+    };
+    const finish = (commit: boolean) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      cancelAnimationFrame(raf);
+      line.remove();
+      card.classList.remove("dragging");
+      list.classList.remove("reordering");
+      if (!dragging) return;
+      // The click that ends the drag must not select the card.
+      suppressMenuClick = true;
+      window.setTimeout(() => (suppressMenuClick = false), 0);
+      if (commit) moveMenuTo(from, ins);
+    };
+    const onUp = () => finish(true);
+    const onCancel = () => finish(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   }
   function duplicateMenu() {
     remember();
@@ -3331,7 +4035,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   async function newDraft() {
     remember();
-    L = draftLayout(titles, tv, opts.heading);
+    L = draftLayout(titles, tv, opts.heading, undefined, draftOpts());
     menuIdx = 0;
     selIds = [];
     if (remoteMode) resetRemoteSession();
@@ -3353,7 +4057,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     const sound = await bundledMenuSound(PRESET_SOUNDS[preset]).catch(() => null);
     remember();
-    L = draftLayout(titles, tv, opts.heading, preset);
+    L = draftLayout(titles, tv, opts.heading, preset, draftOpts());
     // The preset's bundled music for every menu that has no sound of its own.
     if (sound) for (const m of L.menus) if (m.audio.type === "none") m.audio = { type: "file", path: sound };
     menuIdx = 0;
@@ -3393,6 +4097,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       const loaded = await loadLayout(p);
       remember();
       L = loaded;
+      draftTheme = L.theme ?? draftTheme;
+      draftSettings = L.settingsMode ?? draftSettings;
       menuIdx = 0;
       selIds = [];
       if (remoteMode) resetRemoteSession();
@@ -3452,6 +4158,8 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     ro.disconnect();
     window.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("paste", onPaste);
+    closeCtx();
     unlistenDrop?.();
     window.clearTimeout(checkTimer);
     window.clearTimeout(noticeTimer);
@@ -3463,7 +4171,9 @@ export function mountMenuEditor(opts: EditorOptions) {
   closeHook = close;
 
   function onKey(ev: KeyboardEvent) {
-    if ((ev.target as HTMLElement).matches("input, textarea, select")) return;
+    const target = ev.target as HTMLElement;
+    // Splitters and the context menu handle their own keys (arrows would otherwise nudge the selection).
+    if (target.matches("input, textarea, select, [role='separator'], .ed-ctx *")) return;
     if (remoteMode) {
       handleRemoteKey(ev);
       return;
@@ -3475,12 +4185,25 @@ export function mountMenuEditor(opts: EditorOptions) {
       undo();
       return;
     }
-    if (ctrl && key === "v") {
+    // Ctrl+V is handled by the `paste` event (image from the clipboard, else copied elements).
+    if (ev.altKey && !ctrl && (ev.key === "ArrowUp" || ev.key === "ArrowDown") && !props.contains(target)) {
       ev.preventDefault();
-      addCopies(clipboard);
+      const inSidebar = menusPane.contains(document.activeElement);
+      moveMenu(ev.key === "ArrowUp" ? -1 : 1);
+      // renderAll rebuilt the cards; keep keyboard focus in the sidebar.
+      if (inSidebar) menusPane.querySelector<HTMLElement>(".ed-menu-item.active")?.focus();
       return;
     }
     const sel = selection();
+    if (sel.length === 1 && (ev.key === "ContextMenu" || (ev.shiftKey && ev.key === "F10"))) {
+      const node = stage.querySelector<HTMLElement>(`[data-id="${CSS.escape(sel[0].id)}"]`);
+      if (node) {
+        ev.preventDefault();
+        const r = node.getBoundingClientRect();
+        openCtx({ x: r.left + r.width / 2, y: r.top + r.height / 2 }, sel[0]);
+        return;
+      }
+    }
     if (viewMode === "timeline" && !ctrl) {
       const gop = tv.toLowerCase() === "pal" ? 15 : 18;
       if (ev.key === " ") {
@@ -3521,6 +4244,8 @@ export function mountMenuEditor(opts: EditorOptions) {
     } else if (ctrl && (key === "c" || key === "x")) {
       ev.preventDefault();
       clipboard = structuredClone(sel);
+      // Replace a stale OS image so the next paste event carries the copied elements, not that picture.
+      navigator.clipboard?.writeText("musadvd-elements").catch(() => undefined);
       if (key === "x") removeElements(sel);
     } else if (ctrl && key === "g") {
       ev.preventDefault();
@@ -3533,16 +4258,78 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
   window.addEventListener("keydown", onKey, true);
 
+  // Paste: a clipboard picture becomes a new image layer; otherwise copied elements are pasted.
+  async function pasteImageFile(file: File, mime: string) {
+    try {
+      const b64 = await new Promise<string>((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result).split(",")[1] ?? "");
+        fr.onerror = () => reject(fr.error);
+        fr.readAsDataURL(file);
+      });
+      const path = await saveClipboardImage(b64, mime === "image/jpeg" ? "jpg" : "png");
+      if (!closed) await addImageLayer(path);
+    } catch (e) {
+      flash(tr("editor.pasteImageFailed", { e }), "error");
+    }
+  }
+  function onPaste(ev: ClipboardEvent) {
+    if (closed || remoteMode) return;
+    if ((ev.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+    const item = [...(ev.clipboardData?.items ?? [])].find((i) => i.kind === "file" && (i.type === "image/png" || i.type === "image/jpeg"));
+    const file = item?.getAsFile();
+    if (item && file) {
+      ev.preventDefault();
+      void pasteImageFile(file, item.type);
+    } else if (clipboard.length > 0) {
+      ev.preventDefault();
+      addCopies(clipboard);
+    }
+  }
+  document.addEventListener("paste", onPaste);
+
   // Native drag & drop delivers file paths (HTML5 drop events do not); first file of each kind wins.
   let unlistenDrop: (() => void) | null = null;
   const extOf = (p: string) => (p.split(".").pop() ?? "").toLowerCase();
   const matches = (f: { extensions: string[] }[], p: string) => f[0].extensions.includes(extOf(p));
-  function applyDroppedFiles(paths: string[]) {
+  type DropTarget = { kind: "canvas"; x: number; y: number } | { kind: "bg"; node: HTMLElement } | null;
+  /** Where a drop at `pos` (physical px, like the main window's hit test) would land. */
+  function dropTargetAt(pos: { x: number; y: number }): DropTarget {
+    const dpr = window.devicePixelRatio || 1;
+    const cx = pos.x / dpr;
+    const cy = pos.y / dpr;
+    const els = document.elementsFromPoint(cx, cy);
+    const card = els.find((n): n is HTMLElement => n instanceof HTMLElement && n.classList.contains("ed-bg-card"));
+    if (card) return { kind: "bg", node: card };
+    if (!els.includes(viewport)) return null;
+    // The stage rect already includes zoom and scroll; scaleX/Y map screen px back to canvas px.
+    const r = stage.getBoundingClientRect();
+    return { kind: "canvas", x: Math.max(0, Math.min(W(), (cx - r.left) / scaleX)), y: Math.max(0, Math.min(H(), (cy - r.top) / scaleY)) };
+  }
+  function clearDropMarks() {
+    viewport.classList.remove("ed-drop");
+    for (const n of editor.querySelectorAll(".ed-bg-card.ed-drop")) n.classList.remove("ed-drop");
+  }
+  async function applyDroppedFiles(paths: string[], target: DropTarget) {
     const audio = paths.find((p) => matches(AUDIO_FILTER, p));
     const image = paths.find((p) => matches(IMAGE_FILTER, p));
     const video = paths.find((p) => matches(VIDEO_FILTER, p));
     if (!audio && !image && !video) {
       flash(tr("menuEditor.dropUnsupported"), "error");
+      return;
+    }
+    const ignored = paths.length > [audio, image, video].filter(Boolean).length;
+    if (target?.kind === "canvas") {
+      if (audio) {
+        remember();
+        menu().audio = { type: "file", path: audio };
+      }
+      if (image) await addImageLayer(image, target.x, target.y);
+      if (video) await addVideoLayer(video, target.x, target.y);
+      if (audio && !image && !video) {
+        renderAll();
+        flash(tr("menuEditor.dropApplied"), "ok");
+      } else if (ignored) flash(tr("menuEditor.dropSomeIgnored"), "error");
       return;
     }
     remember();
@@ -3557,15 +4344,18 @@ export function mountMenuEditor(opts: EditorOptions) {
       m.background.image = image;
     }
     if (audio && !image && !video) flash(tr("menuEditor.dropApplied"), "ok");
-    else if (paths.length > [audio, image, video].filter(Boolean).length) flash(tr("menuEditor.dropSomeIgnored"), "error");
+    else if (ignored) flash(tr("menuEditor.dropSomeIgnored"), "error");
     renderAll();
   }
   void getCurrentWebview()
     .onDragDropEvent((e) => {
       const p = e.payload;
-      if (p.type === "enter" || p.type === "over") viewport.classList.add("ed-drop");
-      else viewport.classList.remove("ed-drop");
-      if (p.type === "drop" && !closed) applyDroppedFiles(p.paths);
+      clearDropMarks();
+      if (p.type === "leave" || closed) return;
+      const target = dropTargetAt(p.position);
+      if (p.type === "drop") void applyDroppedFiles(p.paths, target);
+      else if (target?.kind === "canvas") viewport.classList.add("ed-drop");
+      else if (target?.kind === "bg") target.node.classList.add("ed-drop");
     })
     .then((u) => (closed ? u() : (unlistenDrop = u)))
     .catch((err) => console.warn("menu editor drag-drop unavailable", err));
