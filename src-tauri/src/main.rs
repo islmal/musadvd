@@ -30,6 +30,7 @@ use base64::Engine as _;
 use musadvd::author::Resolution;
 use musadvd::bd::{bd_frame_rate, BdRate};
 use musadvd::calculator::{Clamp, DiscType, EncodingProfile, Quality};
+use musadvd::chapters::{self, ImportedChapter};
 use musadvd::config::{AppSettings, UNSUPPORTED_CHOICES};
 use musadvd::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
 use musadvd::encoder::{
@@ -37,7 +38,7 @@ use musadvd::encoder::{
     quality_psnr_args, Aspect, AudioMode, AudioOut, AudioTarget, VBV_BUFFER_KBIT,
 };
 use musadvd::menu::{UiLang, DEFAULT_MOTION_SECS};
-use musadvd::probe::{self, language_name, SubtitleKind, TrackLabelMode};
+use musadvd::probe::{self, language_name, ExternalSubtitle, ExternalSubtitleInfo, SubtitleKind, TrackLabelMode};
 use musadvd::template::Template;
 use musadvd::tools::{blocking_tool_command, Toolchain};
 use serde::{Deserialize, Serialize};
@@ -337,6 +338,27 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
         has_source_chapters: !info.chapters.is_empty(),
         chapters,
     })
+}
+
+/// Probes a standalone external subtitle file (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.sup`).
+#[tauri::command]
+fn probe_subtitle_file(state: State<'_, AppState>, path: String) -> Result<ExternalSubtitleInfo, String> {
+    let settings = state.settings();
+    let label_mode = TrackLabelMode::from_setting(&settings.track_label_mode);
+    let ui = UiLang::from_setting(&settings.ui_language);
+    probe::probe_external_subtitle_with_ui(Path::new(&path), label_mode, ui)
+}
+
+/// Reads and parses a chapter file (OGG/MKVToolNix, Matroska XML, FFMETADATA, plain/YouTube, CellTimes.txt).
+#[tauri::command]
+fn import_chapters_file(path: String, fps: Option<f64>) -> Result<Vec<ImportedChapter>, String> {
+    chapters::read_chapters_file(Path::new(&path), fps)
+}
+
+/// Parses pasted chapter text in any supported chapter format.
+#[tauri::command]
+fn parse_chapters_text(text: String, fps: Option<f64>) -> Result<Vec<ImportedChapter>, String> {
+    chapters::parse_chapters(&text, fps)
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,6 +1154,9 @@ struct InputConfig {
     /// Styling and timing offset of the title's text subtitles.
     #[serde(default)]
     subtitle_style: musadvd::textsub::SubtitleStyle,
+    /// Standalone external subtitle files attached to this title.
+    #[serde(default)]
+    external_subtitles: Vec<ExternalSubtitle>,
 }
 
 #[derive(Deserialize)]
@@ -1216,6 +1241,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 contrast: i.contrast,
                 saturation: i.saturation,
                 subtitle_style: i.subtitle_style.clone(),
+                external_subtitles: i.external_subtitles.clone(),
             })
             .collect(),
         ..BuildOptions::default()
@@ -1370,6 +1396,9 @@ fn main() -> std::process::ExitCode {
             get_available_languages,
             get_locale_data,
             probe_file,
+            probe_subtitle_file,
+            import_chapters_file,
+            parse_chapters_text,
             list_templates,
             template_preview,
             calculate_project,
@@ -1690,6 +1719,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!((input.denoise, input.brightness, input.contrast, input.saturation), (None, None, Some(1.15), None));
+        assert!(input.external_subtitles.is_empty());
+
+        let with_ext: InputConfig = serde_json::from_str(
+            r#"{"path":"a.mkv","audio":[1],"subtitles":[],"label":null,"chapters":[],"externalSubtitles":[{"path":"sub.en.srt","language":"eng","title":null,"forced":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with_ext.external_subtitles.len(), 1);
+        assert_eq!(with_ext.external_subtitles[0].language.as_deref(), Some("eng"));
+        assert!(with_ext.external_subtitles[0].forced);
+    }
+
+    #[test]
+    fn external_subtitle_and_chapter_ipc_shapes() {
+        let dir = std::env::temp_dir().join(format!("cx_gui_ext_ch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let srt = dir.join("film.deu.forced.ass");
+        std::fs::write(&srt, "[Script Info]\n").unwrap();
+
+        let info = probe::probe_external_subtitle_with_ui(&srt, TrackLabelMode::SmartMetadata, UiLang::EN).unwrap();
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["codec"], "ass");
+        assert_eq!(json["kind"], "text");
+        assert_eq!(json["language"], "deu");
+        assert_eq!(json["languageName"], "German");
+        assert_eq!(json["displayLabel"], "German (forced)");
+        assert_eq!(json["forced"], true);
+        assert_eq!(json["supported"], true);
+
+        let parsed = parse_chapters_text("0:00 Intro\n5:00 Main\n".into(), None).unwrap();
+        let ch_json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(ch_json[0]["startSecs"], 0.0);
+        assert_eq!(ch_json[0]["title"], "Intro");
+        assert_eq!(ch_json[1]["startSecs"], 300.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

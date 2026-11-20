@@ -9,6 +9,7 @@ pub mod bd_menu;
 pub mod bd_template;
 pub mod burner;
 pub mod calculator;
+pub mod chapters;
 pub mod cli;
 pub mod config;
 pub mod h264;

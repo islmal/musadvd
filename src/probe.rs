@@ -164,6 +164,43 @@ pub fn subtitle_kind(codec: &str) -> SubtitleKind {
     }
 }
 
+/// Base virtual source index for external subtitle files in [`crate::layout::Action::SetSubtitle`]
+/// and [`crate::layout::LayoutTitle::subtitle_sources`]: `EXTERNAL_SUB_SOURCE_BASE + i` addresses
+/// the `i`-th selected external subtitle of a title.
+pub const EXTERNAL_SUB_SOURCE_BASE: u32 = 10_000;
+
+/// External subtitle file attached to a title (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, or `.sup`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSubtitle {
+    pub path: PathBuf,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    #[serde(default)]
+    pub forced: bool,
+}
+
+/// Result of probing a standalone external subtitle file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSubtitleInfo {
+    pub path: PathBuf,
+    pub codec: String,
+    pub kind: String,
+    pub language: Option<String>,
+    pub language_name: String,
+    pub display_label: String,
+    pub title: Option<String>,
+    pub forced: bool,
+    pub supported: bool,
+}
+
+impl ExternalSubtitleInfo {
+    pub fn subtitle_kind(&self) -> SubtitleKind {
+        if self.kind == "bitmap" { SubtitleKind::Bitmap } else { SubtitleKind::Text }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ffprobe JSON
 // ---------------------------------------------------------------------------
@@ -712,11 +749,139 @@ pub fn audio_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<S
 
 /// Labels of `info.subtitles`, forced tracks marked.
 pub fn subtitle_labels(info: &MediaInfo, mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
-    track_labels(info.subtitles.iter().map(|s| (s.language.as_deref(), s.title.as_deref())), &tr(ui, "subtitle"), mode, ui)
+    all_subtitle_labels(info, &[], mode, ui)
+}
+
+/// Labels of `info.subtitles` followed by `external`, numbered across all subtitle tracks of the
+/// title so embedded and external labels never collide on disc menus.
+pub fn all_subtitle_labels(info: &MediaInfo, external: &[ExternalSubtitle], mode: TrackLabelMode, ui: UiLang) -> Vec<String> {
+    let entries = info
+        .subtitles
+        .iter()
+        .map(|s| (s.language.as_deref(), s.title.as_deref(), s.forced))
+        .chain(external.iter().map(|e| (e.language.as_deref(), e.title.as_deref(), e.forced)));
+    let items: Vec<(Option<&str>, Option<&str>, bool)> = entries.collect();
+    track_labels(items.iter().map(|&(l, t, _)| (l, t)), &tr(ui, "subtitle"), mode, ui)
         .into_iter()
-        .zip(&info.subtitles)
-        .map(|(l, s)| if s.forced { format!("{l} (forced)") } else { l })
+        .zip(items)
+        .map(|(l, (_, _, forced))| if forced { format!("{l} (forced)") } else { l })
         .collect()
+}
+
+fn match_iso639_2_token(token: &str) -> Option<String> {
+    if let Some(&(b, term, ..)) = lookup(token) {
+        return Some(if token == term { term.to_string() } else { b.to_string() });
+    }
+    if let Some((prefix, suffix)) = token.split_once(['-', '_']) {
+        if !suffix.is_empty() && suffix.len() <= 4 && suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            if let Some(&(b, term, ..)) = lookup(prefix) {
+                return Some(if prefix == term { term.to_string() } else { b.to_string() });
+            }
+        }
+    }
+    None
+}
+
+fn guess_subtitle_metadata(path: &Path) -> (Option<String>, Option<String>, bool) {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let parts: Vec<&str> = stem.split('.').collect();
+    let stop_at = if parts.len() > 1 { 1 } else { 0 };
+    let mut language: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut forced = false;
+
+    for &seg in parts[stop_at..].iter().rev() {
+        let lower = seg.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        if lower == "forced" {
+            forced = true;
+            continue;
+        }
+        if matches!(lower.as_str(), "sdh" | "cc" | "hi") && title.is_none() {
+            title = Some(lower.to_ascii_uppercase());
+            continue;
+        }
+        if language.is_none() {
+            if let Some(code) = match_iso639_2_token(&lower) {
+                language = Some(code);
+                continue;
+            }
+        }
+        break;
+    }
+
+    (language, title, forced)
+}
+
+/// Probes a standalone external subtitle file (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.sup`),
+/// checking path safety, guessing language/forced metadata from the filename suffix, and
+/// formatting `display_label` using `TrackLabelMode::SmartMetadata` and `UiLang::EN`.
+pub fn probe_external_subtitle(path: &Path) -> Result<ExternalSubtitleInfo, String> {
+    probe_external_subtitle_with_ui(path, TrackLabelMode::SmartMetadata, UiLang::EN)
+}
+
+/// Like [`probe_external_subtitle`], formatted for the caller's label mode and UI language.
+pub fn probe_external_subtitle_with_ui(path: &Path, mode: TrackLabelMode, ui: UiLang) -> Result<ExternalSubtitleInfo, String> {
+    let raw = path.to_string_lossy();
+    if raw.trim().is_empty() {
+        return Err("Subtitle path is empty".to_string());
+    }
+    if crate::menu::is_unc_or_device_path(&raw) {
+        return Err("UNC and device paths are not allowed for subtitle files".to_string());
+    }
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let (codec, kind) = match ext.as_str() {
+        "srt" => ("subrip", SubtitleKind::Text),
+        "ass" => ("ass", SubtitleKind::Text),
+        "ssa" => ("ssa", SubtitleKind::Text),
+        "vtt" => ("webvtt", SubtitleKind::Text),
+        "sub" => {
+            use std::io::Read as _;
+            let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut head = [0u8; 4];
+            if f.read(&mut head).unwrap_or(0) == 4 && head == [0x00, 0x00, 0x01, 0xBA] {
+                return Err(format!(
+                    "{}: binary VobSub .sub files are not supported as standalone external subtitles (use .sup or text .sub)",
+                    path.display()
+                ));
+            }
+            ("sub", SubtitleKind::Text)
+        }
+        "sup" => ("hdmv_pgs_subtitle", SubtitleKind::Bitmap),
+        "" => return Err(format!("{}: missing subtitle file extension", path.display())),
+        other => return Err(format!("{}: unsupported subtitle format '.{other}'", path.display())),
+    };
+
+    let (language, title, forced) = guess_subtitle_metadata(path);
+    let lang_name = language_name(language.as_deref(), ui);
+    let base_label = track_labels(std::iter::once((language.as_deref(), title.as_deref())), &tr(ui, "subtitle"), mode, ui)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| lang_name.clone());
+    let display_label = if forced { format!("{base_label} (forced)") } else { base_label };
+
+    Ok(ExternalSubtitleInfo {
+        path: path.to_path_buf(),
+        codec: codec.to_string(),
+        kind: if kind == SubtitleKind::Text { "text".to_string() } else { "bitmap".to_string() },
+        language,
+        language_name: lang_name,
+        display_label,
+        title,
+        forced,
+        supported: kind == SubtitleKind::Text || crate::subpic::supported(codec),
+    })
 }
 
 /// Audio label with the disc's channel layout ("Spanisch - Latino (Stereo)"): keeps a commentary in
@@ -1110,5 +1275,61 @@ Input #0, matroska,webm, from 'movie.mkv':
 
         let trimmed = detect_scene_chapters(&ffmpeg, &clip, Some(3.0), Some(9.0), 10.0, DEFAULT_SCENE_THRESHOLD, 1.5).unwrap();
         assert_eq!(trimmed, vec![5.0, 7.5]);
+    }
+
+    #[test]
+    fn probes_external_subtitles_and_guesses_languages() {
+        let dir = std::env::temp_dir().join(format!("cx_ext_sub_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cases = [
+            ("movie.en.srt", "subrip", "text", Some("eng"), "English", "English", None, false),
+            ("movie.deu.ass", "ass", "text", Some("deu"), "German", "German", None, false),
+            ("movie.ger.forced.srt", "subrip", "text", Some("ger"), "German", "German (forced)", None, true),
+            ("movie.rus.vtt", "webvtt", "text", Some("rus"), "Russian", "Russian", None, false),
+            ("movie.en.sdh.ssa", "ssa", "text", Some("eng"), "English", "English - SDH", Some("SDH"), false),
+            ("movie.sub", "sub", "text", None, "Unknown", "Unknown", None, false),
+            ("movie.fre.sup", "hdmv_pgs_subtitle", "bitmap", Some("fre"), "French", "French", None, false),
+        ];
+
+        for (name, codec, kind, lang, lang_name, label, title, forced) in cases {
+            let p = dir.join(name);
+            std::fs::write(&p, b"1\n00:00:01,000 --> 00:00:02,000\nHi\n").unwrap();
+            let info = probe_external_subtitle(&p).unwrap();
+            assert_eq!(info.codec, codec, "{name}");
+            assert_eq!(info.kind, kind, "{name}");
+            assert_eq!(info.language.as_deref(), lang, "{name}");
+            assert_eq!(info.language_name, lang_name, "{name}");
+            assert_eq!(info.display_label, label, "{name}");
+            assert_eq!(info.title.as_deref(), title, "{name}");
+            assert_eq!(info.forced, forced, "{name}");
+            assert!(info.supported, "{name}");
+        }
+
+        // Rejects unsupported extension, directory, missing file, UNC/device paths, binary VobSub .sub.
+        let txt = dir.join("notes.txt");
+        std::fs::write(&txt, b"hello").unwrap();
+        assert!(probe_external_subtitle(&txt).is_err());
+        assert!(probe_external_subtitle(&dir).is_err());
+        assert!(probe_external_subtitle(&dir.join("missing.srt")).is_err());
+        assert!(probe_external_subtitle(Path::new(r"\\server\share\sub.srt")).is_err());
+        assert!(probe_external_subtitle(Path::new(r"\\?\C:\sub.srt")).is_err());
+
+        let vobsub = dir.join("binary.sub");
+        std::fs::write(&vobsub, b"\x00\x00\x01\xba\x44\x00\x04").unwrap();
+        assert!(probe_external_subtitle(&vobsub).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_subtitle_labels_numbers_embedded_and_external_together() {
+        let info = tracks(&[("subtitle", "eng", "", "", false)]);
+        let ext = vec![ExternalSubtitle { path: PathBuf::from("a.en.srt"), language: Some("eng".into()), title: None, forced: true }];
+        assert_eq!(
+            all_subtitle_labels(&info, &ext, TrackLabelMode::SmartMetadata, UiLang::EN),
+            vec!["English (1)", "English (2) (forced)"]
+        );
     }
 }

@@ -32,6 +32,7 @@ use crate::i18n::tr;
 use crate::tf;
 use crate::menu::{self, page_by_style, MenuError, MenuPageFiles, RenderOptions, RenderedMenu, TextOverflow, UiLang};
 use crate::probe::{self, language_matches, MediaInfo, ProbeError, SubtitleKind, TrackLabelMode};
+pub use crate::probe::{ExternalSubtitle, EXTERNAL_SUB_SOURCE_BASE};
 use crate::template::{Page, Template};
 use crate::tools::{ProcessPriority, RawStream, ToolError, Toolchain};
 
@@ -503,6 +504,9 @@ pub struct StreamSelection {
     /// Styling and timing offset of this title's text subtitles.
     #[serde(default)]
     pub subtitle_style: crate::textsub::SubtitleStyle,
+    /// Standalone external subtitle files attached to this title.
+    #[serde(default)]
+    pub external_subtitles: Vec<ExternalSubtitle>,
 }
 
 /// Index ranges of the menu entries: an input plus all directly following inputs that are merged
@@ -826,6 +830,8 @@ struct TitlePlan {
     audio: Vec<usize>,
     /// Indices into `info.subtitles` (text subtitles only).
     subtitles: Vec<usize>,
+    /// Standalone external subtitle files muxed after `subtitles`.
+    external_subtitles: Vec<ExternalSubtitle>,
     /// Chapter starts in seconds, first is 0.
     chapters: Vec<f64>,
     chapter_titles: Vec<Option<String>>,
@@ -887,8 +893,27 @@ impl TitlePlan {
     }
 
     fn subtitle_labels(&self) -> Vec<String> {
-        let all = probe::subtitle_labels(&self.info, self.track_label_mode, self.ui_lang);
-        self.subtitles.iter().map(|&i| all[i].clone()).collect()
+        let all = probe::all_subtitle_labels(&self.info, &self.external_subtitles, self.track_label_mode, self.ui_lang);
+        let emb = self.subtitles.iter().map(|&i| all[i].clone());
+        let ext_start = self.info.subtitles.len();
+        let ext = (0..self.external_subtitles.len()).map(|i| all[ext_start + i].clone());
+        emb.chain(ext).collect()
+    }
+
+    fn subtitle_sources(&self) -> Vec<u32> {
+        let emb = self.subtitles.iter().map(|&s| self.info.subtitles[s].index as u32);
+        let ext = (0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32);
+        emb.chain(ext).collect()
+    }
+
+    fn subtitle_langs_raw(&self) -> impl Iterator<Item = Option<&str>> {
+        let emb = self.subtitles.iter().map(|&s| self.info.subtitles[s].language.as_deref());
+        let ext = self.external_subtitles.iter().map(|e| e.language.as_deref());
+        emb.chain(ext)
+    }
+
+    fn total_subtitles(&self) -> usize {
+        self.subtitles.len() + self.external_subtitles.len()
     }
 }
 
@@ -1141,7 +1166,7 @@ async fn encode_title(
     // Frames done count over both runs of a 2-pass encode; never let them go backwards (the
     // closing report of a run carries no frame number).
     let mut frames_seen = 0.0f64;
-    let logs = encoder::run_encode(tools, &job, |phase, p| {
+    let logs = encoder::run_encode_with_external(tools, &job, &t.external_subtitles, |phase, p| {
         let (fraction, base) = match phase {
             EncodePhase::Single => (0.98 * p.fraction, 0.0),
             EncodePhase::Analysis => (0.49 * p.fraction, 0.0),
@@ -1239,6 +1264,41 @@ fn is_rtl_language(lang: &str) -> bool {
     matches!(lang.to_ascii_lowercase().as_str(), "ar" | "ara" | "he" | "heb" | "fa" | "fas" | "per" | "ur" | "urd" | "yi" | "yid")
 }
 
+/// Validates and caps external subtitles for one title (respecting `opts.no_subtitles` and
+/// `MAX_SUBTITLE_STREAMS`), returning the accepted external subtitles and any warnings.
+pub(crate) fn select_external_subtitles(
+    sel: &StreamSelection,
+    opts: &BuildOptions,
+    embedded_count: usize,
+    label: &str,
+) -> Result<(Vec<ExternalSubtitle>, Vec<String>), BuildError> {
+    if opts.no_subtitles || sel.external_subtitles.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut notes = Vec::new();
+    let room = MAX_SUBTITLE_STREAMS.saturating_sub(embedded_count);
+    let mut out = Vec::new();
+    for (i, ext) in sel.external_subtitles.iter().enumerate() {
+        if out.len() >= room {
+            notes.push(format!("{label}: more than {MAX_SUBTITLE_STREAMS} subtitles selected, ignoring extra external subtitle(s)"));
+            break;
+        }
+        let probed = probe::probe_external_subtitle(&ext.path)
+            .map_err(|e| BuildError::Template(format!("{label}: {e}")))?;
+        if probed.subtitle_kind() == SubtitleKind::Text && !opts.disc.is_bluray() && ext.language.as_deref().is_some_and(is_rtl_language) {
+            notes.push(tf!(
+                opts.ui_lang,
+                "note_rtl_subtitle",
+                label = label,
+                index = EXTERNAL_SUB_SOURCE_BASE + i as u32,
+                lang = ext.language.as_deref().unwrap_or("")
+            ));
+        }
+        out.push(ext.clone());
+    }
+    Ok((out, notes))
+}
+
 /// Builds a complete DVD-Video structure from `opts.inputs`.
 ///
 /// When `opts.cancel` fires, all running tools are stopped, the work directory is removed and
@@ -1324,6 +1384,10 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         for note in notes {
             warn(log, note);
         }
+        let (external_subtitles, ext_notes) = select_external_subtitles(&sel, opts, subtitles.len(), &label)?;
+        for note in ext_notes {
+            warn(log, note);
+        }
         apply_selection(&mut info, &sel, &label)?;
 
         let chapters = match &sel.chapters {
@@ -1342,6 +1406,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             label,
             audio,
             subtitles,
+            external_subtitles,
             chapters: chapters.iter().map(|c| c.0).collect(),
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
@@ -1365,7 +1430,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
 
     let groups = groups(&opts.selections, titles.len());
     for g in &groups {
-        let shapes: Vec<MemberShape> = titles[g.clone()].iter().map(|t| (t.label.as_str(), t.audio.len(), t.subtitles.len())).collect();
+        let shapes: Vec<MemberShape> = titles[g.clone()].iter().map(|t| (t.label.as_str(), t.audio.len(), t.total_subtitles())).collect();
         check_group_shapes(&shapes)?;
         let chapters: usize = titles[g.clone()].iter().map(|t| t.chapters.len()).sum();
         if chapters > MAX_CHAPTERS {
@@ -1420,7 +1485,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 duration_secs: members.iter().map(|m| m.info.duration_secs).sum(),
                 clip: t.clip(),
                 audio_sources: t.audio.iter().map(|&a| t.info.audio[a].index as u32).collect(),
-                subtitle_sources: t.subtitles.iter().map(|&s| t.info.subtitles[s].index as u32).collect(),
+                subtitle_sources: t.subtitle_sources(),
                 audio_labels: t.audio_labels(),
                 subtitle_labels: t.subtitle_labels(),
                 }
@@ -1859,7 +1924,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .map(|t| TitleLoad {
             duration_secs: t.info.duration_secs,
             audio_kbps: t.audio_kbps(),
-            subtitle_streams: t.subtitles.len(),
+            subtitle_streams: t.total_subtitles(),
             copy_video_kbps: t.copy_kbps,
             copy_bytes: t.copy_bytes,
             weight: 1.0,
@@ -2033,12 +2098,11 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     t.audio.iter().position(|&a| language_matches(pref, t.info.audio[a].language.as_deref())).map(|p| p as u32)
                 }),
                 subtitle_langs: t
-                    .subtitles
-                    .iter()
-                    .map(|&s| t.info.subtitles[s].language.as_deref().and_then(probe::iso639_1).map(str::to_string))
+                    .subtitle_langs_raw()
+                    .map(|l| l.and_then(probe::iso639_1).map(str::to_string))
                     .collect(),
                 default_subtitle: opts.preferred_subtitle_lang.as_ref().and_then(|pref| {
-                    t.subtitles.iter().position(|&s| language_matches(pref, t.info.subtitles[s].language.as_deref())).map(|p| p as u32)
+                    t.subtitle_langs_raw().position(|l| language_matches(pref, l)).map(|p| p as u32)
                 }),
                 force_subtitle: opts.force_first_subtitle,
             },
@@ -2658,6 +2722,7 @@ mod tests {
             label: stem.into(),
             audio: vec![0, 1],
             subtitles: vec![],
+            external_subtitles: vec![],
             chapters: vec![0.0],
             chapter_titles: vec![None],
             aspect: Aspect::Wide,
@@ -2691,5 +2756,80 @@ mod tests {
         assert_eq!(group[1].audio_modes[1], AudioMode::Ac3);
         assert!(matches!(group[0].audio_outs()[1], AudioOut::Ac3 { .. }));
         assert!(matches!(group[1].audio_outs()[1], AudioOut::Ac3 { .. }));
+    }
+
+    #[test]
+    fn external_subtitle_selection_sources_labels_and_group_shape() {
+        let dir = std::env::temp_dir().join(format!("cx_dvd_ext_sub_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let srt = dir.join("film.en.srt");
+        std::fs::write(&srt, "1\n00:00:01,000 --> 00:00:02,000\nHi\n").unwrap();
+
+        let sel_json = format!(
+            r#"{{"audio":[1],"subtitles":[2],"externalSubtitles":[{{"path":{},"language":"eng","title":"SDH","forced":true}}]}}"#,
+            serde_json::to_string(&srt).unwrap()
+        );
+        let sel: StreamSelection = serde_json::from_str(&sel_json).unwrap();
+        assert_eq!(sel.external_subtitles.len(), 1);
+        assert_eq!(sel.external_subtitles[0].language.as_deref(), Some("eng"));
+        assert!(sel.external_subtitles[0].forced);
+
+        let opts = BuildOptions::default();
+        let (ext, notes) = select_external_subtitles(&sel, &opts, 1, "Film").unwrap();
+        assert_eq!(ext.len(), 1);
+        assert!(notes.is_empty());
+
+        // Invalid external subtitle path fails cleanly.
+        let bad_sel = StreamSelection {
+            external_subtitles: vec![ExternalSubtitle { path: dir.join("missing.srt"), language: None, title: None, forced: false }],
+            ..Default::default()
+        };
+        assert!(select_external_subtitles(&bad_sel, &opts, 0, "Film").is_err());
+
+        let mut src = info(60.0, vec![]);
+        src.subtitles = vec![probe::SubtitleStream {
+            index: 2,
+            codec: "subrip".into(),
+            kind: SubtitleKind::Text,
+            language: Some("ger".into()),
+            title: None,
+            forced: false,
+            width: None,
+            height: None,
+        }];
+        let plan = TitlePlan {
+            info: src,
+            label: "Film".into(),
+            audio: vec![],
+            subtitles: vec![0],
+            external_subtitles: ext,
+            chapters: vec![0.0],
+            chapter_titles: vec![None],
+            aspect: Aspect::Wide,
+            audio_mode: AudioMode::Auto,
+            audio_modes: vec![],
+            track_label_mode: TrackLabelMode::SmartMetadata,
+            ui_lang: UiLang::EN,
+            video: VideoProcessing::default(),
+            loudnorm: false,
+            subtitle_style: Default::default(),
+            video_mode: DvdVideoMode::Encode,
+            copy_kbps: None,
+            copy_bytes: None,
+            motion_secs: 15.0,
+            stem: "title_01".into(),
+            thumbnail: None,
+            chapter_thumbs: vec![],
+        };
+        assert_eq!(plan.subtitle_sources(), vec![2, EXTERNAL_SUB_SOURCE_BASE]);
+        assert_eq!(plan.subtitle_labels(), vec!["German", "English - SDH (forced)"]);
+        assert_eq!(plan.total_subtitles(), 2);
+
+        // Merged group shape counts embedded + external subtitles.
+        assert!(check_group_shapes(&[("A", 1, plan.total_subtitles()), ("B", 1, 2)]).is_ok());
+        assert!(check_group_shapes(&[("A", 1, plan.total_subtitles()), ("B", 1, 1)]).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
