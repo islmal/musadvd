@@ -22,6 +22,7 @@ pub mod eta;
 pub mod fonts;
 pub mod hdmv;
 pub mod i18n;
+pub mod icons;
 pub mod igs;
 pub mod layout;
 pub mod menu;

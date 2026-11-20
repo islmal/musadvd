@@ -1463,6 +1463,7 @@ fn main() -> std::process::ExitCode {
             menu_editor::import_convertx_template,
             menu_editor::save_layout,
             menu_editor::image_preview,
+            menu_editor::save_clipboard_image,
             menu_editor::menu_navigation,
             burn_studio::studio_cancel,
             burn_studio::studio_drives,
@@ -1651,6 +1652,7 @@ mod tests {
             duration_secs: None,
             audio: musadvd::layout::MenuSound::None,
             intro_secs: None,
+            group: None,
             elements: vec![],
         };
         let l = musadvd::layout::CustomLayout {
@@ -1658,6 +1660,8 @@ mod tests {
             canvas: musadvd::layout::Canvas::default(),
             highlight: musadvd::layout::Highlight::default(),
             animations: true,
+            theme: None,
+            settings_mode: None,
             menus: vec![still_menu],
             fast_play: None,
         };

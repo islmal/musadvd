@@ -329,17 +329,17 @@ impl Nav<'_> {
             let content = match g.gfx_type.to_ascii_uppercase().as_str() {
                 "GT_BITMAP" if !g.value.is_empty() => {
                     let Some(src) = image_file(&g.value, warnings) else { continue };
-                    Content::Image { src, fit: fit_of(&g.padding) }
+                    Content::Image { src, fit: fit_of(&g.padding), crop: None }
                 }
                 "GT_VIDEO" => match mapped.and_then(|m| m.video.map(|v| (v, m.start))) {
                     Some((title, start)) => match thumbnails.get(title as usize - 1).cloned().flatten().filter(|_| start.is_none()) {
-                        Some(src) => Content::Image { src, fit: fit_of(&g.padding) },
+                        Some(src) => Content::Image { src, fit: fit_of(&g.padding), crop: None },
                         None => Content::Video { title, start_secs: start, fit: fit_of(&g.padding), path: None },
                     },
                     // A background video is only usable when the template names a picture.
                     None if g.location.eq_ignore_ascii_case("ML_PAGE_BACKGROUND") && image::ImageFormat::from_path(&g.value).is_ok() => {
                         let Some(src) = image_file(&g.value, warnings) else { continue };
-                        Content::Image { src, fit: Fit::Stretch }
+                        Content::Image { src, fit: Fit::Stretch, crop: None }
                     }
                     // The menus of a title play that title's clip in the page's video window; the main
                     // menu shows the first title.
@@ -404,7 +404,7 @@ impl Nav<'_> {
                         .flatten()
                         .chain(page.backgrounds.iter().map(String::as_str));
                     match candidates.filter_map(|v| resolve_resource(src.dir, v)).find(|p| p.is_file()) {
-                        Some(p) => Content::Image { src: p.to_string_lossy().into_owned(), fit },
+                        Some(p) => Content::Image { src: p.to_string_lossy().into_owned(), fit, crop: None },
                         None => {
                             warnings.push(format!("Button '{}' has no image file for the highlight and was skipped", b.name));
                             continue;
@@ -512,6 +512,7 @@ pub fn layout_from_template(
             duration_secs: None,
             audio: MenuSound::None,
             intro_secs: intro_end.map(|t| menu_anim::intro_length(t, src.page.intro_duration)),
+            group: None,
             elements,
         });
     };
@@ -555,6 +556,8 @@ pub fn layout_from_template(
         highlight: Highlight::default(),
         animations: true,
         fast_play: None,
+        theme: None,
+        settings_mode: None,
         menus,
     };
     Ok((layout, warnings))
@@ -825,7 +828,7 @@ mod tests {
         let (l, w) = layout_from_template(&t, &dir.join("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let button = l.menus[0].elements.iter().find(|e| e.action.is_some()).unwrap_or_else(|| panic!("no button: {w:?}"));
-        assert!(matches!(&button.content, Content::Image { src, fit: Fit::Contain } if src.ends_with("mask.png")), "{:?}", button.content);
+        assert!(matches!(&button.content, Content::Image { src, fit: Fit::Contain, .. } if src.ends_with("mask.png")), "{:?}", button.content);
         assert_eq!(button.opacity, 0.0);
     }
 

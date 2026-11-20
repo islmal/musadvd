@@ -82,6 +82,12 @@ pub struct CustomLayout {
     /// Optional FastPlay configuration (VMGM Menu 1 interactive countdown).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_play: Option<FastPlayConfig>,
+    /// Editor draft metadata (`landing` / `classic`); ignored by the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    /// Editor draft metadata (`global` / `perTitle`); ignored by the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_mode: Option<String>,
     pub menus: Vec<CustomMenu>,
 }
 
@@ -191,6 +197,9 @@ pub struct CustomMenu {
     /// template page). `None` = no intro.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro_secs: Option<f64>,
+    /// Editor-only sidebar group; ignored by the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Bottom to top.
     #[serde(default)]
     pub elements: Vec<Element>,
@@ -329,6 +338,15 @@ pub enum Content {
         src: String,
         #[serde(default)]
         fit: Fit,
+        /// Normalized part of the picture to show, applied before `fit`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crop: Option<CropRect>,
+    },
+    /// Built-in symbol (see [`crate::icons`]) in `color`; as a button its shape is the highlight.
+    Icon {
+        icon: String,
+        #[serde(default = "white")]
+        color: String,
     },
     /// Moving clip of a title, or of an external file when `path` is set (then `title` is unused).
     Video {
@@ -350,6 +368,15 @@ pub enum Content {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         border_width: Option<f32>,
     },
+}
+
+/// Normalized crop of a picture (0..1 of its natural size).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CropRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
 /// Pixels of a `Rect` element (shared by the DVD and Blu-ray renderers): `fill`, with the
@@ -595,6 +622,7 @@ pub(crate) fn element_name(e: &Element, n: usize) -> String {
     let kind = match &e.content {
         Content::Text { text, .. } => format!("Text '{}'", text.lines().next().unwrap_or("").chars().take(24).collect::<String>()),
         Content::Image { .. } => "Image".into(),
+        Content::Icon { icon, .. } => format!("Icon '{icon}'"),
         Content::Video { .. } => "Video".into(),
         Content::Rect { .. } => "Rectangle".into(),
     };
@@ -793,6 +821,14 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 Content::Image { src, .. } => {
                     if !Path::new(src).is_file() {
                         errs.push(el(&format!("Image not found: {src}")));
+                    }
+                }
+                Content::Icon { icon, color } => {
+                    if crate::icons::icon_svg(icon).is_none() {
+                        errs.push(el(&format!("Unknown icon '{icon}'")));
+                    }
+                    if parse_color(color).is_none() {
+                        errs.push(el(&format!("Icon colour '{color}' is not a colour")));
                     }
                 }
                 Content::Rect { color, border_color, border_width } => {
@@ -1308,6 +1344,26 @@ pub struct CustomMenus {
     pub warnings: Vec<String>,
 }
 
+/// The part of `img` selected by the normalized `crop`, clamped to the picture and at least 1 px.
+pub(crate) fn crop_normalized(img: &RgbaImage, crop: &CropRect) -> RgbaImage {
+    let (iw, ih) = img.dimensions();
+    let unit = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    let x0 = ((unit(crop.x) * iw as f64).round() as u32).min(iw.saturating_sub(1));
+    let y0 = ((unit(crop.y) * ih as f64).round() as u32).min(ih.saturating_sub(1));
+    let x1 = (((unit(crop.x) + unit(crop.w)).min(1.0) * iw as f64).round() as u32).clamp(x0 + 1, iw.max(1));
+    let y1 = (((unit(crop.y) + unit(crop.h)).min(1.0) * ih as f64).round() as u32).clamp(y0 + 1, ih.max(1));
+    imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image()
+}
+
+/// Alpha channel of `img` as glyph-like coverage (the highlight shape of an icon button).
+pub(crate) fn icon_coverage(img: &RgbaImage) -> menu::Coverage {
+    let mut cov = menu::Coverage::new(img.width(), img.height());
+    for (i, p) in img.pixels().enumerate() {
+        cov.data[i] = p[3] as f32 / 255.0;
+    }
+    cov
+}
+
 /// Fits `img` into `w`x`h` frame pixels; `Contain` leaves transparent bars. Contain/cover keep
 /// the picture's proportions on the TV: the axis that ends up horizontal (the height when
 /// `sideways`, i.e. rotated by 90°/270° afterwards) is first scaled by 1 / `pixel_aspect`.
@@ -1618,8 +1674,11 @@ fn render_custom_page(
                 }
                 text_cov = Some(rotate_coverage(cov, e.rotation, pa, (x, y)));
             }
-            Content::Image { src, fit } => {
-                let src_img = image::open(src).map_err(|err| io(Path::new(src), &err))?.to_rgba8();
+            Content::Image { src, fit, crop } => {
+                let mut src_img = image::open(src).map_err(|err| io(Path::new(src), &err))?.to_rgba8();
+                if let Some(c) = crop {
+                    src_img = crop_normalized(&src_img, c);
+                }
                 let fitted = fit_image(&src_img, w, h, *fit, pa, false);
                 let (img, rx, ry) = rotate_rgba(fitted, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
@@ -1627,6 +1686,18 @@ fn render_custom_page(
                 if has_intro && visible {
                     sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
+            }
+            Content::Icon { icon, color } => {
+                let rgb = parse_color(color).unwrap_or([255, 255, 255]);
+                let raw = crate::icons::render_icon(icon, rgb, w, h, pa).unwrap_or_else(|| RgbaImage::new(w, h));
+                let cov = icon_coverage(&raw);
+                let (img, rx, ry) = rotate_rgba(raw, e.rotation, pa, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                if has_intro && visible {
+                    sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
+                }
+                text_cov = Some(rotate_coverage(cov, e.rotation, pa, (x, y)));
             }
             Content::Rect { color, border_color, border_width } => {
                 let fill = parse_color(color).unwrap_or([255, 255, 255]);
@@ -2163,12 +2234,13 @@ mod tests {
             duration_secs: None,
             audio: MenuSound::None,
             intro_secs: None,
+            group: None,
             elements,
         }
     }
 
     fn layout(menus: Vec<CustomMenu>) -> CustomLayout {
-        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, menus }
+        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, theme: None, settings_mode: None, menus }
     }
 
     #[test]
@@ -2468,10 +2540,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut picture = with_colors(b(300.0, ""), "#00FF00", "#008000");
-        picture.content = Content::Image { src: String::new(), fit: Fit::Stretch };
+        picture.content = Content::Image { src: String::new(), fit: Fit::Stretch, crop: None };
         let png = dir.join("pic.png");
         RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255])).save(&png).unwrap();
-        picture.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch };
+        picture.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch, crop: None };
         let l = layout(vec![menu("main", MenuRole::Title, None, vec![b(10.0, "Erster"), picture])]);
         let out = build_custom_menus(&l, &ts, TvStandard::Pal, &dir, 10.0).unwrap();
         let files = &out.pages[0].1;
@@ -2506,6 +2578,76 @@ mod tests {
     }
 
     #[test]
+    fn crop_math_and_cropped_render() {
+        let mut img = RgbaImage::from_pixel(40, 20, image::Rgba([255, 0, 0, 255]));
+        for y in 0..20 {
+            for x in 20..40 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 255, 255]));
+            }
+        }
+        let right = crop_normalized(&img, &CropRect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 });
+        assert_eq!(right.dimensions(), (20, 20));
+        assert_eq!(right.get_pixel(0, 0).0, [0, 0, 255, 255]);
+        assert_eq!(crop_normalized(&img, &CropRect { x: 0.9, y: 0.9, w: 5.0, h: 5.0 }).dimensions(), (4, 2), "clamped to the edge");
+        assert_eq!(crop_normalized(&img, &CropRect { x: 2.0, y: -1.0, w: 0.0, h: 0.0 }).dimensions(), (1, 1), "at least one pixel");
+
+        let dir = std::env::temp_dir().join(format!("cx_crop_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("two.png");
+        img.save(&png).unwrap();
+        let mut pic = text(400.0, 40.0, "", None);
+        pic.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch, crop: Some(CropRect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 }) };
+        pic.w = 200.0;
+        pic.h = 100.0;
+        let l = layout(vec![menu("main", MenuRole::Title, None, vec![pic])]);
+        let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
+        let media = out.pages[0].1.custom.as_ref().unwrap();
+        let MenuLayer::Image(under) = &media.layers[0] else { panic!() };
+        let under = image::open(under).unwrap().to_rgba8();
+        assert_eq!(under.get_pixel(410, 90).0, [0, 0, 255, 255], "only the blue half is left");
+        assert_eq!(under.get_pixel(590, 90).0, [0, 0, 255, 255]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn icon_buttons_highlight_the_icon_shape() {
+        let dir = std::env::temp_dir().join(format!("cx_icon_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ic = text(400.0, 40.0, "", Some(Action::menu("main")));
+        ic.content = Content::Icon { icon: "home".into(), color: "#00ff00".into() };
+        ic.w = 200.0;
+        ic.h = 100.0;
+        let mut l = layout(vec![menu("main", MenuRole::Title, None, vec![ic])]);
+        assert!(validate(&l, &titles(1), TvStandard::Pal).is_ok());
+        let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
+        let (spec, files) = &out.pages[0];
+        assert_eq!(spec.buttons.len(), 1);
+        let hl = image::open(&files.highlight).unwrap().to_rgba8();
+        let r = spec.buttons[0].rect;
+        assert_eq!(hl.get_pixel(r.x0 + 1, r.y0 + 2).0[3], 0, "no rectangular frame");
+        let lit = (r.x0..r.x1).flat_map(|x| (r.y0..r.y1).map(move |y| (x, y))).filter(|&(x, y)| hl.get_pixel(x, y).0[3] > 0).count();
+        assert!(lit > 100 && lit < ((r.x1 - r.x0) * (r.y1 - r.y0)) as usize / 2, "icon-shaped mask: {lit}");
+        let MenuLayer::Image(under) = &out.pages[0].1.custom.as_ref().unwrap().layers[0] else { panic!() };
+        let under = image::open(under).unwrap().to_rgba8();
+        assert!(under.pixels().any(|p| p.0 == [0, 255, 0, 255]), "icon drawn in its colour");
+        l.menus[0].elements[0].content = Content::Icon { icon: "zzz".into(), color: "#00ff00".into() };
+        assert!(validate(&l, &titles(1), TvStandard::Pal).is_err());
+        l.menus[0].elements[0].content = Content::Icon { icon: "home".into(), color: "red".into() };
+        assert!(validate(&l, &titles(1), TvStandard::Pal).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_layouts_load_and_new_fields_stay_out_of_default_output() {
+        let l = layout(vec![menu("main", MenuRole::Title, None, vec![])]);
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(!json.contains("theme") && !json.contains("settingsMode") && !json.contains("group"), "{json}");
+        let c: Content = serde_json::from_str(r#"{"type":"icon","icon":"next"}"#).unwrap();
+        assert_eq!(c, Content::Icon { icon: "next".into(), color: "#FFFFFF".into() });
+    }
+
+    #[test]
     fn renders_layers_masks_and_specs() {
         let dir = std::env::temp_dir().join(format!("cx_layout_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2513,7 +2655,7 @@ mod tests {
         let png = dir.join("pic.png");
         RgbaImage::from_pixel(40, 20, image::Rgba([0, 200, 0, 255])).save(&png).unwrap();
         let mut picture = text(400.0, 40.0, "", Some(Action::menu("root")));
-        picture.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch };
+        picture.content = Content::Image { src: png.to_string_lossy().into_owned(), fit: Fit::Stretch, crop: None };
         picture.w = 200.0;
         picture.h = 100.0;
         let mut video = text(60.0, 200.0, "", None);

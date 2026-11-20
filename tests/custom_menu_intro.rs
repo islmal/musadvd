@@ -60,6 +60,7 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
         duration_secs: Some(15.0),
         audio: MenuSound::None,
         intro_secs: Some(3.0),
+        group: None,
         elements: vec![elem],
     };
 
@@ -69,6 +70,8 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
         highlight: Highlight::default(),
         animations: true,
         fast_play: None,
+        theme: None,
+        settings_mode: None,
         menus: vec![menu],
     };
 
@@ -186,6 +189,7 @@ fn easter_egg_transparent_mask() {
         duration_secs: Some(10.0),
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![normal_btn, easter_egg_btn],
     };
 
@@ -195,6 +199,8 @@ fn easter_egg_transparent_mask() {
         highlight: Highlight::default(),
         animations: true,
         fast_play: None,
+        theme: None,
+        settings_mode: None,
         menus: vec![menu],
     };
 
@@ -297,6 +303,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         duration_secs: Some(6.0),
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![video, play],
     };
     let layout = CustomLayout {
@@ -305,6 +312,8 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         highlight: Highlight::default(),
         animations: true,
         fast_play: None,
+        theme: None,
+        settings_mode: None,
         menus: vec![menu],
     };
 

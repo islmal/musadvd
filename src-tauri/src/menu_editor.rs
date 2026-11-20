@@ -241,9 +241,58 @@ pub fn image_preview(path: String) -> Result<String, String> {
     Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+
+/// Decodes a pasted picture and checks that its magic bytes match `ext` (`png` or `jpg`).
+fn decode_clipboard_image(data: &str, ext: &str) -> Result<Vec<u8>, String> {
+    let magic: &[u8] = match ext {
+        "png" => &[0x89, 0x50, 0x4E, 0x47],
+        "jpg" => &[0xFF, 0xD8, 0xFF],
+        _ => return Err(format!("unsupported image type '{ext}'")),
+    };
+    // Reject before decoding: base64 inflates by 4/3.
+    if data.len() / 4 * 3 > MAX_CLIPBOARD_IMAGE_BYTES + 3 {
+        return Err("pasted image is too large (max 25 MiB)".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|e| format!("invalid image data: {e}"))?;
+    if bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err("pasted image is too large (max 25 MiB)".into());
+    }
+    if !bytes.starts_with(magic) {
+        return Err(format!("the data is not a {ext} image"));
+    }
+    Ok(bytes)
+}
+
+/// Stores a pasted picture next to the settings (`menu-assets/paste-<millis>.<ext>`) and returns its absolute path.
+#[tauri::command]
+pub fn save_clipboard_image(data: String, ext: String) -> Result<String, String> {
+    let bytes = decode_clipboard_image(&data, &ext)?;
+    let dir = musadvd::config::AppSettings::default_path().parent().map(Path::to_path_buf).unwrap_or_default().join("menu-assets");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let path = dir.join(format!("paste-{millis}.{ext}"));
+    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let abs = std::path::absolute(&path).unwrap_or(path);
+    Ok(abs.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_image_validation() {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let png = b64(&[0x89, 0x50, 0x4E, 0x47, 1, 2]);
+        assert_eq!(decode_clipboard_image(&png, "png").unwrap().len(), 6);
+        assert!(decode_clipboard_image(&png, "jpg").is_err(), "magic must match ext");
+        assert!(decode_clipboard_image(&b64(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpg").is_ok());
+        assert!(decode_clipboard_image(&png, "gif").is_err());
+        assert!(decode_clipboard_image("!!!", "png").is_err());
+        let big = b64(&vec![0x89u8; MAX_CLIPBOARD_IMAGE_BYTES + 10]);
+        assert!(decode_clipboard_image(&big, "png").is_err());
+    }
 
     fn layout_with_canvas(w: u32, h: u32) -> CustomLayout {
         CustomLayout::from_json(&format!(

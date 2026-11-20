@@ -385,6 +385,7 @@ mod build {
                 duration_secs: Some(LOOP),
                 audio: MenuSound::Title { title: 1, start_secs: Some(SOURCE_START) },
                 intro_secs: with_keys.then_some(INTRO),
+                group: None,
                 elements: vec![
                     element(text("Hallo Intro"), headline, None, keys(vec![key(0.0, headline, 0.0), key(INTRO, headline, 1.0)])),
                     element(
@@ -397,6 +398,8 @@ mod build {
                 ],
             }],
             fast_play: None,
+            theme: None,
+            settings_mode: None,
         }
     }
 

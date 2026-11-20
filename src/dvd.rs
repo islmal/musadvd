@@ -2436,6 +2436,7 @@ mod tests {
             duration_secs: None,
             audio: crate::layout::MenuSound::None,
             intro_secs: None,
+            group: None,
             elements: vec![],
         };
         let motion_menu = crate::layout::CustomMenu {
@@ -2450,6 +2451,7 @@ mod tests {
             duration_secs: Some(25.0),
             audio: crate::layout::MenuSound::None,
             intro_secs: Some(5.0),
+            group: None,
             elements: vec![],
         };
         let l = crate::layout::CustomLayout {
@@ -2458,6 +2460,8 @@ mod tests {
             highlight: crate::layout::Highlight::default(),
             animations: true,
             fast_play: None,
+            theme: None,
+            settings_mode: None,
             menus: vec![still_menu, motion_menu],
         };
         // 1 still (0.15 MB) + 1 motion (25s loop + 5s intro = 30s @ 5.5MB/25s = 6.6 MB) = 6.75 MB

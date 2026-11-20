@@ -252,6 +252,7 @@ fn custom_layout_fastplay_page_rendering() {
         duration_secs: None,
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![elem],
     };
 
@@ -268,6 +269,8 @@ fn custom_layout_fastplay_page_rendering() {
             splash: None,
             audio: MenuSound::None,
         }),
+        theme: None,
+        settings_mode: None,
         menus: vec![main_menu],
     };
 

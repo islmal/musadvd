@@ -39,6 +39,8 @@ unicode-bidi = "0.3"
 rayon = "1"
 # Enumerates installed OS font families for the menu/subtitle font pickers.
 fontdb = "0.23"
+# Built-in menu icons (SVG); no text or raster-image features needed.
+resvg = { version = "0.45", default-features = false }
 # MD5 of images and disc reads (Burn Studio).
 md-5 = "0.10"
 

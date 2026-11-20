@@ -71,6 +71,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         duration_secs: None,
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![btn_to_m2],
     };
 
@@ -83,6 +84,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         duration_secs: None,
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![],
     };
 
@@ -92,6 +94,8 @@ fn menu_transition_bridge_pgc_vmgm() {
         highlight: Highlight::default(),
         animations: true,
         fast_play: None,
+        theme: None,
+        settings_mode: None,
         menus: vec![menu1, menu2],
     };
 
@@ -241,6 +245,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         duration_secs: None,
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![],
     };
 
@@ -253,6 +258,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         duration_secs: None,
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![btn_root2, btn_main],
     };
 
@@ -265,6 +271,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         duration_secs: None,
         audio: MenuSound::None,
         intro_secs: None,
+        group: None,
         elements: vec![],
     };
 
@@ -274,6 +281,8 @@ fn menu_transition_cross_domain_and_vtsm() {
         highlight: Highlight::default(),
         animations: true,
         fast_play: None,
+        theme: None,
+        settings_mode: None,
         menus: vec![main_menu, root1, root2],
     };
 

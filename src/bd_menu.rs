@@ -19,7 +19,7 @@ use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
-    bd_button_rect, button_colors, clip_of, element_name, fit_image, frame_box, frame_font_size, is_unrotated,
+    bd_button_rect, button_colors, clip_of, element_name, fit_image, crop_normalized, icon_coverage, frame_box, frame_font_size, is_unrotated,
     parse_color, rect_border, rect_image, rotate_coverage, rotate_rgba, video_clip, video_rotation_deg, Action,
     Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
@@ -682,8 +682,11 @@ fn render_page(
                 }
                 text_cov = Some(rotate_coverage(cov, e.rotation, frame.pixel_aspect, (x, y)));
             }
-            Content::Image { src, fit } => {
-                let src_img = image::open(src).map_err(|err| io_err(Path::new(src), &err))?.to_rgba8();
+            Content::Image { src, fit, crop } => {
+                let mut src_img = image::open(src).map_err(|err| io_err(Path::new(src), &err))?.to_rgba8();
+                if let Some(c) = crop {
+                    src_img = crop_normalized(&src_img, c);
+                }
                 let fitted = fit_image(&src_img, w, h, *fit, frame.pixel_aspect, false);
                 // An invisible image button is a template overlay mask: its bright, opaque pixels are the highlight.
                 if e.action.is_some() && e.opacity == 0.0 {
@@ -695,6 +698,18 @@ fn render_page(
                 if d.intro && visible {
                     sprites.push(sprite(Pixels::Image(img), rx, ry, rw, rh));
                 }
+            }
+            Content::Icon { icon, color } => {
+                let rgb = parse_color(color).unwrap_or([255, 255, 255]);
+                let raw = crate::icons::render_icon(icon, rgb, w, h, frame.pixel_aspect).unwrap_or_else(|| RgbaImage::new(w, h));
+                let cov = icon_coverage(&raw);
+                let (img, rx, ry) = rotate_rgba(raw, e.rotation, frame.pixel_aspect, (x, y));
+                let (rw, rh) = img.dimensions();
+                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                if d.intro && visible {
+                    sprites.push(sprite(Pixels::Image(img), rx, ry, rw, rh));
+                }
+                text_cov = Some(rotate_coverage(cov, e.rotation, frame.pixel_aspect, (x, y)));
             }
             Content::Rect { color, border_color, border_width } => {
                 let fill = parse_color(color).unwrap_or([255, 255, 255]);
@@ -932,6 +947,7 @@ mod tests {
             duration_secs: None,
             audio: MenuSound::None,
             intro_secs: None,
+            group: None,
             elements,
         }
     }
@@ -943,6 +959,8 @@ mod tests {
             highlight: Highlight::default(),
             animations: true,
             fast_play: None,
+            theme: None,
+            settings_mode: None,
             menus: vec![
                 menu("main", MenuRole::Title, None, vec![
                     button(100.0, 100.0, Action::PlayTitle { title: 1 }),
@@ -1168,6 +1186,39 @@ mod tests {
         // Another menu than the first title menu goes through Top Menu with GPR8 = its object.
         assert_eq!(tail(&n, 4)[3..], [hdmv::mov(8, Op::Imm(3)), hdmv::jump_title(0)]);
         assert_eq!(tail(&n, 5)[..], [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
+    }
+
+    #[test]
+    fn icon_buttons_validate_and_render() {
+        let mut l = layout();
+        let mut ic = button(700.0, 500.0, Action::PlayTitle { title: 1 });
+        ic.content = Content::Icon { icon: "play".into(), color: "#ffffff".into() };
+        l.menus[0].elements.push(ic);
+        let frame = MenuFrame::square(1920, 1080);
+        let t = [title(5), title(5)];
+        crate::layout::validate_bd(&l, &t, frame).unwrap();
+        l.menus[0].elements.last_mut().unwrap().content = Content::Icon { icon: "nope".into(), color: "#ffffff".into() };
+        assert!(crate::layout::validate_bd(&l, &t, frame).is_err());
+        l.menus[0].elements.last_mut().unwrap().content = Content::Icon { icon: "play".into(), color: "#ffffff".into() };
+        let tr = traits(&l, &t, frame);
+        let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let dir = std::env::temp_dir().join(format!("bdmenu-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let pages = render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let ig = pages[0].igs.as_ref().unwrap();
+        assert_eq!(ig.buttons.len(), 5);
+    }
+
+    #[test]
+    fn highlight_of_icon_coverage_is_not_a_frame() {
+        let icon = crate::icons::render_icon("home", [255; 3], 100, 100, 1.0).unwrap();
+        let cov = icon_coverage(&icon);
+        let rect = Rect { x0: 0, y0: 0, x1: 100, y1: 100 };
+        let hl = highlight_image(rect, Some(&cov), (0, 0), [255, 0, 0], 255);
+        assert_eq!(hl.get_pixel(0, 0)[3], 0, "box corner stays clear");
+        assert!(hl.pixels().filter(|p| p[3] > 200).count() > 100);
     }
 
     #[test]

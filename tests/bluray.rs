@@ -657,6 +657,7 @@ mod menus {
             duration_secs: None,
             audio: MenuSound::None,
             intro_secs: None,
+            group: None,
             elements,
         }
     }
@@ -669,6 +670,8 @@ mod menus {
             highlight: Highlight::default(),
             animations: true,
             fast_play: None,
+            theme: None,
+            settings_mode: None,
             menus: vec![
                 menu("main", MenuRole::Title, None, vec![
                     button(200.0, "Film 1", Action::PlayTitle { title: 1 }),
