@@ -59,6 +59,9 @@ export interface ProjectFile {
   /** `titlesKey` the layouts were made for (null = unknown). */
   layoutKey: string | null;
   layoutKeyBd: string | null;
+  /** Whether the custom layout was explicitly edited by the user (missing in legacy v1 = true when layout is non-null). */
+  layoutEdited?: boolean;
+  layoutEditedBd?: boolean;
   menuTitle: string;
   menuTitleAuto: boolean;
   output: string;
@@ -135,6 +138,9 @@ export function parseProject(raw: unknown): ProjectFile {
     throw new Error(tr("project.badVersion", { version: String(raw.version) }));
   }
   const mode = (v: unknown) => (v === "template" ? "template" : "custom");
+  const customLayout = layoutOf(raw.customLayout);
+  const customLayoutBd = layoutOf(raw.customLayoutBd);
+  const editedOf = (v: unknown, layout: CustomLayout | null): boolean => (typeof v === "boolean" ? v : layout !== null);
   return {
     format: PROJECT_FORMAT,
     version: raw.version,
@@ -148,10 +154,12 @@ export function parseProject(raw: unknown): ProjectFile {
     template: str(raw.template),
     menuMode: mode(raw.menuMode),
     menuModeBd: mode(raw.menuModeBd),
-    customLayout: layoutOf(raw.customLayout),
-    customLayoutBd: layoutOf(raw.customLayoutBd),
+    customLayout,
+    customLayoutBd,
     layoutKey: nstr(raw.layoutKey),
     layoutKeyBd: nstr(raw.layoutKeyBd),
+    layoutEdited: editedOf(raw.layoutEdited, customLayout),
+    layoutEditedBd: editedOf(raw.layoutEditedBd, customLayoutBd),
     menuTitle: str(raw.menuTitle),
     menuTitleAuto: raw.menuTitleAuto !== false,
     output: str(raw.output),

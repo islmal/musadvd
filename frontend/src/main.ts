@@ -6,7 +6,7 @@ import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
-import { FONTS, cleanTitle, isButton, isMoving, madeForOtherTitles, menuClipSecs, remapLayoutByPaths, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
+import { FONTS, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
@@ -118,6 +118,8 @@ const state = {
   customLayout: null as CustomLayout | null,
   /** `titlesKey` of the videos the custom layout was made for (null = unknown). */
   customLayoutKey: null as string | null,
+  /** True once the user has applied edits in the Menu Editor (false = auto-generated default). */
+  customLayoutEdited: false,
   /** Problems of the custom layout with the current titles (empty = ready). */
   layoutErrors: [] as string[],
   /** Heading of the main menu = project name (also the name of the DVD folder). */
@@ -140,11 +142,11 @@ const LAYOUT_KEY = "musadvd-menu-layout";
 
 /** DVD and Blu-ray menus are designed separately (4:3 TV frame vs 16:9 HD frame). */
 type Medium = "dvd" | "bd";
-type MenuSlot = { layout: CustomLayout | null; key: string | null; mode: "template" | "custom" };
+type MenuSlot = { layout: CustomLayout | null; key: string | null; mode: "template" | "custom"; edited: boolean };
 const mediumOf = (d: DiscChoice): Medium => (["bd25", "bd50", "avchd5", "avchd9"].includes(d) ? "bd" : "dvd");
 const slots: Record<Medium, MenuSlot> = {
-  dvd: { layout: null, key: null, mode: "custom" },
-  bd: { layout: null, key: null, mode: "custom" },
+  dvd: { layout: null, key: null, mode: "custom", edited: false },
+  bd: { layout: null, key: null, mode: "custom", edited: false },
 };
 /** localStorage key suffix of a medium's layout (the DVD keys predate the Blu-ray ones). */
 const slotKey = (m: Medium) => (m === "bd" ? `${LAYOUT_KEY}-bd` : LAYOUT_KEY);
@@ -152,11 +154,12 @@ const slotKey = (m: Medium) => (m === "bd" ? `${LAYOUT_KEY}-bd` : LAYOUT_KEY);
 /** Files the live menu state under `from` and loads the one of `to` (called on disc changes). */
 function switchMedium(from: Medium, to: Medium) {
   if (from === to) return;
-  slots[from] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
+  slots[from] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode, edited: state.customLayoutEdited };
   const next = slots[to];
   state.customLayout = next.layout;
   state.customLayoutKey = next.key;
   state.menuMode = next.mode;
+  state.customLayoutEdited = next.edited;
   state.layoutErrors = [];
 }
 
@@ -176,9 +179,11 @@ function loadSettings() {
       const layout = localStorage.getItem(slotKey(m));
       if (layout) slots[m].layout = JSON.parse(layout) as CustomLayout;
       slots[m].key = localStorage.getItem(`${slotKey(m)}-titles`);
+      const editedRaw = localStorage.getItem(`${slotKey(m)}-edited`);
+      slots[m].edited = slots[m].layout ? (editedRaw === null ? true : editedRaw === "1") : false;
     }
     const live = slots[mediumOf(state.disc)];
-    [state.menuMode, state.customLayout, state.customLayoutKey] = [live.mode, live.layout, live.key];
+    [state.menuMode, state.customLayout, state.customLayoutKey, state.customLayoutEdited] = [live.mode, live.layout, live.key, live.edited];
   } catch {
     /* storage unavailable: defaults */
   }
@@ -188,15 +193,20 @@ function saveSettings() {
   try {
     // The heading is project-specific and therefore not remembered between sessions.
     const { disc, twoPass, motion, bdVideo, bdAudio, template, output } = state;
-    slots[mediumOf(disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
+    slots[mediumOf(disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode, edited: state.customLayoutEdited };
     localStorage.setItem(
       SETTINGS_KEY,
       JSON.stringify({ disc, twoPass, motion, bdVideo, bdAudio, template, output, menuMode: slots.dvd.mode, menuModeBd: slots.bd.mode }),
     );
     for (const m of ["dvd", "bd"] as const) {
-      const { layout, key } = slots[m];
-      if (layout) localStorage.setItem(slotKey(m), JSON.stringify(layout));
-      else localStorage.removeItem(slotKey(m));
+      const { layout, key, edited } = slots[m];
+      if (layout) {
+        localStorage.setItem(slotKey(m), JSON.stringify(layout));
+        localStorage.setItem(`${slotKey(m)}-edited`, edited ? "1" : "0");
+      } else {
+        localStorage.removeItem(slotKey(m));
+        localStorage.removeItem(`${slotKey(m)}-edited`);
+      }
       if (layout && key !== null) localStorage.setItem(`${slotKey(m)}-titles`, key);
       else localStorage.removeItem(`${slotKey(m)}-titles`);
     }
@@ -407,6 +417,12 @@ async function addFiles(paths: string[]) {
     status(tr("main.analysiere", { path }));
     try {
       const meta = await probeFile(path);
+      const oldPaths =
+        state.titles.length > 0
+          ? editorTitles().map((t) => t.path)
+          : state.customLayoutKey
+            ? state.customLayoutKey.split("\n").filter(Boolean)
+            : [];
       const title: Title = {
         id: nextId++,
         meta,
@@ -431,6 +447,7 @@ async function addFiles(paths: string[]) {
       };
       state.titles.push(title);
       if (state.selected === null) state.selected = title.id;
+      syncMenuAfterChange(oldPaths);
       status(tr("main.hinzugefuegt", { fileName: meta.fileName }));
     } catch (e) {
       status(`${path}: ${e}`, "error");
@@ -459,12 +476,7 @@ function removeSelected() {
   state.titles.splice(i, 1);
   normalizeMerge();
   state.selected = state.titles[Math.min(i, state.titles.length - 1)]?.id ?? null;
-  if (state.customLayout) {
-    const newGroupPaths = editorTitles().map((t) => t.path);
-    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
-    state.customLayoutKey = titlesKey(editorTitles());
-    void refreshLayoutCheck();
-  }
+  syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
 }
@@ -488,12 +500,7 @@ function toggleMerge(t: Title) {
   state.splitUndo = null;
   const oldGroupPaths = editorTitles().map((t) => t.path);
   t.mergeWithPrevious = !t.mergeWithPrevious;
-  if (state.customLayout) {
-    const newGroupPaths = editorTitles().map((t) => t.path);
-    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
-    state.customLayoutKey = titlesKey(editorTitles());
-    void refreshLayoutCheck();
-  }
+  syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
 }
@@ -506,12 +513,7 @@ function moveSelected(delta: number) {
   const oldGroupPaths = editorTitles().map((t) => t.path);
   [state.titles[i], state.titles[j]] = [state.titles[j], state.titles[i]];
   normalizeMerge();
-  if (state.customLayout) {
-    const newGroupPaths = editorTitles().map((t) => t.path);
-    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
-    state.customLayoutKey = titlesKey(editorTitles());
-    void refreshLayoutCheck();
-  }
+  syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
 }
@@ -524,12 +526,7 @@ function moveTitle(from: number, to: number) {
   moveItem(state.titles, from, to);
   state.titles[to].mergeWithPrevious = false;
   normalizeMerge();
-  if (state.customLayout) {
-    const newGroupPaths = editorTitles().map((t) => t.path);
-    remapLayoutByPaths(state.customLayout, oldGroupPaths, newGroupPaths);
-    state.customLayoutKey = titlesKey(editorTitles());
-    void refreshLayoutCheck();
-  }
+  syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
 }
@@ -591,6 +588,7 @@ async function splitByChapters(t: Title) {
     subtitleStyle: { ...t.subtitleStyle },
   }));
   news[0].mergeWithPrevious = t.mergeWithPrevious;
+  const oldGroupPaths = editorTitles().map((x) => x.path);
   state.titles.splice(i, 1, ...news);
   if (state.settings?.bd_single_video) {
     state.settings.bd_single_video = false;
@@ -598,6 +596,7 @@ async function splitByChapters(t: Title) {
   }
   state.splitUndo = { original: t, ids: news.map((n) => n.id), index: i };
   state.selected = news[0].id;
+  syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
   status(tr("main.inTitelAufgeteilt", { length: news.length }));
@@ -607,9 +606,11 @@ function undoSplit() {
   const i = splitUndoIndex();
   const u = state.splitUndo;
   if (!u || i < 0) return;
+  const oldGroupPaths = editorTitles().map((x) => x.path);
   state.titles.splice(i, u.ids.length, u.original);
   state.selected = u.original.id;
   state.splitUndo = null;
+  syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
 }
@@ -1110,6 +1111,7 @@ function renderTabs() {
         oninput: (e: Event) => {
           t.label = (e.target as HTMLInputElement).value;
           renderTitleList();
+          if (!state.customLayoutEdited) syncMenuAfterChange(null);
         },
       }),
     ),
@@ -1124,6 +1126,7 @@ function renderTabs() {
 /** Connects the "Trim & picture" tab to the title list and the size estimate. */
 const editHooks = {
   changed: () => {
+    if (!state.customLayoutEdited) syncMenuAfterChange(null);
     renderTitleList();
     renderFooter();
     scheduleCalc();
@@ -1182,6 +1185,7 @@ function renderAudioTab(t: Title) {
           onchange: (e: Event) => {
             if ((e.target as HTMLInputElement).checked) t.audio.add(a.index);
             else t.audio.delete(a.index);
+            if (!state.customLayoutEdited) syncMenuAfterChange(null);
             renderAll();
             scheduleCalc();
           },
@@ -1201,6 +1205,7 @@ function renderAudioTab(t: Title) {
               const v = (e.target as HTMLInputElement).value.trim();
               if (v) t.audioNames[a.index] = v;
               else delete t.audioNames[a.index];
+              if (!state.customLayoutEdited) syncMenuAfterChange(null);
               renderAll();
             },
           }),
@@ -1224,6 +1229,7 @@ async function relabelTitles() {
       status(tr("main.spurnamenKonntenNichtAktualisiert", { e }), "error");
     }
   }
+  if (!state.customLayoutEdited) syncMenuAfterChange(null);
   renderAll();
 }
 
@@ -1333,6 +1339,7 @@ function renderSubtitleTab(t: Title) {
             onchange: (e: Event) => {
               if ((e.target as HTMLInputElement).checked) t.subs.add(s.index);
               else t.subs.delete(s.index);
+              if (!state.customLayoutEdited) syncMenuAfterChange(null);
               renderAll();
               scheduleCalc();
             },
@@ -1358,6 +1365,7 @@ function renderChapterTab(t: Title) {
 
   const update = (chapters: number[]) => {
     t.chapters = chapters;
+    if (!state.customLayoutEdited) syncMenuAfterChange(null);
     renderAll();
   };
 
@@ -1515,12 +1523,63 @@ async function refreshLayoutCheck() {
   }
 }
 
+function menuHeading(): string {
+  return state.menuTitle.trim() || state.titles[0]?.label.trim() || (isBluray() ? tr("main.bluRay") : "DVD");
+}
+
+/** Emits refreshed editor data to an open Menu Editor window ONLY when the layout is still pristine. */
+function notifyEditorIfPristine() {
+  if (state.customLayoutEdited) return;
+  void WebviewWindow.getByLabel("menu-editor").then((win) => {
+    if (win) void emitTo("menu-editor", "editor-init", editorInit());
+  });
+}
+
+/**
+ * Keeps `state.customLayout` synchronized after title or menu-property changes:
+ * - No titles: clears the layout and resets `edited = false`.
+ * - Pristine (`!edited`): regenerates `draftLayout` for the current titles.
+ * - Customized (`edited`): runs `syncLayoutWithTitles` to preserve user edits.
+ */
+function syncMenuAfterChange(oldPaths: string[] | null) {
+  if (state.titles.length === 0) {
+    state.customLayout = null;
+    state.customLayoutKey = null;
+    state.customLayoutEdited = false;
+    state.layoutErrors = [];
+    saveSettings();
+    return;
+  }
+  syncMenuTitle();
+  if (state.menuMode !== "custom") return;
+  const titles = editorTitles();
+  const key = titlesKey(titles);
+  const tv = frameName();
+  const heading = menuHeading();
+  if (!state.customLayoutEdited || !state.customLayout) {
+    state.customLayoutEdited = false;
+    state.customLayout = draftLayout(titles, tv, heading);
+    state.customLayoutKey = key;
+    saveSettings();
+    void refreshLayoutCheck();
+    notifyEditorIfPristine();
+    return;
+  }
+  const prevPaths = oldPaths ?? (state.customLayoutKey !== null && state.customLayoutKey !== key ? state.customLayoutKey.split("\n") : null);
+  if (prevPaths !== null) {
+    state.customLayout = syncLayoutWithTitles(state.customLayout, prevPaths, titles, tv, heading);
+    state.customLayoutKey = key;
+    saveSettings();
+    void refreshLayoutCheck();
+  }
+}
+
 function editorInit(): EditorInit {
   return {
     layout: state.customLayout,
     titles: editorTitles(),
     tv: frameName(),
-    heading: state.menuTitle.trim() || state.titles[0]?.label || (isBluray() ? tr("main.bluRay") : "DVD"),
+    heading: menuHeading(),
     layoutTitlesKey: state.customLayoutKey,
   };
 }
@@ -1531,6 +1590,7 @@ void listen<CustomLayout>("editor-apply", ({ payload }) => {
   state.customLayout = payload;
   state.customLayoutKey = titlesKey(editorTitles());
   state.menuMode = "custom";
+  state.customLayoutEdited = true;
   saveSettings();
   void refreshLayoutCheck();
   scheduleCalc();
@@ -1573,6 +1633,36 @@ async function openEditor() {
   void win.once("tauri://error", (ev) => status(tr("main.menueEditorKonnteNicht", { ev: String(ev.payload) })));
 }
 
+function renderMenuTitleFields(): HTMLElement[] {
+  return [
+    h(
+      "div",
+      { class: "row" },
+      h("label", { for: "menu-title" }, tr("main.ueberschriftHauptmenue")),
+      h("input", {
+        id: "menu-title",
+        type: "text",
+        placeholder: tr("main.nameDesErstenVideos"),
+        value: state.menuTitle,
+        oninput: (e: Event) => {
+          state.menuTitle = (e.target as HTMLInputElement).value;
+          // Typing makes it the user's own heading; an empty field follows the first video again.
+          state.menuTitleAuto = state.menuTitle.trim() === "";
+          if (state.menuTitleAuto) syncMenuTitle();
+          if (state.menuMode === "custom" && state.titles.length > 0 && !state.customLayoutEdited) {
+            syncMenuAfterChange(null);
+            scheduleCalc();
+          }
+        },
+        onchange: () => {
+          if (state.menuMode === "custom" && state.titles.length > 0 && !state.customLayoutEdited) renderAll();
+        },
+      }),
+    ),
+    h("p", { class: "hint" }, tr("main.auchNameDesDvd")),
+  ];
+}
+
 function renderCustomMenuTab(): HTMLElement {
   const l = state.customLayout;
   const wrap = h("div", { class: "custom-menu-tab" });
@@ -1586,6 +1676,7 @@ function renderCustomMenuTab(): HTMLElement {
     const buttons = l.menus.reduce((n, m) => n + m.elements.filter(isButton).length, 0);
     const moving = l.menus.filter(isMoving).length;
     const counts = getMenuAndVideoCounts();
+    const edited = state.customLayoutEdited;
     wrap.append(
       h(
         "div",
@@ -1593,7 +1684,7 @@ function renderCustomMenuTab(): HTMLElement {
         h(
           "div",
           { class: "template-info" },
-          h("h3", {}, tr("main.eigenesMenue")),
+          h("h3", {}, edited ? tr("main.eigenesMenue") : tr("main.autoMenuHeading")),
           h("p", {}, tr("main.titelmenueSRootMenue", { titleMenus, rootMenus, buttons, moving })),
           h("p", {}, h("strong", {}, tr("main.startmenue")), l.menus.find((m) => m.role === "title")?.name ?? "–"),
           h(
@@ -1609,7 +1700,7 @@ function renderCustomMenuTab(): HTMLElement {
                 tr("main.diesesLayoutWurdeFuer"),
               )
             : state.layoutErrors.length === 0
-              ? h("p", { class: "ok-text" }, tr("main.passtZuDenAktuellen"))
+              ? h("p", { class: "ok-text" }, edited ? tr("main.passtZuDenAktuellen") : tr("main.autoMenuReady"))
               : h("ul", { class: "layout-errors" }, ...state.layoutErrors.slice(0, 6).map((e) => h("li", {}, e))),
         ),
       ),
@@ -1633,26 +1724,30 @@ function renderCustomMenuTab(): HTMLElement {
       );
     }
   }
+  wrap.append(...renderMenuTitleFields());
   wrap.append(
     h(
       "div",
       { class: "row" },
-      h("button", { class: "btn primary", type: "button", disabled: state.titles.length === 0, onclick: openEditor }, l ? tr("main.menueEditorOeffnen") : tr("main.menueGestalten")),
-      l
+      h(
+        "button",
+        { class: "btn primary", type: "button", disabled: state.titles.length === 0, onclick: openEditor },
+        l ? (state.customLayoutEdited ? tr("main.menueEditorOeffnen") : tr("main.editMenu")) : tr("main.menueGestalten"),
+      ),
+      l && (state.customLayoutEdited || layoutIsStale())
         ? h(
             "button",
             {
               class: "btn",
               type: "button",
               onclick: () => {
-                state.customLayout = null;
-                state.customLayoutKey = null;
-                state.layoutErrors = [];
-                saveSettings();
+                state.customLayoutEdited = false;
+                syncMenuAfterChange(null);
+                scheduleCalc();
                 renderAll();
               },
             },
-            tr("main.eigenesMenueVerwerfen"),
+            tr("main.resetDefaultMenu"),
           )
         : null,
     ),
@@ -1683,6 +1778,7 @@ function renderTemplateTab() {
             "aria-checked": String(state.menuMode === mode),
             onclick: () => {
               state.menuMode = mode;
+              if (mode === "custom") syncMenuAfterChange(null);
               saveSettings();
               void refreshLayoutCheck();
               scheduleCalc();
@@ -1741,24 +1837,7 @@ function renderTemplateChoice() {
   wrap.append(
     h("p", { class: "hint" }, tr("main.dieMenuevorlageGiltFuer")),
     h("div", { class: "row" }, h("label", { for: "template-select" }, tr("main.vorlage")), select),
-    h(
-      "div",
-      { class: "row" },
-      h("label", { for: "menu-title" }, tr("main.ueberschriftHauptmenue")),
-      h("input", {
-        id: "menu-title",
-        type: "text",
-        placeholder: tr("main.nameDesErstenVideos"),
-        value: state.menuTitle,
-        oninput: (e: Event) => {
-          state.menuTitle = (e.target as HTMLInputElement).value;
-          // Typing makes it the user's own heading; an empty field follows the first video again.
-          state.menuTitleAuto = state.menuTitle.trim() === "";
-          if (state.menuTitleAuto) syncMenuTitle();
-        },
-      }),
-    ),
-    h("p", { class: "hint" }, tr("main.auchNameDesDvd")),
+    ...renderMenuTitleFields(),
   );
   const counts = getMenuAndVideoCounts();
   if (info) {
@@ -2070,7 +2149,7 @@ const touchAutosave = createAutosave(
 );
 
 function snapshotProject(): ProjectFile {
-  slots[mediumOf(state.disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode };
+  slots[mediumOf(state.disc)] = { layout: state.customLayout, key: state.customLayoutKey, mode: state.menuMode, edited: state.customLayoutEdited };
   const { disc, twoPass, motion, bdVideo, bdAudio, template, menuTitle, menuTitleAuto, output } = state;
   return {
     format: PROJECT_FORMAT,
@@ -2089,6 +2168,8 @@ function snapshotProject(): ProjectFile {
     customLayoutBd: slots.bd.layout,
     layoutKey: slots.dvd.key,
     layoutKeyBd: slots.bd.key,
+    layoutEdited: slots.dvd.edited,
+    layoutEditedBd: slots.bd.edited,
     menuTitle,
     menuTitleAuto,
     output,
@@ -2200,10 +2281,20 @@ async function applyProject(data: ProjectFile, path: string | null) {
     // The layouts were made for these titles; with titles missing the stale check stays on the saved key.
     const key = (k: string | null, l: CustomLayout | null) => (l && loaded.length === data.titles.length ? titlesKey(editorTitles()) : k);
     const noTemplates = state.templates.length === 0;
-    slots.dvd = { layout: data.customLayout, key: key(data.layoutKey, data.customLayout), mode: noTemplates ? "custom" : data.menuMode };
-    slots.bd = { layout: data.customLayoutBd, key: key(data.layoutKeyBd, data.customLayoutBd), mode: noTemplates ? "custom" : data.menuModeBd };
+    slots.dvd = {
+      layout: data.customLayout,
+      key: key(data.layoutKey, data.customLayout),
+      mode: noTemplates ? "custom" : data.menuMode,
+      edited: data.layoutEdited ?? data.customLayout !== null,
+    };
+    slots.bd = {
+      layout: data.customLayoutBd,
+      key: key(data.layoutKeyBd, data.customLayoutBd),
+      mode: noTemplates ? "custom" : data.menuModeBd,
+      edited: data.layoutEditedBd ?? data.customLayoutBd !== null,
+    };
     const live = slots[mediumOf(state.disc)];
-    [state.menuMode, state.customLayout, state.customLayoutKey] = [live.mode, live.layout, live.key];
+    [state.menuMode, state.customLayout, state.customLayoutKey, state.customLayoutEdited] = [live.mode, live.layout, live.key, live.edited];
     state.layoutErrors = [];
 
     let note = "";
@@ -2214,6 +2305,9 @@ async function applyProject(data: ProjectFile, path: string | null) {
       } catch (e) {
         note = " " + String(e);
       }
+    }
+    if (state.titles.length === 0 || (state.menuMode === "custom" && !state.customLayoutEdited && !state.customLayout)) {
+      syncMenuAfterChange(null);
     }
     saveSettings();
     syncControls();
@@ -2350,11 +2444,13 @@ async function init() {
     const [info, languages] = await Promise.all([settingsInfo(), availableLanguages()]);
     openSettings(state.settings, info, languages, async (saved) => {
       const previousTemplateDir = state.settings?.template_dir;
+      const prevTv = state.settings?.tv_standard;
       const langChanged = saved.ui_language !== state.settings?.ui_language;
       const relabel = langChanged || saved.track_label_mode !== state.settings?.track_label_mode;
       state.settings = saved;
       if (langChanged) await switchLanguage(saved.ui_language);
       else if (relabel) void relabelTitles();
+      if (saved.tv_standard !== prevTv && !state.customLayoutEdited) syncMenuAfterChange(null);
       if (saved.template_dir !== previousTemplateDir) {
         await refreshTemplates();
         renderAll();
@@ -2372,6 +2468,7 @@ async function init() {
     const from = mediumOf(state.disc);
     state.disc = disc.value as DiscChoice;
     switchMedium(from, mediumOf(state.disc));
+    syncMenuAfterChange(null);
     saveSettings();
     void refreshLayoutCheck();
     scheduleCalc();
