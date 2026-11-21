@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-21
+
 ### Added
 
+- **Menu editor overhaul**: resizable panes and zoom, drag-to-reorder menus with collapsible groups, clipboard image paste, drop on canvas or background, non-destructive crop and "Trim transparency", a searchable live-preview font picker, built-in SVG icons, a new default "Landing Page" theme (the 6-thumbnail grid stays as "Classic Grid") and global or per-title settings menus with disc-wide audio/subtitle choices on DVD and Blu-ray.
+- **Text and button look**: Normal / Highlighted / Selected colours, text box fill with opacity, rounded corners and padding, drop shadow (colour, offset, blur) and outline, rendered the same in the editor and on DVD and Blu-ray.
+- **Navigation control**: per-button Up/Down/Left/Right overrides and "Auto-execute when focused" on DVD and Blu-ray and in Test Remote.
+- **Batch apply**: copy background and audio, typography, navigation icons or header/footer positions from one menu to all menus of the same kind or to every menu.
+- **Smart alignment guides and grid**: snapping to the canvas centre, safe areas and neighbouring elements (Alt for free placement) and an optional 8/16 px grid; the title-safe area is shown next to the action-safe area.
+- **Selection indicators and new symbols**: pointer, bullet, underline and bracket indicators that only appear while their button is highlighted or selected, plus pill and rectangle frames, chapters, settings, star and arrow icons.
+- **Menu play modes**: loop forever, play once and hold, or play once and then run the start button after a timeout; video start offsets are entered as `m:ss`.
+- **After playback per title**: continue the disc flow, play the next title, return to the main menu or the title's own menu, or loop the title, on DVD and Blu-ray and in Test Remote.
 - **Continuous integration**: a GitHub Actions `CI` workflow builds the frontend, runs the `vitest` suites and runs `cargo check --workspace --tests` and `cargo test --lib` on Windows and Linux for every push and pull request, so Linux-only code (`burner/unix.rs`, `SG_IO`, self-update) is compiled on each commit.
 - **Frontend unit tests**: `vitest` suites for `layout.ts` and `project.ts` (`npm test`).
 - **Clippy enforcement**: CI runs `cargo clippy --workspace --all-targets -- -D warnings`; existing lints across the workspace were fixed.
