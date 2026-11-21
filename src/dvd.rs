@@ -655,7 +655,16 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
             None => (t.copy_video_kbps.unwrap_or(0) + t.audio_kbps) as f64 * t.duration_secs,
         })
         .sum();
-    let overhead = disc.default_mux_overhead_kbit() + menu_mb * 8192.0 + subs_kbit + copied_kbit;
+    // Blu-ray keeps a share of the disc; DVD-Video overhead grows with playing time (NAV packs)
+    // and with the stream (pack/PES headers), not with the disc size – see `dvd_mux_kbit`.
+    let all_secs: f64 = titles.iter().map(|t| t.duration_secs).sum();
+    let (disc_share, ratio) = if disc.is_bluray() {
+        (disc.default_mux_overhead_kbit(), 0.0)
+    } else {
+        (calculator::DVD_NAV_KBPS * all_secs + calculator::DVD_IFO_KBIT_PER_TITLE * titles.len() as f64, calculator::DVD_PACK_OVERHEAD_RATIO)
+    };
+    // Everything but the encoded titles' own stream overhead (`ratio` × their audio + video).
+    let overhead = disc_share + menu_mb * 8192.0 + subs_kbit + copied_kbit;
     if encoded.is_empty() && !copied.is_empty() {
         // Nothing left to encode: the copies either fit or they do not.
         let estimated_mb = overhead / 8192.0;
@@ -676,15 +685,25 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
     let weighted_secs: f64 = encoded.iter().map(|t| t.duration_secs * t.weight).sum();
     let audio_kbit: f64 = encoded.iter().map(|t| t.audio_kbps as f64 * t.duration_secs).sum();
     let audio_kbps = (audio_kbit / weighted_secs.max(1.0)).ceil() as u32;
-    let plan = calculator::calculate_capped(disc, weighted_secs, audio_kbps, overhead, profile.max_video_kbps_for(disc))?;
+    // The stream overhead depends on the bitrate being solved: fold it into the calculator's
+    // fixed overhead at the bitrate that exactly fills the disc (`overhead + (1+ratio)·stream = target`).
+    let full_stream_kbit = (disc.target_kbit() - overhead).max(0.0) / (1.0 + ratio);
+    let plan = calculator::calculate_capped(disc, weighted_secs, audio_kbps, overhead + ratio * full_stream_kbit, profile.max_video_kbps_for(disc))?;
     // The calculator assumes every title gets `base * weight`, but `weighted_video_kbps` pins
     // titles at the disc's floor/ceiling. Re-solve the base against the real per-title sizes.
     let real_kbit = |base: u32| -> f64 {
-        overhead + encoded.iter().map(|t| (weighted_video_kbps(disc, base, t.weight, t.audio_kbps) + t.audio_kbps) as f64 * t.duration_secs).sum::<f64>()
+        let stream: f64 = encoded.iter().map(|t| (weighted_video_kbps(disc, base, t.weight, t.audio_kbps) + t.audio_kbps) as f64 * t.duration_secs).sum();
+        overhead + (1.0 + ratio) * stream
     };
-    // Unweighted titles are exactly what the calculator sized (its floor/ceiling clamp is the same).
+    let with_real = |plan: BitratePlan| {
+        let total = real_kbit(plan.video_kbps);
+        let stream = (total - overhead) / (1.0 + ratio);
+        BitratePlan { mux_overhead_kbit: total - stream, estimated_mb: total / 8192.0, ..plan }
+    };
+    // Unweighted titles are exactly what the calculator sized (its floor/ceiling clamp is the same);
+    // only the size is recounted, since a clamped bitrate carries less stream overhead.
     if encoded.iter().all(|t| t.weight == 1.0) {
-        return Ok(plan);
+        return Ok(with_real(plan));
     }
     let target = disc.target_kbit();
     let (base, clamp) = if real_kbit(0) > target {
@@ -702,7 +721,7 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
         // Still at the calculator's base: keep its verdict (e.g. capped at the maximum).
         (lo, if lo == plan.video_kbps { plan.clamp } else { Clamp::None })
     };
-    Ok(BitratePlan { video_kbps: base, clamp, estimated_mb: real_kbit(base) / 8192.0, ..plan })
+    Ok(with_real(BitratePlan { video_kbps: base, clamp, ..plan }))
 }
 
 /// Title frame size actually used: the chosen one, except that LP turns Full D1 into Half D1
@@ -2314,10 +2333,31 @@ mod tests {
         ];
         assert_eq!(avg_audio_kbps(&loads), 491); // (640*3600 + 192*1800) / 5400
         let plan = bitrate_plan(DiscType::Dvd5, &loads, 1.0, EncodingProfile::Auto).unwrap();
-        let overhead = DiscType::Dvd5.default_mux_overhead_kbit() + 8192.0 + 10.0 * 3600.0;
+        // DVD: NAV packs per second, IFOs per title, menus, subtitles; then the stream share.
+        let fixed = calculator::DVD_NAV_KBPS * 5400.0 + 2.0 * calculator::DVD_IFO_KBIT_PER_TITLE + 8192.0 + 10.0 * 3600.0;
+        let r = calculator::DVD_PACK_OVERHEAD_RATIO;
+        let overhead = fixed + r * (DiscType::Dvd5.target_kbit() - fixed) / (1.0 + r);
         let direct = calculator::calculate_with_overhead(DiscType::Dvd5, 5400.0, 491, overhead).unwrap();
         assert_eq!(plan.video_kbps, direct.video_kbps);
         assert!(plan.fits());
+    }
+
+    #[test]
+    fn long_low_bitrate_dvd_stays_under_its_target() {
+        // The 83-cartoon DVD-9 that came out at 7980 of 7950 MB with the flat 2 % overhead:
+        // 36 610 s, AC-3 192 kbit/s, 169.7 MB of menus. Measured on its VOBs: 82 kbit/s of mux
+        // overhead (40 NAV + 2.5-2.6 % of the stream) and 2.8 MB of IFO/BUP.
+        let per = 36_610.0 / 83.0;
+        let loads: Vec<TitleLoad> = (0..83)
+            .map(|_| TitleLoad { duration_secs: per, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 })
+            .collect();
+        let plan = bitrate_plan(DiscType::Dvd9, &loads, 169.7, EncodingProfile::Auto).unwrap();
+        let real_mb = |video: u32| (video as f64 + 192.0 + 82.0) * 36_610.0 / 8192.0 + 169.7 + 2.8;
+        // An encoder that hits the planned bitrate exactly now fits (the old plan, ~1513 kbit/s, did not).
+        assert!(real_mb(plan.video_kbps) <= 7950.0, "{} kbit/s -> {:.0} MB", plan.video_kbps, real_mb(plan.video_kbps));
+        assert!(real_mb(1513) > 7950.0);
+        // The estimate the GUI shows is the model's own size and stays under the target too.
+        assert!(plan.fits() && plan.estimated_mb <= 7950.0 && plan.estimated_mb >= real_mb(plan.video_kbps) - 5.0, "{}", plan.estimated_mb);
     }
 
     #[test]
@@ -2350,9 +2390,10 @@ mod tests {
     fn low_title_hitting_the_floor_still_fits_dvd5() {
         let mk = |secs: f64, weight: f64| TitleLoad { duration_secs: secs, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight };
         // Long Low title: 0.75 * base falls under the 1000 kbit/s floor, a short High title takes the rest.
-        let loads = [mk(20_000.0, QUALITY_LOW), mk(8000.0, QUALITY_HIGH)];
+        // (18 000 s: 20 000 s at the floor only fit the old flat 2 % overhead, not real NAV packs.)
+        let loads = [mk(18_000.0, QUALITY_LOW), mk(8000.0, QUALITY_HIGH)];
         let plan = bitrate_plan(DiscType::Dvd5, &loads, 0.0, EncodingProfile::Auto).unwrap();
-        let used = real_mb(DiscType::Dvd5, &plan, &loads, DiscType::Dvd5.default_mux_overhead_kbit());
+        let used = real_mb(DiscType::Dvd5, &plan, &loads, plan.mux_overhead_kbit);
         assert!(used <= DiscType::Dvd5.target_mb() as f64, "{used} MB");
         assert!((used - plan.estimated_mb).abs() < 1e-6 && plan.fits());
         assert_eq!(weighted_video_kbps(DiscType::Dvd5, plan.video_kbps, QUALITY_LOW, 192), DiscType::Dvd5.limits().min_video_kbps);
@@ -2375,7 +2416,7 @@ mod tests {
         let plan = bitrate_plan(DiscType::Dvd5, &[l], 0.0, EncodingProfile::Auto).unwrap();
         assert_eq!(plan.clamp, Clamp::Min);
         assert!(!plan.fits());
-        let used = real_mb(DiscType::Dvd5, &plan, &[l], DiscType::Dvd5.default_mux_overhead_kbit());
+        let used = real_mb(DiscType::Dvd5, &plan, &[l], plan.mux_overhead_kbit);
         assert!((used - plan.estimated_mb).abs() < 1e-6);
     }
 
@@ -2405,7 +2446,10 @@ mod tests {
             weight: 1.0,
         };
         let mixed = bitrate_plan(DiscType::Dvd5, &[enc, copy_1500_mib], 0.0, EncodingProfile::Auto).unwrap();
-        let expected_overhead = DiscType::Dvd5.default_mux_overhead_kbit() + calculator::bytes_to_kbit(1500 * 1024 * 1024);
+        let r = calculator::DVD_PACK_OVERHEAD_RATIO;
+        let dvd_fixed = |titles: f64, secs: f64| calculator::DVD_NAV_KBPS * secs + calculator::DVD_IFO_KBIT_PER_TITLE * titles;
+        let fixed = dvd_fixed(2.0, 7200.0) + calculator::bytes_to_kbit(1500 * 1024 * 1024);
+        let expected_overhead = fixed + r * (DiscType::Dvd5.target_kbit() - fixed) / (1.0 + r);
         let direct = calculator::calculate_capped(
             DiscType::Dvd5,
             3600.0,
@@ -2415,14 +2459,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mixed.video_kbps, direct.video_kbps);
-        assert!((mixed.estimated_mb - direct.estimated_mb).abs() < 1e-9);
+        let real = (fixed + (1.0 + r) * (mixed.video_kbps + 192) as f64 * 3600.0) / 8192.0;
+        assert!((mixed.estimated_mb - real).abs() < 1e-9);
         assert!(mixed.fits());
 
-        // All-copied DVD-5: two 1500 MiB titles (~3000 MiB + 2% overhead = 3086 MiB) fit cleanly.
+        // All-copied DVD-5: two 1500 MiB titles (3000 MiB + NAV packs and IFOs) fit cleanly.
         let fit = bitrate_plan(DiscType::Dvd5, &[copy_1500_mib, copy_1500_mib], 0.0, EncodingProfile::Auto).unwrap();
         assert_eq!((fit.video_kbps, fit.clamp), (0, Clamp::None));
         assert!(fit.fits());
-        assert!((fit.estimated_mb - (3000.0 + 4300.0 * 0.02)).abs() < 1e-6);
+        assert!((fit.estimated_mb - (3000.0 + dvd_fixed(2.0, 7200.0) / 8192.0)).abs() < 1e-6);
 
         // Three 1500 MiB titles (4500 MiB > 4300 MiB) overflow and clamp to Min.
         let overflow = bitrate_plan(DiscType::Dvd5, &[copy_1500_mib; 3], 0.0, EncodingProfile::Auto).unwrap();

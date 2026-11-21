@@ -18,6 +18,14 @@ pub const MAX_VIDEO_KBPS: u32 = 8500;
 pub const DVD_MAX_TOTAL_KBPS: u32 = 9800;
 /// Default mux overhead as a fraction of the target size (VOB/pack headers, NAV packs).
 pub const DEFAULT_MUX_OVERHEAD_RATIO: f64 = 0.02;
+/// DVD-Video mux overhead per second of playing time: one 2 KiB NAV pack per VOBU (~0.5 s) plus
+/// the VOBU's alignment padding. Measured 39 kbit/s of NAV packs on an 83-title disc.
+pub const DVD_NAV_KBPS: f64 = 40.0;
+/// DVD-Video pack and PES headers and audio padding as a fraction of the audio + video stream
+/// (measured 2.5-2.6 % at 1.7 Mbit/s, rounded up; 2 KiB packs carry the same headers at any bitrate).
+pub const DVD_PACK_OVERHEAD_RATIO: f64 = 0.027;
+/// IFO + BUP of one DVD titleset (measured ~34 KiB; reserved with headroom).
+pub const DVD_IFO_KBIT_PER_TITLE: f64 = 64.0 * 8.192;
 /// Blu-ray overhead (m2ts 192/184-byte packets, PES/PCR).
 pub const BD_MUX_OVERHEAD_RATIO: f64 = 0.06;
 /// Above this video bitrate the quality is rated good.
