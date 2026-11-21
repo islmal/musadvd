@@ -1446,7 +1446,12 @@ pub fn find_vobus(input_dir: &Path, files: Option<&VobFiles>, set: &mut PgcSet, 
                                 prev.pts[1] = pts0;
                             }
                         } else if prev.pts[1] > pts0 {
-                            log.push(format!("WARN: pts for channel {audch} moves backwards by {} at inoffset {inoffset:#x}; please remultiplex input.", prev.pts[1] - pts0));
+                            // spumux rounds SP_DCSQ display delays to 1024-tick units, so a picture's
+                            // end can overshoot the next one's start on the same stream, which
+                            // replaces it anyway; only larger jumps are worth a warning.
+                            if audch < 32 || prev.pts[1] - pts0 >= 1024 {
+                                log.push(format!("WARN: pts for channel {audch} moves backwards by {} at inoffset {inoffset:#x}; please remultiplex input.", prev.pts[1] - pts0));
+                            }
                             prev.pts[1] = pts0;
                         }
                     }
