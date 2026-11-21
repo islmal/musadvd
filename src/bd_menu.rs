@@ -48,16 +48,36 @@ fn sub_reg(t: u32) -> u32 {
     audio_reg(t) + 1
 }
 const SUB_OFF: u32 = 0xFFFF;
+/// Disc-wide audio / subtitle choice ([`Action::SetGlobalAudio`] / [`Action::SetGlobalSubtitle`]),
+/// same values as the per-entry registers (the track number is the stream number). Far above the
+/// per-entry range (`GPR16 + 2 * MAX_TITLES`) and within the 12-bit register field of a
+/// register-form SetStream. Title objects apply it after the entry's own choice; an entry's own
+/// button clears it, so the last choice wins.
+const GLOBAL_AUDIO: u32 = 4000;
+const GLOBAL_SUB: u32 = 4001;
 
 /// Commands that apply the stored audio / subtitle choice of entry `t` (start of a title object).
 fn apply_stream_choice(t: u32, audio: bool, sub: bool) -> Vec<Command> {
     let mut c = Vec::new();
-    if audio {
-        // The PG display flag is rewritten by SetStream: keep the player's current state.
-        let a = Some(audio_reg(t));
+    apply_streams(&mut c, audio.then_some((audio_reg(t), None)), sub.then_some((sub_reg(t), None)));
+    c
+}
+
+/// Appends the commands applying the choice in the `(register, guard)` pairs; `guard` = the
+/// title's track count, beyond which a stored number is skipped (SetStream for a stream the
+/// playlist lacks is an error on the PS4). Goto targets are positions in `c`.
+fn apply_streams(c: &mut Vec<Command>, audio: Option<(u32, Option<u32>)>, sub: Option<(u32, Option<u32>)>) {
+    let guard = |reg: u32, max: Option<u32>, end: u32| {
+        max.map(|n| [hdmv::compare(Op::Gpr(reg), Cmp::Gt, Op::Imm(n)), hdmv::goto(end)]).into_iter().flatten()
+    };
+    if let Some((reg, max)) = audio {
+        let end = c.len() as u32 + 8 + 2 * max.is_some() as u32;
+        // SetStream always writes the PG display flag (PSR2 bit 31, libbluray `_set_stream`):
+        // keep the player's current state.
+        let a = Some(reg);
+        c.extend([hdmv::compare(Op::Gpr(reg), Cmp::Eq, Op::Imm(0)), hdmv::goto(end)]);
+        c.extend(guard(reg, max, end));
         c.extend([
-            hdmv::compare(Op::Gpr(audio_reg(t)), Cmp::Eq, Op::Imm(0)),
-            hdmv::goto(8),
             hdmv::mov(TMP, Op::Psr(2)),
             hdmv::and(TMP, Op::Imm(0x8000_0000)),
             hdmv::compare(Op::Gpr(TMP), Cmp::Ne, Op::Imm(0)),
@@ -66,18 +86,18 @@ fn apply_stream_choice(t: u32, audio: bool, sub: bool) -> Vec<Command> {
             hdmv::set_stream_regs(a, None, false),
         ]);
     }
-    if sub {
-        let at = c.len() as u32;
+    if let Some((reg, max)) = sub {
+        let end = c.len() as u32 + 6 + 2 * max.is_some() as u32;
         c.extend([
-            hdmv::compare(Op::Gpr(sub_reg(t)), Cmp::Eq, Op::Imm(SUB_OFF)),
+            hdmv::compare(Op::Gpr(reg), Cmp::Eq, Op::Imm(SUB_OFF)),
             hdmv::set_stream(0),
-            hdmv::compare(Op::Gpr(sub_reg(t)), Cmp::Eq, Op::Imm(0)),
-            hdmv::goto(at + 6),
-            hdmv::compare(Op::Gpr(sub_reg(t)), Cmp::Ne, Op::Imm(SUB_OFF)),
-            hdmv::set_stream_regs(None, Some(sub_reg(t)), true),
+            hdmv::compare(Op::Gpr(reg), Cmp::Eq, Op::Imm(0)),
+            hdmv::goto(end),
         ]);
+        // SUB_OFF is above every guard, so "off" (already applied) skips the rest too.
+        c.extend(guard(reg, max, end));
+        c.extend([hdmv::compare(Op::Gpr(reg), Cmp::Ne, Op::Imm(SUB_OFF)), hdmv::set_stream_regs(None, Some(reg), true)]);
     }
-    c
 }
 
 /// Targets of the dispatcher (`GPR4`).
@@ -225,6 +245,17 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
     let to_title = |n: u32| if intro { via_dispatcher(KIND_TITLE, n) } else { vec![hdmv::jump_title(n)] };
     let go = |jump: Vec<Command>, mark: u32, flag: u32| [vec![hdmv::mov(MARK, Op::Imm(mark)), hdmv::mov(FLAG, Op::Imm(flag))], jump].concat();
 
+    let global = |audio: bool| {
+        layout.menus.iter().flat_map(|m| &m.elements).any(|e| match e.action {
+            Some(Action::SetGlobalAudio { .. }) => audio,
+            Some(Action::SetGlobalSubtitle { .. }) => !audio,
+            _ => false,
+        })
+    };
+    let (global_audio, global_sub) = (global(true), global(false));
+    // An entry's own choice cancels the disc-wide one (see GLOBAL_AUDIO).
+    let clear = |on: bool, reg: u32| on.then(|| hdmv::mov(reg, Op::Imm(0)));
+
     let mut commands = Vec::new();
     for m in &layout.menus {
         let mut per = Vec::new();
@@ -261,7 +292,7 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 Action::SetAudio { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
                     let n = lt.and_then(|lt| lt.audio_sources.iter().position(|s| s == source)).unwrap_or(0) as u32 + 1;
-                    vec![hdmv::mov(audio_reg(m.title.unwrap_or(1)), Op::Imm(n))]
+                    [Some(hdmv::mov(audio_reg(m.title.unwrap_or(1)), Op::Imm(n))), clear(global_audio, GLOBAL_AUDIO)].into_iter().flatten().collect()
                 }
                 Action::SetSubtitle { source } => {
                     let lt = m.title.and_then(|t| titles.get(t as usize - 1));
@@ -269,8 +300,11 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                         Some(k) => k as u32 + 1,
                         None => SUB_OFF,
                     };
-                    vec![hdmv::mov(sub_reg(m.title.unwrap_or(1)), Op::Imm(pg))]
+                    [Some(hdmv::mov(sub_reg(m.title.unwrap_or(1)), Op::Imm(pg))), clear(global_sub, GLOBAL_SUB)].into_iter().flatten().collect()
                 }
+                // Stored only, like the entry's own choice: the title objects apply it.
+                Action::SetGlobalAudio { track } => vec![hdmv::mov(GLOBAL_AUDIO, Op::Imm(*track))],
+                Action::SetGlobalSubtitle { track } => vec![hdmv::mov(GLOBAL_SUB, Op::Imm(track.unwrap_or(SUB_OFF)))],
                 Action::CustomVm { .. } => vec![],
             };
             per.push(Some(cmds));
@@ -343,6 +377,13 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 })
             };
             let mut c = apply_stream_choice(g as u32, used(true), used(false));
+            let lt = titles.get(g - 1);
+            let count = |audio: bool| lt.map_or(0, |lt| if audio { lt.audio_sources.len() } else { lt.subtitle_sources.len() }) as u32;
+            apply_streams(
+                &mut c,
+                global_audio.then_some((GLOBAL_AUDIO, Some(count(true)))),
+                global_sub.then_some((GLOBAL_SUB, Some(count(false)))),
+            );
             c.extend([hdmv::play_pl_at_mark(Op::Imm(pl), Op::Gpr(MARK)), hdmv::mov(MARK, Op::Imm(0))]);
             if k + 1 < members.len() {
                 c.push(hdmv::jump_title(t as u32 + 1));
@@ -1136,6 +1177,61 @@ mod tests {
         assert_eq!(n.objects[1].commands, top_menu(&[], 2));
         let auto = nav(PlaybackOptions { auto_start: true, ..PlaybackOptions::default() });
         assert_eq!(auto.objects[0].commands[3], hdmv::jump_title(1));
+    }
+
+    #[test]
+    fn global_stream_choice() {
+        let mut l = layout();
+        l.menus[0].elements.extend([
+            button(600.0, 100.0, Action::SetGlobalAudio { track: 2 }),
+            button(600.0, 300.0, Action::SetGlobalSubtitle { track: Some(1) }),
+            button(600.0, 500.0, Action::SetGlobalSubtitle { track: None }),
+        ]);
+        // Title 2 has one audio track and no subtitles.
+        let mut t2 = title(5);
+        (t2.audio_sources, t2.subtitle_sources) = (vec![1], vec![]);
+        let t = [title(5), t2];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }; 2];
+        let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        // The buttons only store (never SetStream in a menu: the PS4 ignores it there).
+        assert_eq!(cmds(&n, 0, 4), &[hdmv::mov(4000, Op::Imm(2))]);
+        assert_eq!(cmds(&n, 0, 5), &[hdmv::mov(4001, Op::Imm(1))]);
+        assert_eq!(cmds(&n, 0, 6), &[hdmv::mov(4001, Op::Imm(0xFFFF))]);
+        // An entry's own choice cancels the disc-wide one.
+        assert_eq!(cmds(&n, 1, 0), &[hdmv::mov(16, Op::Imm(2)), hdmv::mov(4000, Op::Imm(0))]);
+        assert_eq!(cmds(&n, 1, 2), &[hdmv::mov(17, Op::Imm(0xFFFF)), hdmv::mov(4001, Op::Imm(0))]);
+
+        // Title 1: own choice (14 commands), then the disc-wide one guarded by its track counts.
+        let c = &n.objects[4].commands;
+        let g = &c[14..];
+        assert_eq!(g[..4], [hdmv::compare(Op::Gpr(4000), Cmp::Eq, Op::Imm(0)), hdmv::goto(24), hdmv::compare(Op::Gpr(4000), Cmp::Gt, Op::Imm(2)), hdmv::goto(24)]);
+        assert_eq!((g[7], g[9]), (hdmv::set_stream_regs(Some(4000), None, true), hdmv::set_stream_regs(Some(4000), None, false)));
+        assert_eq!(
+            g[10..18],
+            [
+                hdmv::compare(Op::Gpr(4001), Cmp::Eq, Op::Imm(0xFFFF)),
+                hdmv::set_stream(0),
+                hdmv::compare(Op::Gpr(4001), Cmp::Eq, Op::Imm(0)),
+                hdmv::goto(32),
+                hdmv::compare(Op::Gpr(4001), Cmp::Gt, Op::Imm(1)),
+                hdmv::goto(32),
+                hdmv::compare(Op::Gpr(4001), Cmp::Ne, Op::Imm(0xFFFF)),
+                hdmv::set_stream_regs(None, Some(4001), true),
+            ]
+        );
+        assert_eq!(c[32], hdmv::play_pl_at_mark(Op::Imm(2), Op::Gpr(1)));
+        // Title 2 (no settings menu): only the disc-wide choice; audio 2 and any subtitle are
+        // skipped by the guards, "off" still applies.
+        let c = &n.objects[5].commands;
+        assert_eq!((c[2], c[3]), (hdmv::compare(Op::Gpr(4000), Cmp::Gt, Op::Imm(1)), hdmv::goto(10)));
+        assert_eq!((c[10], c[11], c[13]), (hdmv::compare(Op::Gpr(4001), Cmp::Eq, Op::Imm(0xFFFF)), hdmv::set_stream(0), hdmv::goto(18)));
+        assert_eq!((c[14], c[15]), (hdmv::compare(Op::Gpr(4001), Cmp::Gt, Op::Imm(0)), hdmv::goto(18)));
+        assert_eq!(c[18], hdmv::play_pl_at_mark(Op::Imm(3), Op::Gpr(1)));
+        // Register-form SetStream bytes: audio number in GPR4000 (0xFA0), PG number in GPR4001.
+        assert_eq!(hdmv::set_stream_regs(Some(4000), None, true)[4..8], [0x8F, 0xA0, 0x40, 0x00]);
+        assert_eq!(hdmv::set_stream_regs(None, Some(4001), true)[4..8], [0x00, 0x00, 0xCF, 0xA1]);
+        // Without global buttons the titles keep their old commands.
+        assert_eq!(nav(PlaybackOptions::default()).objects[5].commands[0], hdmv::play_pl_at_mark(Op::Imm(3), Op::Gpr(1)));
     }
 
     #[test]

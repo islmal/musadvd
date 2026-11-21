@@ -911,6 +911,41 @@ pub struct DvdLayout {
     pub fast_play: Option<crate::layout::FastPlayConfig>,
 }
 
+/// Marker in [`DvdLayout::title_pre`]: append the disc-wide audio / subtitle choice of a custom
+/// layout (`layout::GLOBAL_AUDIO` / `GLOBAL_SUBTITLE`) to every title PGC, guarded by that title's
+/// track counts. A self-assignment, so it would compile to nothing if it ever stayed in.
+pub const GLOBAL_STREAMS: &str = "g11 = g11;";
+
+/// `pre` of a title PGC: the layout's commands, the title's default streams, then the disc-wide
+/// choice (last, so a chosen "off" is not switched on again by the `s2 eq 0` default).
+fn title_pre_commands(layout_pre: Option<&str>, t: &TitleSpec) -> String {
+    let pre = layout_pre.unwrap_or_default();
+    let global = pre.contains(GLOBAL_STREAMS);
+    let mut c = pre.replace(GLOBAL_STREAMS, "").trim().to_string();
+    let mut push = |cmd: String| c = format!("{c} {cmd}").trim().to_string();
+    if let Some(a) = t.default_audio {
+        push(format!("if (s1 eq 15) audio = {a};"));
+    }
+    if let Some(s) = t.default_subtitle {
+        push(format!("if (s2 eq 0) subtitle = {};", 64 + s));
+    } else if t.force_subtitle && !t.subtitle_langs.is_empty() {
+        // Subtitle stream 0 with the display flag (bit 6).
+        push("if (s2 eq 0) subtitle = 64;".to_string());
+    }
+    if global {
+        use crate::layout::{GLOBAL_AUDIO as A, GLOBAL_SUBTITLE as S};
+        // No arithmetic in the VM subset: one compare per audio track (at most 8).
+        for k in 1..=t.audio_langs.len().min(8) {
+            push(format!("if ({A} eq {k}) audio = {};", k - 1));
+        }
+        push(format!("if ({S} eq 1) subtitle = 0;"));
+        if !t.subtitle_langs.is_empty() {
+            push(format!("if ({S} ge 64) if ({S} lt {}) subtitle = {S};", 64 + t.subtitle_langs.len().min(32)));
+        }
+    }
+    c
+}
+
 /// Number of VM commands in a dvdauthor command string (statements end with `;`).
 pub fn command_count(commands: &str) -> usize {
     commands.matches(';').count()
@@ -1140,16 +1175,7 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
             }
         }
         let _ = writeln!(x, "      <pgc>");
-        let mut title_pre = layout.title_pre.clone().unwrap_or_default();
-        if let Some(a) = t.default_audio {
-            title_pre = format!("{title_pre} if (s1 eq 15) audio = {a};").trim().to_string();
-        }
-        if let Some(s) = t.default_subtitle {
-            title_pre = format!("{title_pre} if (s2 eq 0) subtitle = {};", 64 + s).trim().to_string();
-        } else if t.force_subtitle && !t.subtitle_langs.is_empty() {
-            // Subtitle stream 0 with the display flag (bit 6).
-            title_pre = format!("{title_pre} if (s2 eq 0) subtitle = 64;").trim().to_string();
-        }
+        let title_pre = title_pre_commands(layout.title_pre.as_deref(), t);
         if !title_pre.is_empty() {
             write_commands(&mut x, "        ", "pre", &title_pre, t.first_vob())?;
         }
@@ -1358,15 +1384,7 @@ fn title_pgc(layout: &DvdLayout, t: &TitleSpec, back: &str) -> Result<crate::dvd
         set.vg.numsubpicturetracks = id + 1;
     }
     let mut pgc = Pgc::new();
-    let mut title_pre = layout.title_pre.clone().unwrap_or_default();
-    if let Some(a) = t.default_audio {
-        title_pre = format!("{title_pre} if (s1 eq 15) audio = {a};").trim().to_string();
-    }
-    if let Some(s) = t.default_subtitle {
-        title_pre = format!("{title_pre} if (s2 eq 0) subtitle = {};", 64 + s).trim().to_string();
-    } else if t.force_subtitle && !t.subtitle_langs.is_empty() {
-        title_pre = format!("{title_pre} if (s2 eq 0) subtitle = 64;").trim().to_string();
-    }
+    let title_pre = title_pre_commands(layout.title_pre.as_deref(), t);
     if !title_pre.is_empty() {
         pgc.prei = Some(parse_commands(&title_pre, t.first_vob())?);
     }
@@ -1871,6 +1889,52 @@ mod tests {
         let x = dvdauthor_xml(&layout(ts(false, false), base)).unwrap();
         assert!(x.contains("<post>exit;</post>"));
         assert!(!x.contains("subtitle = 64"));
+    }
+
+    #[test]
+    fn global_stream_choice_in_title_pre() {
+        use crate::dvdvm::{compile_str, Context, Domain};
+        let pre = Some("g2 = 0; g11 = g11;");
+        // Two audio tracks, one subtitle shown by default: the disc-wide choice comes after the
+        // default, so a chosen "off" (g12 = 1) stays off.
+        let t = TitleSpec {
+            audio_langs: vec![None, None],
+            subtitle_langs: vec![None],
+            default_subtitle: Some(0),
+            ..TitleSpec::placeholder(1)
+        };
+        let c = title_pre_commands(pre, &t);
+        assert_eq!(
+            c,
+            "g2 = 0; if (s2 eq 0) subtitle = 64; if (g11 eq 1) audio = 0; if (g11 eq 2) audio = 1; \
+             if (g12 eq 1) subtitle = 0; if (g12 ge 64) if (g12 lt 65) subtitle = g12;"
+        );
+        let ctx = Context { pgc: Some([1, 1, 1]), titles: Some(vec![1]), ..Context::default() };
+        let hex: Vec<String> = compile_str(&c, &ctx, Domain::Vts).unwrap().iter().map(|i| i.iter().map(|b| format!("{b:02x}")).collect()).collect();
+        assert_eq!(
+            hex,
+            [
+                "7100000200000000", // g2 = 0
+                "00b1008200000004", // if (s2 != 0) goto 4
+                "51000000c0000000", // subtitle = 64
+                "00b1000b00010006", // if (g11 != 1) goto 6
+                "5100008000000000", // audio = 0
+                "00b1000b00020008",
+                "5100008100000000", // audio = 1
+                "00b1000c0001000a", // if (g12 != 1) goto 10
+                "5100000080000000", // subtitle = 0 (off)
+                "00f1000c0040000d", // if (g12 < 64) goto 13
+                "00c1000c0041000d", // if (g12 >= 65) goto 13
+                "410000008c000000", // subtitle = g12 (register-form SetSTN)
+                "0000000000000000",
+            ]
+        );
+        // One audio track, no subtitles: no compare against track 2, no subtitle stream to show.
+        let t1 = TitleSpec { audio_langs: vec![None], ..TitleSpec::placeholder(2) };
+        assert_eq!(title_pre_commands(pre, &t1), "g2 = 0; if (g11 eq 1) audio = 0; if (g12 eq 1) subtitle = 0;");
+        // Without the marker nothing changes.
+        assert_eq!(title_pre_commands(Some("g2 = 0;"), &t1), "g2 = 0;");
+        assert_eq!(title_pre_commands(None, &t), "if (s2 eq 0) subtitle = 64;");
     }
 
     #[test]

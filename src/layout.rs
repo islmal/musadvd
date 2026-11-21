@@ -15,7 +15,12 @@
 //! - `g2` dispatch code for a titleset's entry PGC: `1..=99` = chapter, `100 + j` = its j-th
 //!   root menu; reset to 0 by every title and every visible root menu,
 //! - `g3` code for the VMGM router (jumps a VTSM cannot do itself): `1000 + t` = play title t,
-//!   `2000 + t` = enter titleset t's menus (with `g2` set by the caller).
+//!   `2000 + t` = enter titleset t's menus (with `g2` set by the caller),
+//! - `g11` / `g12` disc-wide audio / subtitle choice of [`Action::SetGlobalAudio`] /
+//!   [`Action::SetGlobalSubtitle`]: `g11` = 1-based track (0 = none); `g12` = the SPRM2 value
+//!   `64 + stream` (shown), `1` = off, `0` = none (so it needs no "set" flag). Every title PGC applies
+//!   them on entry when it has that track ([`author::GLOBAL_STREAMS`]); a title's own audio /
+//!   subtitle button clears the matching register, so the last choice wins.
 //!
 //! Rendering ([`build_custom_menus`]): static elements are drawn with the template renderer's
 //! text/image code into frame-sized transparent PNG layers; video elements stay separate layers
@@ -44,6 +49,9 @@ pub const LAYOUT_VERSION: u32 = 1;
 pub const DEFAULT_MENU_SECS: f64 = 20.0;
 /// Command resetting the titleset dispatch register (title PGCs and visible root menus).
 pub const RESET_DISPATCH: &str = "g2 = 0;";
+/// Disc-wide audio / subtitle choice registers (see the module header).
+pub const GLOBAL_AUDIO: &str = "g11";
+pub const GLOBAL_SUBTITLE: &str = "g12";
 
 // ---------------------------------------------------------------------------
 // Model (JSON written by the menu editor)
@@ -426,6 +434,22 @@ pub enum Action {
     SetSubtitle { source: Option<u32> },
     /// Custom conditional VM script (e.g. "if (g4 == 1) link button 2; else jump menu 3;")
     CustomVm { script: String },
+    /// Disc-wide audio choice: the 1-based track position, applied to every title that has it.
+    /// Any menu role.
+    SetGlobalAudio { track: u32 },
+    /// Disc-wide subtitle choice (`null` = off), applied to every title that has the track.
+    SetGlobalSubtitle { track: Option<u32> },
+}
+
+impl Action {
+    pub fn is_global_stream(&self) -> bool {
+        matches!(self, Action::SetGlobalAudio { .. } | Action::SetGlobalSubtitle { .. })
+    }
+}
+
+/// Whether any button of the layout makes a disc-wide audio / subtitle choice.
+pub fn has_global_streams(layout: &CustomLayout) -> bool {
+    layout.menus.iter().flat_map(|m| &m.elements).any(|e| e.action.as_ref().is_some_and(Action::is_global_stream))
 }
 
 impl Action {
@@ -905,6 +929,18 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                         }
                     }
                 }
+                Action::SetGlobalAudio { track } | Action::SetGlobalSubtitle { track: Some(track) } => {
+                    let audio = matches!(action, Action::SetGlobalAudio { .. });
+                    let max = titles
+                        .iter()
+                        .map(|t| if audio { t.audio_sources.len() } else { t.subtitle_sources.len() })
+                        .max()
+                        .unwrap_or(0);
+                    if *track < 1 || *track as usize > max {
+                        let kind = if audio { "Audio track" } else { "Subtitle" };
+                        errs.push(el(&format!("{kind} {track} does not exist (the titles have at most {max})")));
+                    }
+                }
                 _ => {}
             }
             if let Some(r) = if bd { bd_button_rect(e, c, frame) } else { button_rect(e, c, frame) } {
@@ -1189,6 +1225,13 @@ pub fn plan_navigation_with_offset(
             (Some(_), None) => unreachable!("router exists for cross-titleset jumps"),
         }
     };
+    // A title's own choice cancels the disc-wide one (see the module header).
+    let global = has_global_streams(layout);
+    let clear = |reg: &str| if global { format!("{reg} = 0; ") } else { String::new() };
+    let stay = |mi: usize| match placement[mi] {
+        Placement::Vmgm(n) => n,
+        Placement::Vtsm { pgc, .. } => pgc,
+    };
     let mut commands = Vec::new();
     for (mi, m) in layout.menus.iter().enumerate() {
         let from = location(mi);
@@ -1223,16 +1266,21 @@ pub fn plan_navigation_with_offset(
                     let lt = &title_info[title as usize - 1];
                     if matches!(action, Action::SetAudio { .. }) {
                         let n = lt.audio_sources.iter().position(|s| s == source).unwrap_or(0);
-                        format!("audio = {n}; jump menu {pgc};")
+                        format!("{}audio = {n}; jump menu {pgc};", clear(GLOBAL_AUDIO))
                     } else {
                         // Bit 6 switches the subpicture display on.
                         let n = lt.subtitle_sources.iter().position(|s| s == source).unwrap_or(0);
-                        format!("subtitle = {}; jump menu {pgc};", n + 64)
+                        format!("{}subtitle = {}; jump menu {pgc};", clear(GLOBAL_SUBTITLE), n + 64)
                     }
                 }
                 Action::SetSubtitle { source: None } => {
                     let Placement::Vtsm { pgc, .. } = placement[mi] else { unreachable!("validated: VTSM menus only") };
-                    format!("subtitle = 0; jump menu {pgc};")
+                    format!("{}subtitle = 0; jump menu {pgc};", clear(GLOBAL_SUBTITLE))
+                }
+                // Stored only; the title PGCs apply it on entry (author::GLOBAL_STREAMS).
+                Action::SetGlobalAudio { track } => format!("{GLOBAL_AUDIO} = {track}; jump menu {};", stay(mi)),
+                Action::SetGlobalSubtitle { track } => {
+                    format!("{GLOBAL_SUBTITLE} = {}; jump menu {};", track.map_or(1, |k| 64 + k - 1), stay(mi))
                 }
                 Action::Menu { menu, .. } => {
                     let target = by_id[menu.as_str()];
@@ -2166,7 +2214,11 @@ pub fn build_custom_menus(
         titleset_menus,
         main_menu_pages: nav.main_menu_pages,
         pages,
-        title_pre: RESET_DISPATCH.to_string(),
+        title_pre: if has_global_streams(layout) {
+            format!("{RESET_DISPATCH} {}", author::GLOBAL_STREAMS)
+        } else {
+            RESET_DISPATCH.to_string()
+        },
         warnings,
     })
 }
@@ -2467,6 +2519,54 @@ mod tests {
         assert!(err.contains("only works in the root and settings menus"), "{err}");
         assert!(err.contains("stream #9"), "{err}");
         assert!(err.contains("A settings menu needs"), "{err}");
+
+        // Disc-wide choice: valid in a title (VMGM) menu, stored in g11 / g12, stays on the menu.
+        let mut t = titles(2);
+        t[1].audio_sources = vec![1];
+        t[1].subtitle_sources = vec![];
+        let global = layout(vec![
+            menu("main", MenuRole::Title, None, vec![
+                text(10.0, 10.0, "Audio 2", Some(Action::SetGlobalAudio { track: 2 })),
+                text(10.0, 70.0, "Sub 1", Some(Action::SetGlobalSubtitle { track: Some(1) })),
+                text(10.0, 130.0, "Sub off", Some(Action::SetGlobalSubtitle { track: None })),
+            ]),
+            menu("set1", MenuRole::Settings, Some(1), vec![
+                text(10.0, 10.0, "Audio", Some(Action::SetAudio { source: 2 })),
+                text(10.0, 70.0, "Sub off", Some(Action::SetSubtitle { source: None })),
+                text(10.0, 130.0, "Global audio 1", Some(Action::SetGlobalAudio { track: 1 })),
+            ]),
+        ]);
+        validate(&global, &t, TvStandard::Pal).unwrap();
+        let nav = plan_navigation(&global, &t).unwrap();
+        let c = |m: usize, e: usize| nav.commands[m][e].clone().unwrap();
+        assert_eq!(c(0, 0), "g11 = 2; jump menu 1;");
+        assert_eq!(c(0, 1), "g12 = 64; jump menu 1;");
+        assert_eq!(c(0, 2), "g12 = 1; jump menu 1;");
+        // A title's own choice cancels the disc-wide one.
+        assert_eq!(c(1, 0), "g11 = 0; audio = 1; jump menu 1;");
+        assert_eq!(c(1, 1), "g12 = 0; subtitle = 0; jump menu 1;");
+        assert_eq!(c(1, 2), "g11 = 1; jump menu 1;");
+        for m in 0..2 {
+            for e in 0..3 {
+                crate::dvdvm::parse(&c(m, e)).unwrap();
+            }
+        }
+        assert!(has_global_streams(&global) && !has_global_streams(&l));
+        // Track 0 and tracks beyond every title's count are rejected.
+        let bad = layout(vec![menu("main", MenuRole::Title, None, vec![
+            text(10.0, 10.0, "a0", Some(Action::SetGlobalAudio { track: 0 })),
+            text(10.0, 70.0, "a3", Some(Action::SetGlobalAudio { track: 3 })),
+            text(10.0, 130.0, "s2", Some(Action::SetGlobalSubtitle { track: Some(2) })),
+        ])]);
+        let err = validate(&bad, &t, TvStandard::Pal).unwrap_err().0;
+        assert_eq!(err.len(), 3, "{err:?}");
+        assert!(err[0].contains("Audio track 0 does not exist"), "{err:?}");
+        assert!(err[2].contains("Subtitle 2 does not exist (the titles have at most 1)"), "{err:?}");
+        let json = r#"[{"type": "setGlobalAudio", "track": 2}, {"type": "setGlobalSubtitle", "track": null}]"#;
+        assert_eq!(
+            serde_json::from_str::<Vec<Action>>(json).unwrap(),
+            [Action::SetGlobalAudio { track: 2 }, Action::SetGlobalSubtitle { track: None }]
+        );
 
         // JSON names.
         let json = r#"{"type": "setSubtitle", "source": null}"#;
