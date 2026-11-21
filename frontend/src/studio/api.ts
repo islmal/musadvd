@@ -226,6 +226,7 @@ export const writeFiles = (driveId: string, input: BuildInput, speed: string, er
   invoke<void>("studio_write_files", { driveId, input, speed, erase });
 export const discovery = (driveId: string, speed: string, sectors: number | null) =>
   invoke<void>("studio_discovery", { driveId, speed, sectors });
+export const erase = (driveId: string, full: boolean) => invoke<void>("studio_erase", { driveId, full });
 export const readDisc = (driveId: string, output: string) => invoke<void>("studio_read", { driveId, output });
 export const build = (input: BuildInput, output: string) => invoke<void>("studio_build", { input, output });
 export const verify = (driveId: string, image: string | null) => invoke<void>("studio_verify", { driveId, image });

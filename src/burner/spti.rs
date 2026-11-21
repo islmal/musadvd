@@ -203,6 +203,16 @@ pub fn streaming_descriptor(last_lba: u32, read_kbps: u32, write_kbps: u32) -> [
     d
 }
 
+/// BLANK (MMC-6 6.2): byte 1 = IMMED (bit 4) | blanking type (bits 0-2): 000b blank the disc
+/// (full, every sector), 001b blank minimal (PMA, lead-in and the first track's pre-gap only).
+/// Bytes 2-5 (start address / track number) only matter for the track types, 6-11 are reserved.
+/// IMMED returns at once; TEST UNIT READY then answers 2/04/07 with progress until done.
+pub fn blank(full: bool) -> [u8; 12] {
+    let mut c = cdb::<12>(0xA1);
+    c[1] = 0x10 | if full { 0x00 } else { 0x01 };
+    c
+}
+
 /// SEND DISC STRUCTURE (layer break and friends: format 0x20–0x23).
 pub fn send_disc_structure(format: u8, len: u16) -> [u8; 12] {
     let mut c = cdb::<12>(0xBF);
@@ -215,11 +225,15 @@ pub fn send_disc_structure(format: u8, len: u16) -> [u8; 12] {
 // Sense data.
 
 /// Decoded sense data (fixed format 0x70/0x71 or descriptor format 0x72/0x73).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Sense {
     pub key: u8,
     pub asc: u8,
     pub ascq: u8,
+    /// Progress indication (0..1) of a long operation (BLANK, FORMAT UNIT): the sense-key
+    /// specific bytes 15..18 of fixed-format sense with SKSV set, only for NO SENSE / NOT READY
+    /// (other keys use those bytes as a field pointer).
+    pub progress: Option<f32>,
 }
 
 impl Sense {
@@ -227,8 +241,15 @@ impl Sense {
     pub fn parse(raw: &[u8]) -> Option<Sense> {
         let code = *raw.first()? & 0x7F;
         match code {
-            0x70 | 0x71 if raw.len() >= 14 => Some(Sense { key: raw[2] & 0x0F, asc: raw[12], ascq: raw[13] }),
-            0x72 | 0x73 if raw.len() >= 4 => Some(Sense { key: raw[1] & 0x0F, asc: raw[2], ascq: raw[3] }),
+            0x70 | 0x71 if raw.len() >= 14 => {
+                let key = raw[2] & 0x0F;
+                let progress = raw
+                    .get(15..18)
+                    .filter(|s| s[0] & 0x80 != 0 && matches!(key, 0 | 2))
+                    .map(|s| u16::from_be_bytes([s[1], s[2]]) as f32 / 65535.0);
+                Some(Sense { key, asc: raw[12], ascq: raw[13], progress })
+            }
+            0x72 | 0x73 if raw.len() >= 4 => Some(Sense { key: raw[1] & 0x0F, asc: raw[2], ascq: raw[3], progress: None }),
             _ => None,
         }
     }
@@ -238,12 +259,13 @@ impl Sense {
         matches!(self.key, 0x02 | 0x06) && !matches!((self.asc, self.ascq), (0x3A, _))
     }
 
-    /// German description of the common conditions.
+    /// English description of the common conditions.
     pub fn describe(&self) -> String {
         let text = match (self.key, self.asc, self.ascq) {
             (_, 0x3A, _) => "no disc in the drive",
             (2, 0x04, 0x01) => "Drive becoming ready (reading disc)",
             (2, 0x04, 0x04) => "Disc is being formatted",
+            (2, 0x04, 0x07) => "Operation in progress (erasing)",
             (2, 0x04, _) => "Drive not ready",
             (_, 0x30, 0x00..=0x07) => "incompatible or unknown disc",
             (_, 0x57, _) => "Disc table of contents unreadable",
@@ -277,7 +299,7 @@ pub enum DataDir {
     ToDevice,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScsiResult {
     /// SCSI status byte (0 good, 2 check condition).
     pub status: u8,
@@ -949,7 +971,7 @@ mod tests {
         fixed[2] = 0x02;
         fixed[12] = 0x3A;
         let s = Sense::parse(&fixed).unwrap();
-        assert_eq!(s, Sense { key: 2, asc: 0x3A, ascq: 0 });
+        assert_eq!(s, Sense { key: 2, asc: 0x3A, ascq: 0, progress: None });
         assert!(s.describe().starts_with("no disc"), "{}", s.describe());
         assert!(!s.recoverable(), "no medium is not worth a retry");
         let desc = [0x72, 0x05, 0x24, 0x00, 0, 0, 0, 0];
@@ -958,10 +980,33 @@ mod tests {
         assert!(s.describe().contains("5/24/00"));
         assert!(Sense::parse(&[0u8; 18]).is_none());
         assert!(Sense::parse(&[0x70, 0, 0]).is_none(), "truncated");
-        assert!(Sense { key: 2, asc: 4, ascq: 1 }.recoverable());
-        assert!(Sense { key: 6, asc: 0x28, ascq: 0 }.recoverable());
-        assert!(!Sense { key: 3, asc: 0x0C, ascq: 0 }.recoverable());
-        assert!(Sense { key: 3, asc: 0x0C, ascq: 0 }.describe().starts_with("Write error"));
+        assert!(Sense { key: 2, asc: 4, ascq: 1, progress: None }.recoverable());
+        assert!(Sense { key: 6, asc: 0x28, ascq: 0, progress: None }.recoverable());
+        assert!(!Sense { key: 3, asc: 0x0C, ascq: 0, progress: None }.recoverable());
+        assert!(Sense { key: 3, asc: 0x0C, ascq: 0, progress: None }.describe().starts_with("Write error"));
+    }
+
+    #[test]
+    fn sense_progress_indication() {
+        // 2/04/07 with SKSV and progress 0x8000 (half done).
+        let mut fixed = [0u8; 18];
+        (fixed[0], fixed[2], fixed[7], fixed[12], fixed[13]) = (0x70, 0x02, 10, 0x04, 0x07);
+        (fixed[15], fixed[16], fixed[17]) = (0x80, 0x80, 0x00);
+        let s = Sense::parse(&fixed).unwrap();
+        assert!((s.progress.unwrap() - 0.5).abs() < 0.001, "{s:?}");
+        fixed[16..18].copy_from_slice(&[0xFF, 0xFF]);
+        assert_eq!(Sense::parse(&fixed).unwrap().progress, Some(1.0));
+        fixed[15] = 0x00;
+        assert_eq!(Sense::parse(&fixed).unwrap().progress, None, "SKSV clear");
+        (fixed[2], fixed[15]) = (0x05, 0x80);
+        assert_eq!(Sense::parse(&fixed).unwrap().progress, None, "a field pointer is no progress");
+        assert_eq!(Sense::parse(&fixed[..14]).unwrap().progress, None, "short sense has no SKS bytes");
+    }
+
+    #[test]
+    fn blank_cdb() {
+        assert_eq!(blank(false), [0xA1, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "IMMED + blank minimal");
+        assert_eq!(blank(true), [0xA1, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "IMMED + blank the disc");
     }
 
     #[test]
@@ -973,7 +1018,7 @@ mod tests {
         let r = sg_result(0, 0, 0, &[], 2048, 48).unwrap();
         assert_eq!((r.ok(), r.transferred), (true, 2000), "resid is subtracted");
         let r = sg_result(2, 0, 0x08, &fixed, 8, 8).unwrap();
-        assert_eq!(r.sense, Some(Sense { key: 2, asc: 0x3A, ascq: 0 }), "check condition is a delivered answer");
+        assert_eq!(r.sense, Some(Sense { key: 2, asc: 0x3A, ascq: 0, progress: None }), "check condition is a delivered answer");
         assert!(r.into_result("TUR").unwrap_err().to_string().contains("no disc"));
         assert!(sg_result(0, 0x03, 0, &[], 0, 0).is_err(), "DID_TIME_OUT");
         assert!(sg_result(0, 0, 0x06, &[], 0, 0).is_err(), "DRIVER_TIMEOUT");
@@ -984,7 +1029,7 @@ mod tests {
     #[test]
     fn result_checks() {
         assert!(ScsiResult::GOOD.ok());
-        let bad = ScsiResult { status: 2, sense: Some(Sense { key: 5, asc: 0x20, ascq: 0 }), transferred: 0 };
+        let bad = ScsiResult { status: 2, sense: Some(Sense { key: 5, asc: 0x20, ascq: 0, progress: None }), transferred: 0 };
         assert!(!bad.ok());
         let e = bad.into_result("TEST").unwrap_err().to_string();
         assert!(e.starts_with("TEST: invalid command"), "{e}");
@@ -1111,7 +1156,7 @@ mod tests {
             self.sent.borrow_mut().push(cdb.to_vec());
             let data: Vec<u8> = match cdb[0] {
                 0x00 if !self.ready => {
-                    return Ok(ScsiResult { status: 2, sense: Some(Sense { key: 2, asc: 0x3A, ascq: 0 }), transferred: 0 })
+                    return Ok(ScsiResult { status: 2, sense: Some(Sense { key: 2, asc: 0x3A, ascq: 0, progress: None }), transferred: 0 })
                 }
                 0x00 => vec![],
                 0x12 => {
@@ -1137,7 +1182,7 @@ mod tests {
                         a[34] = 0x66;
                         a
                     }
-                    _ => return Ok(ScsiResult { status: 2, sense: Some(Sense { key: 5, asc: 0x24, ascq: 0 }), transferred: 0 }),
+                    _ => return Ok(ScsiResult { status: 2, sense: Some(Sense { key: 5, asc: 0x24, ascq: 0, progress: None }), transferred: 0 }),
                 },
                 0xAC => {
                     let mut b = vec![0u8; 8];

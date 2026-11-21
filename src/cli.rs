@@ -249,6 +249,8 @@ enum Command {
     IfoLayerbreak(studio_cli::IfoLayerbreak),
     /// Burn Studio: drive and media details (MMC).
     DriveInfo(studio_cli::DriveInfoArgs),
+    /// Burn Studio: erase (BLANK) a rewritable disc (CD-RW, DVD-RW); quick by default, `--full` for a full erase.
+    Erase(studio_cli::EraseArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -696,6 +698,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Command::IsoLabel(a) => studio_cli::iso_label(a),
         Command::IfoLayerbreak(a) => studio_cli::ifo_layerbreak(a),
         Command::DriveInfo(a) => studio_cli::drive_info(a),
+        Command::Erase(a) => studio_cli::erase(a),
         Command::Drives => {
             use crate::burner::{speed_label, system_burner};
             let burner = system_burner();
@@ -1161,5 +1164,20 @@ mod tests {
         assert_eq!(parse(&["--dvd-video", "encode"]), DvdVideoMode::Encode);
         assert_eq!(parse(&["--dvd-video", "auto"]), DvdVideoMode::Auto);
         assert_eq!(parse(&["--dvd-video", "strict"]), DvdVideoMode::Strict);
+    }
+
+    #[test]
+    fn parses_erase_flags() {
+        let parse = |extra: &[&str]| {
+            let args = ["musadvd", "erase"].iter().chain(extra);
+            let Cli { command: Command::Erase(a) } = Cli::try_parse_from(args).unwrap() else {
+                panic!("expected Erase");
+            };
+            a
+        };
+        let a = parse(&[]);
+        assert!(!a.full && !a.yes && a.drive.is_none());
+        let a = parse(&["--drive", "F:", "--full", "--yes"]);
+        assert!(a.full && a.yes && a.drive.as_deref() == Some("F:"));
     }
 }

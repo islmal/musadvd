@@ -14,6 +14,7 @@ with Ctrl+C (child processes are killed).
 | `make-iso <VIDEO_TS> <out.iso> [--label]` | Build a burnable UDF 1.02 + ISO 9660 image from a `VIDEO_TS` folder. |
 | `burn <folder> [--drive] [--speed] [--label] ...` | Burn a `VIDEO_TS` or `BDMV` folder (image, write, read-back verification). |
 | `read-disc`, `verify-disc`, `build-iso`, `iso-label`, `ifo-layerbreak`, `drive-info` | Burn Studio operations (`src/studio_cli.rs`, logic in `src/burner/studio.rs`). |
+| `erase [--drive] [--full] [--yes]` | Erase a CD-RW / DVD-RW (quick by default, `--full` for the whole disc); asks for confirmation unless `--yes`. DVD+RW / BD-RE need no erasing. |
 
 ## `build-dvd` options by theme
 

@@ -73,6 +73,19 @@ pub struct DriveInfoArgs {
     pub drive: Option<String>,
 }
 
+#[derive(Args)]
+pub struct EraseArgs {
+    #[arg(long)]
+    pub drive: Option<String>,
+    /// Full erase of the whole disc (can take an hour or more). Default: quick erase (minimal
+    /// blank, usually under a few minutes). DVD+RW and BD-RE are overwritable and need no erasing.
+    #[arg(long)]
+    pub full: bool,
+    /// Do not ask for confirmation (required when stdin is not a terminal).
+    #[arg(long)]
+    pub yes: bool,
+}
+
 fn settings() -> crate::config::BurnStudioSettings {
     AppSettings::load_or_default(&AppSettings::default_path()).0.burn_studio.sanitized()
 }
@@ -232,6 +245,35 @@ pub fn ifo_layerbreak(a: IfoLayerbreak) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+    }
+}
+
+pub fn erase(a: EraseArgs) -> ExitCode {
+    use std::io::{BufRead, IsTerminal, Write};
+    let drive = match studio::find_drive(a.drive.as_deref()) {
+        Ok(d) => d,
+        Err(e) => return fail(e),
+    };
+    if !a.yes {
+        if !std::io::stdin().is_terminal() {
+            return fail("refusing to erase without confirmation: stdin is not a terminal, pass --yes");
+        }
+        eprint!("Erase all data on {}? [y/N] ", drive.name);
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).is_err() || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+            eprintln!("Aborted.");
+            return ExitCode::FAILURE;
+        }
+    }
+    let r = studio::erase(&ctx(), &drive, a.full);
+    eprintln!();
+    match r {
+        Ok(()) => {
+            println!("Erase finished.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
     }
 }
 

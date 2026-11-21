@@ -28,7 +28,7 @@ use crate::config::{BurnStudioSettings, StudioIo};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
-    /// `preparing`, `formatting`, `writing`, `finalizing`, `verifying`, `reading`, `building`.
+    /// `preparing`, `formatting`, `writing`, `finalizing`, `verifying`, `reading`, `building`, `erasing`.
     pub phase: String,
     pub fraction: f64,
     pub lba: u64,
@@ -701,6 +701,33 @@ fn eject_if(ctx: &Ctx, drive: &DriveInfo, wanted: bool) {
             ctx.log(format!("Eject failed: {e}"));
         }
     }
+}
+
+/// Blanks the CD-RW / DVD-RW in `drive`: `full` overwrites every sector, otherwise only the
+/// lead-in/TOC (quick). The drive cannot abort a running BLANK, so the cancel flag is not polled.
+pub fn erase(ctx: &Ctx, drive: &DriveInfo, full: bool) -> Result<(), String> {
+    let t = transport(drive, &ctx.settings.io).map_err(|e| e.to_string())?;
+    let _standby = ctx.settings.general.prevent_standby.then(power::StandbyGuard::new);
+    let kind = if full { "Full" } else { "Quick" };
+    ctx.log(format!("{kind} erase of the disc in {} started.", drive.name));
+    let started = Instant::now();
+    let message = format!("{kind} erase …");
+    let emit = |fraction: f64| {
+        (ctx.emit)(Event::Progress(Progress {
+            phase: "erasing".into(),
+            fraction,
+            lba: 0,
+            total: 0,
+            speed_x: 0.0,
+            ring: 0,
+            device: None,
+            eta_secs: remaining(started, fraction),
+            message: message.clone(),
+        }))
+    };
+    super::mmcwrite::blank_disc(&*t, full, &mut |f| emit(f as f64)).map_err(|e| e.to_string())?;
+    ctx.log(format!("Disc erased in {} s.", started.elapsed().as_secs()));
+    Ok(())
 }
 
 /// Reads the disc in `drive` into `out` (split and layout file from the settings).

@@ -1481,6 +1481,7 @@ fn main() -> std::process::ExitCode {
             burn_studio::studio_write_image,
             burn_studio::studio_write_files,
             burn_studio::studio_discovery,
+            burn_studio::studio_erase,
             burn_studio::studio_read,
             burn_studio::studio_build,
             burn_studio::studio_verify,

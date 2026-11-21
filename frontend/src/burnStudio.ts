@@ -14,6 +14,7 @@ import { fmtNumber, t as tr } from "./i18n";
 const PHASES: Record<string, string> = {
   preparing: tr("studio.main.vorbereiten"),
   formatting: tr("studio.main.formatieren"),
+  erasing: tr("studio.main.erasing"),
   writing: tr("studio.main.schreiben"),
   finalizing: tr("studio.main.abschliessen"),
   verifying: tr("studio.main.ueberpruefen"),

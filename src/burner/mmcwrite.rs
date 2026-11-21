@@ -264,7 +264,7 @@ impl Drive<'_> {
                 return Ok(());
             }
             if !r.sense.is_some_and(|s| s.recoverable()) || start.elapsed() > Duration::from_secs(4 * 3600) {
-                return r.into_result("Formatieren").map(|_| ());
+                return r.into_result("Formatting").map(|_| ());
             }
             if self.cancel.load(Ordering::Relaxed) {
                 return Err(BurnError::Cancelled);
@@ -374,8 +374,19 @@ fn write_disc(
     if o.test_mode && kind != Kind::DvdMinus {
         return Err(BurnError::Unsupported(format!("Test writing is only available on DVD-R/-RW, not on {}", spti::profile_name(profile))));
     }
-    let info = drive.query("READ DISC INFORMATION", &spti::read_disc_information(34), 34)?;
-    let blank = spti::parse_disc_information(&info).is_some_and(|i| i.status == 0);
+    let disc_blank = || -> Result<bool, BurnError> {
+        let info = drive.query("READ DISC INFORMATION", &spti::read_disc_information(34), 34)?;
+        Ok(spti::parse_disc_information(&info).is_some_and(|i| i.status == 0))
+    };
+    let mut blank = disc_blank()?;
+    // A used sequential DVD-RW takes a new disc-at-once image only after blanking (CD-RW never
+    // gets here: Kind::of refuses CDs). Restricted overwrite (0x13) is written in place.
+    if !blank && options.erase && profile == 0x0014 {
+        let text = "Erasing DVD-RW …";
+        progress(tx, BurnPhase::Formatting, 0.0, text);
+        blank_disc(drive.t, false, &mut |f| progress(tx, BurnPhase::Formatting, f as f64, text))?;
+        blank = disc_blank()?;
+    }
     if !kind.random_writable() && !blank {
         return Err(BurnError::Unsupported(format!("the {} is not blank", spti::profile_name(profile))));
     }
@@ -443,7 +454,7 @@ fn write_disc(
             let mut p = [0u8; 12];
             p[1] = 10;
             p[8..12].copy_from_slice(&l0.to_be_bytes());
-            if let Err(e) = drive.send("Layerwechsel", &spti::send_disc_structure(f, 12), DataDir::ToDevice, &mut p, 30) {
+            if let Err(e) = drive.send("Layer break", &spti::send_disc_structure(f, 12), DataDir::ToDevice, &mut p, 30) {
                 // If the drive already has this exact layer break or rejects setting it via MMC,
                 // warn rather than aborting before a single byte is written.
                 progress(tx, BurnPhase::Preparing, 0.0, &format!("Note: the layer break could not be set ({e}), continuing …"));
@@ -522,6 +533,55 @@ fn write_disc(
         verify_disc(drive, src, sectors, tx)?;
     }
     Ok(())
+}
+
+/// Blanks a CD-RW or DVD-RW (MMC BLANK with IMMED) and waits until the drive is ready again,
+/// passing the drive's progress indication (0..1) to `on_progress`. `full` blanks every sector
+/// (up to an hour or more), otherwise only the lead-in/TOC area (minutes). BLANK is sent once and
+/// cannot be aborted, so there is no cancel flag.
+pub fn blank_disc(t: &dyn ScsiTransport, full: bool, on_progress: &mut dyn FnMut(f32)) -> Result<(), BurnError> {
+    let cap = Duration::from_secs(if full { 2 * 3600 } else { 15 * 60 });
+    blank_with(t, full, Duration::from_secs(1), cap, on_progress)
+}
+
+fn blank_with(t: &dyn ScsiTransport, full: bool, poll: Duration, cap: Duration, on_progress: &mut dyn FnMut(f32)) -> Result<(), BurnError> {
+    let cfg = spti::query(t, "GET CONFIGURATION", &spti::get_configuration(0, 0, 8), 8)?;
+    match cfg.get(6..8).map_or(0, |p| u16::from_be_bytes([p[0], p[1]])) {
+        0x000A | 0x0013 | 0x0014 => {}
+        0x0000 => return Err(BurnError::NoMedia),
+        0x001A | 0x002A | 0x0043 => return Err(BurnError::Unsupported("Overwritable media does not need erasing; write directly".into())),
+        0x0009 | 0x0011 | 0x0015 | 0x0016 | 0x001B | 0x002B | 0x0041 | 0x0042 => {
+            return Err(BurnError::Unsupported("Write-once media cannot be erased".into()))
+        }
+        p => return Err(BurnError::Unsupported(format!("{} cannot be erased", spti::profile_name(p)))),
+    }
+    // Never repeated (unlike Drive::send): a second BLANK would restart the erase.
+    t.exec(&spti::blank(full), DataDir::None, &mut [], 120)?.into_result("BLANK")?;
+    on_progress(0.0);
+    let start = Instant::now();
+    loop {
+        let r = t.exec(&spti::test_unit_ready(), DataDir::None, &mut [], 30)?;
+        if r.ok() {
+            on_progress(1.0);
+            return Ok(());
+        }
+        match r.sense {
+            Some(s) if s.key == 0x02 && s.asc == 0x04 => {
+                if let Some(p) = s.progress {
+                    on_progress(p);
+                }
+            }
+            // Unit attention (medium changed / reset) may be reported once after the erase.
+            Some(s) if s.key == 0x06 => {}
+            _ => return r.into_result("Erasing").map(|_| ()),
+        }
+        if start.elapsed() >= cap {
+            return Err(BurnError::Backend(format!("Erasing did not finish within {} minutes", cap.as_secs() / 60)));
+        }
+        if !poll.is_zero() {
+            sleep(poll);
+        }
+    }
 }
 
 /// DVD-R/-RW mode page 05: write type, BUFE, test write, link size; multi-session off.
@@ -634,6 +694,10 @@ mod tests {
         corrupt_read: Option<usize>,
         /// TEST UNIT READY answers "tray open" this many more times.
         tray_open_polls: std::cell::Cell<u32>,
+        /// Answers of TEST UNIT READY before it reports ready (BLANK progress).
+        tur_script: RefCell<VecDeque<Sense>>,
+        /// BLANK was received: the disc reads as blank from then on.
+        blanked: std::cell::Cell<bool>,
     }
 
     impl<'a> Fake<'a> {
@@ -652,6 +716,8 @@ mod tests {
                 layer_param: RefCell::new(vec![]),
                 corrupt_read: None,
                 tray_open_polls: Default::default(),
+                tur_script: RefCell::new(VecDeque::new()),
+                blanked: Default::default(),
             }
         }
 
@@ -673,7 +739,15 @@ mod tests {
             self.sent.borrow_mut().push(cdb.to_vec());
             if cdb[0] == 0x00 && self.tray_open_polls.get() > 0 {
                 self.tray_open_polls.set(self.tray_open_polls.get() - 1);
-                return Ok(check(Sense { key: 0x02, asc: 0x3A, ascq: 0x02 }));
+                return Ok(check(Sense { key: 0x02, asc: 0x3A, ascq: 0x02, progress: None }));
+            }
+            if cdb[0] == 0x00 {
+                if let Some(s) = self.tur_script.borrow_mut().pop_front() {
+                    return Ok(check(s));
+                }
+            }
+            if cdb[0] == 0xA1 {
+                self.blanked.set(true);
             }
             let data: Vec<u8> = match cdb[0] {
                 0x46 => {
@@ -684,7 +758,7 @@ mod tests {
                 }
                 0x51 => {
                     let mut b = vec![0u8; 34];
-                    b[2] = self.disc_status;
+                    b[2] = if self.blanked.get() { 0 } else { self.disc_status };
                     b
                 }
                 0x23 => {
@@ -863,6 +937,92 @@ mod tests {
         assert!(f.writes().is_empty());
     }
 
+    fn in_progress(p: Option<f32>) -> Sense {
+        Sense { key: 2, asc: 0x04, ascq: 0x07, progress: p }
+    }
+
+    fn blank(f: &Fake, full: bool, cap: Duration) -> (Result<(), BurnError>, Vec<f32>) {
+        let mut seen = vec![];
+        let r = blank_with(f, full, Duration::ZERO, cap, &mut |p| seen.push(p));
+        (r, seen)
+    }
+
+    #[test]
+    fn blank_sends_one_immediate_blank_and_polls_progress() {
+        let f = Fake::new(0x14);
+        let attention = Sense { key: 6, asc: 0x28, ascq: 0, progress: None };
+        f.tur_script.borrow_mut().extend([in_progress(Some(0.25)), in_progress(None), attention, in_progress(Some(0.75))]);
+        let (r, seen) = blank(&f, false, Duration::from_secs(60));
+        r.unwrap();
+        assert_eq!(f.ops(), [0x46, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00], "config, one BLANK, polls until ready");
+        assert_eq!(f.sent.borrow()[1], spti::blank(false));
+        assert_eq!(f.sent.borrow()[1][1], 0x11, "IMMED + minimal");
+        assert_eq!(seen, [0.0, 0.25, 0.75, 1.0]);
+        let f = Fake::new(0x0A);
+        blank(&f, true, Duration::from_secs(60)).0.unwrap();
+        assert_eq!(f.sent.borrow()[1][1], 0x10, "IMMED + full, CD-RW accepted");
+    }
+
+    #[test]
+    fn blank_profile_guards() {
+        let cases = [
+            (0x1A, "does not need erasing"),
+            (0x2A, "does not need erasing"),
+            (0x43, "does not need erasing"),
+            (0x09, "Write-once media cannot be erased"),
+            (0x11, "Write-once media cannot be erased"),
+            (0x1B, "Write-once media cannot be erased"),
+            (0x41, "Write-once media cannot be erased"),
+            (0x10, "DVD-ROM cannot be erased"),
+        ];
+        for (profile, text) in cases {
+            let f = Fake::new(profile);
+            let e = blank(&f, false, Duration::from_secs(60)).0.unwrap_err();
+            assert!(e.to_string().contains(text), "{profile:#x}: {e}");
+            assert_eq!(f.ops(), [0x46], "nothing sent but the query");
+        }
+        assert!(matches!(blank(&Fake::new(0), false, Duration::from_secs(60)).0, Err(BurnError::NoMedia)));
+        let f = Fake::new(0x13);
+        blank(&f, false, Duration::from_secs(60)).0.unwrap();
+        assert!(f.ops().contains(&0xA1), "restricted overwrite DVD-RW may be blanked");
+    }
+
+    #[test]
+    fn blank_timeout_and_error_sense() {
+        let f = Fake::new(0x14);
+        f.tur_script.borrow_mut().extend([in_progress(Some(0.1)), in_progress(Some(0.2))]);
+        let e = blank(&f, false, Duration::ZERO).0.unwrap_err();
+        assert!(e.to_string().contains("did not finish"), "{e}");
+        assert_eq!(f.ops().iter().filter(|&&o| o == 0xA1).count(), 1, "BLANK never repeated");
+        let f = Fake::new(0x14);
+        let write_error = Sense { key: 3, asc: 0x0C, ascq: 0, progress: None };
+        f.tur_script.borrow_mut().extend([in_progress(Some(0.1)), write_error, in_progress(None)]);
+        let e = blank(&f, false, Duration::from_secs(60)).0.unwrap_err();
+        assert!(e.to_string().contains("Erasing: Write error"), "{e}");
+        assert_eq!(f.ops(), [0x46, 0xA1, 0x00, 0x00], "stops at the hard error");
+    }
+
+    #[test]
+    fn used_dvd_rw_is_blanked_before_writing_only_when_allowed() {
+        let mut f = Fake::new(0x14);
+        f.disc_status = 2;
+        let (b, d) = opts();
+        assert!(matches!(burn(&f, 10, &b, &d, &AtomicBool::new(false)), Err(BurnError::Unsupported(_))), "no erase without the option");
+        assert!(!f.ops().contains(&0xA1));
+        let mut f = Fake::new(0x14);
+        f.disc_status = 2;
+        f.tur_script.borrow_mut().push_back(in_progress(Some(0.5)));
+        burn(&f, 10, &BurnOptions { erase: true, ..b.clone() }, &d, &AtomicBool::new(false)).unwrap();
+        assert_eq!(f.ops()[..9], [0x1E, 0x46, 0x51, 0x46, 0xA1, 0x00, 0x00, 0x51, 0x23], "blank, wait, re-read disc info, then write");
+        assert_eq!(f.sent.borrow()[4], spti::blank(false), "minimal blank");
+        assert_eq!(f.written.borrow().len(), 10 * S);
+        // Write-once media is still refused, erase or not.
+        let mut f = Fake::new(0x11);
+        f.disc_status = 2;
+        assert!(burn(&f, 10, &BurnOptions { erase: true, ..b }, &d, &AtomicBool::new(false)).is_err());
+        assert!(!f.ops().contains(&0xA1));
+    }
+
     #[test]
     fn cancel_mid_write_flushes_and_unlocks() {
         let cancel = AtomicBool::new(false);
@@ -876,7 +1036,7 @@ mod tests {
 
     #[test]
     fn recoverable_sense_is_retried_and_hard_errors_stop() {
-        let not_ready = Sense { key: 2, asc: 0x04, ascq: 0x08 };
+        let not_ready = Sense { key: 2, asc: 0x04, ascq: 0x08, progress: None };
         let f = Fake::new(0x1B);
         f.write_errors.borrow_mut().extend([not_ready, not_ready]);
         let (b, d) = opts();
@@ -891,7 +1051,7 @@ mod tests {
         assert_eq!(f.ops().last(), Some(&0x1E), "tray unlocked after the error");
         // A write error is not retried.
         let f = Fake::new(0x1B);
-        f.write_errors.borrow_mut().push_back(Sense { key: 3, asc: 0x0C, ascq: 0 });
+        f.write_errors.borrow_mut().push_back(Sense { key: 3, asc: 0x0C, ascq: 0, progress: None });
         let e = burn(&f, 40, &b, &d, &AtomicBool::new(false)).unwrap_err();
         assert!(e.to_string().contains("Write error"), "{e}");
         assert_eq!(f.writes().len(), 1);

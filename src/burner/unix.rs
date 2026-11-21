@@ -1,7 +1,6 @@
 //! Linux/Unix burner. On Linux it probes and writes natively over SG_IO with MusaDVD's own MMC
-//! writer (the engine Burn Studio uses); growisofs (dvd+rw-tools) or xorriso are only a fallback
-//! when the drive cannot be opened that way, or to erase a used DVD-RW, which the native writer
-//! does not do yet.
+//! writer (the engine Burn Studio uses, which also blanks a used DVD-RW); growisofs (dvd+rw-tools)
+//! or xorriso are only a fallback when the drive cannot be opened that way.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -141,13 +140,8 @@ impl OpticalBurner for CliBurner {
             let has_tools = self.growisofs.is_some() || self.xorriso.is_some();
             match super::spti::SgIoTransport::open(drive_id) {
                 Ok(t) => {
-                    let media = native::probe_with(&t);
-                    // Erasing a sequential DVD-RW is the one job left to the tools.
-                    let erase_rw = options.erase && !media.blank && media.physical == "DVD-RW";
-                    if !(erase_rw && self.xorriso.is_some()) {
-                        let source = Box::new(super::source::FileSource::open(iso_path)?);
-                        return native::burn(&t, source, speed, options, cancel, &progress_tx);
-                    }
+                    let source = Box::new(super::source::FileSource::open(iso_path)?);
+                    return native::burn(&t, source, speed, options, cancel, &progress_tx);
                 }
                 Err(e) if !has_tools => return Err(e),
                 Err(_) => {} // the drive cannot be opened for SG_IO: the tools may still reach it

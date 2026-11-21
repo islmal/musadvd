@@ -7,7 +7,7 @@ import { speedChoices } from "./speeds";
 import { el, fmtBytes, fmtSectors, modal } from "./ui";
 import { fmtNumber, t } from "../i18n";
 
-export type Mode = "home" | "write-image" | "write-files" | "read" | "build" | "verify" | "discovery";
+export type Mode = "home" | "write-image" | "write-files" | "read" | "build" | "verify" | "discovery" | "erase";
 
 export const MODES: { id: Exclude<Mode, "home">; title: string; text: string; icon: string }[] = [
   { id: "write-image", title: t("studio.views.imageAufDiscSchreiben"), text: t("studio.views.isoBinCueDvd"), icon: "💿" },
@@ -16,6 +16,7 @@ export const MODES: { id: Exclude<Mode, "home">; title: string; text: string; ic
   { id: "build", title: t("studio.views.imageAusDateienOrdnern"), text: t("studio.views.udfIsoJolietImage"), icon: "🛠" },
   { id: "verify", title: t("studio.views.discUeberpruefen"), text: t("studio.views.mitEinemImageVergleichen"), icon: "✅" },
   { id: "discovery", title: t("studio.views.discoveryTestbrand"), text: t("studio.views.schreibqualitaetUndGeschwindigkeitMessen"), icon: "📈" },
+  { id: "erase", title: t("studio.views.eraseTitle"), text: t("studio.views.eraseText"), icon: "🧹" },
 ];
 
 /** What the views need from the window shell. */
@@ -219,7 +220,7 @@ function pathInput(initial: string, placeholder: string, pick: () => Promise<str
   return { input, row };
 }
 
-const remembered = { image: "", output: "", verifyImage: "", discoverySectors: "", erase: false, verifyMode: "image" };
+const remembered = { image: "", output: "", verifyImage: "", discoverySectors: "", erase: false, eraseFull: false, verifyMode: "image" };
 
 function viewWriteImage(host: Host): HTMLElement {
   const { input, row } = pathInput(remembered.image, t("studio.views.imageDateiIsoCue"), async () => {
@@ -373,6 +374,29 @@ function viewDiscovery(host: Host): HTMLElement {
   );
 }
 
+function viewErase(host: Host, rerender: () => void): HTMLElement {
+  const radio = (full: boolean, label: string, hint: string) =>
+    el("label", { class: "opt-check" }, el("input", { type: "radio", name: "emode", checked: remembered.eraseFull === full, onchange: () => { remembered.eraseFull = full; rerender(); } }), el("span", {}, label), el("small", { class: "opt-hint" }, hint));
+  const go = el("button", { class: "btn primary big" }, t("studio.views.eraseStart"));
+  go.addEventListener("click", () => {
+    const d = host.drive();
+    if (!d) return host.note(t("studio.views.bitteEinLaufwerkWaehlen"));
+    const full = remembered.eraseFull;
+    modal(
+      t("studio.views.eraseConfirmTitle"),
+      el("p", {}, t("studio.views.eraseConfirmText")),
+      [{ label: t("studio.views.abbrechen") }, { label: t("studio.views.eraseStart"), primary: true, onClick: () => host.run(t("studio.views.eraseTitle"), () => api.erase(d.id, full)) }],
+    );
+  });
+  return el(
+    "div",
+    {},
+    el("div", { class: "opt-group" }, radio(false, t("studio.views.eraseQuick"), t("studio.views.eraseQuickHint")), radio(true, t("studio.views.eraseFull"), t("studio.views.eraseFullHint"))),
+    el("p", { class: "hint" }, `⚠ ${t("studio.views.eraseWarning")}`),
+    actionBar(go),
+  );
+}
+
 export function renderHome(go: (m: Mode) => void): HTMLElement {
   return el(
     "div",
@@ -399,6 +423,8 @@ export function renderMode(mode: Exclude<Mode, "home">, host: Host, rerender: ()
       return viewVerify(host, rerender);
     case "discovery":
       return viewDiscovery(host);
+    case "erase":
+      return viewErase(host, rerender);
   }
 }
 

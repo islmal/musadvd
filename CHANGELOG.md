@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native disc erasing**: MMC BLANK (quick or full) with progress, for CD-RW and DVD-RW, on Windows and Linux without external tools: a Burn Studio "Erase disc" mode, `musadvd erase`, and automatic erasing of a used DVD-RW in the direct and Linux burn paths when erasing is allowed. DVD+RW and BD-RE are reported as not needing an erase.
+- **Menu multi-select**: Ctrl/Shift+click picks several menus in the menu editor for batch apply ("Selected menus") or deleting.
+
+### Fixed
+
+- **DVD size planning**: mux overhead is now reserved per second of playing time (NAV packs), as a share of the stream and per title (IFO files) instead of a flat 2 % of the disc, so long low-bitrate DVDs no longer end up over their target size.
+- Subtitle streams no longer flood the log with "pts moves backwards" warnings for overlaps smaller than one subpicture timing unit (harmless, caused by spumux rounding).
+
 ## [1.1.1] - 2026-11-21
 
 ### Added

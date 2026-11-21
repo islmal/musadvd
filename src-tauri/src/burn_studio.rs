@@ -382,6 +382,21 @@ pub fn studio_discovery(
 }
 
 #[tauri::command]
+pub fn studio_erase(
+    app: AppHandle,
+    state: State<'_, StudioState>,
+    app_state: State<'_, AppState>,
+    drive_id: String,
+    full: bool,
+) -> Result<(), String> {
+    let drive = drive_by_id(&drive_id)?;
+    run(app, &state, &app_state, move |ctx| {
+        studio::erase(ctx, &drive, full)?;
+        Ok(studio::Outcome { ok: true, message: if full { "Disc erased (full)." } else { "Disc erased (quick)." }.into(), ..Default::default() })
+    })
+}
+
+#[tauri::command]
 pub fn studio_read(app: AppHandle, state: State<'_, StudioState>, app_state: State<'_, AppState>, drive_id: String, output: String) -> Result<(), String> {
     let drive = drive_by_id(&drive_id)?;
     run(app, &state, &app_state, move |ctx| studio::read(ctx, &drive, Path::new(&output)))
