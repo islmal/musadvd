@@ -140,10 +140,10 @@ pub async fn studio_lock(state: State<'_, StudioState>, drive_id: String, lock: 
     let (tx, rx) = channel::<()>();
     let (ready_tx, ready_rx) = channel::<Result<(), String>>();
     std::thread::spawn(move || match power::TrayLock::acquire(letter) {
-        Ok(guard) => {
+        // `_guard` (not `_`) keeps the lock until the arm ends, i.e. after the release signal.
+        Ok(_guard) => {
             let _ = ready_tx.send(Ok(()));
             let _ = rx.recv(); // returns when the sender is dropped
-            drop(guard);
         }
         Err(e) => {
             let _ = ready_tx.send(Err(e.to_string()));

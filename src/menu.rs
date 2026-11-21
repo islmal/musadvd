@@ -1847,8 +1847,10 @@ mod tests {
     #[test]
     fn cyrillic_uses_fallback_font() {
         let fonts = font_chain(&rounded_style());
-        if fonts.len() < 2 {
-            eprintln!("skipping: template or fallback fonts not installed");
+        // The premise needs a primary font without Cyrillic; CI runners lack Arial Rounded MT Bold,
+        // so font_for falls back to a font that already covers Cyrillic.
+        if fonts.len() < 2 || fonts[0].glyph_id('В').0 != 0 {
+            eprintln!("skipping: template font missing or it covers Cyrillic itself");
             return;
         }
         let placed = place_chars(&fonts, "Война A");
