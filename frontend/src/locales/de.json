@@ -692,7 +692,7 @@
  "menuEditor.alleTitelAbspielen": "Alle Titel abspielen",
  "menuEditor.tonspurWaehlen": "Tonspur wählen",
  "menuEditor.untertitelWaehlen": "Untertitel wählen",
- "menuEditor.tonUndUntertitelwahlGibt": "Ton- und Untertitelwahl gibt es nur in Root- und Einstellungsmenüs eines Titels.",
+ "menuEditor.tonUndUntertitelwahlGibt": "Ton- und Untertitelwahl je Titel gibt es nur im Root- und Einstellungsmenü eines Titels; die Auswahl „alle Titel“ funktioniert in jedem Menü.",
  "menuEditor.tonspur2": "Tonspur",
  "menuEditor.untertitel2": "Untertitel",
  "menuEditor.aus": "Aus",

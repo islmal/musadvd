@@ -692,7 +692,7 @@
  "menuEditor.alleTitelAbspielen": "Play all titles",
  "menuEditor.tonspurWaehlen": "Choose audio track",
  "menuEditor.untertitelWaehlen": "Choose subtitles",
- "menuEditor.tonUndUntertitelwahlGibt": "Audio and subtitle selection exists only in the root and settings menus of a title.",
+ "menuEditor.tonUndUntertitelwahlGibt": "Per-title audio and subtitle selection exists only in the root and settings menus of a title; the \"all titles\" choices work in any menu.",
  "menuEditor.tonspur2": "Audio",
  "menuEditor.untertitel2": "Subtitles",
  "menuEditor.aus": "Off",

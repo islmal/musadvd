@@ -692,7 +692,7 @@
  "menuEditor.alleTitelAbspielen": "Воспроизвести все разделы",
  "menuEditor.tonspurWaehlen": "Выбрать аудиодорожку",
  "menuEditor.untertitelWaehlen": "Выбрать субтитры",
- "menuEditor.tonUndUntertitelwahlGibt": "Выбор аудио и субтитров существует только в корневом меню и меню настроек раздела.",
+ "menuEditor.tonUndUntertitelwahlGibt": "Выбор звука и субтитров для отдельного фильма есть только в корневом меню и меню настроек фильма; выбор «все фильмы» работает в любом меню.",
  "menuEditor.tonspur2": "Аудио",
  "menuEditor.untertitel2": "Субтитры",
  "menuEditor.aus": "Выкл",
