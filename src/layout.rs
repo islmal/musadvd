@@ -93,9 +93,15 @@ pub struct CustomLayout {
     /// Editor draft metadata (`landing` / `classic`); ignored by the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// Editor draft metadata (`global` / `perTitle`); ignored by the build.
+    /// Editor draft metadata (`global` / `perTitle` / `none`); ignored by the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_mode: Option<String>,
+    /// Editor draft metadata: `Some(false)` = drafted without a title screen; ignored by the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_screen: Option<bool>,
+    /// Editor draft metadata: `Some(false)` = drafted without chapter menus; ignored by the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_menus: Option<bool>,
     pub menus: Vec<CustomMenu>,
 }
 
@@ -2657,7 +2663,7 @@ mod tests {
     }
 
     fn layout(menus: Vec<CustomMenu>) -> CustomLayout {
-        CustomLayout { version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, theme: None, settings_mode: None, menus }
+        CustomLayout { title_screen: None, chapter_menus: None, version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, theme: None, settings_mode: None, menus }
     }
 
     #[test]

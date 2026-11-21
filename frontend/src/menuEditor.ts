@@ -13,6 +13,9 @@ import {
   icon as newIcon,
   menuGroup,
   applyStyleBatch,
+  copyMenuClip,
+  pasteMenuClip,
+  type MenuClip,
   afterPlaybackStep,
   startButtonId,
   INDICATOR_ICONS,
@@ -126,6 +129,8 @@ const ZOOM_MAX = 4;
 const ZOOM_PRESETS = [0.5, 0.75, 1];
 
 /** localStorage can throw (private mode, blocked data); preferences are a convenience only. */
+const MENU_CLIP_KEY = "musadvd-editor-menu-clip";
+
 function readPref<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -176,10 +181,15 @@ export function mountMenuEditor(opts: EditorOptions) {
   // Draft options offered next to "new draft" / presets; preselected from the layout's own metadata.
   let draftTheme: MenuTheme = L.theme ?? "landing";
   let draftSettings: SettingsMode = L.settingsMode ?? (titles.length > 1 ? "global" : "perTitle");
-  const draftOpts = () => ({ theme: draftTheme, settingsMode: draftSettings });
+  let draftTitleScreen = L.titleScreen !== false;
+  let draftChapters = L.chapterMenus !== false;
+  const draftOpts = () => ({ theme: draftTheme, settingsMode: draftSettings, titleScreen: draftTitleScreen, chapterMenus: draftChapters });
   let selIds: string[] = [];
   let closed = false;
   let clipboard: LayoutElement[] = [];
+  let menuClip: MenuClip | null = readPref<MenuClip | null>(MENU_CLIP_KEY, null);
+  /** Menu the clipboard was copied from, and each copied element's layer index there. */
+  let clipboardFrom: { menuId: string; layers: number[] } | null = null;
   const collapsedGroups = new Set<string>();
   const groupPrefs = readPref<{ collapsed?: string[]; show?: boolean }>(GROUPS_KEY, {});
   const collapsedMenuGroups = new Set<string>(Array.isArray(groupPrefs.collapsed) ? groupPrefs.collapsed : []);
@@ -676,21 +686,62 @@ export function mountMenuEditor(opts: EditorOptions) {
     scheduleCheck();
   }
 
+  /** "Menus" dropdown: which menus a draft builds (title screen, chapter menus, settings menus). */
+  function menusPicker(): HTMLElement {
+    const box = el("details", { class: "ed-menus-pick" }) as HTMLDetailsElement;
+    const check = (label: string, value: boolean, set: (v: boolean) => void, disabled = false) =>
+      el("label", { class: disabled ? "is-disabled" : "" }, el("input", { type: "checkbox", checked: value, disabled, onchange: (ev: Event) => set((ev.target as HTMLInputElement).checked) }), label);
+    const radio = (value: SettingsMode, label: string) =>
+      el("label", {}, el("input", { type: "radio", name: "ed-draft-settings", checked: draftSettings === value, onchange: () => (draftSettings = value) }), label);
+    const outside = (ev: PointerEvent) => {
+      if (!box.contains(ev.target as Node)) box.open = false;
+    };
+    box.addEventListener("toggle", () => {
+      if (box.open) document.addEventListener("pointerdown", outside, true);
+      else document.removeEventListener("pointerdown", outside, true);
+    });
+    box.append(
+      el("summary", { class: "btn ed-draft-select", title: tr("editor.menusTip") }, tr("editor.menusPick")),
+      el(
+        "div",
+        { class: "ed-menus-pop" },
+        check(tr("editor.menusTitleScreen"), draftTitleScreen, (v) => (draftTitleScreen = v), draftTheme !== "landing"),
+        check(tr("editor.menusChapters"), draftChapters, (v) => (draftChapters = v)),
+        el("div", { class: "ed-menus-pop-head" }, tr("editor.menusSettings")),
+        radio("global", tr("editor.settingsGlobal")),
+        radio("perTitle", tr("editor.settingsPerTitle")),
+        radio("none", tr("editor.settingsNone")),
+        el(
+          "button",
+          {
+            class: "btn primary",
+            type: "button",
+            onclick: () => {
+              box.open = false;
+              void newDraft();
+            },
+          },
+          tr("editor.menusRebuild"),
+        ),
+        el("div", { class: "ed-menus-hint" }, tr("editor.menusHint")),
+      ),
+    );
+    return box;
+  }
+
   function renderHeader() {
     headerButtons.replaceChildren(
       el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
       el(
         "select",
-        { class: "btn ed-draft-select", title: tr("editor.themeTip"), "aria-label": tr("editor.themeTip"), onchange: (ev: Event) => (draftTheme = (ev.target as HTMLSelectElement).value as MenuTheme) },
+        { class: "btn ed-draft-select", title: tr("editor.themeTip"), "aria-label": tr("editor.themeTip"), onchange: (ev: Event) => {
+          draftTheme = (ev.target as HTMLSelectElement).value as MenuTheme;
+          renderHeader();
+        } },
         el("option", { value: "landing", selected: draftTheme === "landing" }, tr("editor.themeLanding")),
         el("option", { value: "classic", selected: draftTheme === "classic" }, tr("editor.themeClassic")),
       ),
-      el(
-        "select",
-        { class: "btn ed-draft-select", title: tr("editor.settingsModeTip"), "aria-label": tr("editor.settingsModeTip"), onchange: (ev: Event) => (draftSettings = (ev.target as HTMLSelectElement).value as SettingsMode) },
-        el("option", { value: "global", selected: draftSettings === "global" }, tr("editor.settingsGlobal")),
-        el("option", { value: "perTitle", selected: draftSettings === "perTitle" }, tr("editor.settingsPerTitle")),
-      ),
+      menusPicker(),
       el(
         "select",
         { class: "btn ed-draft-select", title: tr("menuEditor.presetTitle"), onchange: (ev: Event) => void applyPresetFromSelect(ev.target as HTMLSelectElement) },
@@ -867,6 +918,9 @@ export function mountMenuEditor(opts: EditorOptions) {
             el("button", { class: "btn", type: "button", title: tr("menuEditor.nachOben"), disabled: menuIdx === 0, onclick: () => moveMenu(-1) }, "↑"),
             el("button", { class: "btn", type: "button", title: tr("menuEditor.nachUnten"), disabled: menuIdx >= L.menus.length - 1, onclick: () => moveMenu(1) }, "↓"),
             el("button", { class: "btn", type: "button", onclick: duplicateMenu }, tr("menuEditor.duplizieren")),
+            el("button", { class: "btn", type: "button", title: tr("editor.copyMenuTip"), onclick: copyMenu }, tr("editor.copyMenu")),
+            el("button", { class: "btn", type: "button", disabled: !menuClip, title: tr("editor.pasteMenuOverTip"), onclick: () => pasteMenu(true) }, tr("editor.pasteMenuOver")),
+            el("button", { class: "btn", type: "button", disabled: !menuClip, onclick: () => pasteMenu(false) }, tr("editor.pasteMenuNew")),
             el("button", { class: "btn danger", type: "button", disabled: L.menus.length <= 1, onclick: deleteMenu }, tr("menuEditor.loeschen")),
           )
         : null,
@@ -4065,6 +4119,10 @@ export function mountMenuEditor(opts: EditorOptions) {
       items.push([tr("editor.ctxSetBackground"), () => setBackgroundImage(src)]);
     }
     items.push(
+      [tr("editor.ctxCopy"), () => {
+        copyElements(sel);
+        flash(tr("editor.copiedHint"), "ok");
+      }],
       [tr("menuEditor.duplizieren"), () => addCopies(sel)],
       [tr("editor.ctxFront"), () => moveToEdge(sel, true)],
       [tr("editor.ctxBack"), () => moveToEdge(sel, false)],
@@ -4117,7 +4175,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** "Batch apply": copies the chosen style parts of this menu to the same-kind menus / every menu. */
   function openBatchDialog(m: CustomMenu) {
     let scope: BatchScope = "group";
-    const flags = { background: false, typography: true, navIcons: false, positions: false };
+    const flags = { background: false, music: false, typography: true, navIcons: false, positions: false };
     const overlay = el("div", { class: "ed-batch", role: "dialog", "aria-modal": "true", "aria-label": tr("editor.batchApply") });
     const done = () => overlay.remove();
     const check = (key: keyof typeof flags, label: string) =>
@@ -4132,6 +4190,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         radio("group", tr("editor.batchScopeGroup")),
         radio("all", tr("editor.batchScopeAll")),
         check("background", tr("editor.batchBackground")),
+        check("music", tr("editor.batchMusic")),
         check("typography", tr("editor.batchTypography")),
         check("navIcons", tr("editor.batchNavIcons")),
         check("positions", tr("editor.batchPositions")),
@@ -4247,7 +4306,16 @@ export function mountMenuEditor(opts: EditorOptions) {
       c.nav = Object.keys(nav).length ? nav : null;
     }
   }
-  function addCopies(src: LayoutElement[]) {
+  function copyElements(sel: LayoutElement[]) {
+    if (sel.length === 0) return;
+    clipboard = structuredClone(sel);
+    clipboardFrom = { menuId: menu().id, layers: sel.map((e) => menu().elements.indexOf(e)) };
+    // Replace a stale OS image so the next paste event carries the copied elements, not that picture.
+    navigator.clipboard?.writeText("musadvd-elements").catch(() => undefined);
+  }
+  /** Copies `src` into the current menu: shifted by 16 on the same menu; on another menu (paste of
+   *  elements copied elsewhere) at the same position and layer, so headers and art line up. */
+  function addCopies(src: LayoutElement[], inPlace: number[] | null = null) {
     if (src.length === 0) return;
     if (menu().elements.filter(isButton).length + src.filter(isButton).length > maxButtons(tv)) {
       flash(tr("editor.pasteTooManyButtons", { max: maxButtons(tv) }), "error");
@@ -4264,9 +4332,20 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
       return c;
     });
-    remapNav(copies, new Map(src.map((e, i) => [e.id, copies[i].id])));
-    shiftBy(copies, 16, 16);
-    menu().elements.push(...copies);
+    const idMap = new Map(src.map((e, i) => [e.id, copies[i].id]));
+    remapNav(copies, idMap);
+    const els = menu().elements;
+    for (const c of copies) {
+      // An indicator follows its copied button, or a button with the same id here; else it is free.
+      if (c.indicatorFor) c.indicatorFor = idMap.get(c.indicatorFor) ?? (els.some((e) => e.id === c.indicatorFor && isButton(e)) ? c.indicatorFor : null);
+    }
+    if (inPlace) {
+      // Ascending layers, so each insert lands where the original stood relative to the earlier ones.
+      copies.map((c, i) => [c, inPlace[i] ?? els.length] as const).sort((a, b) => a[1] - b[1]).forEach(([c, at]) => els.splice(Math.min(at, els.length), 0, c));
+    } else {
+      shiftBy(copies, 16, 16);
+      els.push(...copies);
+    }
     selIds = copies.map((c) => c.id);
     pruneGroups();
     renderAll();
@@ -4436,6 +4515,27 @@ export function mountMenuEditor(opts: EditorOptions) {
     menuIdx += 1;
     renderAll();
   }
+  /** Whole-menu clipboard; kept in localStorage so it survives a redraft or reopening the editor. */
+  function copyMenu() {
+    menuClip = copyMenuClip(L, menu().id);
+    writePref(MENU_CLIP_KEY, menuClip);
+    flash(tr("editor.menuCopied", { name: menu().name }), "ok");
+    renderMenus();
+  }
+  function pasteMenu(over: boolean) {
+    if (!menuClip) return;
+    const buttons = menuClip.menu.elements.filter(isButton).length;
+    if (buttons > maxButtons(tv)) {
+      flash(tr("editor.pasteTooManyButtons", { max: maxButtons(tv) }), "error");
+      return;
+    }
+    remember();
+    const { unlinked } = pasteMenuClip(L, menuClip, over ? { replaceId: menu().id } : { insertAfter: menuIdx });
+    if (!over) menuIdx += 1;
+    selIds = [];
+    renderAll();
+    flash(unlinked ? tr("editor.menuPastedUnlinked", { n: unlinked }) : tr("editor.menuPasted"), unlinked ? "error" : "ok");
+  }
   function deleteMenu() {
     if (L.menus.length <= 1) return;
     remember();
@@ -4536,6 +4636,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       L = loaded;
       draftTheme = L.theme ?? draftTheme;
       draftSettings = L.settingsMode ?? draftSettings;
+      draftTitleScreen = L.titleScreen !== false;
+      draftChapters = L.chapterMenus !== false;
       menuIdx = 0;
       selIds = [];
       if (remoteMode) resetRemoteSession();
@@ -4681,9 +4783,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       addCopies(sel);
     } else if (ctrl && (key === "c" || key === "x")) {
       ev.preventDefault();
-      clipboard = structuredClone(sel);
-      // Replace a stale OS image so the next paste event carries the copied elements, not that picture.
-      navigator.clipboard?.writeText("musadvd-elements").catch(() => undefined);
+      copyElements(sel);
       if (key === "x") removeElements(sel);
     } else if (ctrl && key === "g") {
       ev.preventDefault();
@@ -4721,7 +4821,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       void pasteImageFile(file, item.type);
     } else if (clipboard.length > 0) {
       ev.preventDefault();
-      addCopies(clipboard);
+      addCopies(clipboard, clipboardFrom && clipboardFrom.menuId !== menu().id ? clipboardFrom.layers : null);
     }
   }
   document.addEventListener("paste", onPaste);

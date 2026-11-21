@@ -1659,7 +1659,7 @@ mod tests {
             group: None,
             elements: vec![],
         };
-        let l = musadvd::layout::CustomLayout {
+        let l = musadvd::layout::CustomLayout { title_screen: None, chapter_menus: None,
             version: 1,
             canvas: musadvd::layout::Canvas::default(),
             highlight: musadvd::layout::Highlight::default(),

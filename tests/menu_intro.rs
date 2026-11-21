@@ -371,7 +371,7 @@ mod build {
         let key = |t: f64, (x, y, w, h): (f64, f64, f64, f64), opacity: f32| ElementKey { t, x, y, w, h, opacity };
         let headline = (100.0, 100.0, 700.0, 120.0);
         let keys = |v: Vec<ElementKey>| if with_keys { v } else { Vec::new() };
-        CustomLayout {
+        CustomLayout { title_screen: None, chapter_menus: None,
             version: 1,
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),

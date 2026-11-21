@@ -2462,7 +2462,7 @@ mod tests {
             group: None,
             elements: vec![],
         };
-        let l = crate::layout::CustomLayout {
+        let l = crate::layout::CustomLayout { title_screen: None, chapter_menus: None,
             version: 1,
             canvas: crate::layout::Canvas::default(),
             highlight: crate::layout::Highlight::default(),

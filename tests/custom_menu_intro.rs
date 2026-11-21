@@ -78,7 +78,7 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
         elements: vec![elem],
     };
 
-    let layout = CustomLayout {
+    let layout = CustomLayout { title_screen: None, chapter_menus: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),
@@ -236,7 +236,7 @@ fn easter_egg_transparent_mask() {
         elements: vec![normal_btn, easter_egg_btn],
     };
 
-    let layout = CustomLayout {
+    let layout = CustomLayout { title_screen: None, chapter_menus: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),
@@ -365,7 +365,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         group: None,
         elements: vec![video, play],
     };
-    let layout = CustomLayout {
+    let layout = CustomLayout { title_screen: None, chapter_menus: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),

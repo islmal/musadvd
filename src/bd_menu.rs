@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     fn layout() -> CustomLayout {
-        CustomLayout {
+        CustomLayout { title_screen: None, chapter_menus: None,
             version: 1,
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),

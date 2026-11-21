@@ -225,13 +225,17 @@ export interface CustomLayout {
   /** Draft metadata (ignored by the build): theme and settings-menu structure it was made with. */
   theme?: MenuTheme;
   settingsMode?: SettingsMode;
+  /** Draft metadata: false = no separate title screen (landing theme); omitted = true. */
+  titleScreen?: boolean;
+  /** Draft metadata: false = no chapter menus; omitted = true. */
+  chapterMenus?: boolean;
   menus: CustomMenu[];
 }
 
 /** `landing` = retail single-screen main menu (default); `classic` = 6-thumbnail grid. */
 export type MenuTheme = "landing" | "classic";
-/** `global` = one shared audio/subtitle menu for the disc; `perTitle` = one per title. */
-export type SettingsMode = "global" | "perTitle";
+/** `global` = one shared audio/subtitle menu for the disc; `perTitle` = one per title; `none` = no settings menus. */
+export type SettingsMode = "global" | "perTitle" | "none";
 
 /** A selected audio track or subtitle of a title: source stream index and a label. */
 export interface TrackRef {
@@ -657,7 +661,7 @@ function buildTitleSubmenus(
   const sy = H / 576;
   const Y = (v: number) => Math.round(v * sy);
   const n = t.index;
-  const settingsId = !global && needsSettings(t) ? (nav.settingsId ?? allocId("m")) : null;
+  const settingsId = !global && nav.settingsMode !== "none" && needsSettings(t) ? (nav.settingsId ?? allocId("m")) : null;
   const shaded: Background = style?.flatBg
     ? { color: style.bgColor, image: null, video: null, blur: 0, gradientOverlay: "none" }
     : { color: style?.bgColor ?? "#14192B", image: null, video: { title: n, startSecs: null }, blur: 14 };
@@ -737,6 +741,10 @@ export interface DraftOptions {
   theme?: MenuTheme;
   /** Default `global` for several titles on the landing theme, else `perTitle`. */
   settingsMode?: SettingsMode;
+  /** Landing theme: build the separate title screen (default true); off = the episodes page is the main menu. */
+  titleScreen?: boolean;
+  /** Build chapter menus for titles with chapters (default true). */
+  chapterMenus?: boolean;
 }
 
 const ITEMS_PER_PAGE = 6;
@@ -763,11 +771,14 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
   const { width: W, height: H } = canvas;
   const sy = H / 576;
   const Y = (v: number) => Math.round(v * sy);
-  const landing = theme === "landing";
+  // Without a title screen the landing theme builds the grid pages as its main menu.
+  const landing = theme === "landing" && opts.titleScreen !== false;
+  const chapterMenus = opts.chapterMenus !== false;
+  const hasChapters = (t: EditorTitle) => chapterMenus && t.chapters > 1;
   const menus: CustomMenu[] = [];
   const pageCount = Math.max(1, Math.ceil(titles.length / ITEMS_PER_PAGE));
   // A title gets VTSM menus when it has chapters to choose or (per-title mode) streams to select.
-  const needsRoot = (t: EditorTitle) => t.chapters > 1 || (settingsMode === "perTitle" && needsSettings(t));
+  const needsRoot = (t: EditorTitle) => hasChapters(t) || (settingsMode === "perTitle" && needsSettings(t));
   const rootIds = titles.map((t) => (needsRoot(t) ? newId("m") : null));
   const settingsIds = titles.map((t) => (settingsMode === "perTitle" && needsSettings(t) ? newId("m") : null));
 
@@ -791,7 +802,7 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
       const y = Y(120 + Math.floor(i / 3) * 180);
       menu.elements.push(video(x, y, 180, Y(112), n, null, { type: "playTitle", title: n }));
       const root = rootIds[p * ITEMS_PER_PAGE + i];
-      const caption = root ? `${t.label} · ${t.chapters > 1 ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
+      const caption = root ? `${t.label} · ${hasChapters(t) ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
       menu.elements.push(text(x, y + Y(118), 180, Y(30), caption, { size: 18, action: root ? { type: "menu", menu: root } : null }));
     });
   };
@@ -805,7 +816,7 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
     if (titles.length === 1) buttons.push([tr("layout.play"), { type: "playTitle", title: titles[0].index }]);
     else if (titles.length > 1) buttons.push([tr("layout.alleAbspielen"), { type: "playAll" }]);
     if (titles.length > 1) buttons.push([tr("layout.episodes"), { type: "menu", menu: pageMenus[0].id }]);
-    if (titles.length === 1 && rootIds[0] && titles[0].chapters > 1) buttons.push([tr("layout.kapitel2"), { type: "menu", menu: rootIds[0] }]);
+    if (titles.length === 1 && rootIds[0] && hasChapters(titles[0])) buttons.push([tr("layout.kapitel2"), { type: "menu", menu: rootIds[0] }]);
     if (settingsMenu) buttons.push([tr("layout.subsAudio"), { type: "menu", menu: settingsMenu.id }]);
     else if (titles.length === 1 && settingsIds[0]) buttons.push([tr("layout.subsAudio"), { type: "menu", menu: settingsIds[0] }]);
     buttons.forEach(([label, action], i) => {
@@ -833,6 +844,10 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
     const bottom = Y(490);
     if (titles.length > 1 && p === 0) {
       menu.elements.push(text(60, bottom, 220, Y(36), tr("layout.alleAbspielen"), { size: 22, align: "left", action: { type: "playAll" } }));
+    }
+    // The grid is the main menu here, so it links the disc-wide settings (the landing screen would).
+    if (settingsMenu && p === 0) {
+      menu.elements.push(text(300, bottom, 200, Y(36), tr("layout.subsAudio"), { size: 22, action: { type: "menu", menu: settingsMenu.id } }));
     }
     if (p > 0) {
       menu.elements.push(text(300, bottom, 140, Y(36), tr("layout.zurueck"), { size: 22, action: { type: "menu", menu: pageMenus[p - 1].id } }));
@@ -866,10 +881,14 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
     const rootId = rootIds[i];
     if (!rootId) return;
     const main = landing ? mainId : pageMenus[Math.floor(i / ITEMS_PER_PAGE)].id;
-    menus.push(...buildTitleSubmenus(t, main, canvas, tv, rootId, newId, undefined, { theme, settingsMode, settingsId: settingsIds[i] ?? undefined }));
+    // Without chapter menus a title's root page is only its settings entry (no chapter grid).
+    const sub = hasChapters(t) ? t : { ...t, chapters: 1 };
+    menus.push(...buildTitleSubmenus(sub, main, canvas, tv, rootId, newId, undefined, { theme, settingsMode, settingsId: settingsIds[i] ?? undefined }));
   });
 
   const layout: CustomLayout = { version: 1, canvas, highlight: { color: "#FFD200", selectColor: "#FF6A00", opacity: 0.8 }, theme, settingsMode, menus };
+  if (opts.titleScreen === false) layout.titleScreen = false;
+  if (!chapterMenus) layout.chapterMenus = false;
   if (preset) applyPreset(layout, preset);
   // After the preset: it may change the font, and thus the text width.
   for (const m of layout.menus) {
@@ -936,7 +955,10 @@ export function applyStyleToSimilar(layout: CustomLayout, menuId: string): numbe
 export type BatchScope = "group" | "all";
 export interface BatchOptions {
   scope: BatchScope;
+  /** Background picture/video/colour plus loop length and play mode (not the music). */
   background: boolean;
+  /** The menu's music track only; each menu keeps its own copy and can change it afterwards. */
+  music: boolean;
   typography: boolean;
   navIcons: boolean;
   positions: boolean;
@@ -986,6 +1008,7 @@ export function applyStyleBatch(layout: CustomLayout, sourceMenuId: string, opts
   for (const m of layout.menus) {
     if (m === src || (opts.scope === "group" && menuGroup(m) !== menuGroup(src))) continue;
     const before = JSON.stringify(m);
+    if (opts.music) m.audio = clone(src.audio);
     if (opts.background) {
       const bg = src.background;
       m.background = { ...m.background, color: bg.color, blur: bg.blur };
@@ -993,7 +1016,6 @@ export function applyStyleBatch(layout: CustomLayout, sourceMenuId: string, opts
         if (bg[k] === undefined) delete m.background[k];
         else Object.assign(m.background, { [k]: clone(bg[k]) });
       }
-      m.audio = clone(src.audio);
       for (const k of ["durationSecs", "playMode", "timeoutSecs"] as const) {
         if (src[k] === undefined) delete m[k];
         else Object.assign(m, { [k]: src[k] });
@@ -1018,6 +1040,67 @@ export function applyStyleBatch(layout: CustomLayout, sourceMenuId: string, opts
     if (JSON.stringify(m) !== before) changed++;
   }
   return changed;
+}
+
+/** A whole menu on the editor's menu clipboard, with the names of the menus its buttons opened. */
+export interface MenuClip {
+  menu: CustomMenu;
+  /** Menu id → name in the layout it was copied from (to relink buttons after a redraft). */
+  names: Record<string, string>;
+}
+
+export function copyMenuClip(layout: CustomLayout, menuId: string): MenuClip | null {
+  const m = layout.menus.find((x) => x.id === menuId);
+  return m ? { menu: structuredClone(m), names: Object.fromEntries(layout.menus.map((x) => [x.id, x.name])) } : null;
+}
+
+/**
+ * Pastes `clip` into `layout`: over the menu `replaceId` (keeping its id, role, title and group so
+ * links to it still work) or as a new menu after `insertAfter`. Elements get new ids; a button
+ * that opened a menu that no longer exists is relinked to the menu of the same name, else loses
+ * its action (`unlinked` counts those).
+ */
+export function pasteMenuClip(
+  layout: CustomLayout,
+  clip: MenuClip,
+  where: { replaceId: string } | { insertAfter: number },
+  allocId: (prefix: string) => string = newId,
+): { menu: CustomMenu; unlinked: number } {
+  const menu = structuredClone(clip.menu);
+  const idMap = new Map(menu.elements.map((e) => [e.id, allocId("d")]));
+  let unlinked = 0;
+  for (const e of menu.elements) {
+    e.id = idMap.get(e.id)!;
+    if (e.nav) {
+      const nav: NavOverride = {};
+      for (const d of ["up", "down", "left", "right"] as const) {
+        const to = e.nav[d] ? idMap.get(e.nav[d] as string) : undefined;
+        if (to) nav[d] = to;
+      }
+      e.nav = Object.keys(nav).length ? nav : null;
+    }
+    if (e.indicatorFor) e.indicatorFor = idMap.get(e.indicatorFor) ?? null;
+    if (e.action?.type === "menu") {
+      const target = e.action.menu;
+      if (layout.menus.some((m) => m.id === target)) continue;
+      const byName = layout.menus.find((m) => m.name === clip.names[target]);
+      if (byName) e.action = { ...e.action, menu: byName.id };
+      else {
+        e.action = null;
+        unlinked++;
+      }
+    }
+  }
+  if ("replaceId" in where) {
+    const i = layout.menus.findIndex((m) => m.id === where.replaceId);
+    const old = layout.menus[i];
+    Object.assign(menu, { id: old.id, role: old.role, title: old.title ?? null, group: old.group ?? null });
+    layout.menus[i] = menu;
+  } else {
+    menu.id = allocId("m");
+    layout.menus.splice(where.insertAfter + 1, 0, menu);
+  }
+  return { menu, unlinked };
 }
 
 /** The button focused on entry: the first button (element order) that is not auto-execute. Mirrors Rust `focus_pre`. */
@@ -1625,7 +1708,8 @@ export function syncLayoutWithTitles(
     const needsAdd = !matchedNew.has(t.index) || (!hasPlayTitle(t.index) && !hasRootMenu(t.index));
     if (!needsAdd) continue;
 
-    const needsVtsm = t.chapters > 1 || (!globalSettings && needsSettings(t));
+    const chap = out.chapterMenus !== false && t.chapters > 1;
+    const needsVtsm = chap || (!globalSettings && nav.settingsMode !== "none" && needsSettings(t));
     const neededBtns = needsVtsm ? 2 : 1;
 
     // New thumbnails go to the last episodes page (landing) or title page (classic), never to
@@ -1704,7 +1788,7 @@ export function syncLayoutWithTitles(
     let rootId: string | null = null;
     if (needsVtsm) {
       rootId = allocId("m");
-      const submenus = buildTitleSubmenus(t, targetPage.id, out.canvas, tv, rootId, allocId, subStyle, nav);
+      const submenus = buildTitleSubmenus(chap ? t : { ...t, chapters: 1 }, targetPage.id, out.canvas, tv, rootId, allocId, subStyle, nav);
       out.menus.push(...submenus);
     }
 
@@ -1719,7 +1803,7 @@ export function syncLayoutWithTitles(
     );
     vidEl.id = allocId("v");
 
-    const captionLabel = rootId ? `${t.label} · ${t.chapters > 1 ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
+    const captionLabel = rootId ? `${t.label} · ${chap ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
     const capW = slot.cap.x1 - slot.cap.x0;
     const capEl = text(slot.cap.x0, slot.cap.y0, capW, slot.cap.y1 - slot.cap.y0, captionLabel, {
       id: allocId("t"),

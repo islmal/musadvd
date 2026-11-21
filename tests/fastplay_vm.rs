@@ -277,7 +277,7 @@ fn custom_layout_fastplay_page_rendering() {
         elements: vec![elem],
     };
 
-    let custom_layout = CustomLayout {
+    let custom_layout = CustomLayout { title_screen: None, chapter_menus: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),

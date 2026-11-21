@@ -3,6 +3,8 @@ import {
   afterPlaybackStep,
   applyStyleBatch,
   applyStyleToSimilar,
+  copyMenuClip,
+  pasteMenuClip,
   navSlot,
   startButtonId,
   canvasSize,
@@ -121,6 +123,73 @@ describe("chapterLabel", () => {
     expect(chapterLabel(t, 1)).toBe("Intro");
     expect(chapterLabel(t, 2)).toBe(chapterLabel(undefined, 2));
     expect(chapterLabel(t, 3)).toBe(chapterLabel(undefined, 3));
+  });
+});
+
+describe("menu clipboard", () => {
+  it("keeps a mock-up across a redraft: pasted over the new main menu, links relinked by name", () => {
+    const eps = [1, 2].map((n) => title(n, `e${n}.mkv`));
+    const old = draftLayout(eps, "PAL", "Disc");
+    const mock = old.menus[0];
+    mock.background.color = "#F5A800";
+    const episodes = old.menus.find((m) => menuGroup(m) === "episodes")!;
+    mock.elements.push({ ...(mock.elements[0] as LayoutElement), id: "custom", action: { type: "menu", menu: episodes.id } });
+    mock.elements.push({ ...(mock.elements[0] as LayoutElement), id: "gone", action: { type: "menu", menu: "deleted" } });
+    const ind = { ...(mock.elements[0] as LayoutElement), id: "ind", indicatorFor: "custom", action: null };
+    mock.elements.push(ind);
+    const clip = copyMenuClip(old, mock.id)!;
+
+    const fresh = draftLayout(eps, "PAL", "Disc");
+    const target = fresh.menus[0];
+    const { menu, unlinked } = pasteMenuClip(fresh, clip, { replaceId: target.id });
+    expect(unlinked).toBe(1);
+    expect([menu.id, menu.role, menu.background.color, fresh.menus[0]]).toEqual([target.id, "title", "#F5A800", menu]);
+    const custom = menu.elements[menu.elements.length - 3];
+    const newEpisodes = fresh.menus.find((m) => menuGroup(m) === "episodes")!;
+    expect(custom.action).toEqual({ type: "menu", menu: newEpisodes.id });
+    expect(menu.elements[menu.elements.length - 2].action).toBeNull();
+    expect(menu.elements[menu.elements.length - 1].indicatorFor).toBe(custom.id);
+    expect(new Set(menu.elements.map((e) => e.id)).size).toBe(menu.elements.length);
+    expect(menu.elements.some((e) => e.id === "custom")).toBe(false);
+
+    const n = fresh.menus.length;
+    const added = pasteMenuClip(fresh, clip, { insertAfter: 0 }).menu;
+    expect([fresh.menus.length, fresh.menus[1], added.id === target.id]).toEqual([n + 1, added, false]);
+  });
+});
+
+describe("draft menu choices", () => {
+  const tracks = { audioTracks: [{ source: 1, label: "EN" }, { source: 2, label: "DE" }], subtitleTracks: [{ source: 3, label: "EN" }] };
+  const eps = [1, 2, 3].map((n) => title(n, `e${n}.mkv`, { chapters: 4, ...tracks }));
+  const actions = (l: CustomLayout) => l.menus.flatMap((m) => m.elements.map((e) => e.action?.type));
+
+  it("defaults build title screen, chapter menus and the global settings menu", () => {
+    const l = draftLayout(eps, "PAL", "Disc");
+    expect(l.menus.map(menuGroup)).toEqual(expect.arrayContaining(["main", "episodes", "chapters", "settings"]));
+    expect([l.titleScreen, l.chapterMenus]).toEqual([undefined, undefined]);
+  });
+  it("without a title screen the grid is the main menu and links the global settings", () => {
+    const l = draftLayout(eps, "PAL", "Disc", undefined, { titleScreen: false });
+    expect(l.menus.some((m) => menuGroup(m) === "episodes")).toBe(false);
+    const settings = l.menus.find((m) => menuGroup(m) === "settings")!;
+    expect(l.menus[0].elements.some((e) => e.action?.type === "menu" && e.action.menu === settings.id)).toBe(true);
+    expect(l.titleScreen).toBe(false);
+  });
+  it("without chapter menus no chapter grids; per-title settings keep a root page", () => {
+    const l = draftLayout(eps, "PAL", "Disc", undefined, { chapterMenus: false, settingsMode: "perTitle" });
+    expect(actions(l)).not.toContain("playChapter");
+    expect(l.menus.filter((m) => m.role === "root")).toHaveLength(3);
+    expect(l.chapterMenus).toBe(false);
+    expect(actions(draftLayout(eps, "PAL", "Disc", undefined, { chapterMenus: false, settingsMode: "global" }))).not.toContain("playChapter");
+    expect(draftLayout(eps, "PAL", "Disc", undefined, { chapterMenus: false, settingsMode: "global" }).menus.some((m) => m.role === "root")).toBe(false);
+  });
+  it("settings none builds no settings menus at all", () => {
+    for (const theme of ["landing", "classic"] as const) {
+      const l = draftLayout(eps, "PAL", "Disc", undefined, { theme, settingsMode: "none" });
+      expect(l.menus.some((m) => m.role === "settings" || menuGroup(m) === "settings")).toBe(false);
+      expect(actions(l)).not.toEqual(expect.arrayContaining(["setGlobalAudio"]));
+      expect(actions(l)).not.toContain("setAudio");
+    }
   });
 });
 
@@ -363,7 +432,7 @@ describe("batch styling, start button and after-playback", () => {
     return m;
   };
   const mk = () => ({ ...draftLayout([], "PAL", "x"), menus: [menu("a", "episodes"), menu("b", "episodes"), menu("c", "chapters")] }) as CustomLayout;
-  const none = { scope: "group", background: false, typography: false, navIcons: false, positions: false } as const;
+  const none = { scope: "group", background: false, music: false, typography: false, navIcons: false, positions: false } as const;
 
   it("scope group vs all, and each checkbox leaves the rest alone", () => {
     const l = mk();
@@ -373,7 +442,13 @@ describe("batch styling, start button and after-playback", () => {
     a.playMode = "once";
     a.timeoutSecs = 3;
     expect(applyStyleBatch(l, "a", { ...none, background: true })).toBe(1);
-    expect([b.background.color, b.audio, b.playMode, b.timeoutSecs]).toEqual(["#101010", a.audio, "once", 3]);
+    expect([b.background.color, b.audio, b.playMode, b.timeoutSecs]).toEqual(["#101010", { type: "none" }, "once", 3]);
+    // Music alone: the track is copied (as an own copy), nothing else changes.
+    b.background.color = "#202020";
+    expect(applyStyleBatch(l, "a", { ...none, music: true })).toBe(1);
+    expect([b.background.color, b.audio]).toEqual(["#202020", a.audio]);
+    expect(b.audio).not.toBe(a.audio);
+    b.background.color = "#101010";
     expect(c.background.color).not.toBe("#101010");
     expect(applyStyleBatch(l, "a", { ...none, scope: "all", background: true })).toBe(1);
     expect(c.playMode).toBe("once");

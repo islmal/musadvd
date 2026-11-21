@@ -3454,3 +3454,53 @@ input.time {
 .ed-invalid {
   outline: 1px solid #e5484d;
 }
+
+/* "Menus" draft dropdown in the editor header. */
+.ed-menus-pick {
+  position: relative;
+  flex-shrink: 0;
+}
+.ed-menus-pick > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.ed-menus-pick > summary::-webkit-details-marker {
+  display: none;
+}
+.ed-menus-pick > summary::after {
+  content: " ▾";
+}
+.ed-menus-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 240px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--panel, #222);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  white-space: nowrap;
+}
+.ed-menus-pop label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ed-menus-pop label.is-disabled {
+  opacity: 0.5;
+}
+.ed-menus-pop-head {
+  margin-top: 4px;
+  font-weight: 600;
+}
+.ed-menus-hint {
+  max-width: 260px;
+  white-space: normal;
+  font-size: 0.85em;
+  opacity: 0.75;
+}

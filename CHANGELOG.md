@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Menus dropdown** in the menu editor: choose whether a draft builds a title screen, chapter menus and global, per-title or no audio/subtitle menus, and rebuild the menus from there.
+- **Copy and paste a whole menu**: "Copy menu" keeps a menu (also across a rebuild or closing the editor); "Paste over" puts it in place of a drafted menu, relinking its buttons by menu name.
+- **Paste in place**: elements copied from one menu are pasted on another at the same position and layer; a "Copy" item in the element context menu.
+- **Batch apply music**: the music track has its own checkbox, separate from the background.
+
+### Fixed
+
+- The classic grid links the global audio/subtitle menu (it was unreachable without the landing title screen).
+
 ## [1.1.0] - 2026-11-21
 
 ### Added
