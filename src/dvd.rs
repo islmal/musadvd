@@ -492,6 +492,9 @@ pub struct StreamSelection {
     /// Blu-ray only: quality weight of the encoded video (`low` / `high`, else normal), see [`quality_weight`].
     #[serde(default)]
     pub bd_quality: Option<String>,
+    /// End action of this title (overrides the disc-wide playback options).
+    #[serde(default)]
+    pub after_playback: crate::author::AfterPlayback,
     /// Per-title picture adjustments (override project defaults when `Some`).
     #[serde(default)]
     pub denoise: Option<f32>,
@@ -2427,7 +2430,7 @@ mod tests {
         assert!((estimate_menu_mb(2, false, 25.0) - 7.0 * 0.15).abs() < 1e-9);
         assert!((estimate_menu_mb(2, true, 25.0) - (7.0 * 0.15 + 4.0 * 5.5)).abs() < 1e-9);
 
-        let still_menu = crate::layout::CustomMenu {
+        let still_menu = crate::layout::CustomMenu { play_mode: None, timeout_secs: None,
             id: "m1".into(),
             name: "Main".into(),
             role: crate::layout::MenuRole::Title,
@@ -2439,7 +2442,7 @@ mod tests {
             group: None,
             elements: vec![],
         };
-        let motion_menu = crate::layout::CustomMenu {
+        let motion_menu = crate::layout::CustomMenu { play_mode: None, timeout_secs: None,
             id: "m2".into(),
             name: "Chapters".into(),
             role: crate::layout::MenuRole::Root,

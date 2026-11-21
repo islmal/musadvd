@@ -269,7 +269,7 @@ fn text_rect(g: &Graphic, style: Option<&TextStyle>) -> (f64, f64, f64, f64) {
 }
 
 fn element(id: String, content: Content, (x, y, w, h): (f64, f64, f64, f64), opacity: f32) -> Element {
-    Element { id, content, x, y, w, h, rotation: 0.0, opacity, action: None, highlight: None, group: None, intro: Vec::new(), easter_egg: false, nav: None, auto_execute: false }
+    Element { indicator_for: None, id, content, x, y, w, h, rotation: 0.0, opacity, action: None, highlight: None, group: None, intro: Vec::new(), easter_egg: false, nav: None, auto_execute: false }
 }
 
 /// Whether `clip` left the box alone. Not `==`: it recomputes the size as `(x + w) - x`, which is
@@ -515,7 +515,7 @@ pub fn layout_from_template(
         let ctx = Ctx { kind, title, page_no, pages };
         let elements = nav.page_elements(ctx, src, aspect, thumbnails, warnings);
         let intro_end = elements.iter().flat_map(|e| e.intro.iter().map(|k| k.t)).fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
-        menus.push(CustomMenu {
+        menus.push(CustomMenu { play_mode: None, timeout_secs: None,
             id: menu_id(kind, title, page_no),
             name,
             role: if matches!(kind, Kind::Titles | Kind::Episodes | Kind::Bonus) { MenuRole::Title } else if kind == Kind::Settings { MenuRole::Settings } else { MenuRole::Root },

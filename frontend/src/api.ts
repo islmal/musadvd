@@ -220,6 +220,8 @@ export interface InputConfig {
   bdRate?: string | null;
   bdVideo?: string | null;
   bdQuality?: string | null;
+  /** End action of the title ("default" | "next" | "mainMenu" | "titleMenu" | "loop"); omitted = "default". */
+  afterPlayback?: string;
   denoise?: number | null;
   brightness?: number | null;
   contrast?: number | null;

@@ -221,7 +221,7 @@ fn custom_layout_fastplay_page_rendering() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let elem = Element {
+    let elem = Element { indicator_for: None,
         id: "btn_play".into(),
         content: layout::Content::Text {
             text: "Film abspielen".into(),
@@ -261,7 +261,7 @@ fn custom_layout_fastplay_page_rendering() {
         auto_execute: false,
     };
 
-    let main_menu = CustomMenu {
+    let main_menu = CustomMenu { play_mode: None, timeout_secs: None,
         id: "main".into(),
         name: "Main menu".into(),
         role: MenuRole::Title,

@@ -22,7 +22,7 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let elem = Element {
+    let elem = Element { indicator_for: None,
         id: "btn_play".into(),
         content: layout::Content::Text {
             text: "Starten".into(),
@@ -65,7 +65,7 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
         auto_execute: false,
     };
 
-    let menu = CustomMenu {
+    let menu = CustomMenu { play_mode: None, timeout_secs: None,
         id: "main".into(),
         name: "Intro Menu".into(),
         role: MenuRole::Title,
@@ -142,7 +142,7 @@ fn easter_egg_transparent_mask() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let normal_btn = Element {
+    let normal_btn = Element { indicator_for: None,
         id: "btn_normal".into(),
         content: layout::Content::Text {
             text: "Film".into(),
@@ -182,7 +182,7 @@ fn easter_egg_transparent_mask() {
         auto_execute: false,
     };
 
-    let easter_egg_btn = Element {
+    let easter_egg_btn = Element { indicator_for: None,
         id: "btn_secret".into(),
         content: layout::Content::Text {
             text: "Geheim".into(),
@@ -222,7 +222,7 @@ fn easter_egg_transparent_mask() {
         auto_execute: false,
     };
 
-    let menu = CustomMenu {
+    let menu = CustomMenu { play_mode: None, timeout_secs: None,
         id: "main".into(),
         name: "Egg Menu".into(),
         role: MenuRole::Title,
@@ -293,7 +293,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let video = Element {
+    let video = Element { indicator_for: None,
         id: "clip".into(),
         content: layout::Content::Video { title: 0, start_secs: Some(2.0), fit: Fit::Contain, path: Some(el_file.clone()) },
         x: 400.0,
@@ -310,7 +310,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         nav: None,
         auto_execute: false,
     };
-    let play = Element {
+    let play = Element { indicator_for: None,
         id: "play".into(),
         content: layout::Content::Text {
             text: "Film".into(),
@@ -349,7 +349,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         nav: None,
         auto_execute: false,
     };
-    let menu = CustomMenu {
+    let menu = CustomMenu { play_mode: None, timeout_secs: None,
         id: "main".into(),
         name: "Extern".into(),
         role: MenuRole::Title,

@@ -954,7 +954,7 @@ mod tests {
     }
 
     fn button(x: f64, y: f64, action: Action) -> Element {
-        Element {
+        Element { indicator_for: None,
             id: String::new(),
             x,
             y,
@@ -996,7 +996,7 @@ mod tests {
     }
 
     fn menu(id: &str, role: MenuRole, title: Option<u32>, elements: Vec<Element>) -> CustomMenu {
-        CustomMenu {
+        CustomMenu { play_mode: None, timeout_secs: None,
             id: id.into(),
             name: id.into(),
             role,

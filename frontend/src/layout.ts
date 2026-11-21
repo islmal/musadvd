@@ -66,6 +66,9 @@ interface ElementBase {
   nav?: NavOverride | null;
   /** Run the action as soon as the button gets focus (DVD autoaction / BD auto action flag). */
   autoExecute?: boolean;
+  /** Selection indicator: id of a button on the same menu; this element is hidden and only shows
+   *  (in that button's highlight colours) while the button is focused or activated. */
+  indicatorFor?: string | null;
 }
 
 export interface NavOverride {
@@ -124,8 +127,19 @@ export interface ImageElement extends ElementBase {
 }
 
 /** Built-in vector symbols (`assets/icons/<name>.svg`, drawn in `currentColor`). */
-export type IconName = "next" | "prev" | "home" | "play" | "subtitles" | "audio" | "back";
-export const ICON_NAMES: IconName[] = ["next", "prev", "home", "play", "subtitles", "audio", "back"];
+export type IconName =
+  | "next" | "prev" | "home" | "play" | "subtitles" | "audio" | "back"
+  | "arrowLeft" | "arrowRight" | "chapters" | "settings" | "star"
+  | "framePill" | "frameRect"
+  | "pointer" | "bullet" | "underline" | "brackets";
+export const ICON_NAMES: IconName[] = [
+  "next", "prev", "home", "play", "subtitles", "audio", "back",
+  "arrowLeft", "arrowRight", "chapters", "settings", "star",
+  "framePill", "frameRect",
+  "pointer", "bullet", "underline", "brackets",
+];
+/** Icons meant as selection indicators (default `indicatorFor` target when added). */
+export const INDICATOR_ICONS: IconName[] = ["pointer", "bullet", "underline", "brackets"];
 
 /** A built-in symbol, fitted (contain) into its box and filled with `color`. */
 export interface IconElement extends ElementBase {
@@ -175,10 +189,22 @@ export interface CustomMenu {
   durationSecs?: number | null;
   audio: MenuSound;
   introSecs?: number | null;
+  /** What happens when the menu clip ends; null/omitted = "loop". */
+  playMode?: MenuPlayMode | null;
+  /** "onceActivate": seconds to hold the last frame before the start button runs (0..254, default 0). */
+  timeoutSecs?: number | null;
   /** Editor-only sidebar group ("main", "episodes", "chapters", "settings"); null = derived from the role. */
   group?: string | null;
   elements: LayoutElement[];
 }
+
+/** `loop` = loop forever (today); `once` = play once and hold the last frame;
+ *  `onceActivate` = play once, hold `timeoutSecs`, then run the menu's start button (first focused one). */
+export type MenuPlayMode = "loop" | "once" | "onceActivate";
+
+/** Per-title end action. `default` = the disc-wide flow (Play All / return settings). */
+export type AfterPlayback = "default" | "next" | "mainMenu" | "titleMenu" | "loop";
+export const AFTER_PLAYBACK: AfterPlayback[] = ["default", "next", "mainMenu", "titleMenu", "loop"];
 
 export type FastPlayMenuTarget = "vtsmRoot" | "vmgmMain";
 
@@ -231,6 +257,8 @@ export interface EditorTitle {
   audioTracks?: TrackRef[];
   /** Text subtitles that go onto the disc. */
   subtitleTracks?: TrackRef[];
+  /** End action of the title (Test Remote preview); omitted = "default". */
+  afterPlayback?: AfterPlayback;
 }
 
 export const OVERLAY_LABELS: [GradientOverlay, string][] = [

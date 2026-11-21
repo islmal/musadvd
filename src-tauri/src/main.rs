@@ -1171,6 +1171,9 @@ struct InputConfig {
     dvd_video: Option<String>,
     #[serde(default)]
     bd_quality: Option<String>,
+    /// End action of this title (see `StreamSelection`).
+    #[serde(default)]
+    after_playback: musadvd::author::AfterPlayback,
     /// Per-title picture adjustments (override project defaults when `Some`).
     #[serde(default)]
     denoise: Option<f32>,
@@ -1265,6 +1268,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 bd_video: i.bd_video.clone(),
                 dvd_video: i.dvd_video.clone(),
                 bd_quality: i.bd_quality.clone(),
+                after_playback: i.after_playback,
                 denoise: i.denoise,
                 brightness: i.brightness,
                 contrast: i.contrast,
@@ -1643,7 +1647,7 @@ mod tests {
 
     #[test]
     fn dvd_calculation_uses_custom_layout_estimate() {
-        let still_menu = musadvd::layout::CustomMenu {
+        let still_menu = musadvd::layout::CustomMenu { play_mode: None, timeout_secs: None,
             id: "m1".into(),
             name: "Main".into(),
             role: musadvd::layout::MenuRole::Title,

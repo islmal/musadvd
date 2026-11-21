@@ -33,7 +33,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         audio: MenuSound::None,
     };
 
-    let btn_to_m2 = Element {
+    let btn_to_m2 = Element { indicator_for: None,
         id: "btn_m2".into(),
         content: layout::Content::Text {
             text: "Zu Menü 2".into(),
@@ -76,7 +76,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         auto_execute: false,
     };
 
-    let menu1 = CustomMenu {
+    let menu1 = CustomMenu { play_mode: None, timeout_secs: None,
         id: "menu1".into(),
         name: "Menü 1".into(),
         role: MenuRole::Title,
@@ -89,7 +89,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         elements: vec![btn_to_m2],
     };
 
-    let menu2 = CustomMenu {
+    let menu2 = CustomMenu { play_mode: None, timeout_secs: None,
         id: "menu2".into(),
         name: "Menü 2".into(),
         role: MenuRole::Title,
@@ -192,7 +192,7 @@ fn menu_transition_cross_domain_and_vtsm() {
     // Root 1 has 2 buttons:
     // 1. Linking to Root 2 with intra-VTSM transition
     // 2. Linking to Title Menu with cross-domain transition
-    let btn_root2 = Element {
+    let btn_root2 = Element { indicator_for: None,
         id: "b_root2".into(),
         content: layout::Content::Text {
             text: "Root 2".into(),
@@ -235,7 +235,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         auto_execute: false,
     };
 
-    let btn_main = Element {
+    let btn_main = Element { indicator_for: None,
         id: "b_main".into(),
         content: layout::Content::Text {
             text: "Main menu".into(),
@@ -278,7 +278,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         auto_execute: false,
     };
 
-    let main_menu = CustomMenu {
+    let main_menu = CustomMenu { play_mode: None, timeout_secs: None,
         id: "main".into(),
         name: "Main menu".into(),
         role: MenuRole::Title,
@@ -291,7 +291,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         elements: vec![],
     };
 
-    let root1 = CustomMenu {
+    let root1 = CustomMenu { play_mode: None, timeout_secs: None,
         id: "root1".into(),
         name: "Root 1".into(),
         role: MenuRole::Root,
@@ -304,7 +304,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         elements: vec![btn_root2, btn_main],
     };
 
-    let root2 = CustomMenu {
+    let root2 = CustomMenu { play_mode: None, timeout_secs: None,
         id: "root2".into(),
         name: "Root 2".into(),
         role: MenuRole::Root,

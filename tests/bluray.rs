@@ -620,7 +620,7 @@ mod menus {
     use musadvd::layout::{Action, Background, Canvas, Content, CustomLayout, CustomMenu, Element, Highlight, MenuRole, MenuSound};
 
     fn button(y: f64, text: &str, action: Action) -> Element {
-        Element {
+        Element { indicator_for: None,
             id: String::new(),
             content: Content::Text {
                 text: text.into(),
@@ -662,7 +662,7 @@ mod menus {
     }
 
     fn menu(id: &str, role: MenuRole, title: Option<u32>, elements: Vec<Element>) -> CustomMenu {
-        CustomMenu {
+        CustomMenu { play_mode: None, timeout_secs: None,
             id: id.into(),
             name: id.into(),
             role,

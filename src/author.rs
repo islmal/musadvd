@@ -1,4 +1,4 @@
-//! dvdauthor / spumux project generation.
+﻿//! dvdauthor / spumux project generation.
 //!
 //! Division of labour between the two tools:
 //! - `spumux` muxes the highlight/select PNGs into the menu MPEG as a subpicture stream and
@@ -152,16 +152,16 @@ impl TvStandard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Resolution {
-    /// 720×576 (PAL) / 720×480 (NTSC).
+    /// 720Ã—576 (PAL) / 720Ã—480 (NTSC).
     #[default]
     FullD1,
-    /// 352×576 / 352×480.
+    /// 352Ã—576 / 352Ã—480.
     HalfD1,
-    /// 352×288 / 352×240.
+    /// 352Ã—288 / 352Ã—240.
     Sif,
-    /// 1920×1080 (Blu-ray only).
+    /// 1920Ã—1080 (Blu-ray only).
     Hd1080,
-    /// 1280×720 (Blu-ray only).
+    /// 1280Ã—720 (Blu-ray only).
     Hd720,
 }
 
@@ -750,7 +750,7 @@ enum Dir {
 }
 
 /// Spatial remote-control navigation: for each direction pick the nearest button whose
-/// perpendicular edge gap lies within a 45° cone in that direction, falling back to the whole
+/// perpendicular edge gap lies within a 45Â° cone in that direction, falling back to the whole
 /// half-plane. Buttons that overlap on the perpendicular axis have gap 0 so mixed-width
 /// left/right-aligned stacks navigate row-by-row; center distance breaks ties. Without any
 /// candidate the button points to itself.
@@ -874,6 +874,22 @@ pub struct TitlesetSpec {
     pub title: TitleSpec,
     /// VMGM menu page that lists this title (where playback returns to).
     pub main_menu_page: u32,
+}
+
+/// Per-title end action; `Default` follows [`PlaybackOptions`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AfterPlayback {
+    #[default]
+    Default,
+    /// Play the next title (the last one goes to the main menu).
+    Next,
+    /// The title's main (landing / title) menu page.
+    MainMenu,
+    /// The title's own episode / chapter menu (Root), else the main menu.
+    TitleMenu,
+    /// Restart the title.
+    Loop,
 }
 
 /// What happens when the disc starts and when a title ends (menu options).

@@ -355,7 +355,7 @@ mod build {
     const SLOT: (f64, f64, f64, f64) = (960.0, 300.0, 800.0, 450.0);
 
     fn element(content: Content, (x, y, w, h): (f64, f64, f64, f64), action: Option<Action>, intro: Vec<ElementKey>) -> Element {
-        Element { id: String::new(), content, x, y, w, h, rotation: 0.0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false, nav: None, auto_execute: false }
+        Element { indicator_for: None, id: String::new(), content, x, y, w, h, rotation: 0.0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false, nav: None, auto_execute: false }
     }
 
     fn text(s: &str) -> Content {
@@ -376,7 +376,7 @@ mod build {
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),
             animations,
-            menus: vec![CustomMenu {
+            menus: vec![CustomMenu { play_mode: None, timeout_secs: None,
                 id: "main".into(),
                 name: "main".into(),
                 role: MenuRole::Title,

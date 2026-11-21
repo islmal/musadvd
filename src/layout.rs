@@ -184,6 +184,19 @@ pub enum MenuRole {
     Settings,
 }
 
+/// End behaviour of a menu clip.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuPlayMode {
+    /// Loop forever (moving menus) / hold forever (stills).
+    #[default]
+    Loop,
+    /// Play once, then hold the last frame.
+    Once,
+    /// Play once, hold `timeout_secs`, then run the start button's action.
+    OnceActivate,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomMenu {
@@ -205,6 +218,12 @@ pub struct CustomMenu {
     /// template page). `None` = no intro.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro_secs: Option<f64>,
+    /// What happens when the menu clip ends; `None` = loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_mode: Option<MenuPlayMode>,
+    /// [`MenuPlayMode::OnceActivate`]: seconds the last frame holds before the start button runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<f64>,
     /// Editor-only sidebar group; ignored by the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -296,6 +315,10 @@ pub struct Element {
     /// `auto_action_flag`). Ignored on non-button elements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_execute: bool,
+    /// Selection indicator: id of a button on the same menu. The element is not drawn into the
+    /// background; its shape only joins that button's highlight/select overlays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indicator_for: Option<String>,
 }
 
 /// Per-direction D-pad overrides of a button; `None` = automatic.
@@ -2472,7 +2495,7 @@ mod tests {
     }
 
     fn text(x: f64, y: f64, label: &str, action: Option<Action>) -> Element {
-        Element {
+        Element { indicator_for: None,
             id: label.into(),
             content: Content::Text {
                 text: label.into(),
@@ -2514,7 +2537,7 @@ mod tests {
     }
 
     fn menu(id: &str, role: MenuRole, title: Option<u32>, elements: Vec<Element>) -> CustomMenu {
-        CustomMenu {
+        CustomMenu { play_mode: None, timeout_secs: None,
             id: id.into(),
             name: id.into(),
             role,
