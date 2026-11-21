@@ -131,6 +131,12 @@ struct VideoInfo {
     /// the stream itself rules a copy out (the disc's bitrate limit is checked only by the build).
     bd_copy_kbps: Option<u32>,
     bd_copy_issue: Option<String>,
+    /// DVD-Video copy of the untrimmed, uncropped file at Full D1 with the source aspect and no
+    /// picture processing, keyed "PAL"/"NTSC" (each key is in exactly one of the two maps). The GUI
+    /// adds the trim/crop/filter/resolution checks itself; the per-title bitrate limit
+    /// (audio-dependent) is checked only by the build.
+    dvd_copy_kbps: std::collections::BTreeMap<&'static str, u32>,
+    dvd_copy_issue: std::collections::BTreeMap<&'static str, String>,
     /// The Blu-ray format the file already has (`1080`/`720` and a rate name): a copy needs the
     /// title to keep exactly this format.
     bd_format: Option<BdFormat>,
@@ -263,6 +269,32 @@ struct VideoMetadata {
     has_source_chapters: bool,
 }
 
+type DvdCopyVerdicts = (std::collections::BTreeMap<&'static str, u32>, std::collections::BTreeMap<&'static str, String>);
+
+/// Per-standard DVD stream-copy verdict of the file as it is (no trim/crop/filters).
+fn dvd_copy_verdicts(info: &probe::MediaInfo) -> DvdCopyVerdicts {
+    let mut out = DvdCopyVerdicts::default();
+    let Some(v) = info.video.as_ref() else { return out };
+    for (tv, name) in [(musadvd::author::TvStandard::Pal, "PAL"), (musadvd::author::TvStandard::Ntsc, "NTSC")] {
+        match encoder::dvd_video_copy(
+            info,
+            tv,
+            Resolution::FullD1,
+            Aspect::for_source(v.display_aspect),
+            encoder::VideoProcessing::default(),
+            encoder::MAX_VIDEO_PEAK_KBPS,
+        ) {
+            Ok(c) => {
+                out.0.insert(name, c.kbps);
+            }
+            Err(why) => {
+                out.1.insert(name, why);
+            }
+        }
+    }
+    out
+}
+
 #[tauri::command]
 async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMetadata, String> {
     let tools = toolchain(&state).await?;
@@ -290,6 +322,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
     let format = |n: Option<(musadvd::author::Resolution, musadvd::bd::BdRate)>| {
         n.map(|(res, rate)| BdFormat { resolution: if res == musadvd::author::Resolution::Hd720 { "720" } else { "1080" }, rate: rate.name() })
     };
+    let dvd_copy = dvd_copy_verdicts(&info);
     let chapters = dvd::chapter_starts(&info, chapter_settings.interval_secs, chapter_settings.min_video_secs)
         .into_iter()
         .map(|(start_secs, title)| ChapterInfo { start_secs, title })
@@ -309,6 +342,8 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
             dvd_aspect: Aspect::for_source(v.display_aspect).as_str().into(),
             bd_copy_kbps: bd_copy.as_ref().ok().copied(),
             bd_copy_issue: bd_copy.as_ref().err().cloned(),
+            dvd_copy_kbps: dvd_copy.0,
+            dvd_copy_issue: dvd_copy.1,
             bd_default_rates: {
                 use musadvd::author::Resolution::{Hd1080, Hd720};
                 let mut m = std::collections::BTreeMap::new();
@@ -1502,6 +1537,42 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use musadvd::calculator::MAX_VIDEO_KBPS;
+
+    #[test]
+    fn dvd_copy_verdict_per_standard() {
+        let mut info = probe::MediaInfo {
+            path: PathBuf::from("nonexistent_dvd_copy_test.mpg"),
+            duration_secs: 10.0,
+            video: Some(probe::VideoStream {
+                index: 0,
+                codec: "h264".into(),
+                width: 720,
+                height: 576,
+                display_aspect: 16.0 / 9.0,
+                fps: 25.0,
+                field_order: "progressive".into(),
+                crop: None,
+                hdr: false,
+                profile: None,
+                level: None,
+                pix_fmt: "yuv420p".into(),
+                bit_rate: Some(6_000_000),
+            }),
+            audio: vec![],
+            subtitles: vec![],
+            chapters: vec![],
+            trim: None,
+            audio_names: Default::default(),
+        };
+        let (kbps, issue) = dvd_copy_verdicts(&info);
+        assert!(kbps.is_empty());
+        assert!(issue["PAL"].contains("needs MPEG-2") && issue["NTSC"].contains("needs MPEG-2"));
+
+        info.video.as_mut().unwrap().codec = "mpeg2video".into();
+        let (kbps, issue) = dvd_copy_verdicts(&info);
+        assert_eq!(kbps.get("PAL"), Some(&6000));
+        assert!(!issue.contains_key("PAL") && issue.contains_key("NTSC") && !kbps.contains_key("NTSC"));
+    }
 
     #[test]
     fn calculation_for_two_titles() {

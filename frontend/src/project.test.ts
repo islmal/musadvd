@@ -32,6 +32,16 @@ describe("parseProject", () => {
     const p = parseProject({ ...base, disc: "floppy", bdVideo: "x", bdAudio: "y", tvStandard: "SECAM", menuMode: "?" });
     expect([p.disc, p.bdVideo, p.bdAudio, p.tvStandard, p.menuMode]).toEqual(["dvd5", "encode", "auto", null, "custom"]);
   });
+  it("keeps a valid dvdVideo and nulls invalid or missing ones", () => {
+    expect(parseProject({ ...base, dvdVideo: "auto" }).dvdVideo).toBe("auto");
+    expect(parseProject({ ...base, dvdVideo: "strict" }).dvdVideo).toBe("strict");
+    expect(parseProject({ ...base, dvdVideo: "copy" }).dvdVideo).toBeNull();
+    expect(parseProject(base).dvdVideo).toBeNull();
+  });
+  it("round-trips dvdVideo through JSON", () => {
+    const p = parseProject({ ...base, dvdVideo: "strict" });
+    expect(parseProject(JSON.parse(JSON.stringify(p))).dvdVideo).toBe("strict");
+  });
   it("keeps only usable titles and sanitises their fields", () => {
     const p = parseProject({
       ...base,

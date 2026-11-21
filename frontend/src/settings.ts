@@ -223,6 +223,12 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
           ["Half D1", t("settings.halfD1352576Ntsc")],
           ["SIF", t("settings.sif352288Ntsc352240")],
         ]),
+        select("dvd_video", t("settings.dvdVideo"), [
+          ["encode", t("settings.dvdVideoEncode")],
+          ["auto", t("settings.dvdVideoAuto")],
+          ["strict", t("settings.dvdVideoStrict")],
+        ]),
+        note(t("settings.dvdVideoNote")),
         note(t("settings.menuesUndTitelWerden")),
       ),
       group(

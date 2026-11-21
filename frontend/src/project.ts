@@ -58,6 +58,8 @@ export interface ProjectFile {
   savedAt: string;
   disc: ProjectDisc;
   tvStandard: "PAL" | "NTSC" | null;
+  /** DVD video mode; null = not in the file, so the user's setting stays untouched. */
+  dvdVideo: "encode" | "auto" | "strict" | null;
   twoPass: boolean;
   motion: boolean;
   bdVideo: (typeof COPY_MODES)[number];
@@ -190,6 +192,7 @@ export function parseProject(raw: unknown): ProjectFile {
     savedAt: str(raw.savedAt),
     disc: pick(raw.disc, DISCS, "dvd5"),
     tvStandard: raw.tvStandard === "PAL" || raw.tvStandard === "NTSC" ? raw.tvStandard : null,
+    dvdVideo: raw.dvdVideo === "encode" || raw.dvdVideo === "auto" || raw.dvdVideo === "strict" ? raw.dvdVideo : null,
     twoPass: raw.twoPass === true,
     motion: raw.motion === true,
     bdVideo: pick(raw.bdVideo, COPY_MODES, "encode"),

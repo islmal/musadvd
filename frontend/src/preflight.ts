@@ -11,7 +11,7 @@ export interface PreflightInput {
   clamp: "none" | "min" | "max" | null;
   titles: {
     label: string;
-    /** Blu-ray stream copy was requested (project or title level) and the verdict says it will be encoded. */
+    /** Blu-ray or DVD stream copy was requested (project or title level) and the verdict says it will be encoded. */
     copyFallback: string | null;
     /** Blu-ray stream copy is still on while a forced deinterlace is set. */
     copyWithDeinterlace: boolean;

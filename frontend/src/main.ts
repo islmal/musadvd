@@ -850,7 +850,7 @@ function calcInput() {
       durationSecs: effDuration(t),
       audioKbps: audioKbps(t),
       subtitleStreams: totalEnabledSubs(t),
-      copyVideoKbps: bdCopy(t)?.kbps ?? null,
+      copyVideoKbps: copyVerdict(t)?.kbps ?? null,
       weight: isBluray() && t.bdQuality ? QUALITY_WEIGHT[t.bdQuality] : 1,
     })),
     motionMenu: usesMotion(),
@@ -903,11 +903,15 @@ async function runCalc() {
 // ---------------------------------------------------------------------------
 
 function copyBadge(t: Title) {
-  const c = bdCopy(t);
+  const c = copyVerdict(t);
   if (!c) return "";
   return c.issue
     ? h("span", { class: "badge copy-badge encode", title: c.issue }, tr("main.bdEncodeBadge"))
-    : h("span", { class: "badge copy-badge copy", title: tr("main.bdCopyTip", { kbps: c.kbps ?? 0 }) }, tr("main.bdCopyBadge"));
+    : h(
+        "span",
+        { class: "badge copy-badge copy", title: tr("main.bdCopyTip", { kbps: c.kbps ?? 0 }) },
+        tr(isBluray() ? "main.bdCopyBadge" : "main.dvdCopyBadge"),
+      );
 }
 
 /** Copy / Re-encode badge of one audio track on a Blu-ray (nothing on DVD). */
@@ -957,6 +961,37 @@ function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: 
   const strict = mode !== "auto";
   return issue ? { kbps: null, issue, strict } : { kbps: copyKbps, issue: null, strict };
 }
+
+/** DVD video copy verdict of a title (null = encoded anyway). The backend probes the untrimmed,
+ * uncropped file at Full D1; everything that changes the picture or the project's DVD format is
+ * checked here, mirroring the build. `strict`: a failed copy stops the build. */
+function dvdCopy(t: Title): { kbps: number | null; issue: string | null; strict: boolean } | null {
+  const v = t.meta.video;
+  const s = state.settings;
+  const mode = s?.dvd_video;
+  if (isBluray() || !s || !v || !mode || mode === "encode") return null;
+  const tv = s.tv_standard;
+  const issue =
+    v.dvdCopyIssue?.[tv] ??
+    (s.dvd_resolution !== "Full D1"
+      ? tr("main.notFullD1")
+      : s.aspect_ratio_policy !== "Auto" && s.aspect_ratio_policy !== v.dvdAspect
+        ? tr("main.aspectForced")
+        : isTrimmed(t)
+        ? tr("main.trimActive")
+        : t.crop
+          ? tr("main.cropActive")
+          : hasPictureFilters(t)
+            ? tr("main.pictureFiltersActive")
+            : s.deinterlace === "yadif"
+              ? tr("main.deinterlaceForced")
+              : s.scale_mode !== "letterbox"
+                ? tr("main.scaleOverride")
+                : null);
+  return { kbps: issue ? null : (v.dvdCopyKbps?.[tv] ?? null), issue, strict: mode === "strict" };
+}
+
+const copyVerdict = (t: Title) => bdCopy(t) ?? dvdCopy(t);
 
 function renderVideoTab(t: Title) {
   const v = t.meta.video;
@@ -1191,7 +1226,7 @@ function renderFooter() {
     menusReady &&
     !singleVideoViolated() &&
     !counts.overLimit &&
-    !state.titles.some((t) => bdCopy(t)?.strict && bdCopy(t)?.issue) &&
+    !state.titles.some((t) => copyVerdict(t)?.strict && copyVerdict(t)?.issue) &&
     !bdAudioBlocked() &&
     mergeMismatches().size === 0 &&
     !!state.output.trim() &&
@@ -2531,7 +2566,7 @@ function preflightInput() {
       const c = bdCopy(t);
       return {
         label: t.label.trim() || t.meta.fileName,
-        copyFallback: c?.issue ?? null,
+        copyFallback: copyVerdict(t)?.issue ?? null,
         copyWithDeinterlace: !!c && !c.issue && state.settings?.deinterlace === "yadif",
         quality: state.calc?.titles[i]?.quality ?? null,
       };
@@ -2628,6 +2663,7 @@ function snapshotProject(): ProjectFile {
     savedAt: new Date().toISOString(),
     disc,
     tvStandard: state.settings?.tv_standard ?? null,
+    dvdVideo: state.settings?.dvd_video ?? null,
     twoPass,
     motion,
     bdVideo,
@@ -2832,10 +2868,20 @@ async function applyProject(data: ProjectFile, path: string | null) {
     state.layoutErrors = [];
 
     let note = "";
-    if (data.tvStandard && state.settings && data.tvStandard !== state.settings.tv_standard) {
+    const tvChange = data.tvStandard && state.settings && data.tvStandard !== state.settings.tv_standard ? data.tvStandard : null;
+    const dvdChange = data.dvdVideo && state.settings && data.dvdVideo !== state.settings.dvd_video ? data.dvdVideo : null;
+    if (state.settings && (tvChange || dvdChange)) {
       try {
-        state.settings = await storeSettings({ ...state.settings, tv_standard: data.tvStandard });
-        note = " " + tr("project.tvApplied", { tv: data.tvStandard });
+        state.settings = await storeSettings({
+          ...state.settings,
+          tv_standard: tvChange ?? state.settings.tv_standard,
+          dvd_video: dvdChange ?? state.settings.dvd_video,
+        });
+        if (tvChange) note = " " + tr("project.tvApplied", { tv: tvChange });
+        if (dvdChange) {
+          const label = tr({ encode: "settings.dvdVideoEncode", auto: "settings.dvdVideoAuto", strict: "settings.dvdVideoStrict" }[dvdChange]);
+          note += " " + tr("project.dvdVideoApplied", { mode: label });
+        }
       } catch (e) {
         note = " " + String(e);
       }
@@ -2991,6 +3037,7 @@ async function init() {
         renderAll();
       }
       updateCustomDiscLabel();
+      renderTitleList(); // DVD copy badges follow tv/resolution/dvd_video
       status(tr("main.einstellungenGespeichert"));
       void refreshLayoutCheck();
       scheduleCalc();

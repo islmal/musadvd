@@ -26,6 +26,10 @@ export interface VideoInfo {
   avchdCopyKbps: number | null;
   avchdCopyIssue: string | null;
   avchdFormat: { resolution: "1080" | "720"; rate: string } | null;
+  /** DVD-Video stream copy of the untrimmed, uncropped file at Full D1 with the source aspect and
+   * no picture processing, keyed `PAL`/`NTSC`: average kbit/s, or why it is re-encoded. */
+  dvdCopyKbps: Record<string, number>;
+  dvdCopyIssue: Record<string, string>;
 }
 
 export interface AudioTrack {
@@ -355,6 +359,8 @@ export interface AppSettings {
   template_dir: string;
   tv_standard: "PAL" | "NTSC";
   dvd_resolution: "Full D1" | "Half D1" | "SIF";
+  /** DVD-Video stream copy: `encode` (default), `auto` or `strict` (see `encoder::DvdVideoMode`). */
+  dvd_video: "encode" | "auto" | "strict";
   bd_resolution: "1080p" | "720p";
   bd_single_video: boolean;
   aspect_ratio_policy: "Auto" | "4:3" | "16:9";
