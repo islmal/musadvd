@@ -458,6 +458,12 @@ describe("batch styling, start button and after-playback", () => {
     expect(applyStyleBatch(l, "a", { ...none, typography: true })).toBe(1);
     expect(b.elements.find((e) => e.type === "text")).toMatchObject({ font: "Georgia", text: "bh", y: 5 });
     expect(applyStyleBatch(l, "missing", { ...none, background: true })).toBe(0);
+    // Selected scope: only the listed menus, across groups.
+    c.background.color = "#000000";
+    b.background.color = "#000000";
+    a.background.color = "#ABCDEF";
+    expect(applyStyleBatch(l, "a", { ...none, scope: "selected", menuIds: ["c"], background: true })).toBe(1);
+    expect([b.background.color, c.background.color]).toEqual(["#000000", "#ABCDEF"]);
   });
 
   it("nav icons copy name/colour/size around the target centre; positions move only heading and nav", () => {

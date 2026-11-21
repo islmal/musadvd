@@ -1503,5 +1503,21 @@
  "editor.pasteMenuNew": "Paste as new",
  "editor.menuCopied": "Menu \"{name}\" copied",
  "editor.menuPasted": "Menu pasted",
- "editor.menuPastedUnlinked": "Menu pasted – {n} button(s) pointed to menus that no longer exist and lost their action"
+ "editor.menuPastedUnlinked": "Menu pasted – {n} button(s) pointed to menus that no longer exist and lost their action",
+ "editor.menusPicked": "{n} menus selected",
+ "editor.deletePicked": "Delete selected",
+ "editor.clearPicked": "Clear selection",
+ "editor.batchScopeSelected": "Selected menus ({n})",
+ "editor.menuPickHint": "Ctrl+click or Shift+click picks several menus for batch apply or delete",
+ "studio.main.erasing": "Erasing",
+ "studio.views.eraseTitle": "Erase disc",
+ "studio.views.eraseText": "Wipe a rewritable disc",
+ "studio.views.eraseStart": "Erase",
+ "studio.views.eraseConfirmTitle": "Erase disc?",
+ "studio.views.eraseConfirmText": "All data on the disc will be permanently lost. This cannot be undone.",
+ "studio.views.eraseQuick": "Quick",
+ "studio.views.eraseQuickHint": "Minimal erase, about 1 minute",
+ "studio.views.eraseFull": "Full",
+ "studio.views.eraseFullHint": "Whole disc, can take up to about 1 hour for DVD-RW",
+ "studio.views.eraseWarning": "Erasing permanently deletes everything on the disc. Only rewritable discs (CD-RW, DVD-RW) can be erased; DVD+RW and BD-RE need no erasing."
 }

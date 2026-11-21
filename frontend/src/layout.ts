@@ -952,9 +952,11 @@ export function applyStyleToSimilar(layout: CustomLayout, menuId: string): numbe
   return changed;
 }
 
-export type BatchScope = "group" | "all";
+export type BatchScope = "group" | "all" | "selected";
 export interface BatchOptions {
   scope: BatchScope;
+  /** Target menu ids for scope `selected`. */
+  menuIds?: string[];
   /** Background picture/video/colour plus loop length and play mode (not the music). */
   background: boolean;
   /** The menu's music track only; each menu keeps its own copy and can change it afterwards. */
@@ -1007,6 +1009,7 @@ export function applyStyleBatch(layout: CustomLayout, sourceMenuId: string, opts
   let changed = 0;
   for (const m of layout.menus) {
     if (m === src || (opts.scope === "group" && menuGroup(m) !== menuGroup(src))) continue;
+    if (opts.scope === "selected" && !opts.menuIds?.includes(m.id)) continue;
     const before = JSON.stringify(m);
     if (opts.music) m.audio = clone(src.audio);
     if (opts.background) {

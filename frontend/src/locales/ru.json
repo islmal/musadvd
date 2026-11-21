@@ -1503,5 +1503,21 @@
  "editor.pasteMenuNew": "Вставить как новое",
  "editor.menuCopied": "Меню «{name}» скопировано",
  "editor.menuPasted": "Меню вставлено",
- "editor.menuPastedUnlinked": "Меню вставлено – кнопок, указывавших на удалённые меню: {n}; их действие снято"
+ "editor.menuPastedUnlinked": "Меню вставлено – кнопок, указывавших на удалённые меню: {n}; их действие снято",
+ "editor.menusPicked": "Выбрано меню: {n}",
+ "editor.deletePicked": "Удалить выбранные",
+ "editor.clearPicked": "Снять выбор",
+ "editor.batchScopeSelected": "Выбранные меню ({n})",
+ "editor.menuPickHint": "Ctrl+щелчок или Shift+щелчок выбирает несколько меню для пакетного применения или удаления",
+ "studio.main.erasing": "Стирание",
+ "studio.views.eraseTitle": "Стереть диск",
+ "studio.views.eraseText": "Очистить перезаписываемый диск",
+ "studio.views.eraseStart": "Стереть",
+ "studio.views.eraseConfirmTitle": "Стереть диск?",
+ "studio.views.eraseConfirmText": "Все данные на диске будут безвозвратно потеряны. Это нельзя отменить.",
+ "studio.views.eraseQuick": "Быстро",
+ "studio.views.eraseQuickHint": "Минимальное стирание, около 1 минуты",
+ "studio.views.eraseFull": "Полное",
+ "studio.views.eraseFullHint": "Весь диск; для DVD-RW может занять около часа",
+ "studio.views.eraseWarning": "Стирание безвозвратно удаляет всё на диске. Стереть можно только перезаписываемые диски (CD-RW, DVD-RW); DVD+RW и BD-RE стирать не нужно."
 }

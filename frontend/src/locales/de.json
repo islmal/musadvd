@@ -1503,5 +1503,21 @@
  "editor.pasteMenuNew": "Als neues einfügen",
  "editor.menuCopied": "Menü „{name}“ kopiert",
  "editor.menuPasted": "Menü eingefügt",
- "editor.menuPastedUnlinked": "Menü eingefügt – {n} Button(s) zeigten auf nicht mehr vorhandene Menüs und haben ihre Aktion verloren"
+ "editor.menuPastedUnlinked": "Menü eingefügt – {n} Button(s) zeigten auf nicht mehr vorhandene Menüs und haben ihre Aktion verloren",
+ "editor.menusPicked": "{n} Menüs ausgewählt",
+ "editor.deletePicked": "Ausgewählte löschen",
+ "editor.clearPicked": "Auswahl aufheben",
+ "editor.batchScopeSelected": "Ausgewählte Menüs ({n})",
+ "editor.menuPickHint": "Strg+Klick oder Umschalt+Klick wählt mehrere Menüs für Stapelweise anwenden oder Löschen",
+ "studio.main.erasing": "Löschen",
+ "studio.views.eraseTitle": "Disc löschen",
+ "studio.views.eraseText": "Wiederbeschreibbare Disc leeren",
+ "studio.views.eraseStart": "Löschen",
+ "studio.views.eraseConfirmTitle": "Disc löschen?",
+ "studio.views.eraseConfirmText": "Alle Daten auf der Disc gehen unwiderruflich verloren. Das lässt sich nicht rückgängig machen.",
+ "studio.views.eraseQuick": "Schnell",
+ "studio.views.eraseQuickHint": "Minimales Löschen, ca. 1 Minute",
+ "studio.views.eraseFull": "Vollständig",
+ "studio.views.eraseFullHint": "Ganze Disc, kann bei DVD-RW bis zu etwa 1 Stunde dauern",
+ "studio.views.eraseWarning": "Beim Löschen wird alles auf der Disc unwiderruflich entfernt. Nur wiederbeschreibbare Discs (CD-RW, DVD-RW) lassen sich löschen; DVD+RW und BD-RE müssen nicht gelöscht werden."
 }

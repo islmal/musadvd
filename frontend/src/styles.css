@@ -3504,3 +3504,16 @@ input.time {
   font-size: 0.85em;
   opacity: 0.75;
 }
+
+/* Menus picked with Ctrl/Shift+click (the active menu keeps its own look). */
+.ed-menu-item.picked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.ed-menu-picked {
+  align-items: center;
+}
+.ed-menu-picked-count {
+  font-weight: 600;
+  margin-right: auto;
+}

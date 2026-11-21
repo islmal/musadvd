@@ -178,6 +178,11 @@ export function mountMenuEditor(opts: EditorOptions) {
   const stale = !!opts.layout && madeForOtherTitles(opts.layout, opts.layoutTitlesKey, titles);
   let L: CustomLayout = structuredClone(opts.layout ?? draftLayout(titles, tv, opts.heading));
   let menuIdx = 0;
+  /** Extra menus picked with Ctrl/Shift+click (ids); the active menu always counts as picked. */
+  let menuSel = new Set<string>();
+  /** Menu indices in sidebar order (visible rows only), for Shift+click ranges. */
+  let menuOrder: number[] = [];
+  const pickedMenuIds = () => [...new Set([menu()?.id, ...menuSel].filter((x): x is string => !!x))];
   // Draft options offered next to "new draft" / presets; preselected from the layout's own metadata.
   let draftTheme: MenuTheme = L.theme ?? "landing";
   let draftSettings: SettingsMode = L.settingsMode ?? (titles.length > 1 ? "global" : "perTitle");
@@ -804,6 +809,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function renderMenus() {
+    for (const id of menuSel) if (!L.menus.some((m) => m.id === id) || id === menu()?.id) menuSel.delete(id);
     const firstTitle = L.menus.findIndex((m) => m.role === "title");
     const items = L.menus.map((m, i) => {
       const buttons = m.elements.filter(isButton).length;
@@ -814,12 +820,32 @@ export function mountMenuEditor(opts: EditorOptions) {
       return el(
         "button",
         {
-          class: `ed-menu-item${i === menuIdx ? " active" : ""}`,
+          class: `ed-menu-item${i === menuIdx ? " active" : ""}${menuSel.has(m.id) ? " picked" : ""}`,
           type: "button",
           "data-idx": String(i),
-          onpointerdown: (ev: PointerEvent) => startMenuDrag(ev, i),
-          onclick: () => {
+          "aria-pressed": String(i === menuIdx || menuSel.has(m.id)),
+          onpointerdown: (ev: PointerEvent) => {
+            if (!(ev.ctrlKey || ev.metaKey || ev.shiftKey)) startMenuDrag(ev, i);
+          },
+          onclick: (ev: MouseEvent) => {
             if (suppressMenuClick) return;
+            if (ev.ctrlKey || ev.metaKey) {
+              // Toggle this menu in the multi-selection; the active menu stays the one being edited.
+              if (i !== menuIdx) {
+                if (menuSel.has(m.id)) menuSel.delete(m.id);
+                else menuSel.add(m.id);
+              }
+              renderMenus();
+              return;
+            }
+            if (ev.shiftKey) {
+              const a = menuOrder.indexOf(menuIdx);
+              const b = menuOrder.indexOf(i);
+              if (a >= 0 && b >= 0) for (const k of menuOrder.slice(Math.min(a, b), Math.max(a, b) + 1)) menuSel.add(L.menus[k].id);
+              renderMenus();
+              return;
+            }
+            menuSel.clear();
             menuIdx = i;
             selIds = [];
             if (remoteMode) {
@@ -851,6 +877,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       collapsedMenuGroups.delete(menuGroup(m));
     }
     let listChildren: Node[] = items;
+    menuOrder = L.menus.map((_, i) => i);
     if (grouped) {
       const byGroup = new Map<string, number[]>();
       L.menus.forEach((x, i) => {
@@ -880,7 +907,9 @@ export function mountMenuEditor(opts: EditorOptions) {
         );
         return [head, ...(open ? idxs.map((i) => items[i]) : [])];
       });
+      menuOrder = order.flatMap((g) => (collapsedMenuGroups.has(g) ? [] : (byGroup.get(g) ?? [])));
     }
+    const picked = pickedMenuIds();
     const parts: Child[] = [
       el(
         "div",
@@ -903,7 +932,17 @@ export function mountMenuEditor(opts: EditorOptions) {
           tr("editor.groupsToggle"),
         ),
       ),
-      el("div", { class: "ed-menu-list" }, ...listChildren),
+      el("div", { class: "ed-menu-list", title: tr("editor.menuPickHint") }, ...listChildren),
+      picked.length > 1 && m
+        ? el(
+            "div",
+            { class: "ed-menu-actions ed-menu-picked" },
+            el("span", { class: "ed-menu-picked-count" }, tr("editor.menusPicked", { n: picked.length })),
+            el("button", { class: "btn", type: "button", title: tr("editor.batchTip"), onclick: () => openBatchDialog(m) }, tr("editor.batchApply")),
+            el("button", { class: "btn danger", type: "button", disabled: picked.length >= L.menus.length, onclick: () => deleteMenus(picked) }, tr("editor.deletePicked")),
+            el("button", { class: "btn", type: "button", onclick: () => { menuSel.clear(); renderMenus(); } }, tr("editor.clearPicked")),
+          )
+        : null,
       el(
         "div",
         { class: "ed-menu-actions" },
@@ -4174,7 +4213,9 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
   /** "Batch apply": copies the chosen style parts of this menu to the same-kind menus / every menu. */
   function openBatchDialog(m: CustomMenu) {
-    let scope: BatchScope = "group";
+    // The source is the active menu; Ctrl/Shift-picked menus are offered as the targets.
+    const targets = pickedMenuIds().filter((id) => id !== m.id);
+    let scope: BatchScope = targets.length > 0 ? "selected" : "group";
     const flags = { background: false, music: false, typography: true, navIcons: false, positions: false };
     const overlay = el("div", { class: "ed-batch", role: "dialog", "aria-modal": "true", "aria-label": tr("editor.batchApply") });
     const done = () => overlay.remove();
@@ -4187,6 +4228,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         "div",
         { class: "ed-batch-card" },
         el("h3", {}, tr("editor.batchTitle")),
+        targets.length > 0 ? radio("selected", tr("editor.batchScopeSelected", { n: targets.length })) : null,
         radio("group", tr("editor.batchScopeGroup")),
         radio("all", tr("editor.batchScopeAll")),
         check("background", tr("editor.batchBackground")),
@@ -4206,7 +4248,7 @@ export function mountMenuEditor(opts: EditorOptions) {
               onclick: () => {
                 done();
                 const before = JSON.stringify(L);
-                const n = applyStyleBatch(L, m.id, { scope, ...flags });
+                const n = applyStyleBatch(L, m.id, { scope, menuIds: targets, ...flags });
                 if (n === 0) {
                   flash(tr("editor.styleNothing"), "ok");
                   return;
@@ -4537,12 +4579,18 @@ export function mountMenuEditor(opts: EditorOptions) {
     flash(unlinked ? tr("editor.menuPastedUnlinked", { n: unlinked }) : tr("editor.menuPasted"), unlinked ? "error" : "ok");
   }
   function deleteMenu() {
-    if (L.menus.length <= 1) return;
+    deleteMenus([menu().id]);
+  }
+  /** Deletes the given menus (at least one menu stays); buttons that opened them lose their action. */
+  function deleteMenus(ids: string[]) {
+    const gone = new Set(ids);
+    if (L.menus.length - gone.size < 1) return;
     remember();
-    const gone = menu().id;
-    L.menus.splice(menuIdx, 1);
-    // Buttons that opened this menu lose their action.
-    for (const m of L.menus) for (const e of m.elements) if (e.action?.type === "menu" && e.action.menu === gone) e.action = null;
+    const active = menu();
+    L.menus = L.menus.filter((m) => !gone.has(m.id));
+    for (const m of L.menus) for (const e of m.elements) if (e.action?.type === "menu" && gone.has(e.action.menu)) e.action = null;
+    menuIdx = gone.has(active.id) ? Math.min(menuIdx, L.menus.length - 1) : L.menus.indexOf(active);
+    menuSel.clear();
     selIds = [];
     renderAll();
   }
