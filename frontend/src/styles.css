@@ -1281,9 +1281,23 @@ input.time {
 
 .ed-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   flex: 1;
+  min-width: 0;
+}
+
+/* Wrap whole controls onto a new row instead of squeezing their labels. */
+.ed-header-actions > *,
+.ed-toolbar > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* Draft pickers keep their longest label readable ("Global settings menu"). */
+.ed-draft-select {
+  min-width: max-content;
 }
 
 .ed-spacer {
@@ -1386,8 +1400,9 @@ input.time {
 
 .ed-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }

@@ -660,19 +660,19 @@ export function mountMenuEditor(opts: EditorOptions) {
       el("button", { class: "btn", type: "button", onclick: () => void newDraft() }, tr("menuEditor.entwurfAusTiteln")),
       el(
         "select",
-        { class: "btn", title: tr("editor.themeTip"), "aria-label": tr("editor.themeTip"), onchange: (ev: Event) => (draftTheme = (ev.target as HTMLSelectElement).value as MenuTheme) },
+        { class: "btn ed-draft-select", title: tr("editor.themeTip"), "aria-label": tr("editor.themeTip"), onchange: (ev: Event) => (draftTheme = (ev.target as HTMLSelectElement).value as MenuTheme) },
         el("option", { value: "landing", selected: draftTheme === "landing" }, tr("editor.themeLanding")),
         el("option", { value: "classic", selected: draftTheme === "classic" }, tr("editor.themeClassic")),
       ),
       el(
         "select",
-        { class: "btn", title: tr("editor.settingsModeTip"), "aria-label": tr("editor.settingsModeTip"), onchange: (ev: Event) => (draftSettings = (ev.target as HTMLSelectElement).value as SettingsMode) },
+        { class: "btn ed-draft-select", title: tr("editor.settingsModeTip"), "aria-label": tr("editor.settingsModeTip"), onchange: (ev: Event) => (draftSettings = (ev.target as HTMLSelectElement).value as SettingsMode) },
         el("option", { value: "global", selected: draftSettings === "global" }, tr("editor.settingsGlobal")),
         el("option", { value: "perTitle", selected: draftSettings === "perTitle" }, tr("editor.settingsPerTitle")),
       ),
       el(
         "select",
-        { class: "btn", title: tr("menuEditor.presetTitle"), onchange: (ev: Event) => void applyPresetFromSelect(ev.target as HTMLSelectElement) },
+        { class: "btn ed-draft-select", title: tr("menuEditor.presetTitle"), onchange: (ev: Event) => void applyPresetFromSelect(ev.target as HTMLSelectElement) },
         el("option", { value: "" }, tr("menuEditor.presetPick")),
         ...MENU_PRESETS.map((p) => el("option", { value: p }, tr(`menuEditor.preset_${p}`))),
       ),
