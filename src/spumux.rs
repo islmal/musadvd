@@ -943,7 +943,8 @@ impl<W: Write> Mux<W> {
                 d.extend([3, m.buttons.len() as u8]);
                 for b in &m.buttons {
                     d.extend(b.name.bytes().chain([0]));
-                    d.extend([if b.autoaction { 1 } else { 0 }, 0, 0, b.group]);
+                    // Two modifier bytes, then autoaction and group: the layout `dvd_mux` (dvdauthor) reads.
+                    d.extend([0, 0, u8::from(b.autoaction), b.group]);
                     for v in b.rect {
                         d.extend((v as u16).to_be_bytes());
                     }

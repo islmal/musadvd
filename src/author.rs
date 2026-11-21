@@ -462,6 +462,8 @@ pub struct MenuButton {
     /// Moving preview for the button's `GT_VIDEO` graphics in motion menus.
     pub clip: Option<ClipSource>,
     pub nav: Navigation,
+    /// The action runs on focus (spumux `autoaction`, IG `auto_action_flag`).
+    pub auto_action: bool,
 }
 
 /// Where a motion menu's sample clip comes from.
@@ -717,6 +719,7 @@ pub fn plan_buttons(
             thumbnail,
             clip,
             nav: Navigation::default(),
+            auto_action: false,
         });
     }
 
@@ -1537,6 +1540,9 @@ pub fn spumux_xml(tv: TvStandard, highlight_png: &str, select_png: &str, buttons
                 let _ = write!(x, r#" {attr}="{}""#, xml_escape(t));
             }
         }
+        if b.auto_action {
+            let _ = write!(x, r#" autoaction="1""#);
+        }
         let _ = writeln!(x, "/>");
     }
     let _ = writeln!(x, "    </spu>");
@@ -1560,6 +1566,7 @@ mod tests {
             thumbnail: None,
             clip: None,
             nav: Navigation::default(),
+            auto_action: false,
         }
     }
 

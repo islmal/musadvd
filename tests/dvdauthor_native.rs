@@ -212,6 +212,7 @@ fn button(name: &str, r: [u32; 4], action: ButtonAction) -> MenuButton {
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
+        auto_action: false,
     }
 }
 

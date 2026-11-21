@@ -26,6 +26,8 @@ pub struct IgButton {
     pub right: u16,
     pub selected: u16,
     pub activated: u16,
+    /// `auto_action_flag`: the commands run as soon as the button is selected.
+    pub auto_action: bool,
     pub commands: Vec<Command>,
 }
 
@@ -138,7 +140,7 @@ fn ics_payload(m: &IgMenu) -> Vec<u8> {
         page.push(1);
         page.extend(b.id.to_be_bytes());
         page.extend(b.id.to_be_bytes()); // numeric select value
-        page.push(0); // auto action
+        page.push(if b.auto_action { 0x80 } else { 0 }); // auto_action_flag (1 bit) + 7 reserved
         page.extend(b.x.to_be_bytes());
         page.extend(b.y.to_be_bytes());
         for n in [b.up, b.down, b.left, b.right] {
@@ -233,8 +235,8 @@ mod tests {
             default_selected: Some(1),
             palette: vec![[16, 128, 128, 0], [235, 128, 128, 255]],
             buttons: vec![
-                IgButton { id: 1, x: 100, y: 100, up: 1, down: 2, left: 1, right: 1, selected: 1, activated: 1, commands: vec![[0; 12]] },
-                IgButton { id: 2, x: 100, y: 300, up: 1, down: 2, left: 2, right: 2, selected: 1, activated: 1, commands: vec![] },
+                IgButton { id: 1, x: 100, y: 100, up: 1, down: 2, left: 1, right: 1, selected: 1, activated: 1, auto_action: false, commands: vec![[0; 12]] },
+                IgButton { id: 2, x: 100, y: 300, up: 1, down: 2, left: 2, right: 2, selected: 1, activated: 1, auto_action: true, commands: vec![] },
             ],
             objects: vec![IgObject { id: 1, width: 4, height: 2, rle: rle_encode(&[1; 8], 4, 2) }],
             pts: 90_000,
@@ -269,6 +271,26 @@ mod tests {
         assert_eq!(ods[3], 0xC0);
         assert_eq!(u32::from_be_bytes([0, ods[4], ods[5], ods[6]]) as usize, ods.len() - 7);
         assert_eq!(&ods[7..11], &[0, 4, 0, 2]);
+    }
+
+    #[test]
+    fn auto_action_flag_is_per_button() {
+        let segs = parse(&build_sup(&menu()));
+        let ics = &segs[0].1;
+        // 12-byte composition header, 15 bytes interactive_composition, 21 bytes page header.
+        let mut i = 12 + 15 + 21;
+        let mut found = Vec::new();
+        for _ in 0..ics[i - 1] {
+            assert_eq!(ics[i + 2], 1, "one button per BOG");
+            i += 3;
+            let id = u16::from_be_bytes([ics[i], ics[i + 1]]);
+            found.push((id, ics[i + 4], u16::from_be_bytes([ics[i + 9], ics[i + 10]])));
+            let cmds = u16::from_be_bytes([ics[i + 33], ics[i + 34]]) as usize;
+            i += 35 + 12 * cmds;
+        }
+        assert_eq!(i, ics.len());
+        // (id, auto_action_flag byte, up neighbour)
+        assert_eq!(found, [(1, 0x00, 1), (2, 0x80, 1)]);
     }
 
     #[test]

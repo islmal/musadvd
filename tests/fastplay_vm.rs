@@ -31,6 +31,7 @@ fn fastplay_dvdauthor_xml_and_routing() {
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
+        auto_action: false,
     };
     let b2 = MenuButton {
         name: "b2".into(),
@@ -42,6 +43,7 @@ fn fastplay_dvdauthor_xml_and_routing() {
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
+        auto_action: false,
     };
 
     let fp_spec = MenuSpec {
@@ -138,6 +140,7 @@ fn fastplay_target_title_and_vtsm_root_routing() {
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
+        auto_action: false,
     };
     let b2 = MenuButton {
         name: "b2".into(),
@@ -149,6 +152,7 @@ fn fastplay_target_title_and_vtsm_root_routing() {
         thumbnail: None,
         clip: None,
         nav: Navigation::default(),
+        auto_action: false,
     };
 
     let fp_spec = MenuSpec {
@@ -253,6 +257,8 @@ fn custom_layout_fastplay_page_rendering() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
 
     let main_menu = CustomMenu {

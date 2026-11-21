@@ -149,7 +149,7 @@ fn ig_menu(rate_code: u8, pts: u32, sparse: bool) -> IgMenu {
         frame_rate_code: rate_code,
         default_selected: None,
         palette: vec![[16, 128, 128, 0], [235, 128, 128, 255], [81, 90, 240, 255], [145, 54, 34, 255]],
-        buttons: vec![IgButton { id: 1, x: 0, y: 600, up: 1, down: 1, left: 1, right: 1, selected: 1, activated: 2, commands: vec![] }],
+        buttons: vec![IgButton { id: 1, x: 0, y: 600, up: 1, down: 1, left: 1, right: 1, selected: 1, activated: 2, auto_action: false, commands: vec![] }],
         objects: vec![
             IgObject { id: 1, width: w as u16, height: h as u16, rle: rle.clone() },
             IgObject { id: 2, width: w as u16, height: h as u16, rle },
@@ -355,7 +355,7 @@ mod build {
     const SLOT: (f64, f64, f64, f64) = (960.0, 300.0, 800.0, 450.0);
 
     fn element(content: Content, (x, y, w, h): (f64, f64, f64, f64), action: Option<Action>, intro: Vec<ElementKey>) -> Element {
-        Element { id: String::new(), content, x, y, w, h, rotation: 0.0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false }
+        Element { id: String::new(), content, x, y, w, h, rotation: 0.0, opacity: 1.0, action, highlight: None, group: None, intro, easter_egg: false, nav: None, auto_execute: false }
     }
 
     fn text(s: &str) -> Content {

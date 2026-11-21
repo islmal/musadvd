@@ -72,6 +72,8 @@ fn menu_transition_bridge_pgc_vmgm() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
 
     let menu1 = CustomMenu {
@@ -229,6 +231,8 @@ fn menu_transition_cross_domain_and_vtsm() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
 
     let btn_main = Element {
@@ -270,6 +274,8 @@ fn menu_transition_cross_domain_and_vtsm() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
 
     let main_menu = CustomMenu {

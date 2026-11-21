@@ -288,6 +288,57 @@ pub struct Element {
     /// Hidden Easter Egg: Button hitbox and navigation active, but subpicture highlight is 100% transparent.
     #[serde(default)]
     pub easter_egg: bool,
+    /// Explicit D-pad targets (element ids of buttons on the same menu); unset directions keep
+    /// the automatic routing. Ignored on non-button elements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav: Option<NavOverride>,
+    /// The action runs as soon as the button gets the focus (DVD `autoaction`, BD
+    /// `auto_action_flag`). Ignored on non-button elements.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_execute: bool,
+}
+
+/// Per-direction D-pad overrides of a button; `None` = automatic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub down: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<String>,
+}
+
+impl NavOverride {
+    fn dirs(&self) -> [(&'static str, &Option<String>); 4] {
+        [("up", &self.up), ("down", &self.down), ("left", &self.left), ("right", &self.right)]
+    }
+}
+
+/// Applies the menu's [`Element::nav`] overrides on top of the automatic navigation of
+/// `buttons` (built from `menu`'s elements, `template_index` = element index). Targets that are
+/// not a button on this page, or the button itself, are ignored ([`validate`] rejects them).
+pub(crate) fn apply_nav_overrides(menu: &CustomMenu, buttons: &mut [MenuButton]) {
+    let name_of = |id: &str| -> Option<String> {
+        let idx = menu.elements.iter().position(|e| e.id == id && e.action.is_some())?;
+        buttons.iter().find(|b| b.template_index == idx).map(|b| b.name.clone())
+    };
+    let targets: Vec<[Option<String>; 4]> = buttons
+        .iter()
+        .map(|b| {
+            let Some(o) = menu.elements.get(b.template_index).and_then(|e| e.nav.as_ref()) else { return Default::default() };
+            o.dirs().map(|(_, id)| id.as_deref().and_then(name_of).filter(|n| *n != b.name))
+        })
+        .collect();
+    for (b, [up, down, left, right]) in buttons.iter_mut().zip(targets) {
+        for (slot, t) in [(&mut b.nav.up, up), (&mut b.nav.down, down), (&mut b.nav.left, left), (&mut b.nav.right, right)] {
+            if t.is_some() {
+                *slot = t;
+            }
+        }
+    }
 }
 
 /// Box and opacity of an element `t` seconds into the intro (canvas coordinates; the box may lie
@@ -748,11 +799,24 @@ pub fn menu_button_navigation(
                 thumbnail: None,
                 clip: None,
                 nav: Navigation::default(),
+                auto_action: false,
             })
         })
         .collect();
     author::compute_navigation(&mut buttons);
+    apply_nav_overrides(menu, &mut buttons);
     buttons.into_iter().map(|b| (b.name, b.nav)).collect()
+}
+
+/// `pre` of a DVD menu page with auto-action buttons: the focus starts on the first other button
+/// (`s8` = SPRM8), never on a remembered auto-action button that would fire on entry and could loop.
+fn focus_pre(base: Option<&str>, buttons: &[MenuButton]) -> Option<String> {
+    let first = buttons.iter().position(|b| !b.auto_action).filter(|_| buttons.iter().any(|b| b.auto_action));
+    match (base, first) {
+        (base, None) => base.map(str::to_string),
+        (None, Some(i)) => Some(format!("s8 = {}k;", i + 1)),
+        (Some(base), Some(i)) => Some(format!("{base} s8 = {}k;", i + 1)),
+    }
 }
 
 /// Gives every menu without its own sound the global default menu audio file. FastPlay and
@@ -940,6 +1004,15 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 }
             }
             let Some(action) = &e.action else { continue };
+            for (dir, id) in e.nav.iter().flat_map(|o| o.dirs()) {
+                let Some(id) = id else { continue };
+                match m.elements.iter().find(|x| &x.id == id) {
+                    None => errs.push(el(&format!("D-pad {dir} points to an unknown element '{id}'"))),
+                    Some(t) if t.action.is_none() => errs.push(el(&format!("D-pad {dir} points to '{id}', which is not a button"))),
+                    Some(_) if *id == e.id => errs.push(el(&format!("D-pad {dir} points to the button itself"))),
+                    Some(_) => {}
+                }
+            }
             if is_video && video_rotation_deg(e.rotation).unwrap_or(0) != 0 {
                 errs.push(el(&format!("Video buttons cannot be rotated ({medium} video layers are axis-aligned rectangles)")));
             }
@@ -1006,6 +1079,10 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 }
                 rects.push((element_name(e, n), r));
             }
+        }
+        let mut menu_buttons = m.elements.iter().filter(|e| e.action.is_some()).peekable();
+        if menu_buttons.peek().is_some() && menu_buttons.all(|e| e.auto_execute) {
+            errs.push(menu("every button runs on focus – the menu would act on entry; keep at least one button without auto-execute".into()));
         }
         let max_buttons = if bd { MAX_BD_BUTTONS } else { MAX_BUTTONS };
         if rects.len() > max_buttons {
@@ -1977,10 +2054,12 @@ fn render_custom_page(
             thumbnail: None,
             clip: None,
             nav: Navigation::default(),
+            auto_action: e.auto_execute,
         });
     }
     flush(&mut current, &mut layers)?;
     author::compute_navigation(&mut buttons);
+    apply_nav_overrides(menu, &mut buttons);
 
     let intro = if has_intro {
         let end = sprites.iter().flat_map(|s| s.keys.iter().map(|k| k.t)).fold(0.0f64, f64::max);
@@ -2158,6 +2237,7 @@ fn render_fastplay_page(
             thumbnail: None,
             clip: None,
             nav: Navigation { right: Some("b2".into()), ..Default::default() },
+            auto_action: false,
         },
         MenuButton {
             name: "b2".into(),
@@ -2169,6 +2249,7 @@ fn render_fastplay_page(
             thumbnail: None,
             clip: None,
             nav: Navigation { left: Some("b1".into()), ..Default::default() },
+            auto_action: false,
         },
     ];
 
@@ -2253,6 +2334,8 @@ pub fn build_custom_menus(
     });
     for i in order {
         let PageOutput { files, buttons, motion, warnings: w } = rendered[i].clone_parts();
+        let base = matches!(nav.placement[i], Placement::Vtsm { .. }).then_some(RESET_DISPATCH);
+        let pre = focus_pre(base, &buttons);
         warnings.extend(w.into_iter().map(|w| format!("Menu '{}': {w}", layout.menus[i].name)));
         match nav.placement[i] {
             Placement::Vmgm(n) => {
@@ -2261,7 +2344,7 @@ pub fn build_custom_menus(
                     buttons,
                     entry: (n == vmgm_base).then(|| "title".to_string()),
                     motion,
-                    pre: None,
+                    pre,
                     intro_secs: files.intro.as_ref().map(|i| i.secs),
                     pause_secs: None,
                     post: None,
@@ -2276,7 +2359,7 @@ pub fn build_custom_menus(
                     buttons,
                     entry: list.is_empty().then(|| "root".to_string()),
                     motion,
-                    pre: Some(RESET_DISPATCH.to_string()),
+                    pre,
                     intro_secs: files.intro.as_ref().map(|i| i.secs),
                     pause_secs: None,
                     post: None,
@@ -2425,6 +2508,8 @@ mod tests {
             group: None,
             intro: Vec::new(),
             easter_egg: false,
+            nav: None,
+            auto_execute: false,
         }
     }
 
@@ -3058,6 +3143,106 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Three stacked buttons a/b/c and a decoration d.
+    fn stacked() -> CustomMenu {
+        let mut deco = text(400.0, 40.0, "d", None);
+        deco.w = 100.0;
+        menu("main", MenuRole::Title, None, vec![
+            text(60.0, 40.0, "a", Some(Action::PlayTitle { title: 1 })),
+            text(60.0, 200.0, "b", Some(Action::PlayAll)),
+            text(60.0, 360.0, "c", Some(Action::PlayChapter { title: 1, chapter: 2 })),
+            deco,
+        ])
+    }
+
+    #[test]
+    fn nav_overrides_apply_after_automatic_routing() {
+        let canvas = Canvas { width: 720, height: 576 };
+        let mut m = stacked();
+        let auto = menu_button_navigation(&m, canvas, TvStandard::Pal, false);
+        assert_eq!(auto[0].1.down.as_deref(), Some("b"));
+        m.elements[0].nav = Some(NavOverride {
+            down: Some("c".into()),
+            up: Some("missing".into()),
+            left: Some("d".into()),
+            right: Some("a".into()),
+        });
+        for bluray in [false, true] {
+            let frame: MenuFrame = if bluray { MenuFrame::square(1920, 1080) } else { TvStandard::Pal.into() };
+            let got = menu_button_navigation(&m, canvas, frame, bluray);
+            let base = menu_button_navigation(&stacked(), canvas, frame, bluray);
+            assert_eq!(got[0].1.down.as_deref(), Some("c"), "override wins");
+            // Unknown, non-button and self targets fall back to the automatic route.
+            assert_eq!((&got[0].1.up, &got[0].1.left, &got[0].1.right), (&base[0].1.up, &base[0].1.left, &base[0].1.right));
+            assert_eq!(got[1..], base[1..]);
+        }
+        let err = validate(&layout(vec![m]), &titles(1), TvStandard::Pal).unwrap_err();
+        let msgs = err.0.join("\n");
+        assert!(msgs.contains("(Text 'a'): D-pad up points to an unknown element 'missing'"), "{msgs}");
+        assert!(msgs.contains("(Text 'a'): D-pad left points to 'd', which is not a button"), "{msgs}");
+        assert!(msgs.contains("(Text 'a'): D-pad right points to the button itself"), "{msgs}");
+        assert!(!msgs.contains("D-pad down"), "{msgs}");
+    }
+
+    #[test]
+    fn nav_and_auto_execute_json_round_trip() {
+        let plain = text(0.0, 0.0, "a", Some(Action::PlayAll));
+        let s = serde_json::to_string(&plain).unwrap();
+        assert!(!s.contains("nav") && !s.contains("autoExecute"), "old JSON unchanged: {s}");
+        let mut e = plain.clone();
+        e.nav = Some(NavOverride { down: Some("c".into()), ..Default::default() });
+        e.auto_execute = true;
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""nav":{"down":"c"}"#) && s.contains(r#""autoExecute":true"#), "{s}");
+        assert_eq!(serde_json::from_str::<Element>(&s).unwrap(), e);
+        // The editor sends null for automatic directions.
+        let mut v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        v["nav"] = serde_json::json!({ "up": null, "down": "c", "left": null, "right": null });
+        assert_eq!(serde_json::from_value::<Element>(v).unwrap(), e);
+    }
+
+    #[test]
+    fn dvd_auto_execute_reaches_spumux_and_never_starts_focused() {
+        let dir = std::env::temp_dir().join(format!("cx_autoexec_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = stacked();
+        m.elements[0].auto_execute = true;
+        m.elements[2].nav = Some(NavOverride { down: Some("a".into()), ..Default::default() });
+        let l = layout(vec![m]);
+        validate(&l, &titles(1), TvStandard::Pal).unwrap();
+        let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
+        let (spec, files) = &out.pages[0];
+        assert_eq!(spec.buttons.iter().map(|b| b.auto_action).collect::<Vec<_>>(), [true, false, false]);
+        assert_eq!(spec.pre.as_deref(), Some("s8 = 2k;"), "focus starts on b2, the first button without auto-action");
+        let xml = std::fs::read_to_string(&files.spumux_xml).unwrap();
+        assert!(xml.contains(r#"<button name="b1" "#) && xml.lines().any(|l| l.contains(r#"name="b1""#) && l.contains(r#"autoaction="1""#)), "{xml}");
+        assert_eq!(xml.matches("autoaction").count(), 1, "{xml}");
+        assert!(xml.lines().any(|l| l.contains(r#"name="b3""#) && l.contains(r#"down="b1""#)), "override: {xml}");
+        // spumux puts the flag where dvd_mux reads it (name, two modifier bytes, autoaction, group).
+        let defs = crate::spumux::parse_xml(&xml, &dir).unwrap();
+        assert!(defs[0].menu.as_ref().unwrap().buttons[0].autoaction);
+        let mut mpg = Vec::new();
+        crate::spumux::mux(std::io::Cursor::new(Vec::new()), &mut mpg, defs, 0).unwrap();
+        // Button table (command 3, three buttons): name, 4 flag bytes, rect (8), four nav names.
+        let mut i = mpg.windows(5).position(|w| w == b"\x03\x03b1\0").unwrap() + 2;
+        let skip_str = |i: &mut usize| *i += mpg[*i..].iter().position(|&c| c == 0).unwrap() + 1;
+        let mut flags = Vec::new();
+        for _ in 0..3 {
+            skip_str(&mut i);
+            flags.push(mpg[i..i + 3].to_vec());
+            i += 12;
+            (0..4).for_each(|_| skip_str(&mut i));
+        }
+        assert_eq!(flags, [vec![0, 0, 1], vec![0, 0, 0], vec![0, 0, 0]]);
+
+        // Every button auto-executing cannot work.
+        let mut all = l.clone();
+        all.menus[0].elements.iter_mut().for_each(|e| e.auto_execute = true);
+        let err = validate(&all, &titles(1), TvStandard::Pal).unwrap_err();
+        assert!(err.0.iter().any(|e| e.contains("every button runs on focus")), "{err:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn menu_button_navigation_matches_author_on_pal_and_bd1080() {
         let mut deco = text(40.0, 20.0, "Title", None);
@@ -3115,6 +3300,7 @@ mod tests {
                         thumbnail: None,
                         clip: None,
                         nav: Navigation::default(),
+                        auto_action: false,
                     })
                 })
                 .collect();

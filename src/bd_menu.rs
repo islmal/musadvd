@@ -19,7 +19,7 @@ use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
-    bd_button_rect, button_colors, clip_of, draw_text_element, element_name, fit_image, crop_normalized, icon_coverage, frame_box, is_unrotated,
+    apply_nav_overrides, bd_button_rect, button_colors, clip_of, draw_text_element, element_name, fit_image, crop_normalized, icon_coverage, frame_box, is_unrotated,
     parse_color, rect_border, rect_image, rotate_coverage, rotate_rgba, video_clip, video_rotation_deg, Action,
     Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
@@ -811,7 +811,13 @@ fn render_page(
         }
     });
 
-    // IG stream: palette, objects, buttons with their neighbours.
+    // IG stream: palette, objects, buttons with their neighbours. Every menu object selects
+    // button 1 (`SetButtonPage(1)`), so the first button without auto-action goes first: an
+    // auto-action button selected on entry would fire at once (and could loop).
+    let auto = |p: &Pending| menu.elements[p.element].auto_execute;
+    if let Some(k) = pending.iter().position(|p| !auto(p)) {
+        pending[..=k].rotate_right(1);
+    }
     let mut buttons: Vec<MenuButton> = pending
         .iter()
         .enumerate()
@@ -825,9 +831,11 @@ fn render_page(
             thumbnail: None,
             clip: None,
             nav: Navigation::default(),
+            auto_action: auto(p),
         })
         .collect();
     author::compute_navigation(&mut buttons);
+    apply_nav_overrides(menu, &mut buttons);
     let id_of = |name: &Option<String>| name.as_ref().and_then(|n| n[1..].parse::<u16>().ok()).unwrap_or(0);
     let make_ig = |steps: u32, crop: bool| -> Result<IgMenu, LayoutError> {
         let IgSet { pal, objects, rects } = ig_set(&pending, steps, crop, &menu.name)?;
@@ -844,6 +852,7 @@ fn render_page(
                 right: id_of(&buttons[i].nav.right),
                 selected: (2 * i) as u16,
                 activated: (2 * i + 1) as u16,
+                auto_action: buttons[i].auto_action,
                 commands: commands[p.element].clone().unwrap_or_default(),
             })
             .collect();
@@ -929,7 +938,7 @@ pub fn render_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{Background, Canvas, Element, ElementKey, Highlight};
+    use crate::layout::{Background, Canvas, Element, ElementKey, Highlight, NavOverride};
 
     fn title(chapters: usize) -> LayoutTitle {
         LayoutTitle {
@@ -957,6 +966,8 @@ mod tests {
             group: None,
             intro: Vec::new(),
             easter_egg: false,
+            nav: None,
+            auto_execute: false,
             content: Content::Text {
                 text: "Play".into(),
                 font: "Arial".into(),
@@ -1342,6 +1353,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let ig = pages[0].igs.as_ref().unwrap();
         assert_eq!(ig.buttons.len(), 4 + 1, "the Rect button joins the {before} existing elements");
+    }
+
+    #[test]
+    fn nav_overrides_and_auto_action_reach_the_ig_buttons() {
+        let mut l = layout();
+        for (e, id) in l.menus[0].elements.iter_mut().zip(["a", "b", "c", "d"]) {
+            e.id = id.into();
+        }
+        l.menus[0].elements[0].auto_execute = true;
+        l.menus[0].elements[3].nav = Some(NavOverride { up: Some("b".into()), down: Some("a".into()), ..Default::default() });
+        let frame = MenuFrame::square(1920, 1080);
+        let t = [title(5), title(5)];
+        crate::layout::validate_bd(&l, &t, frame).unwrap();
+        let tr = traits(&l, &t, frame);
+        let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let dir = std::env::temp_dir().join(format!("bdmenu-nav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let pages = render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let ig = pages[0].igs.as_ref().unwrap();
+        // SetButtonPage(1) selects id 1: "b" moved in front of the auto-action button "a".
+        assert_eq!(ig.buttons.iter().map(|b| b.auto_action).collect::<Vec<_>>(), [false, true, false, false]);
+        assert_eq!(ig.buttons[0].commands, nav.commands[0][1].clone().unwrap(), "id 1 runs b's commands");
+        assert_eq!(ig.buttons[1].commands, nav.commands[0][0].clone().unwrap());
+        // "d" (id 4): overridden up -> b (1), down -> a (2); automatic left/right stay on itself.
+        assert_eq!((ig.buttons[3].up, ig.buttons[3].down, ig.buttons[3].left), (1, 2, 4));
+        assert_eq!(ig.buttons[2].down, 4, "c keeps its automatic route");
     }
 
     #[test]

@@ -61,6 +61,8 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
             ElementKey { t: 3.0, x: 100.0, y: 100.0, w: 300.0, h: 50.0, opacity: 1.0 },
         ],
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
 
     let menu = CustomMenu {
@@ -176,6 +178,8 @@ fn easter_egg_transparent_mask() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
 
     let easter_egg_btn = Element {
@@ -214,6 +218,8 @@ fn easter_egg_transparent_mask() {
         group: None,
         intro: Vec::new(),
         easter_egg: true,
+        nav: None,
+        auto_execute: false,
     };
 
     let menu = CustomMenu {
@@ -301,6 +307,8 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
     let play = Element {
         id: "play".into(),
@@ -338,6 +346,8 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         group: None,
         intro: Vec::new(),
         easter_egg: false,
+        nav: None,
+        auto_execute: false,
     };
     let menu = CustomMenu {
         id: "main".into(),

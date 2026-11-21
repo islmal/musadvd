@@ -656,6 +656,8 @@ mod menus {
             group: None,
             intro: Vec::new(),
             easter_egg: false,
+            nav: None,
+            auto_execute: false,
         }
     }
 

@@ -269,7 +269,7 @@ fn text_rect(g: &Graphic, style: Option<&TextStyle>) -> (f64, f64, f64, f64) {
 }
 
 fn element(id: String, content: Content, (x, y, w, h): (f64, f64, f64, f64), opacity: f32) -> Element {
-    Element { id, content, x, y, w, h, rotation: 0.0, opacity, action: None, highlight: None, group: None, intro: Vec::new(), easter_egg: false }
+    Element { id, content, x, y, w, h, rotation: 0.0, opacity, action: None, highlight: None, group: None, intro: Vec::new(), easter_egg: false, nav: None, auto_execute: false }
 }
 
 /// Whether `clip` left the box alone. Not `==`: it recomputes the size as `(x + w) - x`, which is
