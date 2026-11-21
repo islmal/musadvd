@@ -44,9 +44,11 @@ import {
   type Fit,
   type LayoutElement,
   type TextElement,
+  type NavOverride,
 } from "./layout";
 import { currentLanguage, t as tr } from "./i18n";
 import { fontPicker } from "./fontPicker";
+import { resolveNav, textBoxCss, textGlyphCss } from "./textStyle";
 import { iconDataUrl, iconSvg } from "./icons";
 import { alphaBounds, clampCrop, trimmedBox } from "./imageCrop";
 
@@ -396,10 +398,12 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** Line breaks of wrapped texts, computed by the engine (same fonts and metrics as the build). */
   const lineCache = new Map<string, Promise<string[]>>();
   function linesOf(e: TextElement): Promise<string[]> {
-    const key = JSON.stringify([e.text, e.font, e.size, e.bold, e.italic, e.wrap, e.w, e.h, e.rotation, L.canvas, opts.tv]);
+    const key = JSON.stringify([e.text, e.font, e.size, e.bold, e.italic, e.wrap, e.w, e.h, e.rotation, e.padding ?? 0, L.canvas, opts.tv]);
     let p = lineCache.get(key);
     if (!p) {
-      p = textLines(e, L.canvas, opts.tv);
+      // Wrap inside the padded text area (the engine insets by padding itself, so this is only the width fed to it).
+      const pad = e.padding ?? 0;
+      p = textLines(pad > 0 ? { ...e, w: Math.max(1, e.w - 2 * pad) } : e, L.canvas, opts.tv);
       p.catch(() => lineCache.delete(key));
       if (lineCache.size > 200) lineCache.clear();
       lineCache.set(key, p);
@@ -1037,7 +1041,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       remoteFocusId = null;
       return;
     }
-    const fallback = computeNavigationFallback(m);
+    const fallback = resolveNav(m, computeNavigationFallback(m));
     remoteGraph.clear();
     for (const n of fallback) remoteGraph.set(n.id, n);
     if (focusFirst || !remoteFocusId || !remoteGraph.has(remoteFocusId)) {
@@ -1050,9 +1054,10 @@ export function mountMenuEditor(opts: EditorOptions) {
         if (!cur || cur.id !== m.id) return;
         const prevFocus = remoteFocusId;
         remoteGraph.clear();
-        for (const n of navs) remoteGraph.set(n.id, n);
+        const resolved = resolveNav(cur, navs);
+        for (const n of resolved) remoteGraph.set(n.id, n);
         if (!remoteFocusId || !remoteGraph.has(remoteFocusId)) {
-          remoteFocusId = navs[0]?.id ?? null;
+          remoteFocusId = resolved[0]?.id ?? null;
         }
         if (prevFocus !== remoteFocusId) renderStage();
         renderToolbar();
@@ -1109,12 +1114,21 @@ export function mountMenuEditor(opts: EditorOptions) {
       updateRemoteFocusVisuals();
       return;
     }
+    const prev = remoteFocusId;
     const nextId = remoteGraph.get(remoteFocusId)?.[dir] ?? null;
     if (nextId && buttons.some((b) => b.id === nextId)) {
       if (nextId !== remoteFocusId) remoteStatus = "";
       remoteFocusId = nextId;
+      if (nextId !== prev) autoExecuteFocus();
     }
     updateRemoteFocusVisuals();
+  }
+
+  /** Runs the action of a freshly focused button that has "auto-execute" (DVD autoaction / BD auto action). */
+  function autoExecuteFocus() {
+    const b = menu()?.elements.find((x) => x.id === remoteFocusId && isButton(x));
+    // A menu jump re-focuses the first button without moving: never chain-fire there (only real focus moves call this).
+    if (b?.autoExecute) activateRemoteFocus();
   }
 
   function activateRemoteFocus() {
@@ -1289,8 +1303,9 @@ export function mountMenuEditor(opts: EditorOptions) {
         fontWeight: e.bold ? "700" : "400",
         fontStyle: e.italic ? "italic" : "normal",
         textAlign: e.align,
-        textShadow: e.shadow ? "2px 2px 0 rgba(0,0,0,0.67)" : "none",
+        ...textGlyphCss(e),
       });
+      Object.assign(inner.style, textBoxCss(e));
     } else if (e.type === "rect") {
       Object.assign(inner.style, {
         backgroundColor: e.color,
@@ -1318,11 +1333,13 @@ export function mountMenuEditor(opts: EditorOptions) {
       if (e.type === "video") inner.append(el("span", { class: "ed-video-badge" }, `▶ ${videoLabel(e)}`));
     }
     const isCell1 = !remoteMode && viewMode === "timeline" && isButton(e) && playheadTime < (menu().introSecs ?? 0.0);
+    const hasNav = !!e.nav && Object.values(e.nav).some((v) => !!v);
     const isRemoteFocused = remoteMode && remoteFocusId === e.id;
     const isRemoteActivated = remoteMode && remoteActivateId === e.id;
     const classes = [
       "ed-el",
       isButton(e) ? "is-button" : "",
+      isButton(e) && e.type === "text" ? "is-text-btn" : "",
       e.group ? "in-group" : "",
       !remoteMode && isSel(e.id) ? "selected" : "",
       isCell1 ? "hli-inactive" : "",
@@ -1345,6 +1362,9 @@ export function mountMenuEditor(opts: EditorOptions) {
     );
     if (isCell1) {
       node.append(el("span", { class: "ed-hli-badge" }, tr("menuEditor.subpictureInactive")));
+    }
+    if (!remoteMode && isButton(e) && (hasNav || e.autoExecute)) {
+      node.append(el("span", { class: "ed-nav-badge", title: tr("editor.navBadgeTip") }, `${hasNav ? "↕↔" : ""}${e.autoExecute ? "▶" : ""}`));
     }
     if (e.easterEgg) {
       node.append(el("span", { class: "ed-easter-egg-badge" }, "🥚 Easter Egg"));
@@ -1369,9 +1389,11 @@ export function mountMenuEditor(opts: EditorOptions) {
     node.addEventListener("click", (ev) => {
       if (!remoteMode || !isButton(e) || remotePreview) return;
       ev.stopPropagation();
+      const moved = remoteFocusId !== e.id;
       remoteFocusId = e.id;
       remoteStatus = "";
       updateRemoteFocusVisuals();
+      if (moved) autoExecuteFocus();
     });
     node.addEventListener("dblclick", (ev) => {
       if (!remoteMode || !isButton(e) || remotePreview) return;
@@ -3150,34 +3172,108 @@ export function mountMenuEditor(opts: EditorOptions) {
     return out;
   }
 
-  /** Own marked/activated colours of a button (at most 3 different pairs per menu). */
-  function buttonColorControls(e: LayoutElement): HTMLElement[] {
-    if (!isButton(e)) return [];
+  /** One labelled colour swatch of the look row. */
+  const swatch = (label: string, value: string, set: (v: string) => void) =>
+    el("label", { class: "ed-swatch" }, el("span", {}, label), bind(el("input", { type: "color", value }) as HTMLInputElement, (v) => set(v.toUpperCase()), { live: true }));
+
+  /** Highlighted / Selected swatches: own colours of a button (at most 3 different pairs per menu). */
+  function buttonSwatches(e: LayoutElement): HTMLElement[] {
     const own = e.highlight ?? null;
+    const ensure = () => (e.highlight ??= { color: L.highlight.color, selectColor: L.highlight.selectColor });
+    return [
+      swatch(tr("editor.lookHighlighted"), own?.color ?? L.highlight.color, (v) => (ensure().color = v)),
+      swatch(tr("editor.lookSelected"), own?.selectColor ?? L.highlight.selectColor, (v) => (ensure().selectColor = v)),
+    ];
+  }
+
+  /** Normal / Highlighted / Selected look row; Normal exists for text only, the other two for buttons only. */
+  function lookControls(e: LayoutElement): HTMLElement[] {
+    const btn = isButton(e);
+    const t = e.type === "text" ? e : null;
+    if (!t && !btn) return [];
     const out: HTMLElement[] = [
+      el("div", { class: "ed-looks" }, ...(t ? [swatch(tr("editor.lookNormal"), t.color, (v) => (t.color = v))] : []), ...(btn ? buttonSwatches(e) : [])),
+    ];
+    if (btn) {
+      if (e.highlight) {
+        out.push(
+          el("a", { href: "#", class: "ed-link", onclick: (ev: Event) => { ev.preventDefault(); remember(); e.highlight = null; renderAll(); } }, tr("editor.lookReset")),
+        );
+      }
+      out.push(el("p", { class: "ed-hint" }, tr("menuEditor.eineDvdMenueseiteZeigt")));
+    }
+    return out;
+  }
+
+  /** Background box, corner radius and padding of a text element. */
+  function textBoxControls(t: TextElement): HTMLElement {
+    const bg = t.bgColor ?? null;
+    const dis = { disabled: !bg };
+    return group(
+      tr("editor.boxTitle"),
+      el(
+        "div",
+        { class: "ed-grid2" },
+        row(tr("editor.boxBg"), el("input", { type: "checkbox", checked: !!bg, onchange: (ev: Event) => { remember(); t.bgColor = (ev.target as HTMLInputElement).checked ? (t.bgColor ?? "#000000") : null; renderAll(); } })),
+        row(tr("editor.boxColor"), bind(el("input", { type: "color", value: bg ?? "#000000", ...dis }) as HTMLInputElement, (v) => (t.bgColor = v.toUpperCase()), { live: true })),
+        row(tr("editor.boxOpacity"), num(Math.round((t.bgOpacity ?? 1) * 100), (v) => (t.bgOpacity = Math.max(0, Math.min(100, v)) / 100), { min: "0", max: "100", step: "5", ...dis })),
+        row(tr("editor.boxPadding"), num(t.padding ?? 0, (v) => (t.padding = Math.max(0, v)), { min: "0", max: "200", step: "1" })),
+        row(tr("editor.boxRx"), num(t.rx ?? 0, (v) => (t.rx = Math.max(0, v)), { min: "0", max: "500", step: "1" })),
+        row(tr("editor.boxRy"), num(t.ry ?? 0, (v) => (t.ry = Math.max(0, v)), { min: "0", max: "500", step: "1" })),
+      ),
+    );
+  }
+
+  /** Drop shadow (needs the shadow toggle) and glyph outline of a text element. */
+  function textShadowControls(t: TextElement): HTMLElement {
+    const dis = { disabled: !t.shadow };
+    return group(
+      tr("editor.shadowTitle"),
+      el(
+        "div",
+        { class: "ed-grid2" },
+        row(tr("menuEditor.schatten"), el("input", { type: "checkbox", checked: t.shadow, onchange: (ev: Event) => { remember(); t.shadow = (ev.target as HTMLInputElement).checked; renderAll(); } })),
+        row(tr("editor.shadowColor"), bind(el("input", { type: "color", value: t.shadowColor ?? "#000000", ...dis }) as HTMLInputElement, (v) => (t.shadowColor = v.toUpperCase()), { live: true })),
+        row(tr("editor.shadowOpacity"), num(Math.round((t.shadowOpacity ?? 0.67) * 100), (v) => (t.shadowOpacity = Math.max(0, Math.min(100, v)) / 100), { min: "0", max: "100", step: "5", ...dis })),
+        row(tr("editor.shadowBlur"), num(t.shadowBlur ?? 0, (v) => (t.shadowBlur = Math.max(0, v)), { min: "0", max: "50", step: "1", ...dis })),
+        row("X", num(t.shadowX ?? 2, (v) => (t.shadowX = v), { min: "-50", max: "50", step: "1", ...dis })),
+        row("Y", num(t.shadowY ?? 2, (v) => (t.shadowY = v), { min: "-50", max: "50", step: "1", ...dis })),
+        row(tr("editor.outlineColor"), bind(el("input", { type: "color", value: t.outlineColor ?? "#000000" }) as HTMLInputElement, (v) => (t.outlineColor = v.toUpperCase()), { live: true })),
+        row(tr("editor.outlineWidth"), num(t.outlineWidth ?? 0, (v) => (t.outlineWidth = Math.max(0, v)), { min: "0", max: "30", step: "0.5" })),
+      ),
+    );
+  }
+
+  /** D-pad targets per direction ("Auto" = spatial routing) and auto-execute of a button. */
+  function navControls(m: CustomMenu, e: LayoutElement): HTMLElement {
+    const others = m.elements.filter((x) => isButton(x) && x.id !== e.id);
+    const options = (): [string, string][] => [["", tr("editor.navAuto")], ...others.map((x): [string, string] => [x.id, layerName(x)])];
+    const dirs = [["up", tr("editor.navUp")], ["down", tr("editor.navDown")], ["left", tr("editor.navLeft")], ["right", tr("editor.navRight")]] as const;
+    return group(
+      tr("editor.navTitle"),
+      el(
+        "div",
+        { class: "ed-grid2" },
+        ...dirs.map(([d, label]) => {
+          const cur = e.nav?.[d] ?? "";
+          return row(
+            label,
+            select(options(), others.some((x) => x.id === cur) ? cur : "", (v) => {
+              const nav: NavOverride = { ...(e.nav ?? {}) };
+              if (v) nav[d] = v;
+              else delete nav[d];
+              e.nav = Object.values(nav).some((x) => !!x) ? nav : null;
+            }),
+          );
+        }),
+      ),
       el(
         "label",
         { class: "ed-check" },
-        el("input", {
-          type: "checkbox",
-          checked: !!own,
-          onchange: (ev: Event) => {
-            remember();
-            e.highlight = (ev.target as HTMLInputElement).checked ? { color: L.highlight.color, selectColor: L.highlight.selectColor } : null;
-            renderAll();
-          },
-        }),
-        tr("menuEditor.eigeneFarben"),
+        el("input", { type: "checkbox", checked: !!e.autoExecute, onchange: (ev: Event) => { remember(); e.autoExecute = (ev.target as HTMLInputElement).checked || undefined; renderAll(); } }),
+        tr("editor.autoExecute"),
       ),
-    ];
-    if (own) {
-      out.push(
-        row(tr("menuEditor.ausgewaehlt"), bind(el("input", { type: "color", value: own.color }) as HTMLInputElement, (v) => (own.color = v.toUpperCase()), { live: true })),
-        row(tr("menuEditor.aktiviert"), bind(el("input", { type: "color", value: own.selectColor }) as HTMLInputElement, (v) => (own.selectColor = v.toUpperCase()), { live: true })),
-        el("p", { class: "ed-hint" }, tr("menuEditor.eineDvdMenueseiteZeigt")),
-      );
-    }
-    return out;
+    );
   }
 
   /** Crop fields (percent of the picture) plus reset and "trim transparency". */
@@ -3284,7 +3380,7 @@ export function mountMenuEditor(opts: EditorOptions) {
             }),
           ),
           row(tr("menuEditor.groessePx"), num(t.size, (v) => (t.size = Math.max(4, Math.min(300, v))), { min: "4", max: "300", step: "1" })),
-          row(tr("menuEditor.farbe"), bind(el("input", { type: "color", value: t.color }) as HTMLInputElement, (v) => (t.color = v.toUpperCase()), { live: true })),
+          ...lookControls(t),
           el(
             "div",
             { class: "ed-seg", role: "group", "aria-label": tr("menuEditor.ausrichtung") },
@@ -3311,7 +3407,6 @@ export function mountMenuEditor(opts: EditorOptions) {
             ...([
               ["bold", tr("menuEditor.fett")],
               ["italic", tr("menuEditor.kursiv")],
-              ["shadow", tr("menuEditor.schatten")],
               ["wrap", tr("menuEditor.zeilenumbruch")],
             ] as const).map(([k, label]) =>
               el(
@@ -3436,7 +3531,9 @@ export function mountMenuEditor(opts: EditorOptions) {
     return [
       el("h3", {}, kind),
       ...(typeGroup as HTMLElement[]),
-      group(tr("menuEditor.button2"), ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...buttonColorControls(e)),
+      ...(e.type === "text" ? [textBoxControls(e), textShadowControls(e)] : []),
+      group(tr("menuEditor.button2"), ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...(e.type === "text" ? [] : lookControls(e))),
+      ...(isButton(e) ? [navControls(m, e)] : []),
       ...(isButton(e)
         ? [
             group(
@@ -3817,6 +3914,18 @@ export function mountMenuEditor(opts: EditorOptions) {
     renderAll();
   }
   /** Copies of `src` (new ids, groups re-mapped to fresh ids), offset by 16 px, on top and selected. */
+  /** Points copied elements' nav overrides at the copies; targets outside the copied set are dropped. */
+  function remapNav(copies: LayoutElement[], idMap: Map<string, string>) {
+    for (const c of copies) {
+      if (!c.nav) continue;
+      const nav: NavOverride = {};
+      for (const d of ["up", "down", "left", "right"] as const) {
+        const to = c.nav[d] ? idMap.get(c.nav[d] as string) : undefined;
+        if (to) nav[d] = to;
+      }
+      c.nav = Object.keys(nav).length ? nav : null;
+    }
+  }
   function addCopies(src: LayoutElement[]) {
     if (src.length === 0) return;
     if (menu().elements.filter(isButton).length + src.filter(isButton).length > maxButtons(tv)) {
@@ -3834,6 +3943,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       }
       return c;
     });
+    remapNav(copies, new Map(src.map((e, i) => [e.id, copies[i].id])));
     shiftBy(copies, 16, 16);
     menu().elements.push(...copies);
     selIds = copies.map((c) => c.id);
@@ -3994,7 +4104,13 @@ export function mountMenuEditor(opts: EditorOptions) {
     const copy: CustomMenu = structuredClone(menu());
     copy.id = newId("m");
     copy.name = tr("menuEditor.copySuffix", { name: copy.name });
-    copy.elements = copy.elements.map((e) => ({ ...e, id: newId("d") }));
+    const idMap = new Map<string, string>();
+    copy.elements = copy.elements.map((e) => {
+      const id = newId("d");
+      idMap.set(e.id, id);
+      return { ...e, id };
+    });
+    remapNav(copy.elements, idMap);
     L.menus.splice(menuIdx + 1, 0, copy);
     menuIdx += 1;
     renderAll();

@@ -62,6 +62,17 @@ interface ElementBase {
   intro?: ElementKey[];
   /** Hidden Easter Egg: Button hitbox and navigation active, but subpicture highlight is 100% transparent. */
   easterEgg?: boolean;
+  /** Manual D-pad targets (element ids of buttons on the same menu); null/omitted = automatic spatial routing. */
+  nav?: NavOverride | null;
+  /** Run the action as soon as the button gets focus (DVD autoaction / BD auto action flag). */
+  autoExecute?: boolean;
+}
+
+export interface NavOverride {
+  up?: string | null;
+  down?: string | null;
+  left?: string | null;
+  right?: string | null;
 }
 
 export interface TextElement extends ElementBase {
@@ -76,6 +87,24 @@ export interface TextElement extends ElementBase {
   shadow: boolean;
   /** Break lines at the box width (otherwise only at line feeds). */
   wrap?: boolean;
+  /** Box fill behind the text; null/omitted = transparent. */
+  bgColor?: string | null;
+  /** Fill opacity 0..1 (default 1). */
+  bgOpacity?: number;
+  /** Corner radii of the fill, canvas units (default 0). */
+  rx?: number;
+  ry?: number;
+  /** Inner padding between box edge and text, canvas units (default 0). */
+  padding?: number;
+  /** Drop shadow (used when `shadow` is true); defaults reproduce the old fixed shadow: #000000, 0.67, 2/2, blur 0. */
+  shadowColor?: string;
+  shadowOpacity?: number;
+  shadowX?: number;
+  shadowY?: number;
+  shadowBlur?: number;
+  /** Text outline; omitted or width 0 = none. Width in canvas units. */
+  outlineColor?: string | null;
+  outlineWidth?: number;
 }
 
 /** Source rectangle of a picture, normalized 0..1 of its natural size. */
@@ -503,13 +532,30 @@ export function computeNavigationFallback(menu: CustomMenu): ButtonNav[] {
     return btns[chosen ? chosen.idx : from].id;
   };
 
-  return btns.map((b, i) => ({
-    id: b.id,
-    up: target(i, "up"),
-    down: target(i, "down"),
-    left: target(i, "left"),
-    right: target(i, "right"),
-  }));
+  return resolveNav(
+    menu,
+    btns.map((b, i) => ({
+      id: b.id,
+      up: target(i, "up"),
+      down: target(i, "down"),
+      left: target(i, "left"),
+      right: target(i, "right"),
+    })),
+  );
+}
+
+/** Applies manual `nav` overrides on top of an automatic graph; targets that are not buttons of the menu, or the button itself, are ignored. */
+export function resolveNav(menu: CustomMenu, auto: ButtonNav[]): ButtonNav[] {
+  const buttons = new Map(menu.elements.filter(isButton).map((e) => [e.id, e]));
+  return auto.map((n) => {
+    const o = buttons.get(n.id)?.nav;
+    if (!o) return n;
+    const pick = (dir: NavDir): string | null => {
+      const v = o[dir];
+      return v && v !== n.id && buttons.has(v) ? v : n[dir];
+    };
+    return { id: n.id, up: pick("up"), down: pick("down"), left: pick("left"), right: pick("right") };
+  });
 }
 
 /** Menus that move (video elements, video background or sound) – they are encoded as loops. */
@@ -809,6 +855,11 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
  * highlight, background colour and overlay) to every other menu of its group; positions, texts,
  * actions and pictures stay. Returns how many menus changed.
  */
+const TEXT_STYLE_KEYS = [
+  "bgColor", "bgOpacity", "rx", "ry", "padding",
+  "shadowColor", "shadowOpacity", "shadowX", "shadowY", "shadowBlur", "outlineColor", "outlineWidth",
+] as const;
+
 export function applyStyleToSimilar(layout: CustomLayout, menuId: string): number {
   const src = layout.menus.find((m) => m.id === menuId);
   if (!src) return 0;
@@ -826,7 +877,13 @@ export function applyStyleToSimilar(layout: CustomLayout, menuId: string): numbe
     const before = JSON.stringify(m);
     for (const e of texts(m)) {
       const from = srcText.get(kindOf(m, e));
-      if (from) Object.assign(e, { font: from.font, color: from.color, bold: from.bold, italic: from.italic, shadow: from.shadow });
+      if (from) {
+        Object.assign(e, { font: from.font, color: from.color, bold: from.bold, italic: from.italic, shadow: from.shadow });
+        for (const k of TEXT_STYLE_KEYS) {
+          if (from[k] === undefined) delete e[k];
+          else Object.assign(e, { [k]: from[k] });
+        }
+      }
     }
     for (const e of m.elements) {
       if (e.type === "icon" && srcIcon) e.color = srcIcon.color;
@@ -933,7 +990,7 @@ function applyPreset(layout: CustomLayout, preset: MenuPreset): void {
  * A 720×576 draft on a 16:9 Blu-ray canvas: positions and sizes scale with the canvas, text
  * sizes with its height, and video boxes become 16:9 (400×225) with the caption right below.
  */
-function scaleMenuToBluray(m: CustomMenu, fromCanvas: { width: number; height: number }, toCanvas: { width: number; height: number }): void {
+export function scaleMenuToBluray(m: CustomMenu, fromCanvas: { width: number; height: number }, toCanvas: { width: number; height: number }): void {
   const sx = toCanvas.width / fromCanvas.width;
   const sy = toCanvas.height / fromCanvas.height;
   const vidW = Math.round((400 * toCanvas.width) / 1920);
@@ -943,7 +1000,12 @@ function scaleMenuToBluray(m: CustomMenu, fromCanvas: { width: number; height: n
     e.y = Math.round(e.y * sy);
     e.w = Math.round(e.w * sx);
     e.h = Math.round(e.h * sy);
-    if (e.type === "text") e.size = Math.round(e.size * sy);
+    if (e.type === "text") {
+      e.size = Math.round(e.size * sy);
+      for (const k of ["rx", "ry", "padding", "shadowX", "shadowY", "shadowBlur", "outlineWidth"] as const) {
+        if (e[k]) e[k] = Math.round(e[k] * sy);
+      }
+    }
     // Thumbnail buttons become 16:9; an action-less video (landing key art) just scales.
     if (e.type === "video" && e.action) [e.w, e.h] = [vidW, vidH];
     if (e.type === "icon") {
