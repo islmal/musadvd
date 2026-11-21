@@ -359,7 +359,7 @@ mod build {
     }
 
     fn text(s: &str) -> Content {
-        Content::Text { text: s.into(), font: "Arial".into(), size: 80.0, color: "#FFFFFF".into(), align: "center".into(), bold: true, italic: false, shadow: false, wrap: false }
+        Content::Text { text: s.into(), font: "Arial".into(), size: 80.0, color: "#FFFFFF".into(), align: "center".into(), bold: true, italic: false, shadow: false, wrap: false, bg_color: None, bg_opacity: None, rx: None, ry: None, padding: None, shadow_color: None, shadow_opacity: None, shadow_x: None, shadow_y: None, shadow_blur: None, outline_color: None, outline_width: None }
     }
 
     /// One title menu: a fading headline, the clip zooming in from its centre, a button.

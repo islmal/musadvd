@@ -19,7 +19,7 @@ use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
 use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
-    bd_button_rect, button_colors, clip_of, element_name, fit_image, crop_normalized, icon_coverage, frame_box, frame_font_size, is_unrotated,
+    bd_button_rect, button_colors, clip_of, draw_text_element, element_name, fit_image, crop_normalized, icon_coverage, frame_box, is_unrotated,
     parse_color, rect_border, rect_image, rotate_coverage, rotate_rgba, video_clip, video_rotation_deg, Action,
     Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
 };
@@ -707,14 +707,8 @@ fn render_page(
         };
         let visible = e.opacity > 0.0 || !e.intro.is_empty();
         match &e.content {
-            Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
-                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, frame), *bold, *italic, *wrap, align, w, h);
-                let mut img = RgbaImage::new(w, h);
-                let [r, g, b] = parse_color(color).unwrap_or([255, 255, 255]);
-                if *shadow {
-                    menu::blend_coverage(&mut img, &cov, [0, 0, 0, 170], 2, 2, 255);
-                }
-                menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
+            c @ Content::Text { .. } => {
+                let (img, cov) = draw_text_element(c, w, h, canvas, frame);
                 let (img, rx, ry) = rotate_rgba(img, e.rotation, frame.pixel_aspect, (x, y));
                 let (rw, rh) = img.dimensions();
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
@@ -973,6 +967,18 @@ mod tests {
                 italic: false,
                 shadow: false,
                 wrap: true,
+                bg_color: None,
+                bg_opacity: None,
+                rx: None,
+                ry: None,
+                padding: None,
+                shadow_color: None,
+                shadow_opacity: None,
+                shadow_x: None,
+                shadow_y: None,
+                shadow_blur: None,
+                outline_color: None,
+                outline_width: None,
             },
             action: Some(action),
         }

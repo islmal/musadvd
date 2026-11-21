@@ -341,6 +341,41 @@ pub enum Content {
         /// Break lines at the box width (otherwise only at `\n`; overlong lines end with "…").
         #[serde(default)]
         wrap: bool,
+        /// Fill colour of the element box behind the text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg_color: Option<String>,
+        /// Opacity of the box fill (default 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg_opacity: Option<f32>,
+        /// Horizontal corner radius of the box fill, canvas units (clamped to half the box).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rx: Option<f32>,
+        /// Vertical corner radius of the box fill.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ry: Option<f32>,
+        /// Text area = box inset by this on all sides.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f32>,
+        /// Shadow colour (default black; only with `shadow`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow_color: Option<String>,
+        /// Shadow opacity (default 0.67).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow_opacity: Option<f32>,
+        /// Shadow offset (default 2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow_x: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow_y: Option<f32>,
+        /// Shadow blur radius (default 0).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow_blur: Option<f32>,
+        /// Glyph outline colour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outline_color: Option<String>,
+        /// Glyph outline width, canvas units (0 = none).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outline_width: Option<f32>,
     },
     Image {
         src: String,
@@ -834,12 +869,32 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 errs.push(el("Opacity must be between 0 and 1"));
             }
             match &e.content {
-                Content::Text { color, size, .. } => {
+                Content::Text { color, size, bg_color, bg_opacity, rx, ry, padding, shadow_color, shadow_opacity, shadow_x, shadow_y, shadow_blur, outline_color, outline_width, .. } => {
                     if parse_color(color).is_none() {
                         errs.push(el(&format!("Text colour '{color}' is not a colour")));
                     }
                     if !(4.0..=300.0).contains(size) {
                         errs.push(el("Font size must be between 4 and 300"));
+                    }
+                    for (what, c) in [("Box", bg_color), ("Shadow", shadow_color), ("Outline", outline_color)] {
+                        if c.as_deref().is_some_and(|c| parse_color(c).is_none()) {
+                            errs.push(el(&format!("{what} colour '{}' is not a colour", c.as_deref().unwrap_or_default())));
+                        }
+                    }
+                    for v in [bg_opacity, shadow_opacity].into_iter().flatten() {
+                        if !(0.0..=1.0).contains(v) {
+                            errs.push(el("Box/shadow opacity must be between 0 and 1"));
+                        }
+                    }
+                    for v in [rx, ry, padding, shadow_blur, outline_width].into_iter().flatten() {
+                        if !(0.0..=100.0).contains(v) {
+                            errs.push(el("Radius, padding, blur and outline width must be between 0 and 100"));
+                        }
+                    }
+                    for v in [shadow_x, shadow_y].into_iter().flatten() {
+                        if !(-100.0..=100.0).contains(v) {
+                            errs.push(el("Shadow offset must be between -100 and 100"));
+                        }
                     }
                 }
                 Content::Image { src, .. } => {
@@ -1601,6 +1656,97 @@ pub(crate) fn frame_font_size(size: f32, canvas: Canvas, frame: impl Into<MenuFr
     size * frame.into().height as f32 / canvas.height as f32
 }
 
+/// Renders a text element into a `w` x `h` box and returns it with the glyph coverage (box
+/// coordinates, for the highlight mask). Paint order: box fill, shadow, outline, text. The element
+/// opacity is applied by the caller's blit; `bgOpacity` is baked into the box fill. Lengths are
+/// canvas units scaled like font sizes; only an explicit shadow offset is scaled, the default stays
+/// the historic 2 frame pixels.
+pub(crate) fn draw_text_element(
+    content: &Content,
+    w: u32,
+    h: u32,
+    canvas: Canvas,
+    frame: impl Into<MenuFrame>,
+) -> (RgbaImage, menu::Coverage) {
+    let Content::Text {
+        text,
+        font,
+        size,
+        color,
+        align,
+        bold,
+        italic,
+        shadow,
+        wrap,
+        bg_color,
+        bg_opacity,
+        rx,
+        ry,
+        padding,
+        shadow_color,
+        shadow_opacity,
+        shadow_x,
+        shadow_y,
+        shadow_blur,
+        outline_color,
+        outline_width,
+    } = content
+    else {
+        return (RgbaImage::new(w, h), menu::Coverage::new(w, h));
+    };
+    let frame = frame.into();
+    let unit = |v: f32| frame_font_size(v, canvas, frame);
+    let mut img = RgbaImage::new(w, h);
+    if let Some([r, g, b]) = bg_color.as_deref().and_then(parse_color) {
+        let a = bg_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+        let (rxp, ryp) = (unit(rx.unwrap_or(0.0)).min(w as f32 / 2.0), unit(ry.unwrap_or(0.0)).min(h as f32 / 2.0));
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            // Distance into the corner ellipse (1 = on its edge), antialiased over about one pixel.
+            let dx = if rxp > 0.0 { (rxp - fx).max(fx - (w as f32 - rxp)).max(0.0) } else { 0.0 };
+            let dy = if ryp > 0.0 { (ryp - fy).max(fy - (h as f32 - ryp)).max(0.0) } else { 0.0 };
+            let cover = if dx > 0.0 && dy > 0.0 {
+                let d = ((dx / rxp).powi(2) + (dy / ryp).powi(2)).sqrt();
+                ((1.0 - d) * rxp.min(ryp) + 0.5).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            *p = image::Rgba([r, g, b, (cover * a * 255.0).round() as u8]);
+        }
+    }
+    let pad = (unit(padding.unwrap_or(0.0)).round().max(0.0) as u32).min((w.min(h) - 1) / 2);
+    let mut cov = menu::text_coverage(text, font, unit(*size), *bold, *italic, *wrap, align, w - 2 * pad, h - 2 * pad);
+    if pad > 0 {
+        let mut full = menu::Coverage::new(w, h);
+        for y in 0..cov.height {
+            let (src, dst) = ((y * cov.width) as usize, ((y + pad) * w + pad) as usize);
+            full.data[dst..dst + cov.width as usize].copy_from_slice(&cov.data[src..src + cov.width as usize]);
+        }
+        cov = full;
+    }
+    let outline = outline_color
+        .as_deref()
+        .and_then(parse_color)
+        .map(|c| (c, unit(outline_width.unwrap_or(0.0)).round() as u32))
+        .filter(|(_, r)| *r > 0);
+    let outlined = outline.map(|(_, r)| cov.dilate(r));
+    if *shadow {
+        let [r, g, b] = shadow_color.as_deref().and_then(parse_color).unwrap_or([0, 0, 0]);
+        // Default 170 (0.67 truncated) keeps the historic shadow byte-identical.
+        let a = shadow_opacity.map_or(170, |o| (o.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let off = |v: &Option<f32>| v.map_or(2, |v| unit(v).round() as i64);
+        let base = outlined.as_ref().unwrap_or(&cov);
+        let blurred = shadow_blur.map(unit).filter(|r| *r > 0.0).map(|r| base.blur(r));
+        menu::blend_coverage(&mut img, blurred.as_ref().unwrap_or(base), [r, g, b, a], off(shadow_x), off(shadow_y), 255);
+    }
+    if let (Some((c, _)), Some(o)) = (outline, &outlined) {
+        menu::blend_coverage(&mut img, o, [c[0], c[1], c[2], 255], 0, 0, 255);
+    }
+    let [r, g, b] = parse_color(color).unwrap_or([255, 255, 255]);
+    menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
+    (img, cov)
+}
+
 /// Clip of a video element or background: the external `path` if set, else the title's clip.
 /// A file's own sound is never used (menu sound is chosen separately).
 pub(crate) fn video_clip(titles: &[LayoutTitle], title: u32, start: Option<f64>, path: Option<&PathBuf>) -> ClipSource {
@@ -1706,14 +1852,8 @@ fn render_custom_page(
         let pa = tv.menu_pixel_aspect();
 
         match &e.content {
-            Content::Text { text, font, size, color, align, bold, italic, shadow, wrap } => {
-                let cov = menu::text_coverage(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, align, w, h);
-                let mut img = RgbaImage::new(w, h);
-                let [r, g, b] = parse_color(color).unwrap_or([255, 255, 255]);
-                if *shadow {
-                    menu::blend_coverage(&mut img, &cov, [0, 0, 0, 170], 2, 2, 255);
-                }
-                menu::blend_coverage(&mut img, &cov, [r, g, b, 255], 0, 0, 255);
+            c @ Content::Text { .. } => {
+                let (img, cov) = draw_text_element(c, w, h, canvas, tv);
                 let (img, rx, ry) = rotate_rgba(img, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
                 menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
@@ -2261,6 +2401,18 @@ mod tests {
                 italic: false,
                 shadow: false,
                 wrap: false,
+                bg_color: None,
+                bg_opacity: None,
+                rx: None,
+                ry: None,
+                padding: None,
+                shadow_color: None,
+                shadow_opacity: None,
+                shadow_x: None,
+                shadow_y: None,
+                shadow_blur: None,
+                outline_color: None,
+                outline_width: None,
             },
             x,
             y,
@@ -3131,5 +3283,152 @@ mod tests {
         let (fast, fx, fy) = rotate_rgba(src.clone(), 0.0, pal_pa, (42, 84));
         assert_eq!((fx, fy), (42, 84));
         assert_eq!(fast.as_raw(), src.as_raw());
+    }
+
+    fn styled_text() -> Content {
+        Content::Text {
+            text: "Hi".into(),
+            font: "Arial".into(),
+            size: 40.0,
+            color: "#FF0000".into(),
+            align: "center".into(),
+            bold: true,
+            italic: false,
+            shadow: false,
+            wrap: false,
+            bg_color: None,
+            bg_opacity: None,
+            rx: None,
+            ry: None,
+            padding: None,
+            shadow_color: None,
+            shadow_opacity: None,
+            shadow_x: None,
+            shadow_y: None,
+            shadow_blur: None,
+            outline_color: None,
+            outline_width: None,
+        }
+    }
+
+    fn draw(c: &Content) -> (RgbaImage, menu::Coverage) {
+        draw_text_element(c, 200, 80, Canvas::default(), TvStandard::Pal)
+    }
+
+    fn cov_bounds(c: &menu::Coverage) -> (u32, u32, u32, u32) {
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..c.height {
+            for x in 0..c.width {
+                if c.data[(y * c.width + x) as usize] > 0.0 {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+            }
+        }
+        (x0, y0, x1, y1)
+    }
+
+    #[test]
+    fn default_text_matches_the_old_render_path() {
+        for shadow in [false, true] {
+            let mut c = styled_text();
+            if let Content::Text { shadow: sh, .. } = &mut c {
+                *sh = shadow;
+            }
+            let (img, cov) = draw(&c);
+            let mut old = RgbaImage::new(200, 80);
+            let old_cov = menu::text_coverage("Hi", "Arial", 40.0, true, false, false, "center", 200, 80);
+            if shadow {
+                menu::blend_coverage(&mut old, &old_cov, [0, 0, 0, 170], 2, 2, 255);
+            }
+            menu::blend_coverage(&mut old, &old_cov, [255, 0, 0, 255], 0, 0, 255);
+            assert_eq!(img.as_raw(), old.as_raw(), "shadow={shadow}");
+            assert_eq!(cov.data, old_cov.data);
+        }
+    }
+
+    #[test]
+    fn text_box_fill_has_rounded_transparent_corners() {
+        let mut c = styled_text();
+        if let Content::Text { bg_color, bg_opacity, rx, ry, .. } = &mut c {
+            (*bg_color, *bg_opacity, *rx, *ry) = (Some("#00FF00".into()), Some(0.5), Some(20.0), Some(20.0));
+        }
+        let (img, _) = draw(&c);
+        assert_eq!(img.get_pixel(0, 0)[3], 0);
+        assert_eq!(img.get_pixel(199, 79)[3], 0);
+        assert_eq!(*img.get_pixel(100, 5), image::Rgba([0, 255, 0, 128]));
+        assert_eq!(*img.get_pixel(100, 40), *img.get_pixel(100, 5)); // not under a glyph pixel
+    }
+
+    #[test]
+    fn padding_shifts_the_glyph_coverage() {
+        let (_, plain) = draw(&styled_text());
+        let mut c = styled_text();
+        if let Content::Text { padding, align, .. } = &mut c {
+            (*padding, *align) = (Some(30.0), "left".into());
+        }
+        let (_, padded) = draw(&c);
+        let (px0, ..) = cov_bounds(&padded);
+        assert!(px0 >= 30, "left-aligned padded text starts inside the padding: {px0}");
+        let (x0, y0, x1, y1) = cov_bounds(&plain);
+        let (qx0, qy0, qx1, qy1) = cov_bounds(&padded);
+        assert!(qx1 - qx0 <= x1 - x0 + 1 && qy1 - qy0 <= y1 - y0 + 1);
+        assert!(qy0 >= 30 && qy1 < 50, "text area is the box inset by the padding");
+    }
+
+    #[test]
+    fn shadow_colour_offset_and_blur_change_pixels() {
+        let mut c = styled_text();
+        if let Content::Text { shadow, shadow_color, shadow_x, shadow_y, .. } = &mut c {
+            (*shadow, *shadow_color, *shadow_x, *shadow_y) = (true, Some("#0000FF".into()), Some(6.0), Some(6.0));
+        }
+        let (img, cov) = draw(&c);
+        // A pixel covered only by the shifted shadow is blue.
+        let p = (0..80u32)
+            .flat_map(|y| (0..200u32).map(move |x| (x, y)))
+            .find(|&(x, y)| cov.at(x as i64, y as i64) == 0.0 && cov.at(x as i64 - 6, y as i64 - 6) > 0.9)
+            .expect("shadow-only pixel");
+        assert_eq!(*img.get_pixel(p.0, p.1), image::Rgba([0, 0, 255, 170]));
+        if let Content::Text { shadow_blur, .. } = &mut c {
+            *shadow_blur = Some(4.0);
+        }
+        let (blurred, _) = draw(&c);
+        assert_ne!(blurred.as_raw(), img.as_raw());
+        // Blur spreads the shadow beyond its sharp footprint.
+        let outside = (0..80u32).flat_map(|y| (0..200u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.get_pixel(x, y)[3] == 0 && blurred.get_pixel(x, y)[3] > 0)
+            .count();
+        assert!(outside > 0);
+    }
+
+    #[test]
+    fn outline_adds_a_ring_outside_the_glyphs() {
+        let (plain, cov) = draw(&styled_text());
+        let mut c = styled_text();
+        if let Content::Text { outline_color, outline_width, .. } = &mut c {
+            (*outline_color, *outline_width) = (Some("#0000FF".into()), Some(3.0));
+        }
+        let (img, cov2) = draw(&c);
+        assert_eq!(cov.data, cov2.data, "highlight mask stays the glyphs");
+        let ring = (0..80u32).flat_map(|y| (0..200u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| cov.at(x as i64, y as i64) == 0.0 && plain.get_pixel(x, y)[3] == 0 && *img.get_pixel(x, y) == image::Rgba([0, 0, 255, 255]))
+            .count();
+        assert!(ring > 20, "{ring}");
+    }
+
+    #[test]
+    fn text_style_json_roundtrip_and_validation() {
+        let old = r##"{"type":"text","text":"A"}"##;
+        let c: Content = serde_json::from_str(old).unwrap();
+        let out = serde_json::to_string(&c).unwrap();
+        assert!(!out.contains("bgColor") && !out.contains("shadowX") && !out.contains("outline"), "{out}");
+        let styled: Content = serde_json::from_str(r##"{"type":"text","text":"A","bgColor":"#112233","bgOpacity":0.5,"rx":4,"padding":2,"shadowBlur":3,"outlineWidth":1.5}"##).unwrap();
+        assert!(matches!(&styled, Content::Text { bg_opacity: Some(o), padding: Some(p), .. } if *o == 0.5 && *p == 2.0));
+        let mut bad = layout(vec![menu("m", MenuRole::Title, None, vec![Element { content: styled_text(), ..text(10.0, 10.0, "A", None) }])]);
+        validate(&bad, &titles(1), TvStandard::Pal).unwrap();
+        if let Content::Text { bg_opacity, outline_color, rx, .. } = &mut bad.menus[0].elements[0].content {
+            (*bg_opacity, *outline_color, *rx) = (Some(2.0), Some("nope".into()), Some(500.0));
+        }
+        let err = validate(&bad, &titles(1), TvStandard::Pal).unwrap_err().to_string();
+        assert!(err.contains("opacity") && err.contains("Outline colour") && err.contains("0 and 100"), "{err}");
     }
 }

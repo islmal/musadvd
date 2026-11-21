@@ -244,6 +244,18 @@ fn text_content(style: Option<&TextStyle>, g_height: u32, text: &str, frame: &Te
         italic: style.is_some_and(|s| s.italic),
         shadow: style.is_some_and(|s| s.shadow.is_some()),
         wrap: false,
+        bg_color: None,
+        bg_opacity: None,
+        rx: None,
+        ry: None,
+        padding: None,
+        shadow_color: None,
+        shadow_opacity: None,
+        shadow_x: None,
+        shadow_y: None,
+        shadow_blur: None,
+        outline_color: None,
+        outline_width: None,
     }
 }
 

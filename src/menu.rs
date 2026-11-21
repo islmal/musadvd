@@ -353,8 +353,30 @@ impl Coverage {
         b
     }
 
+    /// Separable gaussian blur (sigma = radius / 2, kernel cut at `radius`); outside reads as empty.
+    pub(crate) fn blur(&self, radius: f32) -> Coverage {
+        let r = radius.ceil() as i64;
+        let sigma = (radius / 2.0).max(0.1);
+        let k: Vec<f32> = (-r..=r).map(|i| (-((i * i) as f32) / (2.0 * sigma * sigma)).exp()).collect();
+        let sum: f32 = k.iter().sum();
+        let (w, h) = (self.width as i64, self.height as i64);
+        let mut tmp = Coverage::new(self.width, self.height);
+        let mut out = Coverage::new(self.width, self.height);
+        for y in 0..h {
+            for x in 0..w {
+                tmp.data[(y * w + x) as usize] = k.iter().enumerate().map(|(i, k)| k * self.at(x + i as i64 - r, y)).sum::<f32>() / sum;
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                out.data[(y * w + x) as usize] = k.iter().enumerate().map(|(i, k)| k * tmp.at(x, y + i as i64 - r)).sum::<f32>() / sum;
+            }
+        }
+        out
+    }
+
     /// Morphological dilation with a disk of radius `r` (text outline).
-    fn dilate(&self, r: u32) -> Coverage {
+    pub(crate) fn dilate(&self, r: u32) -> Coverage {
         let mut out = Coverage::new(self.width, self.height);
         let Some((bx0, by0, bx1, by1)) = self.bounds() else { return out };
         if r == 0 {
