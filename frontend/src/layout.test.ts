@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  afterPlaybackStep,
+  applyStyleBatch,
   applyStyleToSimilar,
+  navSlot,
+  startButtonId,
   canvasSize,
   chapterLabel,
   cleanTitle,
@@ -341,5 +345,102 @@ describe("syncLayoutWithTitles on a landing layout", () => {
     expect(eps[1].elements.some((e) => isIcon(e, "prev"))).toBe(true);
     expect(s.menus[0].elements.filter((e) => e.type === "video" && e.action)).toHaveLength(0);
     expectConsistent(s, 8);
+  });
+});
+
+describe("batch styling, start button and after-playback", () => {
+  const base = { rotation: 0, opacity: 1 };
+  const txt = (id: string, y: number, extra: Record<string, unknown> = {}) =>
+    ({ ...base, id, type: "text", x: 10, y, w: 100, h: 20, text: id, font: "Arial", size: 20, color: "#FFFFFF", align: "center", bold: false, italic: false, shadow: true, ...extra }) as LayoutElement;
+  const ico = (id: string, name: string, x: number, menu = "m1") =>
+    ({ ...base, id, type: "icon", icon: name, color: "#FFFFFF", x, y: 400, w: 40, h: 40, action: { type: "menu", menu } }) as LayoutElement;
+  const vid = (id: string) => ({ ...base, id, type: "video", title: 1, fit: "cover", x: 5, y: 100, w: 150, h: 90, action: { type: "playTitle", title: 1 } }) as LayoutElement;
+  const menu = (id: string, group: string, role: "title" | "root" = "title") => {
+    const m = emptyMenu(id, role);
+    m.id = id;
+    m.group = group;
+    m.elements = [txt(id + "h", 5), vid(id + "v"), txt(id + "c", 200), ico(id + "n", "next", 600), ico(id + "p", "prev", 20)];
+    return m;
+  };
+  const mk = () => ({ ...draftLayout([], "PAL", "x"), menus: [menu("a", "episodes"), menu("b", "episodes"), menu("c", "chapters")] }) as CustomLayout;
+  const none = { scope: "group", background: false, typography: false, navIcons: false, positions: false } as const;
+
+  it("scope group vs all, and each checkbox leaves the rest alone", () => {
+    const l = mk();
+    const [a, b, c] = l.menus;
+    a.background.color = "#101010";
+    a.audio = { type: "file", path: "x.opus" };
+    a.playMode = "once";
+    a.timeoutSecs = 3;
+    expect(applyStyleBatch(l, "a", { ...none, background: true })).toBe(1);
+    expect([b.background.color, b.audio, b.playMode, b.timeoutSecs]).toEqual(["#101010", a.audio, "once", 3]);
+    expect(c.background.color).not.toBe("#101010");
+    expect(applyStyleBatch(l, "a", { ...none, scope: "all", background: true })).toBe(1);
+    expect(c.playMode).toBe("once");
+    // typography off: fonts untouched even though background copied
+    a.elements.forEach((e) => e.type === "text" && (e.font = "Georgia"));
+    expect(b.elements.find((e) => e.type === "text")).toMatchObject({ font: "Arial" });
+    expect(applyStyleBatch(l, "a", { ...none, typography: true })).toBe(1);
+    expect(b.elements.find((e) => e.type === "text")).toMatchObject({ font: "Georgia", text: "bh", y: 5 });
+    expect(applyStyleBatch(l, "missing", { ...none, background: true })).toBe(0);
+  });
+
+  it("nav icons copy name/colour/size around the target centre; positions move only heading and nav", () => {
+    const l = mk();
+    const [a, b] = l.menus;
+    const na = a.elements.find((e) => e.id === "an") as LayoutElement & { icon: string; color: string };
+    Object.assign(na, { icon: "arrowRight", color: "#FF0000", w: 60, h: 60, x: 500, y: 300 });
+    expect(applyStyleBatch(l, "a", { ...none, navIcons: true })).toBe(1);
+    const nb = b.elements.find((e) => e.id === "bn") as typeof na;
+    expect([nb.icon, nb.color, nb.w, nb.h]).toEqual(["arrowRight", "#FF0000", 60, 60]);
+    expect([nb.x + 30, nb.y + 30]).toEqual([620, 420]); // old centre kept
+    const pb = b.elements.find((e) => e.id === "bp")!;
+    expect(pb).toMatchObject({ icon: "prev", x: 20, w: 40 }); // prev slot has same source look: unchanged geometry
+
+    a.elements.find((e) => e.id === "ah")!.y = 50;
+    a.elements.find((e) => e.id === "av")!.x = 77;
+    a.elements.find((e) => e.id === "ac")!.x = 88;
+    expect(applyStyleBatch(l, "a", { ...none, positions: true })).toBe(1);
+    expect(b.elements.find((e) => e.id === "bh")!.y).toBe(50);
+    expect(nb.x).toBe(500);
+    expect(b.elements.find((e) => e.id === "bv")!.x).toBe(5);
+    expect(b.elements.find((e) => e.id === "bc")!.x).toBe(10);
+  });
+
+  it("navSlot maps icons with a menu action", () => {
+    expect(navSlot(ico("i", "arrowRight", 0))).toBe("next");
+    expect(navSlot(ico("i", "prev", 0))).toBe("prev");
+    expect(navSlot(ico("i", "home", 0))).toBe("home");
+    expect(navSlot(ico("i", "back", 0))).toBe("back");
+    expect(navSlot(ico("i", "star", 0))).toBeNull();
+    expect(navSlot({ ...ico("i", "next", 0), action: null } as LayoutElement)).toBeNull();
+    expect(navSlot(txt("t", 0, { text: "→", action: { type: "menu", menu: "m" } }))).toBe("next");
+    expect(navSlot(txt("t", 0))).toBeNull();
+  });
+
+  it("startButtonId is the first non-autoExecute button", () => {
+    const m = emptyMenu("s", "title");
+    m.elements = [txt("a", 0), txt("b", 10, { action: { type: "playAll" }, autoExecute: true }), txt("c", 20, { action: { type: "playAll" } }), txt("d", 30, { action: { type: "playAll" } })];
+    expect(startButtonId(m)).toBe("c");
+    expect(startButtonId(emptyMenu("e", "title"))).toBeNull();
+  });
+
+  it("afterPlaybackStep covers the five modes", () => {
+    const l = mk();
+    const root = emptyMenu("r", "root");
+    root.id = "r";
+    root.title = 2;
+    l.menus.push(root);
+    // title 2 has a root menu; title 1 does not; main menu of both is "a" (plays title 1 only) -> else first menu
+    const ts = (mode?: EditorTitle["afterPlayback"], i = 1) => title(i, `p${i}`, { afterPlayback: mode });
+    const step = (modes: (EditorTitle["afterPlayback"])[], t: number) => afterPlaybackStep(l, modes.map((m, i) => ts(m, i + 1)), t);
+    expect(step([undefined, "default"], 1)).toEqual({ type: "menu", menuId: "a" });
+    expect(step(["loop"], 1)).toEqual({ type: "title", title: 1 });
+    expect(step(["next", "default"], 1)).toEqual({ type: "title", title: 2 });
+    expect(step(["default", "next"], 2)).toEqual({ type: "menu", menuId: "a" }); // last title -> main menu
+    expect(step(["mainMenu"], 1)).toEqual({ type: "menu", menuId: "a" });
+    expect(step(["titleMenu", "titleMenu"], 2)).toEqual({ type: "menu", menuId: "r" });
+    expect(step(["titleMenu"], 1)).toEqual({ type: "menu", menuId: "a" }); // no root -> main
+    expect(afterPlaybackStep({ ...l, menus: [] }, [ts()], 1)).toEqual({ type: "none" });
   });
 });

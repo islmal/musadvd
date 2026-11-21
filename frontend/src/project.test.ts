@@ -71,6 +71,14 @@ describe("parseProject", () => {
     expect(parseProject({ ...base, customLayout: layout, layoutEdited: false }).layoutEdited).toBe(false);
     expect(parseProject({ ...base, customLayout: { menus: 1 } }).customLayout).toBeNull();
   });
+  it("validates the per-title after-playback action", () => {
+    const titles = (v: unknown) => parseProject({ ...base, titles: [{ path: "a.mkv", afterPlayback: v }] }).titles[0];
+    expect(titles("loop").afterPlayback).toBe("loop");
+    expect(titles("bogus").afterPlayback).toBeUndefined();
+    expect(parseProject({ ...base, titles: [{ path: "a.mkv" }] }).titles[0].afterPlayback).toBeUndefined();
+    const p = parseProject({ ...base, titles: [{ path: "a.mkv", afterPlayback: "titleMenu" }] });
+    expect(parseProject(JSON.parse(JSON.stringify(p))).titles[0].afterPlayback).toBe("titleMenu");
+  });
   it("round-trips through JSON", () => {
     const p = parseProject({ ...base, disc: "bd25", twoPass: true, titles: [{ path: "a.mkv", label: "A" }] });
     expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p);

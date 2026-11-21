@@ -6,7 +6,7 @@ import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
-import { cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type CustomLayout, type EditorTitle } from "./layout";
+import { AFTER_PLAYBACK, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type AfterPlayback, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
@@ -112,6 +112,8 @@ interface Title {
   saturation: number | null;
   /** Look and timing of this title's text subtitles (empty = defaults). */
   subtitleStyle: SubtitleStyle;
+  /** What happens when this title ends ("default" = the disc-wide playback settings). */
+  afterPlayback: AfterPlayback;
 }
 
 type BdRes = "1080" | "720";
@@ -570,6 +572,7 @@ async function addFiles(paths: string[]): Promise<Title[]> {
         contrast: null,
         saturation: null,
         subtitleStyle: {},
+        afterPlayback: "default",
       };
       state.titles.push(title);
       added.push(title);
@@ -719,6 +722,8 @@ async function splitByChapters(t: Title) {
       contrast: t.contrast,
       saturation: t.saturation,
       subtitleStyle: { ...t.subtitleStyle },
+      // Every segment inherits it: "loop"/"next"/menu targets make sense for each piece alike.
+      afterPlayback: t.afterPlayback,
     };
   });
   news[0].mergeWithPrevious = t.mergeWithPrevious;
@@ -1889,6 +1894,22 @@ function renderChapterTab(t: Title) {
       h("tbody", {}, ...rows),
     ),
     h(
+      "div",
+      { class: "row" },
+      h("label", { for: "after-playback" }, tr("main.afterPlayback")),
+      h(
+        "select",
+        {
+          id: "after-playback",
+          onchange: (e: Event) => {
+            t.afterPlayback = (e.target as HTMLSelectElement).value as AfterPlayback;
+          },
+        },
+        ...AFTER_PLAYBACK.map((v) => h("option", { value: v, selected: v === t.afterPlayback }, tr(`main.afterPlayback_${v}`))),
+      ),
+    ),
+    h("p", { class: "hint" }, tr("main.afterPlaybackHint")),
+    h(
       "p",
       { class: "hint" },
       tr("main.vonHoechstens99Kapiteln", { length: items.length, fmtTime: fmtTime(t.meta.durationSecs) }),
@@ -1920,6 +1941,8 @@ function editorTitles(): EditorTitle[] {
       durationSecs: offset,
       chapterNames: names,
       chapterStarts: starts,
+      // The end of a merged entry is the end of its last file.
+      afterPlayback: members[members.length - 1].afterPlayback,
       clipStartSecs: (t.trimStart ?? 0) + Math.min(effDuration(t) * 0.1, 300, Math.max(effDuration(t) - 1, 0)),
       // Tracks that go onto the disc (unsupported bitmap formats are skipped by the engine).
       audioTracks: t.meta.audio
@@ -2548,6 +2571,7 @@ async function convert() {
         endSecs: t.trimEnd,
         crop: t.crop,
         mergeWithPrevious: t.mergeWithPrevious,
+        ...(t.afterPlayback !== "default" ? { afterPlayback: t.afterPlayback } : {}),
         audioNames: t.audioNames,
         bdResolution: isBluray() ? t.bdResolution : null,
         bdRate: isBluray() ? t.bdRate : null,
@@ -2641,6 +2665,7 @@ function snapshotProject(): ProjectFile {
       contrast: t.contrast,
       saturation: t.saturation,
       subtitleStyle: { ...t.subtitleStyle },
+      ...(t.afterPlayback !== "default" ? { afterPlayback: t.afterPlayback } : {}),
       externalSubtitles: t.externalSubtitles.map((e) => ({
         path: e.path,
         language: e.language,
@@ -2687,6 +2712,7 @@ function titleFromProject(p: ProjectTitle, meta: VideoMetadata, afterSkipped: bo
     trimEnd: p.trimEnd !== null && p.trimEnd <= dur ? p.trimEnd : null,
     mergeWithPrevious: p.mergeWithPrevious && !afterSkipped,
     audioNames: Object.fromEntries(Object.entries(p.audioNames).filter(([k]) => audioIdx.has(Number(k)))),
+    afterPlayback: p.afterPlayback ?? "default",
   };
 }
 

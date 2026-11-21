@@ -3354,3 +3354,103 @@ input.time {
 .ed-stage.remote-mode .ed-el.is-text-btn.remote-activate .ed-inner {
   color: var(--ed-sel) !important;
 }
+
+/* Smart guides, grid and title-safe frame in the menu editor. */
+.ed-safe.title {
+  inset: 10% 10%;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.ed-guides,
+.ed-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+}
+.ed-grid {
+  z-index: 0;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.12) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+}
+.ed-guide {
+  position: absolute;
+  background: #ff2bd6;
+}
+.ed-guide.kind-center,
+.ed-guide.kind-safe,
+.ed-guide.kind-grid {
+  background: #19d3f3;
+}
+.ed-grid-select {
+  width: auto;
+}
+
+/* Selection indicators: dashed and semi-transparent while editing, hidden until their button is focused in Test Remote. */
+.ed-stage:not(.remote-mode) .ed-el.is-indicator {
+  opacity: 0.6;
+  outline: 1px dashed rgba(255, 255, 255, 0.7);
+  outline-offset: 1px;
+}
+.ed-stage.remote-mode .ed-el.is-indicator {
+  display: none;
+  outline: none !important;
+  box-shadow: none !important;
+  animation: none !important;
+}
+.ed-stage.remote-mode .ed-el.is-indicator.ind-on {
+  display: block;
+}
+
+/* Test Remote: menu play mode / end-of-title badges. */
+.ed-remote-badge {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 30;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  pointer-events: none;
+}
+
+/* Batch apply dialog. */
+.ed-batch {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.ed-batch-card {
+  min-width: 300px;
+  max-width: 420px;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--panel, #222);
+  color: inherit;
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ed-batch-card label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ed-batch-card h3 {
+  margin: 0;
+}
+.ed-batch-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ed-invalid {
+  outline: 1px solid #e5484d;
+}

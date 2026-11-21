@@ -888,43 +888,160 @@ const TEXT_STYLE_KEYS = [
   "shadowColor", "shadowOpacity", "shadowX", "shadowY", "shadowBlur", "outlineColor", "outlineWidth",
 ] as const;
 
+type TextKind = "heading" | "label" | "button";
+const topTextY = (m: CustomMenu) => Math.min(...m.elements.filter((e) => e.type === "text" && !e.action).map((e) => e.y));
+const textKindOf = (m: CustomMenu, e: TextElement): TextKind => (e.action ? "button" : e.y === topTextY(m) ? "heading" : "label");
+const textsOf = (m: CustomMenu) => m.elements.filter((e): e is TextElement => e.type === "text");
+
+/** Copies text look, icon colour and button highlight from `src` to `m` (no background, no geometry). */
+function copyTypography(src: CustomMenu, m: CustomMenu): void {
+  const srcText = new Map<TextKind, TextElement>();
+  for (const e of textsOf(src)) if (!srcText.has(textKindOf(src, e))) srcText.set(textKindOf(src, e), e);
+  const srcIcon = src.elements.find((e): e is IconElement => e.type === "icon");
+  const srcButton = src.elements.find(isButton);
+  for (const e of textsOf(m)) {
+    const from = srcText.get(textKindOf(m, e));
+    if (from) {
+      Object.assign(e, { font: from.font, color: from.color, bold: from.bold, italic: from.italic, shadow: from.shadow });
+      for (const k of TEXT_STYLE_KEYS) {
+        if (from[k] === undefined) delete e[k];
+        else Object.assign(e, { [k]: from[k] });
+      }
+    }
+  }
+  for (const e of m.elements) {
+    if (e.type === "icon" && srcIcon) e.color = srcIcon.color;
+    if (isButton(e) && srcButton) {
+      if (srcButton.highlight) e.highlight = { ...srcButton.highlight };
+      else delete e.highlight;
+    }
+  }
+}
+
 export function applyStyleToSimilar(layout: CustomLayout, menuId: string): number {
   const src = layout.menus.find((m) => m.id === menuId);
   if (!src) return 0;
-  type Kind = "heading" | "label" | "button";
-  const topY = (m: CustomMenu) => Math.min(...m.elements.filter((e) => e.type === "text" && !e.action).map((e) => e.y));
-  const kindOf = (m: CustomMenu, e: TextElement): Kind => (e.action ? "button" : e.y === topY(m) ? "heading" : "label");
-  const texts = (m: CustomMenu) => m.elements.filter((e): e is TextElement => e.type === "text");
-  const srcText = new Map<Kind, TextElement>();
-  for (const e of texts(src)) if (!srcText.has(kindOf(src, e))) srcText.set(kindOf(src, e), e);
-  const srcIcon = src.elements.find((e): e is IconElement => e.type === "icon");
-  const srcButton = src.elements.find(isButton);
   let changed = 0;
   for (const m of layout.menus) {
     if (m === src || menuGroup(m) !== menuGroup(src)) continue;
     const before = JSON.stringify(m);
-    for (const e of texts(m)) {
-      const from = srcText.get(kindOf(m, e));
-      if (from) {
-        Object.assign(e, { font: from.font, color: from.color, bold: from.bold, italic: from.italic, shadow: from.shadow });
-        for (const k of TEXT_STYLE_KEYS) {
-          if (from[k] === undefined) delete e[k];
-          else Object.assign(e, { [k]: from[k] });
-        }
-      }
-    }
-    for (const e of m.elements) {
-      if (e.type === "icon" && srcIcon) e.color = srcIcon.color;
-      if (isButton(e) && srcButton) {
-        if (srcButton.highlight) e.highlight = { ...srcButton.highlight };
-        else delete e.highlight;
-      }
-    }
+    copyTypography(src, m);
     m.background.color = src.background.color;
     m.background.gradientOverlay = src.background.gradientOverlay;
     if (JSON.stringify(m) !== before) changed++;
   }
   return changed;
+}
+
+export type BatchScope = "group" | "all";
+export interface BatchOptions {
+  scope: BatchScope;
+  background: boolean;
+  typography: boolean;
+  navIcons: boolean;
+  positions: boolean;
+}
+
+/** Navigation slot of an element: an icon (or a plain arrow glyph text) with a menu action. */
+export function navSlot(e: LayoutElement): "next" | "prev" | "home" | "back" | null {
+  if (e.action?.type !== "menu") return null;
+  if (e.type === "icon") {
+    switch (e.icon) {
+      case "next": case "arrowRight": return "next";
+      case "prev": case "arrowLeft": return "prev";
+      case "home": return "home";
+      case "back": return "back";
+      default: return null;
+    }
+  }
+  if (e.type === "text") {
+    const g = e.text.trim();
+    if (/^[>›→▶]+$/.test(g)) return "next";
+    if (/^[<‹←◀]+$/.test(g)) return "prev";
+  }
+  return null;
+}
+
+const firstNavBySlot = (m: CustomMenu) => {
+  const map = new Map<string, LayoutElement>();
+  for (const e of m.elements) {
+    const s = navSlot(e);
+    if (s && !map.has(s)) map.set(s, e);
+  }
+  return map;
+};
+
+/**
+ * Copies the look of menu `sourceMenuId` to the other menus of its group (or all menus) by
+ * category (background/audio/play mode, typography, nav icons, heading + nav positions).
+ * Thumbnails, captions and other buttons never move. Returns how many menus changed.
+ */
+export function applyStyleBatch(layout: CustomLayout, sourceMenuId: string, opts: BatchOptions): number {
+  const src = layout.menus.find((m) => m.id === sourceMenuId);
+  if (!src) return 0;
+  const srcNav = firstNavBySlot(src);
+  const srcHeading = textsOf(src).find((e) => !e.action && e.y === topTextY(src));
+  const clone = <T>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
+  let changed = 0;
+  for (const m of layout.menus) {
+    if (m === src || (opts.scope === "group" && menuGroup(m) !== menuGroup(src))) continue;
+    const before = JSON.stringify(m);
+    if (opts.background) {
+      const bg = src.background;
+      m.background = { ...m.background, color: bg.color, blur: bg.blur };
+      for (const k of ["image", "video", "gradientOverlay"] as const) {
+        if (bg[k] === undefined) delete m.background[k];
+        else Object.assign(m.background, { [k]: clone(bg[k]) });
+      }
+      m.audio = clone(src.audio);
+      for (const k of ["durationSecs", "playMode", "timeoutSecs"] as const) {
+        if (src[k] === undefined) delete m[k];
+        else Object.assign(m, { [k]: src[k] });
+      }
+    }
+    if (opts.typography) copyTypography(src, m);
+    if (opts.navIcons || opts.positions) {
+      const heading = textsOf(m).find((e) => !e.action && e.y === topTextY(m));
+      for (const e of m.elements) {
+        const s = navSlot(e);
+        const from = s ? srcNav.get(s) : undefined;
+        if (!from) continue;
+        if (opts.navIcons && e.type === "icon" && from.type === "icon") {
+          const cx = e.x + e.w / 2;
+          const cy = e.y + e.h / 2;
+          Object.assign(e, { icon: from.icon, color: from.color, w: from.w, h: from.h, x: cx - from.w / 2, y: cy - from.h / 2 });
+        }
+        if (opts.positions) Object.assign(e, { x: from.x, y: from.y, w: from.w, h: from.h });
+      }
+      if (opts.positions && heading && srcHeading) Object.assign(heading, { x: srcHeading.x, y: srcHeading.y, w: srcHeading.w, h: srcHeading.h });
+    }
+    if (JSON.stringify(m) !== before) changed++;
+  }
+  return changed;
+}
+
+/** The button focused on entry: the first button (element order) that is not auto-execute. Mirrors Rust `focus_pre`. */
+export function startButtonId(menu: CustomMenu): string | null {
+  return menu.elements.find((e) => isButton(e) && !e.autoExecute)?.id ?? null;
+}
+
+export type AfterPlaybackStep = { type: "title"; title: number } | { type: "menu"; menuId: string } | { type: "none" };
+
+/** Test Remote model of what follows the end of `title` (1-based); see `AfterPlayback`. */
+export function afterPlaybackStep(layout: CustomLayout, titles: EditorTitle[], title: number): AfterPlaybackStep {
+  const mode = titles[title - 1]?.afterPlayback ?? "default";
+  const plays = (m: CustomMenu) => m.elements.some((e) => (e.action?.type === "playTitle" || e.action?.type === "playChapter") && e.action.title === title);
+  const main = layout.menus.find((m) => m.role === "title" && plays(m)) ?? layout.menus[0];
+  const mainStep: AfterPlaybackStep = main ? { type: "menu", menuId: main.id } : { type: "none" };
+  switch (mode) {
+    case "loop": return { type: "title", title };
+    case "next": return titles[title] ? { type: "title", title: title + 1 } : mainStep;
+    case "titleMenu": {
+      const root = layout.menus.find((m) => m.role === "root" && m.title === title);
+      return root ? { type: "menu", menuId: root.id } : mainStep;
+    }
+    default: return mainStep;
+  }
 }
 
 export type MenuPreset = "swiss" | "cinema" | "midnight";

@@ -12,7 +12,12 @@ import {
   ICON_NAMES,
   icon as newIcon,
   menuGroup,
-  applyStyleToSimilar,
+  applyStyleBatch,
+  afterPlaybackStep,
+  startButtonId,
+  INDICATOR_ICONS,
+  type BatchScope,
+  type MenuPlayMode,
   type IconName,
   type ImageElement,
   type MenuTheme,
@@ -51,6 +56,7 @@ import { fontPicker } from "./fontPicker";
 import { resolveNav, textBoxCss, textGlyphCss } from "./textStyle";
 import { iconDataUrl, iconSvg } from "./icons";
 import { alphaBounds, clampCrop, trimmedBox } from "./imageCrop";
+import { snapLines, snapMove, snapResize, snapToGrid, ACTION_SAFE, TITLE_SAFE, type Box, type Guide, type SnapLines } from "./snap";
 
 type Child = Node | string | null | undefined | false;
 /** A field-level undo step; `execute` re-applies it (for a future redo), `undo` reverts and re-renders. */
@@ -109,6 +115,8 @@ const FIT_LABELS: [Fit, string][] = [
 const SNAP = 2;
 const PANES_KEY = "musadvd-editor-panes";
 const GROUPS_KEY = "musadvd-editor-groups";
+const GRID_KEY = "musadvd-editor-grid";
+const GRID_STEPS = [0, 8, 16];
 /** Splitter limits in px: [min, max, default]. */
 const PANE_LIMITS = { menus: [160, 480, 240], props: [240, 560, 310] } as const;
 type PaneKey = keyof typeof PANE_LIMITS;
@@ -208,12 +216,20 @@ export function mountMenuEditor(opts: EditorOptions) {
   let remoteFocusId: string | null = null;
   const remoteGraph = new Map<string, ButtonNav>();
   let remoteHistory: number[] = [];
-  let remotePreview: { title: string; subtitle: string; thumbUrl: string | null } | null = null;
+  let remotePreview: { title: string; subtitle: string; thumbUrl: string | null; titleNum: number } | null = null;
   let remoteStatus = "";
   let remoteActivateId: string | null = null;
   let remoteNavSeq = 0;
   let remotePreviewSeq = 0;
   let remoteActivateTimer: number | undefined;
+  /** Test Remote: countdown of a "play once, then start button" menu (and the badge text shown on the stage). */
+  let remoteMenuTimer: number | undefined;
+  let remoteBadge = "";
+  /** Grid snap step in canvas px (0 = off), remembered between sessions. */
+  let gridStep = (() => {
+    const v = readPref<number>(GRID_KEY, 0);
+    return GRID_STEPS.includes(v) ? v : 0;
+  })();
 
   function snapToClosedGop(secs: number): number {
     const isPal = tv.toLowerCase() === "pal";
@@ -253,6 +269,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   const H = () => L.canvas.height;
   const titleName = (n: number) => `${n}: ${titles[n - 1]?.label ?? tr("menuEditor.missing")}`;
   const snap = (v: number) => Math.round(v / SNAP) * SNAP;
+  const snapV = (v: number) => (gridStep ? snapToGrid(v, gridStep) : snap(v));
   const normalizeAngle = (deg: number) => {
     if (!Number.isFinite(deg)) return 0;
     const r = ((deg % 360) + 360) % 360;
@@ -904,6 +921,7 @@ export function mountMenuEditor(opts: EditorOptions) {
             padBtn("←", () => stepRemote("left"), navDisabled),
             padBtn("→", () => stepRemote("right"), navDisabled),
             padBtn("OK", () => (remotePreview ? remoteBack() : activateRemoteFocus()), !remotePreview && buttons.length === 0, "primary"),
+            remotePreview ? padBtn(tr("editor.remoteEndOfTitle"), () => remoteEndOfTitle()) : null,
             canBack ? padBtn(tr("menuEditor.remoteBack"), () => remoteBack()) : null,
             padBtn(tr("menuEditor.remoteExit"), () => exitRemoteMode()),
           ),
@@ -960,6 +978,24 @@ export function mountMenuEditor(opts: EditorOptions) {
         }),
         tr("menuEditor.sichererBereich"),
       ),
+      el(
+        "label",
+        { class: "ed-check", title: tr("editor.gridTip") },
+        tr("editor.grid"),
+        el(
+          "select",
+          {
+            class: "ed-grid-select",
+            "aria-label": tr("editor.grid"),
+            onchange: (ev: Event) => {
+              gridStep = Number((ev.target as HTMLSelectElement).value) || 0;
+              writePref(GRID_KEY, gridStep);
+              renderStage();
+            },
+          },
+          ...GRID_STEPS.map((n) => el("option", { value: String(n), selected: n === gridStep }, n === 0 ? tr("editor.gridOff") : tr("editor.gridPx", { n }))),
+        ),
+      ),
       el("span", { class: `ed-counter${buttons > maxButtons(tv) ? " bad" : ""}` }, tr("menuEditor.buttons", { buttons, maxButtons: maxButtons(tv) })),
     );
   }
@@ -995,7 +1031,14 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
     if (e.type === "image" || e.type === "icon") {
       const img = inner?.querySelector<HTMLImageElement>("img.ed-media");
-      if (img) placeMedia(img, e);
+      if (img) {
+        // Stretch icons are generated for the box aspect, so a resize needs a fresh SVG.
+        if (e.type === "icon" && img.dataset.sz !== `${Math.round(e.w)},${Math.round(e.h)}`) {
+          img.dataset.sz = `${Math.round(e.w)},${Math.round(e.h)}`;
+          img.src = iconDataUrl(e.icon, e.color, Math.round(e.w), Math.round(e.h));
+        }
+        placeMedia(img, e);
+      }
     }
     const angle = normalizeAngle(e.rotation);
     if (isUnrotated(angle)) {
@@ -1029,11 +1072,74 @@ export function mountMenuEditor(opts: EditorOptions) {
       const id = node.dataset.id ?? null;
       node.classList.toggle("remote-focus", remoteMode && id !== null && id === remoteFocusId);
       node.classList.toggle("remote-activate", remoteMode && id !== null && id === remoteActivateId);
+      if (node.dataset.ind) {
+        const ie = menu()?.elements.find((x) => x.id === id);
+        if (ie) syncIndicator(node, ie);
+      }
     }
     renderToolbar();
   }
 
+  /** Test Remote: an indicator shows only while its button is focused (highlight colour) or activated (select colour). */
+  function syncIndicator(node: HTMLElement, e: LayoutElement) {
+    const bid = e.indicatorFor;
+    if (!bid) return;
+    const act = remoteMode && remoteActivateId === bid;
+    const on = act || (remoteMode && remoteFocusId === bid);
+    node.classList.toggle("ind-on", on);
+    const btn = menu()?.elements.find((x) => x.id === bid);
+    const img = node.querySelector<HTMLImageElement>("img.ed-media");
+    if (on && e.type === "icon" && img) {
+      const col = act ? (btn?.highlight?.selectColor ?? L.highlight.selectColor) : (btn?.highlight?.color ?? L.highlight.color);
+      img.src = iconDataUrl(e.icon, col, Math.round(e.w), Math.round(e.h));
+    }
+  }
+
+  function cancelMenuTimer() {
+    if (remoteMenuTimer !== undefined) window.clearInterval(remoteMenuTimer);
+    remoteMenuTimer = undefined;
+    if (remoteBadge) {
+      remoteBadge = "";
+      stage.querySelector(".ed-remote-badge")?.remove();
+    }
+  }
+
+  /** Test Remote: starts the hold badge / countdown of the entered menu's play mode. */
+  function armMenuTimer() {
+    cancelMenuTimer();
+    const m = menu();
+    if (!m || !remoteMode) return;
+    const mode = m.playMode ?? "loop";
+    if (mode === "once") {
+      remoteBadge = tr("editor.remoteHoldsLast");
+      return;
+    }
+    const startId = mode === "onceActivate" ? startButtonId(m) : null;
+    if (!startId) return;
+    let left = Math.ceil((isMoving(m) ? (m.durationSecs ?? 20) : 0) + (m.timeoutSecs ?? 0));
+    const label = () => tr("editor.remoteAutoStart", { secs: Math.max(0, left) });
+    remoteBadge = label();
+    remoteMenuTimer = window.setInterval(() => {
+      if (closed || !remoteMode) {
+        cancelMenuTimer();
+        return;
+      }
+      left -= 1;
+      if (left > 0) {
+        remoteBadge = label();
+        const b = stage.querySelector(".ed-remote-badge");
+        if (b) b.textContent = remoteBadge;
+        return;
+      }
+      cancelMenuTimer();
+      remoteFocusId = startId;
+      updateRemoteFocusVisuals();
+      activateRemoteFocus();
+    }, 1000);
+  }
+
   function loadRemoteNav(focusFirst: boolean) {
+    if (focusFirst) armMenuTimer();
     const m = menu();
     const seq = ++remoteNavSeq;
     if (!m) {
@@ -1082,7 +1188,7 @@ export function mountMenuEditor(opts: EditorOptions) {
 
   function openRemotePreview(heading: string, subtitle: string, titleNum: number, atSecs?: number) {
     const pSeq = ++remotePreviewSeq;
-    remotePreview = { title: heading, subtitle, thumbUrl: null };
+    remotePreview = { title: heading, subtitle, thumbUrl: null, titleNum };
     remoteStatus = "";
     renderStage();
     renderToolbar();
@@ -1103,6 +1209,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function stepRemote(dir: "up" | "down" | "left" | "right") {
+    cancelMenuTimer();
     if (remotePreview) return;
     const m = menu();
     if (!m) return;
@@ -1132,6 +1239,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function activateRemoteFocus() {
+    cancelMenuTimer();
     if (remotePreview) {
       remoteBack();
       return;
@@ -1218,6 +1326,31 @@ export function mountMenuEditor(opts: EditorOptions) {
     }
   }
 
+  /** Test Remote: what happens when the previewed title ends (its "after playback" setting). */
+  function remoteEndOfTitle() {
+    if (!remotePreview) return;
+    const step = afterPlaybackStep(L, titles, remotePreview.titleNum);
+    if (step.type === "title" && titles[step.title - 1]) {
+      openRemotePreview(tr("menuEditor.remotePreviewTitle", { title: titleName(step.title) }), "", step.title);
+    } else if (step.type === "menu") {
+      const idx = L.menus.findIndex((x) => x.id === step.menuId);
+      if (idx < 0) {
+        remoteBack();
+        return;
+      }
+      remoteHistory.push(menuIdx);
+      menuIdx = idx;
+      remotePreviewSeq += 1;
+      remotePreview = null;
+      remoteStatus = "";
+      remoteActivateId = null;
+      loadRemoteNav(true);
+      renderAll();
+    } else {
+      remoteBack();
+    }
+  }
+
   function resetRemoteSession() {
     remotePreviewSeq += 1;
     remotePreview = null;
@@ -1244,6 +1377,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     remoteNavSeq += 1;
     remotePreviewSeq += 1;
     window.clearTimeout(remoteActivateTimer);
+    cancelMenuTimer();
     remotePreview = null;
     remoteFocusId = null;
     remoteHistory = [];
@@ -1254,7 +1388,11 @@ export function mountMenuEditor(opts: EditorOptions) {
   }
 
   function handleRemoteKey(ev: KeyboardEvent) {
-    if (ev.key === "ArrowUp") {
+    cancelMenuTimer();
+    if (ev.key === "End") {
+      ev.preventDefault();
+      if (remotePreview) remoteEndOfTitle();
+    } else if (ev.key === "ArrowUp") {
       ev.preventDefault();
       stepRemote("up");
     } else if (ev.key === "ArrowDown") {
@@ -1314,7 +1452,8 @@ export function mountMenuEditor(opts: EditorOptions) {
       });
     } else if (e.type === "icon") {
       // A vector symbol: natural size 1:1 so placeMedia keeps it square on the TV like the build.
-      const img = el("img", { class: "ed-media", alt: "", draggable: false, src: iconDataUrl(e.icon, e.color) }) as HTMLImageElement;
+      const img = el("img", { class: "ed-media", alt: "", draggable: false, src: iconDataUrl(e.icon, e.color, Math.round(e.w), Math.round(e.h)) }) as HTMLImageElement;
+      img.dataset.sz = `${Math.round(e.w)},${Math.round(e.h)}`;
       img.dataset.nw = "1";
       img.dataset.nh = "1";
       inner.append(img);
@@ -1340,6 +1479,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       "ed-el",
       isButton(e) ? "is-button" : "",
       isButton(e) && e.type === "text" ? "is-text-btn" : "",
+      e.indicatorFor ? "is-indicator" : "",
       e.group ? "in-group" : "",
       !remoteMode && isSel(e.id) ? "selected" : "",
       isCell1 ? "hli-inactive" : "",
@@ -1356,6 +1496,7 @@ export function mountMenuEditor(opts: EditorOptions) {
         class: classes,
         title: actionLabel(e.action),
         "data-id": e.id,
+        "data-ind": e.indicatorFor ?? null,
         style: `--ed-hl: ${e.highlight?.color ?? L.highlight.color}; --ed-sel: ${e.highlight?.selectColor ?? L.highlight.selectColor}`,
       },
       inner,
@@ -1370,6 +1511,7 @@ export function mountMenuEditor(opts: EditorOptions) {
       node.append(el("span", { class: "ed-easter-egg-badge" }, "🥚 Easter Egg"));
     }
     applyBox(node, boxAt(e));
+    if (e.indicatorFor) syncIndicator(node, e);
     // Cell 1 buttons are only dimmed: they stay editable, otherwise a playhead at 0 locks the whole menu.
     if (!remoteMode && isSel(e.id)) {
       for (const corner of ["nw", "ne", "sw", "se"]) {
@@ -1436,8 +1578,18 @@ export function mountMenuEditor(opts: EditorOptions) {
     // Background shading, same look as the ffmpeg filters (encoder::custom_menu_args).
     const overlay = m.background.gradientOverlay ?? "none";
     if (overlay !== "none") stage.append(el("div", { class: `ed-shade shade-${overlay}`, "aria-hidden": "true" }));
+    if (gridStep && !remoteMode) stage.append(el("div", { class: "ed-grid", "aria-hidden": "true", style: `background-size: ${gridStep}px ${gridStep}px` }));
     for (const e of m.elements) stage.append(renderElement(e));
-    if (showSafe) stage.append(el("div", { class: "ed-safe", "aria-hidden": "true" }));
+    if (showSafe) {
+      const inset = (f: number) => `inset: ${f * 100}% ${f * 100}%`;
+      stage.append(
+        el("div", { class: "ed-safe", "aria-hidden": "true", style: inset(ACTION_SAFE) }),
+        el("div", { class: "ed-safe title", "aria-hidden": "true", style: inset(TITLE_SAFE) }),
+      );
+    }
+    if (remoteMode && remoteBadge) {
+      stage.append(el("div", { class: "ed-remote-badge", style: `font-size: ${Math.max(12, Math.round(H() * 0.028))}px` }, remoteBadge));
+    }
     if (remoteMode && remotePreview) {
       const thumb = remotePreview.thumbUrl
         ? el("img", { class: "ed-remote-overlay-thumb", src: remotePreview.thumbUrl, alt: "" })
@@ -1459,6 +1611,12 @@ export function mountMenuEditor(opts: EditorOptions) {
               { class: "ed-remote-overlay-body" },
               el("div", { class: "ed-remote-overlay-title" }, remotePreview.title),
               el("div", { class: "ed-remote-overlay-sub" }, remotePreview.subtitle),
+              el(
+                "div",
+                { class: "ed-remote-overlay-sub" },
+                tr("editor.remoteAfterMode", { mode: tr(`editor.rmAfter_${titles[remotePreview.titleNum - 1]?.afterPlayback ?? "default"}`) }),
+              ),
+              el("button", { type: "button", class: "btn ed-remote-overlay-back", onclick: () => remoteEndOfTitle() }, tr("editor.remoteEndOfTitle")),
               el(
                 "button",
                 {
@@ -2270,15 +2428,47 @@ export function mountMenuEditor(opts: EditorOptions) {
     const startY = ev.clientY;
     const before = JSON.stringify(L);
     let moved = false;
+    // Smart guides: the other elements of the menu, the canvas centre and the safe margins (4 screen px threshold).
+    const thr = 4 / Math.max(scaleX, 0.01);
+    const lines: SnapLines = snapLines(key ? [] : menu().elements.filter((x) => !isSel(x.id)).map((x): Box => rotatedAabbOf(x)), L.canvas);
+    let guideLayer: HTMLElement | null = null;
+    const showGuides = (gs: Guide[]) => {
+      if (!guideLayer) {
+        guideLayer = el("div", { class: "ed-guides", "aria-hidden": "true" });
+        stage.append(guideLayer);
+      }
+      guideLayer.replaceChildren(
+        ...gs.map((g) =>
+          el("div", {
+            class: `ed-guide kind-${g.kind}`,
+            style: g.axis === "x" ? `left:${g.pos}px;top:0;width:${1 / scaleX}px;height:100%` : `top:${g.pos}px;left:0;height:${1 / scaleY}px;width:100%`,
+          }),
+        ),
+      );
+    };
     const onMove = (mv: PointerEvent) => {
       const dx = (mv.clientX - startX) / scaleX;
       const dy = (mv.clientY - startY) / scaleY;
       if (!moved && Math.abs(dx) + Math.abs(dy) < 2) return;
       moved = true;
+      // Alt = free placement (no grid, no guides).
+      const sv = (v: number) => (mv.altKey ? Math.round(v) : snapV(v));
+      const gs: Guide[] = [];
       if (!handle) {
-        // Snap the selection's top-left corner, clamp the union box inside the canvas.
-        const ddx = key ? snap(union.x + dx) - union.x : Math.max(-union.x, Math.min(snap(union.x + dx) - union.x, W() - union.w - union.x));
-        const ddy = key ? snap(union.y + dy) - union.y : Math.max(-union.y, Math.min(snap(union.y + dy) - union.y, H() - union.h - union.y));
+        // Snap the selection's top-left corner (grid), then let guides win within the threshold; clamp the union box inside the canvas.
+        const rawX = union.x + dx;
+        const rawY = union.y + dy;
+        let nx = sv(rawX);
+        let ny = sv(rawY);
+        if (!key && !mv.altKey) {
+          const sm = snapMove({ x: rawX, y: rawY, w: union.w, h: union.h }, lines, thr);
+          gs.push(...sm.guides);
+          if (sm.guides.some((g) => g.axis === "x")) nx = rawX + sm.dx;
+          if (sm.guides.some((g) => g.axis === "y")) ny = rawY + sm.dy;
+        }
+        showGuides(gs);
+        const ddx = key ? nx - union.x : Math.max(-union.x, Math.min(nx - union.x, W() - union.w - union.x));
+        const ddy = key ? ny - union.y : Math.max(-union.y, Math.min(ny - union.y, H() - union.h - union.y));
         for (const s0 of targets) {
           s0.t.x = Math.round(s0.x + ddx);
           s0.t.y = Math.round(s0.y + ddy);
@@ -2308,8 +2498,8 @@ export function mountMenuEditor(opts: EditorOptions) {
             if (Math.abs(w - s0.w) > Math.abs(h - s0.h)) h = w / r;
             else w = h * r;
           }
-          w = snap(Math.max(8, Math.min(w, W())));
-          h = snap(Math.max(8, Math.min(h, H())));
+          w = sv(Math.max(8, Math.min(w, W())));
+          h = sv(Math.max(8, Math.min(h, H())));
           const dcLocalX = (handle.includes("e") ? 0.5 : handle.includes("w") ? -0.5 : 0) * (w - s0.w);
           const dcLocalY = (handle.includes("s") ? 0.5 : handle.includes("n") ? -0.5 : 0) * (h - s0.h);
           const dcx = (dcLocalX * pa * cos - dcLocalY * sin) / pa;
@@ -2341,17 +2531,48 @@ export function mountMenuEditor(opts: EditorOptions) {
           if (Math.abs(w - s0.w) > Math.abs(h - s0.h)) h = w / r;
           else w = h * r;
         }
-        s0.t.x = snap(x);
-        s0.t.y = snap(y);
-        s0.t.w = snap(Math.max(8, w));
-        s0.t.h = snap(Math.max(8, h));
+        // Only the dragged edges snap (grid first, guides win), so the opposite edge stays put.
+        let l = x;
+        let r = x + w;
+        let tp = y;
+        let bt = y + h;
+        if (handle.includes("w")) l = sv(l);
+        if (handle.includes("e")) r = sv(r);
+        if (handle.includes("n")) tp = sv(tp);
+        if (handle.includes("s")) bt = sv(bt);
+        if (!key && !mv.altKey && !mv.shiftKey) {
+          const sr = snapResize({ x, y, w, h }, { left: handle.includes("w"), right: handle.includes("e"), top: handle.includes("n"), bottom: handle.includes("s") }, lines, thr);
+          gs.push(...sr.guides);
+          if (sr.guides.some((g) => g.axis === "x")) {
+            if (handle.includes("w")) l = sr.box.x;
+            if (handle.includes("e")) r = sr.box.x + sr.box.w;
+          }
+          if (sr.guides.some((g) => g.axis === "y")) {
+            if (handle.includes("n")) tp = sr.box.y;
+            if (handle.includes("s")) bt = sr.box.y + sr.box.h;
+          }
+        }
+        if (r - l < 8) {
+          if (handle.includes("w")) l = r - 8;
+          else r = l + 8;
+        }
+        if (bt - tp < 8) {
+          if (handle.includes("n")) tp = bt - 8;
+          else bt = tp + 8;
+        }
+        s0.t.x = Math.round(l);
+        s0.t.y = Math.round(tp);
+        s0.t.w = Math.round(r - l);
+        s0.t.h = Math.round(bt - tp);
         clamp(s0.t);
         show(s0.node, s0.t);
       }
+      showGuides(gs);
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      (guideLayer as HTMLElement | null)?.remove();
       if (moved) {
         pushHistory(before);
         renderProps();
@@ -2673,6 +2894,32 @@ export function mountMenuEditor(opts: EditorOptions) {
       { rerender: true },
     );
 
+  /** Seconds as m:ss (fractions kept to 2 digits). */
+  function fmtMmSs(secs: number): string {
+    const t = Math.round(Math.max(0, secs) * 100) / 100;
+    const m = Math.floor(t / 60);
+    const s = Number((t - m * 60).toFixed(2));
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+  }
+  /** "m:ss", "m:ss.5" or plain seconds; null when invalid. */
+  function parseMmSs(text: string): number | null {
+    const q = text.trim();
+    const m = /^(\d+):(\d{1,2}(?:\.\d+)?)$/.exec(q);
+    if (m) return Number(m[2]) < 60 ? Number(m[1]) * 60 + Number(m[2]) : null;
+    return /^\d+(?:\.\d+)?$/.test(q) ? Number(q) : null;
+  }
+  /** A start-time field in m:ss; an invalid entry keeps the old value and is marked. */
+  const mmssInput = (value: number, set: (v: number) => void) => {
+    const input = el("input", { type: "text", value: fmtMmSs(value), class: "ed-mmss", placeholder: "m:ss" }) as HTMLInputElement;
+    return bind(input, (v) => {
+      const p = parseMmSs(v);
+      input.classList.toggle("ed-invalid", p === null);
+      if (p === null) return;
+      set(p);
+      input.value = fmtMmSs(p);
+    });
+  };
+
   const titleOptions = (): [string, string][] => titles.map((_, i) => [String(i + 1), titleName(i + 1)]);
 
   function renderProps() {
@@ -2800,27 +3047,23 @@ export function mountMenuEditor(opts: EditorOptions) {
             { min: "0", max: "60", step: tv.toLowerCase() === "pal" ? "0.6" : "0.6006" },
           ),
         ),
-        el("p", { class: "ed-hint" }, isMoving(m) ? tr("menuEditor.bewegtesMenueWirdAls") : tr("menuEditor.standbildKeineVideosKein")),
-        el(
-          "button",
-          {
-            class: "btn",
-            type: "button",
-            title: tr("editor.styleSimilarTip"),
-            onclick: () => {
-              const before = JSON.stringify(L);
-              const n = applyStyleToSimilar(L, m.id);
-              if (n === 0) {
-                flash(tr("editor.styleNothing"), "ok");
-                return;
-              }
-              pushHistory(before);
-              renderAll();
-              flash(tr("editor.styleApplied", { n }), "ok");
-            },
-          },
-          tr("editor.styleSimilar"),
+        row(
+          tr("editor.playMode"),
+          select(
+            [
+              ["loop", tr("editor.playLoop")],
+              ["once", tr("editor.playOnce")],
+              ["onceActivate", tr("editor.playOnceActivate")],
+            ],
+            m.playMode ?? "loop",
+            (v) => (m.playMode = v === "loop" ? null : (v as MenuPlayMode)),
+          ),
         ),
+        m.playMode === "onceActivate"
+          ? row(tr("editor.timeoutSecs"), num(m.timeoutSecs ?? 0, (v) => (m.timeoutSecs = Math.max(0, Math.min(254, Math.round(v)))), { min: "0", max: "254", step: "1" }))
+          : null,
+        el("p", { class: "ed-hint" }, isMoving(m) ? tr("menuEditor.bewegtesMenueWirdAls") : tr("menuEditor.standbildKeineVideosKein")),
+        el("button", { class: "btn", type: "button", title: tr("editor.batchTip"), onclick: () => openBatchDialog(m) }, tr("editor.batchApply")),
       ),
       bgCard(group(
         tr("menuEditor.hintergrund"),
@@ -2875,12 +3118,8 @@ export function mountMenuEditor(opts: EditorOptions) {
           : null,
         bg.video
           ? row(
-              tr("menuEditor.startS"),
-              num(
-                bg.video.startSecs ?? defaultStart(bg.video),
-                (v) => (bg.video = { ...bg.video!, startSecs: Math.max(0, v) }),
-                { min: "0", step: "1" },
-              ),
+              tr("editor.startTime"),
+              mmssInput(bg.video.startSecs ?? defaultStart(bg.video), (v) => (bg.video = { ...bg.video!, startSecs: v })),
             )
           : null,
         bgKind !== "color"
@@ -3521,7 +3760,7 @@ export function mountMenuEditor(opts: EditorOptions) {
                 retargetAction(v, v.title);
                 followAction(v);
               })),
-          row(tr("menuEditor.startS"), num(v.startSecs ?? defaultStart(v), (x) => (v.startSecs = Math.max(0, x)), { min: "0", step: "1" })),
+          row(tr("editor.startTime"), mmssInput(v.startSecs ?? defaultStart(v), (x) => (v.startSecs = x))),
           row(tr("menuEditor.anpassung"), select(FIT_LABELS, v.fit, (x) => (v.fit = x as Fit))),
           el("p", { class: "ed-hint" }, tr("menuEditor.dasVideoLaeuftIm")),
         ),
@@ -3532,7 +3771,22 @@ export function mountMenuEditor(opts: EditorOptions) {
       el("h3", {}, kind),
       ...(typeGroup as HTMLElement[]),
       ...(e.type === "text" ? [textBoxControls(e), textShadowControls(e)] : []),
-      group(tr("menuEditor.button2"), ...actionControls(e), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...(e.type === "text" ? [] : lookControls(e))),
+      group(
+        tr("menuEditor.button2"),
+        isButton(e)
+          ? null
+          : row(
+              tr("editor.indicatorFor"),
+              select(
+                [["", tr("editor.indicatorNone")], ...m.elements.filter((x) => x !== e && isButton(x)).map((b): [string, string] => [b.id, b.type === "text" ? b.text.slice(0, 24) || b.id : `${actionLabel(b.action)} (${b.id})`])],
+                e.indicatorFor ?? "",
+                (v) => {
+                  e.indicatorFor = v || null;
+                  if (v) e.action = null;
+                },
+              ),
+            ),
+        ...(e.indicatorFor ? [] : actionControls(e)), isButton(e) ? el("p", { class: "ed-hint" }, actionLabel(e.action)) : null, ...(e.type === "text" ? [] : lookControls(e))),
       ...(isButton(e) ? [navControls(m, e)] : []),
       ...(isButton(e)
         ? [
@@ -3860,6 +4114,63 @@ export function mountMenuEditor(opts: EditorOptions) {
     window.addEventListener("blur", closeCtx);
     node.querySelector<HTMLElement>(".ed-ctx-item")?.focus();
   }
+  /** "Batch apply": copies the chosen style parts of this menu to the same-kind menus / every menu. */
+  function openBatchDialog(m: CustomMenu) {
+    let scope: BatchScope = "group";
+    const flags = { background: false, typography: true, navIcons: false, positions: false };
+    const overlay = el("div", { class: "ed-batch", role: "dialog", "aria-modal": "true", "aria-label": tr("editor.batchApply") });
+    const done = () => overlay.remove();
+    const check = (key: keyof typeof flags, label: string) =>
+      el("label", {}, el("input", { type: "checkbox", checked: flags[key], onchange: (ev: Event) => (flags[key] = (ev.target as HTMLInputElement).checked) }), label);
+    const radio = (value: BatchScope, label: string) =>
+      el("label", {}, el("input", { type: "radio", name: "ed-batch-scope", checked: scope === value, onchange: () => (scope = value) }), label);
+    overlay.append(
+      el(
+        "div",
+        { class: "ed-batch-card" },
+        el("h3", {}, tr("editor.batchTitle")),
+        radio("group", tr("editor.batchScopeGroup")),
+        radio("all", tr("editor.batchScopeAll")),
+        check("background", tr("editor.batchBackground")),
+        check("typography", tr("editor.batchTypography")),
+        check("navIcons", tr("editor.batchNavIcons")),
+        check("positions", tr("editor.batchPositions")),
+        el(
+          "div",
+          { class: "ed-batch-actions" },
+          el("button", { class: "btn", type: "button", onclick: done }, tr("editor.batchCancel")),
+          el(
+            "button",
+            {
+              class: "btn primary",
+              type: "button",
+              onclick: () => {
+                done();
+                const before = JSON.stringify(L);
+                const n = applyStyleBatch(L, m.id, { scope, ...flags });
+                if (n === 0) {
+                  flash(tr("editor.styleNothing"), "ok");
+                  return;
+                }
+                pushHistory(before);
+                renderAll();
+                flash(tr("editor.styleApplied", { n }), "ok");
+              },
+            },
+            tr("editor.batchApplyBtn"),
+          ),
+        ),
+      ),
+    );
+    overlay.addEventListener("pointerdown", (ev) => {
+      if (ev.target === overlay) done();
+    });
+    overlay.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") done();
+    });
+    document.body.append(overlay);
+    overlay.querySelector<HTMLElement>("input")?.focus();
+  }
   /** Grid of the built-in icons with live previews (drawn in the text colour via currentColor). */
   function iconGrid(current: IconName | null, pick: (n: IconName) => void, itemClass: string): HTMLElement {
     return el(
@@ -3894,6 +4205,15 @@ export function mountMenuEditor(opts: EditorOptions) {
     return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "#FFFFFF";
   }
   function addIcon(name: IconName) {
+    const btn = selected();
+    if (INDICATOR_ICONS.includes(name) && btn && isButton(btn)) {
+      // A selection indicator: small, left of the button, vertically centred, in the button's highlight colour.
+      const s = 24;
+      const ic = newIcon(Math.round(btn.x - s - 4), Math.round(btn.y + btn.h / 2 - s / 2), s, s, name, btn.highlight?.color ?? L.highlight.color);
+      ic.indicatorFor = btn.id;
+      addElement(ic);
+      return;
+    }
     addElement(newIcon(Math.round(W() / 2 - 32), Math.round(H() / 2 - 32), 64, 64, name, dominantTextColor()));
   }
   stage.addEventListener("contextmenu", (ev) => {
@@ -3909,6 +4229,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (list.length === 0) return;
     remember();
     menu().elements = menu().elements.filter((x) => !list.includes(x));
+    for (const x of menu().elements) if (x.indicatorFor && list.some((d) => d.id === x.indicatorFor)) x.indicatorFor = null;
     selIds = [];
     pruneGroups();
     renderAll();
@@ -4280,6 +4601,7 @@ export function mountMenuEditor(opts: EditorOptions) {
     window.clearTimeout(checkTimer);
     window.clearTimeout(noticeTimer);
     window.clearTimeout(remoteActivateTimer);
+    cancelMenuTimer();
     editor.remove();
     opts.onClose();
     return true;

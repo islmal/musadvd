@@ -4,7 +4,7 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { autosavePath, loadProject, saveProject, type Crop, type SubtitleStyle } from "./api";
 import { t as tr } from "./i18n";
-import type { CustomLayout } from "./layout";
+import { AFTER_PLAYBACK, type AfterPlayback, type CustomLayout } from "./layout";
 import { modal } from "./studio/ui";
 
 export const PROJECT_FORMAT = "musadvd-project";
@@ -47,6 +47,8 @@ export interface ProjectTitle {
   contrast: number | null;
   saturation: number | null;
   subtitleStyle: SubtitleStyle;
+  /** Omitted when "default". */
+  afterPlayback?: AfterPlayback;
   externalSubtitles?: ProjectExternalSubtitle[];
 }
 
@@ -145,6 +147,7 @@ function titleOf(v: unknown): ProjectTitle | null {
     }
   });
   const externalSubtitles = externalSubsOf(v.externalSubtitles);
+  const afterPlayback = pick(v.afterPlayback, AFTER_PLAYBACK, "default");
   return {
     path: v.path,
     audio: ints(v.audio),
@@ -166,6 +169,7 @@ function titleOf(v: unknown): ProjectTitle | null {
     contrast: num(v.contrast),
     saturation: num(v.saturation),
     subtitleStyle: styleOf(v.subtitleStyle),
+    ...(afterPlayback !== "default" ? { afterPlayback } : {}),
     ...(externalSubtitles ? { externalSubtitles } : {}),
   };
 }
