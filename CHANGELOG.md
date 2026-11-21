@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-21
+
 ### Added
 
 - **Menus dropdown** in the menu editor: choose whether a draft builds a title screen, chapter menus and global, per-title or no audio/subtitle menus, and rebuild the menus from there.
