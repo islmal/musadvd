@@ -10,6 +10,9 @@
 //!
 //! GPL-2.0 (derived from dvdauthor).
 
+// The index loops mirror dvdauthor's C 1:1 (byte-identical output, easy diffing upstream).
+#![allow(clippy::needless_range_loop)]
+
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

@@ -43,6 +43,14 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev libssl-dev libxdo-dev patchelf
 
+      # tauri.windows.conf.json bundles ../bin/*.exe, which must match a file. bin/ is git-ignored
+      # (ffmpeg is copied in locally); a non-tool placeholder satisfies the glob while tests that
+      # need ffmpeg still skip.
+      - name: Placeholder for the bundled bin/ glob
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force bin | Out-Null; New-Item -ItemType File -Force bin/ci-placeholder.exe | Out-Null
+
       # package.json lives in the repo root; the sources are in ./frontend.
       - run: npm ci
       - run: npm run build
