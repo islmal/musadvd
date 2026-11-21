@@ -576,7 +576,9 @@ async fn build_menus(
     crate::layout::validate_bd(layout, &layout_titles, frame).map_err(template)?;
     let traits = bd_menu::traits(layout, &layout_titles, frame);
     let members: Vec<Vec<usize>> = groups.iter().map(|g| titles[g.clone()].iter().map(|t| t.chapters.len()).collect()).collect();
-    let nav = bd_menu::plan(layout, &layout_titles, &traits, opts.playback, &members);
+    // The entry's end action is the one of its last file (where it applies; GUI and DVD agree).
+    let after: Vec<crate::author::AfterPlayback> = groups.iter().map(|g| opts.selections.get(g.end - 1).map(|s| s.after_playback).unwrap_or_default()).collect();
+    let nav = bd_menu::plan_with_after(layout, &layout_titles, &traits, opts.playback, &members, &after);
     let secs = opts.motion_duration.unwrap_or(crate::layout::DEFAULT_MENU_SECS);
     let pages = bd_menu::render_pages(layout, &layout_titles, frame, rate, &nav, work, secs).map_err(template)?;
     let warnings: Vec<String> = pages.iter().flat_map(|p| p.warnings.clone()).collect();
@@ -644,7 +646,7 @@ async fn build_menus(
     for (i, page) in pages.iter().enumerate() {
         cancel.check()?;
         let sup = page.igs.as_ref().map(|_| work.join(format!("menu_{:02}.sup", i + 1)));
-        let job = crate::bd_author::menu_job(work.join(format!("menu_{:02}.mkv", i + 1)), sup, i, page.intro.as_ref().map(|n| n.secs), !page.moving, rate, width, &bdmv, page.secs);
+        let job = crate::bd_author::menu_job(work.join(format!("menu_{:02}.mkv", i + 1)), sup, i, page.intro.as_ref().map(|n| n.secs), page.still, rate, width, &bdmv, page.secs);
         mux_log.push_str(&cancellable(cancel, crate::bd_mux::mux_title(tools, &job)).await?);
     }
     std::fs::write(work.join("mux_menus.log"), mux_log).at(work)?;

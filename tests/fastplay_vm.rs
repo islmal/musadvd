@@ -94,6 +94,7 @@ fn fastplay_dvdauthor_xml_and_routing() {
                 force_subtitle: false,
                 default_audio: None,
                 default_subtitle: None,
+                after_playback: Default::default(),
             },
         }],
         playback: PlaybackOptions::default(),
@@ -184,6 +185,7 @@ fn fastplay_target_title_and_vtsm_root_routing() {
                     force_subtitle: false,
                 default_audio: None,
                 default_subtitle: None,
+                after_playback: Default::default(),
                 },
             },
             TitlesetSpec {
@@ -199,6 +201,7 @@ fn fastplay_target_title_and_vtsm_root_routing() {
                     force_subtitle: false,
                 default_audio: None,
                 default_subtitle: None,
+                after_playback: Default::default(),
                 },
             },
         ],

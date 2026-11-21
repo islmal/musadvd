@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use image::{imageops, RgbaImage};
 
-use crate::author::{self, ButtonAction, ClipSource, MenuButton, MenuFrame, Navigation, PlaybackOptions, Rect};
+use crate::author::{self, AfterPlayback, ButtonAction, ClipSource, MenuButton, MenuFrame, Navigation, PlaybackOptions, Rect};
 use crate::bd::BdRate;
 use crate::encoder::{CustomMenuMedia, MenuBackground, MenuLayer};
 use crate::hdmv::{self, Cmp, MovieObject, Op};
@@ -21,7 +21,7 @@ use crate::igs::{self, Command, IgButton, IgMenu, IgObject};
 use crate::layout::{
     apply_nav_overrides, bd_button_rect, button_colors, clip_of, draw_text_element, element_name, fit_image, crop_normalized, icon_coverage, frame_box, is_unrotated,
     parse_color, rect_border, rect_image, rotate_coverage, rotate_rgba, video_clip, video_rotation_deg, Action,
-    Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuRole, MenuSound,
+    overlaps, Canvas, Content, CustomLayout, CustomMenu, ElementKey, LayoutError, LayoutTitle, MenuPlayMode, MenuRole, MenuSound,
 };
 use crate::menu;
 use crate::menu_anim::{self, Intro, Pixels, Sprite};
@@ -122,6 +122,9 @@ pub struct MenuTraits {
     pub has_buttons: bool,
     /// The page opens with an intro animation (and is `moving`).
     pub intro: bool,
+    /// [`MenuPlayMode::OnceActivate`]: element index of the start button (the first button that is
+    /// not auto-execute, = IG button 1) whose commands run when the clip ends.
+    pub activate: Option<usize>,
 }
 
 /// Menu id without its page suffix (`chap-1-p2` → `chap-1`): pages of one menu share it.
@@ -163,9 +166,12 @@ pub fn traits(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame) -
                 || m.background.video.is_some()
                 || m.elements.iter().any(|e| matches!(e.content, Content::Video { .. }))
                 || menu_audio(m, titles).0.is_some();
-            let has_buttons =
-                m.elements.iter().any(|e| e.action.is_some() && bd_button_rect(e, layout.canvas, frame).is_some());
-            MenuTraits { moving, has_buttons, intro }
+            let is_button = |e: &crate::layout::Element| e.action.is_some() && bd_button_rect(e, layout.canvas, frame).is_some();
+            let has_buttons = m.elements.iter().any(is_button);
+            let activate = (m.play_mode == Some(MenuPlayMode::OnceActivate))
+                .then(|| m.elements.iter().position(|e| is_button(e) && !e.auto_execute))
+                .flatten();
+            MenuTraits { moving, has_buttons, intro, activate }
         })
         .collect()
 }
@@ -197,6 +203,18 @@ pub fn title_playlist(menus: usize, t: u32) -> u32 {
 /// count of each merged file. Every file is an HDMV title of its own (title numbers run over all
 /// files); a file that is not the last of its entry jumps on to the next one when it ends.
 pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits], opts: PlaybackOptions, groups: &[Vec<usize>]) -> BdNav {
+    plan_with_after(layout, titles, traits, opts, groups, &[])
+}
+
+/// [`plan`] with an end action per entry (missing = [`AfterPlayback::Default`]).
+pub fn plan_with_after(
+    layout: &CustomLayout,
+    titles: &[LayoutTitle],
+    traits: &[MenuTraits],
+    opts: PlaybackOptions,
+    groups: &[Vec<usize>],
+    after: &[AfterPlayback],
+) -> BdNav {
     let m_count = layout.menus.len();
     let t_count: usize = groups.iter().map(Vec::len).sum();
     // With intros every button that leaves a menu goes through the dispatcher object (last), which
@@ -336,6 +354,10 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
     // button was selected once.
     for (i, t) in traits.iter().enumerate() {
         let pl = i as u32;
+        // onceActivate: the start button's commands run when the clip ends (no infinite still on
+        // that page, see `render_page`). Button commands contain no Goto, so they can be inlined.
+        // A start action that does not jump away falls through to the replay below.
+        let act: Vec<Command> = t.activate.and_then(|n| commands[i].get(n).cloned().flatten()).unwrap_or_default();
         let cmds = if t.intro {
             // Fresh entry: intro + first loop, then loop from the mark behind the intro. After
             // paging: straight to the loop (the intro never plays twice in a row).
@@ -348,16 +370,17 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
                 hdmv::compare(Op::Gpr(ENTRY), Cmp::Eq, Op::Imm(1)),
                 hdmv::goto(at + 4),
                 hdmv::play_pl(pl),
-                hdmv::goto(at + 5),
+                hdmv::goto(at + 5 + !act.is_empty() as u32),
                 hdmv::mov(ENTRY, Op::Imm(0)),
                 hdmv::play_pl_at_mark(Op::Imm(pl), Op::Imm(1)),
-                hdmv::goto(at + 5),
             ]);
+            c.extend(act);
+            c.push(hdmv::goto(at + 5));
             c
         } else {
             let first = if t.has_buttons { vec![hdmv::set_button_page(1)] } else { vec![] };
             let at = first.len() as u32;
-            [first, vec![hdmv::play_pl(pl), hdmv::goto(at)]].concat()
+            [first, vec![hdmv::play_pl(pl)], act, vec![hdmv::goto(at)]].concat()
         };
         objects.push(MovieObject { commands: cmds, resume: false });
     }
@@ -397,13 +420,46 @@ pub fn plan(layout: &CustomLayout, titles: &[LayoutTitle], traits: &[MenuTraits]
             } else {
                 None
             };
-            let to_menu_idx = if !opts.return_to_title_menu { own_menu(g as u32) } else { None }.unwrap_or_else(|| main_menu(g as u32));
             // Back to a menu through the Top Menu title (see RETURN_MENU).
-            let to_menu = if to_menu_idx == first_title_menu {
-                vec![hdmv::jump_title(0)]
-            } else {
-                vec![hdmv::mov(RETURN_MENU, Op::Imm(menu_obj(to_menu_idx))), hdmv::jump_title(0)]
+            let menu_cmds = |idx: usize| {
+                if idx == first_title_menu {
+                    vec![hdmv::jump_title(0)]
+                } else {
+                    vec![hdmv::mov(RETURN_MENU, Op::Imm(menu_obj(idx))), hdmv::jump_title(0)]
+                }
             };
+            let main = main_menu(g as u32);
+            // Per-entry end action. While Play All runs (FLAG) it keeps advancing like `Default`
+            // does; only `Loop` wins over Play All. `Next` on the last entry behaves like `MainMenu`.
+            let menu_end = match after.get(g - 1).copied().unwrap_or_default() {
+                AfterPlayback::Default => None,
+                AfterPlayback::Loop => {
+                    c.push(hdmv::jump_title(first_file(g as u32)));
+                    objects.push(MovieObject { commands: c, resume: false });
+                    continue;
+                }
+                AfterPlayback::Next if g < g_count => {
+                    c.push(hdmv::jump_title(first_file(g as u32 + 1)));
+                    objects.push(MovieObject { commands: c, resume: false });
+                    continue;
+                }
+                AfterPlayback::Next | AfterPlayback::MainMenu => Some(main),
+                AfterPlayback::TitleMenu => Some(own_menu(g as u32).unwrap_or(main)),
+            };
+            if let Some(idx) = menu_end {
+                match next {
+                    Some(n) => {
+                        let at = c.len() as u32;
+                        c.extend([hdmv::compare(Op::Gpr(FLAG), Cmp::Ne, Op::Imm(1)), hdmv::goto(at + 3), hdmv::jump_title(n)]);
+                        c.extend(menu_cmds(idx));
+                    }
+                    None => c.extend([vec![hdmv::mov(FLAG, Op::Imm(0))], menu_cmds(idx)].concat()),
+                }
+                objects.push(MovieObject { commands: c, resume: false });
+                continue;
+            }
+            let to_menu_idx = if !opts.return_to_title_menu { own_menu(g as u32) } else { None }.unwrap_or(main);
+            let to_menu = menu_cmds(to_menu_idx);
             if opts.play_sequentially {
                 match next {
                     Some(n) => c.push(hdmv::jump_title(n)),
@@ -472,6 +528,8 @@ pub struct BdPage {
     /// Length of the clip: the loop, plus the intro in front of it if there is one.
     pub secs: f64,
     pub moving: bool,
+    /// The playlist item holds its last frame forever (`still_mode` 2): still pages and `once`.
+    pub still: bool,
     /// `None` for a menu without buttons.
     pub igs: Option<IgMenu>,
     /// Intro frames to composite (`secs` then covers intro + loop).
@@ -695,17 +753,20 @@ fn render_page(
     let mut sprites: Vec<Sprite> = Vec::new();
     let mut slots: Vec<usize> = Vec::new();
     let mut pending: Vec<Pending> = Vec::new();
+    let mut indicators: Vec<Indicator> = Vec::new();
     for (n, e) in menu.elements.iter().enumerate() {
         let (x, y, w, h) = frame_box(e, canvas, frame);
         let unrotated = is_unrotated(e.rotation);
-        let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        // An indicator is not part of the picture: it only shows in its button's highlight.
+        let indicator = e.indicator_for.is_some();
+        let opacity = if indicator { 0 } else { (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8 };
         let mut text_cov: Option<(menu::Coverage, i64, i64)> = None;
         // Sprite of this element: its keys only apply to unrotated elements.
         let sprite = |pixels: Pixels, rx: i64, ry: i64, rw: u32, rh: u32| {
             let keys = if unrotated { e.intro.iter().map(|k| frame_key(k, canvas, frame)).collect() } else { Vec::new() };
             Sprite { pixels, rect: (rx as f64, ry as f64, rw as f64, rh as f64), opacity: e.opacity, keys }
         };
-        let visible = e.opacity > 0.0 || !e.intro.is_empty();
+        let visible = !indicator && (e.opacity > 0.0 || !e.intro.is_empty());
         match &e.content {
             c @ Content::Text { .. } => {
                 let (img, cov) = draw_text_element(c, w, h, canvas, frame);
@@ -775,6 +836,12 @@ fn render_page(
                 });
             }
         }
+        if let Some(target) = e.indicator_for.as_deref() {
+            if let Some(rect) = bd_button_rect(e, canvas, frame) {
+                indicators.push((target, rect, text_cov, (x, y)));
+            }
+            continue;
+        }
         if commands.get(n).is_none_or(Option::is_none) {
             continue;
         }
@@ -795,6 +862,7 @@ fn render_page(
         });
     }
     flush(&mut current, &mut layers)?;
+    merge_indicators(layout, menu, &mut pending, indicators, alpha, &mut warnings);
 
     // The intro: whole frames, ending where the loop (mark 1, IG composition) starts.
     let intro = d.intro.then(|| {
@@ -896,7 +964,23 @@ fn render_page(
         || layers.iter().any(|l| matches!(l, MenuLayer::Video { .. }))
         || audio.is_some()
         || intro.is_some();
-    let loop_secs = if moving { menu.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0) } else { STILL_SECS };
+    // `once` holds the last frame with an infinite still. `onceActivate` must end the item so the
+    // menu object reaches the start button's commands: no still, the hold is part of the clip.
+    // shortcut: on a moving page the timeout extends the clip (the background keeps moving) instead of
+    // freezing its last frame; upgrade with a timed still (`still_mode` 1) once it is verified on PS4.
+    let mode = menu.play_mode.unwrap_or_default();
+    let timeout = menu.timeout_secs.unwrap_or(0.0).clamp(0.0, 254.0);
+    let activate = mode == MenuPlayMode::OnceActivate;
+    let still = match mode {
+        MenuPlayMode::Loop => !moving,
+        MenuPlayMode::Once => true,
+        MenuPlayMode::OnceActivate => false,
+    };
+    let loop_secs = match (moving, activate) {
+        (true, _) => menu.duration_secs.unwrap_or(default_secs).clamp(1.0, 600.0) + if activate { timeout } else { 0.0 },
+        (false, true) => timeout.max(STILL_SECS),
+        (false, false) => STILL_SECS,
+    };
     // A page with an intro is one clip: the intro, then the loop.
     let secs = loop_secs + intro.as_ref().map_or(0.0, |i| i.secs);
     Ok(BdPage {
@@ -904,10 +988,55 @@ fn render_page(
         audio,
         secs,
         moving,
+        still,
         igs,
         intro,
         warnings,
     })
+}
+
+/// Target button id, box, highlight shape (coverage and its origin) and the box origin for a
+/// shape-less indicator.
+type Indicator<'a> = (&'a str, Rect, Option<(menu::Coverage, i64, i64)>, (i64, i64));
+
+/// Adds every indicator's shape to its button's selected / activated pictures (in the button's
+/// colours) and grows the button rectangle to the union of both boxes. An indicator whose union
+/// would overlap another button, or whose button is missing, is left out with a warning.
+fn merge_indicators(
+    layout: &CustomLayout,
+    menu: &CustomMenu,
+    pending: &mut [Pending],
+    indicators: Vec<Indicator>,
+    alpha: u8,
+    warnings: &mut Vec<String>,
+) {
+    for (target, ind, cov, fallback) in indicators {
+        let Some(k) = pending.iter().position(|p| !target.is_empty() && menu.elements[p.element].id == target) else {
+            warnings.push(format!("Indicator for '{target}': no such button on this menu – left out"));
+            continue;
+        };
+        let old = pending[k].rect;
+        let rect = Rect { x0: old.x0.min(ind.x0), y0: old.y0.min(ind.y0), x1: old.x1.max(ind.x1), y1: old.y1.max(ind.y1) };
+        if pending.iter().enumerate().any(|(j, q)| j != k && overlaps(rect, q.rect)) {
+            warnings.push(format!("Indicator for '{target}' would overlap another button – left out"));
+            continue;
+        }
+        let (hl, sel) = button_colors(layout, &menu.elements[pending[k].element]);
+        let (c, origin) = match &cov {
+            Some((c, ox, oy)) => (Some(c), (*ox, *oy)),
+            None => (None, fallback),
+        };
+        let grow = |button: &RgbaImage, color: [u8; 3]| {
+            let mut img = RgbaImage::new(rect.x1 - rect.x0, rect.y1 - rect.y0);
+            let at = |r: Rect| ((r.x0 - rect.x0) as i64, (r.y0 - rect.y0) as i64);
+            imageops::overlay(&mut img, &highlight_image(ind, c, origin, color, alpha), at(ind).0, at(ind).1);
+            imageops::overlay(&mut img, button, at(old).0, at(old).1);
+            img
+        };
+        let p = &mut pending[k];
+        (p.selected, p.activated) = (grow(&p.selected, hl), grow(&p.activated, sel));
+        p.rect = rect;
+    }
 }
 
 /// Renders every menu of the layout into `out_dir` (`bm<NN>_*` layer files).
@@ -1038,7 +1167,7 @@ mod tests {
     fn nav(opts: PlaybackOptions) -> BdNav {
         let l = layout();
         let t = [title(5), title(5)];
-        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }, MenuTraits { moving: true, has_buttons: true, intro: false }];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false, activate: None }, MenuTraits { moving: true, has_buttons: true, intro: false, activate: None }];
         plan(&l, &t, &tr, opts, &[vec![5], vec![5]])
     }
 
@@ -1046,7 +1175,7 @@ mod tests {
     fn merged_nav(opts: PlaybackOptions) -> BdNav {
         let l = layout();
         let t = [title(5), title(5)];
-        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }, MenuTraits { moving: true, has_buttons: true, intro: false }];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false, activate: None }, MenuTraits { moving: true, has_buttons: true, intro: false, activate: None }];
         plan(&l, &t, &tr, opts, &[vec![2, 3], vec![5]])
     }
 
@@ -1083,7 +1212,7 @@ mod tests {
             button(0.0, 0.0, Action::PlayChapter { title: 1, chapter: 5 }),
         ];
         let t = [title(5), title(5)];
-        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }, MenuTraits { moving: true, has_buttons: true, intro: false }];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false, activate: None }, MenuTraits { moving: true, has_buttons: true, intro: false, activate: None }];
         let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![2, 3], vec![5]]);
         let go = |mark, title| [hdmv::mov(1, Op::Imm(mark)), hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(title)];
         assert_eq!(cmds(&n, 0, 0), &go(1, 1), "chapter 2 is the last mark of file 1");
@@ -1208,7 +1337,7 @@ mod tests {
         let mut t2 = title(5);
         (t2.audio_sources, t2.subtitle_sources) = (vec![1], vec![]);
         let t = [title(5), t2];
-        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false }; 2];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false, activate: None }; 2];
         let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
         // The buttons only store (never SetStream in a menu: the PS4 ignores it there).
         assert_eq!(cmds(&n, 0, 4), &[hdmv::mov(4000, Op::Imm(2))]);
@@ -1390,7 +1519,7 @@ mod tests {
         let t = [title(5), title(5)];
         crate::layout::validate_bd(&l, &t, frame).unwrap();
         let tr = traits(&l, &t, frame);
-        assert_eq!(tr[0], MenuTraits { moving: false, has_buttons: true, intro: false });
+        assert_eq!(tr[0], MenuTraits { moving: false, has_buttons: true, intro: false, activate: None });
         let nav = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
         let dir = std::env::temp_dir().join(format!("bdmenu-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1641,4 +1770,155 @@ mod tests {
         assert!(err.contains("overlaps"), "{err}");
     }
 
+    #[test]
+    fn after_playback_per_entry() {
+        let l = layout();
+        let t = [title(5), title(5)];
+        let tr = [MenuTraits { moving: false, has_buttons: true, intro: false, activate: None }, MenuTraits { moving: true, has_buttons: true, intro: false, activate: None }];
+        let run = |after: &[AfterPlayback], groups: &[Vec<usize>]| plan_with_after(&l, &t, &tr, PlaybackOptions::default(), groups, after);
+        let one = [vec![5], vec![5]];
+        use AfterPlayback::*;
+        // Missing / Default entries are today's navigation.
+        assert_eq!(run(&[Default, Default], &one), nav(PlaybackOptions::default()));
+        assert_eq!(run(&[], &one), nav(PlaybackOptions::default()));
+        // Loop wins over Play All: no FLAG test, straight back to the entry's first file.
+        let n = run(&[Loop, Loop], &one);
+        assert_eq!((tail(&n, 4), tail(&n, 5)), (&[hdmv::jump_title(1)][..], &[hdmv::jump_title(2)][..]));
+        // Next: the following entry; the last one goes to its main menu (Top Menu, GPR8 = 0).
+        let n = run(&[Next, Next], &one);
+        assert_eq!(tail(&n, 4), [hdmv::jump_title(2)]);
+        assert_eq!(tail(&n, 5), [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
+        // MainMenu / TitleMenu: Play All (FLAG) still advances, else the menu.
+        let n = run(&[MainMenu, MainMenu], &one);
+        assert_eq!(tail(&n, 4)[0], hdmv::compare(Op::Gpr(2), Cmp::Ne, Op::Imm(1)));
+        assert_eq!(tail(&n, 4)[2..], [hdmv::jump_title(2), hdmv::jump_title(0)]);
+        assert_eq!(tail(&n, 5), [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
+        // Entry 1 has its own (settings) menu, object 3; entry 2 none -> main menu.
+        let n = run(&[TitleMenu, TitleMenu], &one);
+        assert_eq!(tail(&n, 4)[2..], [hdmv::jump_title(2), hdmv::mov(8, Op::Imm(3)), hdmv::jump_title(0)]);
+        assert_eq!(tail(&n, 5), [hdmv::mov(2, Op::Imm(0)), hdmv::jump_title(0)]);
+        // Merged entry [a, b]: a still chains to b, only b ends with the entry's action.
+        let n = run(&[Loop, Default], &[vec![2, 3], vec![5]]);
+        assert_eq!(tail(&n, 4), [hdmv::jump_title(2)]);
+        assert_eq!(tail(&n, 5), [hdmv::jump_title(1)]);
+        assert_eq!(run(&[Next], &[vec![2, 3], vec![5]]).objects[5].commands.last(), Some(&hdmv::jump_title(3)));
+        // Movie titles never use JumpObject, whatever the end action.
+        let is_jump_object = |c: &Command| c[0] & 0x1F == 0x01 && c[1] & 0x0F == 0;
+        for a in [Default, Next, MainMenu, TitleMenu, Loop] {
+            let n = run(&[a, a], &one);
+            assert!(n.title_objects.iter().all(|&o| !n.objects[o as usize].commands.iter().any(is_jump_object)), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn once_activate_runs_the_start_button_after_the_clip() {
+        let mut l = layout();
+        l.menus[0].play_mode = Some(MenuPlayMode::OnceActivate);
+        l.menus[0].elements[0].auto_execute = true;
+        let t = [title(5), title(5)];
+        let frame = MenuFrame::square(1920, 1080);
+        let tr = traits(&l, &t, frame);
+        assert_eq!((tr[0].activate, tr[1].activate), (Some(1), None), "first button that is not auto-execute");
+        let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let start = cmds(&n, 0, 1).to_vec();
+        assert_eq!(n.objects[2].commands, [vec![hdmv::set_button_page(1), hdmv::play_pl(0)], start, vec![hdmv::goto(1)]].concat());
+        assert_eq!(n.objects[3].commands, [hdmv::set_button_page(1), hdmv::play_pl(1), hdmv::goto(1)], "loop menus unchanged");
+
+        // Intro page: both the fresh (intro) and the paged play fall into the start commands.
+        let mut l = intro_layout();
+        l.menus[0].play_mode = Some(MenuPlayMode::OnceActivate);
+        let tr = traits(&l, &t, frame);
+        let n = plan(&l, &t, &tr, PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let start = cmds(&n, 0, 0).to_vec();
+        let c = &n.objects[2].commands;
+        let at = 2u32; // mov PAGE, SetButtonPage
+        assert_eq!(c[at as usize + 3], hdmv::goto(at + 6));
+        assert_eq!(c[at as usize + 6..c.len() - 1], start[..]);
+        assert_eq!(c.last(), Some(&hdmv::goto(at + 5)));
+    }
+
+    #[test]
+    fn play_modes_set_the_clip_length_and_still() {
+        let t = [title(5), title(5)];
+        let frame = MenuFrame::square(1920, 1080);
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let dir = std::env::temp_dir().join(format!("bdmenu-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = |mode: Option<MenuPlayMode>, moving: bool| {
+            let mut l = layout();
+            l.menus[0].play_mode = mode;
+            l.menus[0].timeout_secs = Some(3.0);
+            if moving {
+                l.menus[0].audio = MenuSound::File { path: "x.ac3".into() };
+            }
+            let nav = plan(&l, &t, &traits(&l, &t, frame), PlaybackOptions::default(), &[vec![5], vec![5]]);
+            let p = &render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap()[0];
+            (p.moving, p.still, p.secs)
+        };
+        use MenuPlayMode::*;
+        assert_eq!(page(None, false), (false, true, STILL_SECS));
+        assert_eq!(page(Some(Once), false), (false, true, STILL_SECS));
+        assert_eq!(page(Some(OnceActivate), false), (false, false, 3.0), "the hold is the clip, never an infinite still");
+        assert_eq!(page(None, true), (true, false, 10.0));
+        assert_eq!(page(Some(Once), true), (true, true, 10.0), "once: infinite still at the clip end");
+        assert_eq!(page(Some(OnceActivate), true), (true, false, 13.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn indicator(x: f64, y: f64, target: &str) -> Element {
+        let mut e = button(x, y, Action::PlayAll);
+        (e.action, e.w, e.h, e.indicator_for) = (None, 60.0, 60.0, Some(target.into()));
+        e.content = Content::Icon { icon: "play".into(), color: "#ffffff".into() };
+        e
+    }
+
+    #[test]
+    fn indicators_join_the_button_highlight_only() {
+        let mut l = layout();
+        for (e, id) in l.menus[0].elements.iter_mut().zip(["a", "b", "c", "d"]) {
+            e.id = id.into();
+        }
+        l.menus[0].elements.push(indicator(20.0, 120.0, "a"));
+        // Would overlap button "c" (y 500..600): left out.
+        l.menus[0].elements.push(indicator(100.0, 450.0, "b"));
+        let t = [title(5), title(5)];
+        let frame = MenuFrame::square(1920, 1080);
+        let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
+        let nav = plan(&l, &t, &traits(&l, &t, frame), PlaybackOptions::default(), &[vec![5], vec![5]]);
+        let dir = std::env::temp_dir().join(format!("bdmenu-ind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = render_pages(&l, &t, frame, rate, &nav, &dir, 10.0).unwrap().remove(0);
+        let MenuLayer::Image(png) = &page.media.layers[0] else { panic!("image layer") };
+        let bg = image::open(png).unwrap().to_rgba8();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!((20..80).all(|x| (120..180).all(|y| bg.get_pixel(x, y)[3] == 0)), "indicator not in the picture");
+        let ig = page.igs.unwrap();
+        assert_eq!(ig.buttons.len(), 4, "indicators are no buttons");
+        let (b, o) = (&ig.buttons[0], &ig.objects[0]);
+        assert_eq!((b.x, b.y, o.width, o.height), (20, 100, 480, 100), "union of button and indicator");
+        assert_eq!((ig.buttons[1].x, ig.buttons[1].y, ig.objects[2].width), (100, 300, 400));
+        assert!(page.warnings.iter().any(|w| w.contains("overlap")), "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn merged_indicator_is_drawn_in_the_button_colours() {
+        let l = layout();
+        let mut m = l.menus[0].clone();
+        m.elements[0].id = "a".into();
+        let rect = Rect { x0: 100, y0: 100, x1: 200, y1: 150 };
+        let mut pending = vec![Pending { rect, selected: RgbaImage::new(100, 50), activated: RgbaImage::new(100, 50), element: 0 }];
+        let mut cov = menu::Coverage::new(20, 20);
+        cov.data.fill(1.0);
+        let ind = Rect { x0: 60, y0: 110, x1: 80, y1: 130 };
+        let mut warnings = Vec::new();
+        merge_indicators(&l, &m, &mut pending, vec![("a", ind, Some((cov, 60, 110)), (60, 110)), ("zz", ind, None, (0, 0))], 255, &mut warnings);
+        let p = &pending[0];
+        assert_eq!(p.rect, Rect { x0: 60, y0: 100, x1: 200, y1: 150 });
+        let (hl, sel) = button_colors(&l, &m.elements[0]);
+        assert_eq!(p.selected.dimensions(), (140, 50));
+        assert_eq!(p.selected.get_pixel(5, 15).0, [hl[0], hl[1], hl[2], 255]);
+        assert_eq!(p.activated.get_pixel(5, 15).0, [sel[0], sel[1], sel[2], 255]);
+        assert_eq!(p.selected.get_pixel(30, 40)[3], 0, "the button's own picture stays");
+        assert_eq!(warnings.len(), 1, "unknown button");
+    }
 }

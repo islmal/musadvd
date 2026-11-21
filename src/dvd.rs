@@ -2080,9 +2080,13 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .iter()
         .zip(ts_menus)
         .zip(&main_pages)
-        .map(|((g, menus), &main_menu_page)| (&titles[g.clone()], menus, main_menu_page))
-        .map(|(members, menus, main_menu_page)| (&members[0], members, menus, main_menu_page))
-        .map(|(t, members, menus, main_menu_page)| TitlesetSpec {
+        .map(|((g, menus), &main_menu_page)| {
+            // A merged entry ends with its last file, so that file's choice counts.
+            let after = opts.selections.get(g.end - 1).map(|s| s.after_playback).unwrap_or_default();
+            (&titles[g.clone()], menus, main_menu_page, after)
+        })
+        .map(|(members, menus, main_menu_page, after)| (&members[0], members, menus, main_menu_page, after))
+        .map(|(t, members, menus, main_menu_page, after_playback)| TitlesetSpec {
             main_menu_page,
             menus,
             title: TitleSpec {
@@ -2109,6 +2113,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     t.subtitle_langs_raw().position(|l| language_matches(pref, l)).map(|p| p as u32)
                 }),
                 force_subtitle: opts.force_first_subtitle,
+                after_playback,
             },
         })
         .collect();

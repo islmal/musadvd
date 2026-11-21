@@ -121,6 +121,7 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
                 force_subtitle: false,
                 default_audio: None,
                 default_subtitle: None,
+                after_playback: Default::default(),
             },
         }],
         playback: PlaybackOptions::default(),

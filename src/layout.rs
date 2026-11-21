@@ -751,6 +751,10 @@ pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
     a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 }
 
+pub(crate) fn rect_union(a: Rect, b: Rect) -> Rect {
+    Rect { x0: a.x0.min(b.x0), y0: a.y0.min(b.y0), x1: a.x1.max(b.x1), y1: a.y1.max(b.y1) }
+}
+
 pub(crate) fn element_name(e: &Element, n: usize) -> String {
     let kind = match &e.content {
         Content::Text { text, .. } => format!("Text '{}'", text.lines().next().unwrap_or("").chars().take(24).collect::<String>()),
@@ -926,12 +930,19 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
             MenuSound::File { path } if !Path::new(path).is_file() => errs.push(menu(format!("Audio file not found: {path}"))),
             _ => {}
         }
+        if m.timeout_secs.is_some_and(|t| !(0.0..=254.0).contains(&t)) {
+            errs.push(menu("Timeout must be between 0 and 254 seconds".into()));
+        }
+        if m.play_mode == Some(MenuPlayMode::OnceActivate) && !m.elements.iter().any(|e| e.action.is_some() && !e.auto_execute) {
+            errs.push(menu("'Play once, then activate' needs a start button (a button without auto-execute)".into()));
+        }
         if let Some(d) = m.duration_secs {
             if !(1.0..=600.0).contains(&d) {
                 errs.push(menu("Duration must be between 1 and 600 seconds".into()));
             }
         }
         let mut rects: Vec<(String, Rect)> = Vec::new();
+        let rect_of = |e: &Element| if bd { bd_button_rect(e, c, frame) } else { button_rect(e, c, frame) };
         let canvas_pa = canvas_pixel_aspect(c, frame);
         for (n, e) in m.elements.iter().enumerate() {
             let el = |msg: &str| menu(format!("{}: {msg}", element_name(e, n)));
@@ -1026,6 +1037,20 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                     }
                 }
             }
+            if let Some(id) = &e.indicator_for {
+                if e.action.is_some() {
+                    errs.push(el("An indicator cannot have an action"));
+                }
+                if is_video {
+                    errs.push(el("A video cannot be an indicator"));
+                }
+                match m.elements.iter().find(|x| &x.id == id) {
+                    None => errs.push(el(&format!("Indicator points to an unknown element '{id}'"))),
+                    Some(_) if *id == e.id => errs.push(el("Indicator points to itself")),
+                    Some(t) if t.action.is_none() => errs.push(el(&format!("Indicator points to '{id}', which is not a button"))),
+                    Some(_) => {}
+                }
+            }
             let Some(action) = &e.action else { continue };
             for (dir, id) in e.nav.iter().flat_map(|o| o.dirs()) {
                 let Some(id) = id else { continue };
@@ -1094,10 +1119,17 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
                 }
                 _ => {}
             }
-            if let Some(r) = if bd { bd_button_rect(e, c, frame) } else { button_rect(e, c, frame) } {
+            if let Some(r) = rect_of(e) {
+                // On disc the button's rectangle also covers its indicators.
+                let r = m
+                    .elements
+                    .iter()
+                    .filter(|i| i.indicator_for.as_deref() == Some(e.id.as_str()) && i.action.is_none())
+                    .filter_map(rect_of)
+                    .fold(r, rect_union);
                 for (other, o) in &rects {
                     if overlaps(r, *o) {
-                        errs.push(el(&format!("overlaps {other} ({medium} buttons must not overlap)")));
+                        errs.push(el(&format!("overlaps {other} ({medium} buttons and their indicators must not overlap)")));
                     }
                 }
                 rects.push((element_name(e, n), r));
@@ -1759,8 +1791,8 @@ pub(crate) fn frame_font_size(size: f32, canvas: Canvas, frame: impl Into<MenuFr
 /// Renders a text element into a `w` x `h` box and returns it with the glyph coverage (box
 /// coordinates, for the highlight mask). Paint order: box fill, shadow, outline, text. The element
 /// opacity is applied by the caller's blit; `bgOpacity` is baked into the box fill. Lengths are
-/// canvas units scaled like font sizes; only an explicit shadow offset is scaled, the default stays
-/// the historic 2 frame pixels.
+/// canvas units scaled like font sizes, the default 2-unit shadow offset included (on a DVD canvas,
+/// whose height is the frame's, it stays the historic 2 pixels).
 pub(crate) fn draw_text_element(
     content: &Content,
     w: u32,
@@ -1834,7 +1866,7 @@ pub(crate) fn draw_text_element(
         let [r, g, b] = shadow_color.as_deref().and_then(parse_color).unwrap_or([0, 0, 0]);
         // Default 170 (0.67 truncated) keeps the historic shadow byte-identical.
         let a = shadow_opacity.map_or(170, |o| (o.clamp(0.0, 1.0) * 255.0).round() as u8);
-        let off = |v: &Option<f32>| v.map_or(2, |v| unit(v).round() as i64);
+        let off = |v: &Option<f32>| unit(v.unwrap_or(2.0)).round() as i64;
         let base = outlined.as_ref().unwrap_or(&cov);
         let blurred = shadow_blur.map(unit).filter(|r| *r > 0.0).map(|r| base.blur(r));
         menu::blend_coverage(&mut img, blurred.as_ref().unwrap_or(base), [r, g, b, a], off(shadow_x), off(shadow_y), 255);
@@ -1936,11 +1968,14 @@ fn render_custom_page(
     let mut highlight = IndexedImage::new(fw, fh, highlight_palette);
     let mut select = IndexedImage::new(fw, fh, select_palette);
     let mut buttons: Vec<MenuButton> = Vec::new();
+    let mut indicator_covs: Vec<(usize, (menu::Coverage, i64, i64))> = Vec::new();
 
     for (n, e) in menu.elements.iter().enumerate() {
         let (x, y, w, h) = frame_box(e, canvas, tv);
         let unrotated = is_unrotated(e.rotation);
         let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        // Indicators only add their shape to their button's masks (after this loop).
+        let indicator = e.indicator_for.is_some() && !matches!(e.content, Content::Video { .. });
         // Rotated glyph coverage `(cov, origin_x, origin_y)` of a text button, for its highlight shape.
         let mut text_cov: Option<(menu::Coverage, i64, i64)> = None;
 
@@ -1948,7 +1983,7 @@ fn render_custom_page(
             let keys = if unrotated { e.intro.iter().map(|k| frame_key(k, canvas, tv)).collect() } else { Vec::new() };
             menu_anim::Sprite { pixels, rect: (rx as f64, ry as f64, rw as f64, rh as f64), opacity: e.opacity, keys }
         };
-        let visible = e.opacity > 0.0 || !e.intro.is_empty();
+        let visible = !indicator && (e.opacity > 0.0 || !e.intro.is_empty());
         let pa = tv.menu_pixel_aspect();
 
         match &e.content {
@@ -1956,7 +1991,9 @@ fn render_custom_page(
                 let (img, cov) = draw_text_element(c, w, h, canvas, tv);
                 let (img, rx, ry) = rotate_rgba(img, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                if !indicator {
+                    menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                }
                 if has_intro && visible {
                     sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
@@ -1970,7 +2007,12 @@ fn render_custom_page(
                 let fitted = fit_image(&src_img, w, h, *fit, pa, false);
                 let (img, rx, ry) = rotate_rgba(fitted, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                if indicator {
+                    text_cov = Some((icon_coverage(&img), rx, ry));
+                }
+                if !indicator {
+                    menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                }
                 if has_intro && visible {
                     sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
@@ -1981,7 +2023,9 @@ fn render_custom_page(
                 let cov = icon_coverage(&raw);
                 let (img, rx, ry) = rotate_rgba(raw, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                if !indicator {
+                    menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                }
                 if has_intro && visible {
                     sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
@@ -1992,7 +2036,12 @@ fn render_custom_page(
                 let raw = rect_image(fill, rect_border(border_color, border_width, canvas, tv, w, h), w, h, 255);
                 let (img, rx, ry) = rotate_rgba(raw, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
-                menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                if indicator {
+                    text_cov = Some((icon_coverage(&img), rx, ry));
+                }
+                if !indicator {
+                    menu::blit(current.get_or_insert_with(|| RgbaImage::new(fw, fh)), &img, rx, ry, opacity);
+                }
                 if has_intro && visible {
                     sprites.push(sprite(menu_anim::Pixels::Image(img), rx, ry, rw, rh));
                 }
@@ -2017,6 +2066,10 @@ fn render_custom_page(
             }
         }
 
+        if indicator {
+            indicator_covs.extend(text_cov.map(|c| (n, c)));
+            continue;
+        }
         let Some(cmd) = commands.get(n).cloned().flatten() else { continue };
         let Some(rect) = button_rect(e, canvas, tv) else {
             warnings.push(format!("{}: button lies outside the picture and was skipped", element_name(e, n)));
@@ -2028,29 +2081,12 @@ fn render_custom_page(
         if !e.easter_egg {
             match &text_cov {
                 Some((cov, cov_rx, cov_ry)) => {
-                    let (min_x, min_y, max_x, max_y) = if unrotated {
+                    let bounds = if unrotated {
                         (0i64, 0i64, fw as i64, fh as i64)
                     } else {
                         (rect.x0 as i64, rect.y0 as i64, rect.x1 as i64, rect.y1 as i64)
                     };
-                    for py in 0..cov.height {
-                        for px in 0..cov.width {
-                            let v = cov.at(px as i64, py as i64);
-                            let idx = if smooth_edges {
-                                if v >= 0.5 { 1 } else if v >= 0.15 { 2 } else { 0 }
-                            } else if v >= 0.35 {
-                                value
-                            } else {
-                                0
-                            };
-                            let (tx, ty) = (cov_rx + px as i64, cov_ry + py as i64);
-                            if idx > 0 && tx >= min_x && ty >= min_y && tx < max_x && ty < max_y {
-                                let i = (ty as u32 * fw + tx as u32) as usize;
-                                highlight.pixels[i] = idx;
-                                select.pixels[i] = idx;
-                            }
-                        }
-                    }
+                    paint_mask(&mut highlight, &mut select, cov, (*cov_rx, *cov_ry), bounds, smooth_edges, value);
                 }
                 None => {
                     let t = ((rect.x1 - rect.x0).min(rect.y1 - rect.y0) / 20).clamp(2, 6);
@@ -2083,6 +2119,21 @@ fn render_custom_page(
     flush(&mut current, &mut layers)?;
     author::compute_navigation(&mut buttons);
     apply_nav_overrides(menu, &mut buttons);
+    // After the navigation, so the D-pad routing stays the one Test Remote shows.
+    for (n, (cov, ox, oy)) in &indicator_covs {
+        let ind = &menu.elements[*n];
+        let target = menu.elements.iter().position(|t| Some(&t.id) == ind.indicator_for.as_ref());
+        let Some(b) = target.and_then(|t| buttons.iter_mut().find(|b| b.template_index == t)) else { continue };
+        let owner = &menu.elements[b.template_index];
+        if owner.easter_egg {
+            continue;
+        }
+        let value = pairs.iter().position(|p| *p == button_colors(layout, owner)).unwrap_or(0).min(MAX_COLOR_PAIRS - 1) as u8 + 1;
+        paint_mask(&mut highlight, &mut select, cov, (*ox, *oy), (0, 0, fw as i64, fh as i64), smooth_edges, value);
+        if let Some(r) = button_rect(ind, canvas, tv) {
+            b.rect = rect_union(b.rect, r);
+        }
+    }
 
     let intro = if has_intro {
         let end = sprites.iter().flat_map(|s| s.keys.iter().map(|k| k.t)).fold(0.0f64, f64::max);
@@ -2153,6 +2204,39 @@ fn render_custom_page(
         intro_fill: [0; 3],
     };
     Ok(PageOutput { files, buttons, motion: moving, warnings })
+}
+
+/// Paints a coverage at `origin` into both button masks, clipped to `bounds` (`x0, y0, x1, y1`):
+/// with one colour pair as pixel value 1 plus value 2 for soft edges, else as the pair's `value`.
+fn paint_mask(
+    highlight: &mut IndexedImage,
+    select: &mut IndexedImage,
+    cov: &menu::Coverage,
+    origin: (i64, i64),
+    bounds: (i64, i64, i64, i64),
+    smooth_edges: bool,
+    value: u8,
+) {
+    let fw = highlight.width;
+    let (min_x, min_y, max_x, max_y) = bounds;
+    for py in 0..cov.height {
+        for px in 0..cov.width {
+            let v = cov.at(px as i64, py as i64);
+            let idx = if smooth_edges {
+                if v >= 0.5 { 1 } else if v >= 0.15 { 2 } else { 0 }
+            } else if v >= 0.35 {
+                value
+            } else {
+                0
+            };
+            let (tx, ty) = (origin.0 + px as i64, origin.1 + py as i64);
+            if idx > 0 && tx >= min_x && ty >= min_y && tx < max_x && ty < max_y {
+                let i = (ty as u32 * fw + tx as u32) as usize;
+                highlight.pixels[i] = idx;
+                select.pixels[i] = idx;
+            }
+        }
+    }
 }
 
 /// Renders the FastPlay announcement page (VMGM Menu 1).
@@ -2313,6 +2397,22 @@ fn render_fastplay_page(
     Ok((spec, files))
 }
 
+/// Still time of the page cell and post command for a menu's play mode (`None, None` = loop as
+/// before). `Once` holds the last frame forever (255 = infinite still, the post never runs);
+/// `OnceActivate` holds `timeout_secs` and then runs the start button's command (the button
+/// focused on entry: the first one without auto-execute, see [`focus_pre`]). With an intro both
+/// apply to the page cell after it.
+fn play_mode_end(menu: &CustomMenu, buttons: &[MenuButton], ctx: author::CommandContext) -> (Option<u8>, Option<String>) {
+    match menu.play_mode.unwrap_or_default() {
+        MenuPlayMode::Loop => (None, None),
+        MenuPlayMode::Once => (Some(255), None),
+        MenuPlayMode::OnceActivate => {
+            let secs = menu.timeout_secs.unwrap_or(0.0).round().clamp(0.0, 254.0) as u8;
+            (Some(secs), buttons.iter().find(|b| !b.auto_action).map(|b| b.action.command(ctx)))
+        }
+    }
+}
+
 /// Validates the layout, plans its navigation and renders every menu into `out_dir`
 /// (`cm<NN>_*` files). `default_secs` is the loop length of moving menus without their own.
 pub fn build_custom_menus(
@@ -2360,6 +2460,11 @@ pub fn build_custom_menus(
         let base = matches!(nav.placement[i], Placement::Vtsm { .. }).then_some(RESET_DISPATCH);
         let pre = focus_pre(base, &buttons);
         warnings.extend(w.into_iter().map(|w| format!("Menu '{}': {w}", layout.menus[i].name)));
+        let ctx = match nav.placement[i] {
+            Placement::Vmgm(n) => author::CommandContext { domain: author::Domain::Vmgm, menu: n },
+            Placement::Vtsm { pgc, .. } => author::CommandContext { domain: author::Domain::Vtsm, menu: pgc },
+        };
+        let (pause_secs, post) = play_mode_end(&layout.menus[i], &buttons, ctx);
         match nav.placement[i] {
             Placement::Vmgm(n) => {
                 let spec = MenuSpec {
@@ -2369,8 +2474,8 @@ pub fn build_custom_menus(
                     motion,
                     pre,
                     intro_secs: files.intro.as_ref().map(|i| i.secs),
-                    pause_secs: None,
-                    post: None,
+                    pause_secs,
+                    post,
                 };
                 vmgm_menus.push(spec.clone());
                 pages.push((spec, files));
@@ -2384,8 +2489,8 @@ pub fn build_custom_menus(
                     motion,
                     pre,
                     intro_secs: files.intro.as_ref().map(|i| i.secs),
-                    pause_secs: None,
-                    post: None,
+                    pause_secs,
+                    post,
                 };
                 list.push(spec.clone());
                 pages.push((spec, files));
@@ -3070,6 +3175,99 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn indicator(x: f64, y: f64, target: &str) -> Element {
+        Element {
+            id: format!("ind_{target}"),
+            content: Content::Rect { color: "#00FF00".into(), border_color: None, border_width: None },
+            w: 30.0,
+            h: 30.0,
+            indicator_for: Some(target.into()),
+            ..text(x, y, "", None)
+        }
+    }
+
+    #[test]
+    fn indicator_joins_the_button_masks_only() {
+        let dir = std::env::temp_dir().join(format!("cx_layout_ind_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let l = layout(vec![menu(
+            "main",
+            MenuRole::Title,
+            None,
+            vec![
+                indicator(20.0, 110.0, "Play"),
+                text(60.0, 100.0, "Play", Some(Action::PlayTitle { title: 1 })),
+                text(60.0, 300.0, "More", Some(Action::PlayAll)),
+            ],
+        )]);
+        let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
+        let (spec, files) = &out.pages[0];
+        assert_eq!(spec.buttons.len(), 2, "the indicator is no button");
+        assert_eq!(spec.buttons[0].rect, Rect { x0: 20, y0: 100, x1: 360, y1: 150 }, "button box ∪ indicator box");
+        let MenuLayer::Image(under) = &files.custom.as_ref().unwrap().layers[0] else { panic!() };
+        assert_eq!(image::open(under).unwrap().to_rgba8().get_pixel(35, 125).0[3], 0, "not in the background");
+        for mask in [&files.highlight, &files.select] {
+            assert!(image::open(mask).unwrap().to_rgba8().get_pixel(35, 125).0[3] > 0, "in {}", mask.display());
+        }
+        // The D-pad routing ignores the indicator (as Test Remote does).
+        let nav = menu_button_navigation(&l.menus[0], l.canvas, TvStandard::Pal, false);
+        let rename = |n: &Option<String>| n.as_deref().map(|n| if n == "Play" { "b1" } else { "b2" }.to_string());
+        for ((_, remote), disc) in nav.iter().zip(&spec.buttons) {
+            assert_eq!((rename(&remote.up), rename(&remote.down)), (disc.nav.up.clone(), disc.nav.down.clone()));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn indicator_and_play_mode_validation() {
+        let err = |l: &CustomLayout| validate(l, &titles(1), TvStandard::Pal).unwrap_err().to_string();
+        let play = || text(60.0, 100.0, "Play", Some(Action::PlayTitle { title: 1 }));
+        let mut with_action = indicator(20.0, 110.0, "Play");
+        with_action.action = Some(Action::PlayAll);
+        let mut to_self = indicator(20.0, 110.0, "x");
+        to_self.id = "x".into();
+        let cases = [
+            (vec![play(), with_action], "cannot have an action"),
+            (vec![play(), indicator(20.0, 110.0, "nope")], "unknown element 'nope'"),
+            (vec![play(), to_self], "points to itself"),
+            (vec![play(), text(60.0, 300.0, "Plain", None), indicator(20.0, 310.0, "Plain")], "not a button"),
+            // The grown rectangle of Play would cover More.
+            (vec![play(), text(400.0, 100.0, "More", Some(Action::PlayAll)), indicator(380.0, 110.0, "Play")], "indicators must not overlap"),
+        ];
+        for (elements, want) in cases {
+            let e = err(&layout(vec![menu("m", MenuRole::Title, None, elements)]));
+            assert!(e.contains(want), "{want}: {e}");
+        }
+        validate(&layout(vec![menu("m", MenuRole::Title, None, vec![play(), indicator(20.0, 110.0, "Play")])]), &titles(1), TvStandard::Pal).unwrap();
+
+        let mut m = menu("m", MenuRole::Title, None, vec![]);
+        (m.play_mode, m.timeout_secs) = (Some(MenuPlayMode::OnceActivate), Some(300.0));
+        let e = err(&layout(vec![m]));
+        assert!(e.contains("between 0 and 254") && e.contains("needs a start button"), "{e}");
+    }
+
+    #[test]
+    fn play_modes_set_still_and_post() {
+        let dir = std::env::temp_dir().join(format!("cx_layout_pm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut auto = text(60.0, 300.0, "Auto", Some(Action::PlayAll));
+        auto.auto_execute = true;
+        let mut once = menu("a", MenuRole::Title, None, vec![text(60.0, 100.0, "Play", Some(Action::PlayTitle { title: 1 }))]);
+        once.play_mode = Some(MenuPlayMode::Once);
+        let mut activate = menu("b", MenuRole::Title, None, vec![auto, text(60.0, 100.0, "Play", Some(Action::PlayTitle { title: 1 }))]);
+        (activate.play_mode, activate.timeout_secs) = (Some(MenuPlayMode::OnceActivate), Some(7.4));
+        let looping = menu("c", MenuRole::Title, None, vec![text(60.0, 100.0, "Play", Some(Action::PlayTitle { title: 1 }))]);
+        let out = build_custom_menus(&layout(vec![once, activate, looping]), &titles(1), TvStandard::Pal, &dir, 15.0).unwrap();
+        let v = &out.vmgm_menus;
+        assert_eq!((v[0].pause_secs, v[0].post.as_deref()), (Some(255), None), "once: infinite still");
+        // The start button is the first one without auto-execute.
+        assert_eq!((v[1].pause_secs, v[1].post.as_deref()), (Some(7), Some("g1 = 0; jump title 1;")));
+        assert_eq!((v[2].pause_secs, v[2].post.as_deref()), (None, None), "loop: unchanged");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn ntsc_scales_the_canvas() {
         let l = CustomLayout {
@@ -3553,6 +3751,23 @@ mod tests {
             assert_eq!(img.as_raw(), old.as_raw(), "shadow={shadow}");
             assert_eq!(cov.data, old_cov.data);
         }
+    }
+
+    #[test]
+    fn default_shadow_offset_scales_like_an_explicit_one() {
+        let mut c = styled_text();
+        if let Content::Text { shadow, .. } = &mut c {
+            *shadow = true;
+        }
+        let mut explicit = c.clone();
+        if let Content::Text { shadow_x, shadow_y, .. } = &mut explicit {
+            (*shadow_x, *shadow_y) = (Some(2.0), Some(2.0));
+        }
+        // 576-line canvas on a 1080-line frame: both offsets become 4 frame pixels.
+        let bd = MenuFrame::square(1920, 1080);
+        let (a, _) = draw_text_element(&c, 200, 80, Canvas::default(), bd);
+        let (b, _) = draw_text_element(&explicit, 200, 80, Canvas::default(), bd);
+        assert_eq!(a.as_raw(), b.as_raw());
     }
 
     #[test]

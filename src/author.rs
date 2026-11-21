@@ -267,6 +267,9 @@ pub struct TitleSpec {
     /// Default subtitle stream index to select on title start (0-based stream index, e.g. from preferred language).
     #[serde(default)]
     pub default_subtitle: Option<u32>,
+    /// What happens when the title ends (a merged entry takes its last file's choice).
+    #[serde(default)]
+    pub after_playback: AfterPlayback,
 }
 
 impl TitleSpec {
@@ -297,6 +300,7 @@ impl TitleSpec {
             force_subtitle: false,
             default_audio: None,
             default_subtitle: None,
+            after_playback: AfterPlayback::Default,
         }
     }
 
@@ -1024,6 +1028,7 @@ fn write_menus(
             );
         }
         let pause = match menu.pause_secs {
+            Some(255) => r#" pause="inf""#.to_string(),
             Some(p) => format!(r#" pause="{p}""#),
             None if menu.motion => String::new(),
             None => r#" pause="inf""#.to_string(),
@@ -1061,7 +1066,10 @@ pub fn dispatcher_menu(pages: usize, title: usize) -> usize {
 /// Commands of title `title`'s dispatcher (runs when the title ends). At most 3 commands:
 /// - sequential playback / play-all: next title (title 1 again after the last with looping),
 /// - otherwise: repeat the title (looping), or back to its main menu page or its own menu.
-fn dispatcher_commands(title: usize, titles: usize, page: u32, has_ts_menu: bool, opts: PlaybackOptions) -> String {
+///
+/// A title's own [`AfterPlayback`] replaces the disc-wide options, except that a running Play All
+/// (`g1 == 1`) keeps advancing; only `Loop` beats Play All (it repeats the title forever).
+fn dispatcher_commands(title: usize, titles: usize, page: u32, has_ts_menu: bool, opts: PlaybackOptions, ap: AfterPlayback) -> String {
     let next = if title < titles {
         Some(title + 1)
     } else if opts.loop_playback {
@@ -1069,6 +1077,23 @@ fn dispatcher_commands(title: usize, titles: usize, page: u32, has_ts_menu: bool
     } else {
         None
     };
+    let own = match ap {
+        AfterPlayback::Default => None,
+        AfterPlayback::Loop => return format!("jump title {title};"),
+        // Play All would go to the same title, so no `g1` test is needed.
+        AfterPlayback::Next if title < titles => return format!("jump title {};", title + 1),
+        AfterPlayback::Next | AfterPlayback::MainMenu => Some(format!("jump menu {page};")),
+        // The VTSM root entry is the title's first Root menu (custom layouts: through its
+        // dispatcher, with `g2` reset by the title's `pre`).
+        AfterPlayback::TitleMenu if has_ts_menu => Some(format!("jump titleset {title} menu;")),
+        AfterPlayback::TitleMenu => Some(format!("jump menu {page};")),
+    };
+    if let Some(own) = own {
+        return match next {
+            Some(n) => format!("if (g1 eq 1) jump title {n}; {own}"),
+            None => format!("g1 = 0; {own}"),
+        };
+    }
     let to_menu = if !opts.return_to_title_menu && has_ts_menu {
         format!("jump titleset {title} menu;")
     } else {
@@ -1088,9 +1113,15 @@ fn dispatcher_commands(title: usize, titles: usize, page: u32, has_ts_menu: bool
 }
 
 /// Post command of a title on a disc without main menu (single title): repeat, show the
-/// title's own menu, or stop.
-fn post_without_main_menu(has_ts_menu: bool, opts: PlaybackOptions) -> &'static str {
-    if opts.loop_playback {
+/// title's own menu, or stop. Without a main menu every menu choice of [`AfterPlayback`] ends in
+/// the title's own menu.
+fn post_without_main_menu(has_ts_menu: bool, opts: PlaybackOptions, ap: AfterPlayback) -> &'static str {
+    let looping = match ap {
+        AfterPlayback::Default => opts.loop_playback,
+        AfterPlayback::Loop => true,
+        AfterPlayback::Next | AfterPlayback::MainMenu | AfterPlayback::TitleMenu => false,
+    };
+    if looping {
         "jump title 1;"
     } else if has_ts_menu {
         "call menu;"
@@ -1152,7 +1183,7 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
             let _ = writeln!(menus, "      <!-- dispatcher for title {} -->", i + 1);
             let _ = writeln!(menus, "      <pgc>");
             let name = format!("VMGM dispatcher {}", i + 1);
-            let commands = dispatcher_commands(i + 1, titles, page, !ts.menus.is_empty(), opts);
+            let commands = dispatcher_commands(i + 1, titles, page, !ts.menus.is_empty(), opts, ts.title.after_playback);
             write_commands(&mut menus, "        ", "pre", &commands, &name)?;
             let _ = writeln!(menus, "      </pgc>");
         }
@@ -1163,7 +1194,7 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
 
     for (i, ts) in layout.titlesets.iter().enumerate() {
         let back = if pages == 0 {
-            post_without_main_menu(!ts.menus.is_empty(), opts).to_string()
+            post_without_main_menu(!ts.menus.is_empty(), opts, ts.title.after_playback).to_string()
         } else {
             format!("call vmgm menu {};", dispatcher_menu(pages, i + 1))
         };
@@ -1440,7 +1471,7 @@ pub fn author_dvd(layout: &DvdLayout, work: &std::path::Path, dest: &std::path::
     let mut summaries = Vec::new();
     for (i, ts) in layout.titlesets.iter().enumerate() {
         let back = if pages == 0 {
-            post_without_main_menu(!ts.menus.is_empty(), opts).to_string()
+            post_without_main_menu(!ts.menus.is_empty(), opts, ts.title.after_playback).to_string()
         } else {
             format!("call vmgm menu {};", dispatcher_menu(pages, i + 1))
         };
@@ -1486,7 +1517,7 @@ pub fn author_dvd(layout: &DvdLayout, work: &std::path::Path, dest: &std::path::
         let mut all = layout.vmgm_menus.clone();
         for (i, ts) in layout.titlesets.iter().enumerate() {
             let page = ts.main_menu_page.clamp(1, pages as u32);
-            all.push(MenuSpec::commands(dispatcher_commands(i + 1, titles, page, !ts.menus.is_empty(), opts), None));
+            all.push(MenuSpec::commands(dispatcher_commands(i + 1, titles, page, !ts.menus.is_empty(), opts, ts.title.after_playback), None));
         }
         let fpc = if opts.auto_start {
             "g1 = 0; jump title 1;"
@@ -1726,6 +1757,7 @@ mod tests {
             force_subtitle: false,
             default_audio: None,
             default_subtitle: None,
+            after_playback: Default::default(),
         };
         let layout = DvdLayout {
             dest: "DVD".into(),
@@ -1876,6 +1908,47 @@ mod tests {
     }
 
     #[test]
+    fn after_playback_per_title() {
+        use AfterPlayback::*;
+        let base = PlaybackOptions::default();
+        let seq_loop = PlaybackOptions { play_sequentially: true, loop_playback: true, ..base };
+        let d = |t, ap, opts| dispatcher_commands(t, 3, 2, true, opts, ap);
+        // Default keeps the disc-wide rules.
+        assert_eq!(d(1, Default, base), "if (g1 eq 1) jump title 2; jump menu 2;");
+        // Next: the following title, the last one goes to its main menu (Play All on the last
+        // title with disc looping still wraps to title 1).
+        assert_eq!(d(1, Next, base), "jump title 2;");
+        assert_eq!(d(3, Next, base), "g1 = 0; jump menu 2;");
+        assert_eq!(d(3, Next, seq_loop), "if (g1 eq 1) jump title 1; jump menu 2;");
+        // Menus: Play All keeps advancing, else the menu – also over sequential playback.
+        assert_eq!(d(1, MainMenu, PlaybackOptions { play_sequentially: true, ..base }), "if (g1 eq 1) jump title 2; jump menu 2;");
+        assert_eq!(d(2, TitleMenu, base), "if (g1 eq 1) jump title 3; jump titleset 2 menu;");
+        assert_eq!(dispatcher_commands(2, 3, 2, false, base, TitleMenu), "if (g1 eq 1) jump title 3; jump menu 2;");
+        assert_eq!(d(3, TitleMenu, base), "g1 = 0; jump titleset 3 menu;");
+        // Loop wins over Play All and the disc-wide options.
+        assert_eq!(d(2, Loop, seq_loop), "jump title 2;");
+        // Without a main menu every menu choice ends in the title's own menu (or stops).
+        assert_eq!(post_without_main_menu(true, base, Loop), "jump title 1;");
+        assert_eq!(post_without_main_menu(true, PlaybackOptions { loop_playback: true, ..base }, MainMenu), "call menu;");
+        assert_eq!(post_without_main_menu(false, base, Next), "exit;");
+        // The choice reaches the authored dispatcher PGC (native path builds the same string).
+        let mut b = button("b1", 0, 0, 10, 10);
+        b.action = ButtonAction::PlayAll;
+        let layout = DvdLayout {
+            dest: "DVD".into(),
+            menu_aspect: "4:3".into(),
+            playback: base,
+            tv: TvStandard::Pal,
+            title_pre: None,
+            fast_play: None,
+            vmgm_menus: vec![MenuSpec { vob: "m.mpg".into(), buttons: vec![b], entry: Some("title".into()), motion: false, pre: None, intro_secs: None, pause_secs: None, post: None }],
+            titlesets: vec![TitlesetSpec { menus: vec![], title: TitleSpec { after_playback: Loop, ..TitleSpec::placeholder(1) }, main_menu_page: 1 }],
+        };
+        let x = dvdauthor_xml(&layout).unwrap();
+        assert!(x.contains("<pre>jump title 1;</pre>"), "{x}");
+    }
+
+    #[test]
     fn single_title_without_main_menu() {
         let ts = |menus: bool, force: bool| TitlesetSpec {
             menus: if menus {
@@ -2003,6 +2076,7 @@ mod tests {
                     force_subtitle: false,
                     default_audio: None,
                     default_subtitle: None,
+                    after_playback: Default::default(),
                 },
                 main_menu_page: 1,
             }],

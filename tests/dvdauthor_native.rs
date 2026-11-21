@@ -159,6 +159,7 @@ fn title(files: &[(&str, &[&str])], aspect: &str, audio: &[(&str, Option<&str>)]
         force_subtitle: false,
         default_audio: None,
         default_subtitle: None,
+        after_playback: Default::default(),
     }
 }
 

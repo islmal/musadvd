@@ -149,6 +149,7 @@ fn menu_transition_bridge_pgc_vmgm() {
                 force_subtitle: false,
                 default_audio: None,
                 default_subtitle: None,
+                after_playback: Default::default(),
             },
         }],
         playback: PlaybackOptions::default(),
