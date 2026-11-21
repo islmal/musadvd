@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-21
+
 ### Added
 
 - **Native disc erasing**: MMC BLANK (quick or full) with progress, for CD-RW and DVD-RW, on Windows and Linux without external tools: a Burn Studio "Erase disc" mode, `musadvd erase`, and automatic erasing of a used DVD-RW in the direct and Linux burn paths when erasing is allowed. DVD+RW and BD-RE are reported as not needing an erase.
