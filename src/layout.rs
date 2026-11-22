@@ -1395,15 +1395,19 @@ pub fn plan_navigation_with_offset(
     let num_vmgm_bridges = bridges.iter().filter(|b| matches!(b.placement, Placement::Vmgm(_))).count() as u32;
     let router_no = (!router_codes.is_empty()).then_some(vmgm_base + title_menus.len() as u32 + num_vmgm_bridges);
 
-    // 4. Where each title's playback returns to: the first title menu that plays it.
+    // 4. Where each title's playback returns to: the first title menu that plays it or opens
+    // its root menu (a chapter title's thumbnail leads to its root menu instead of playing).
+    let opens_root = |menu: &str, t: u32| layout.menus.iter().any(|m| m.id == menu && m.role == MenuRole::Root && m.title == Some(t));
     let main_menu_pages: Vec<u32> = (1..=titles as u32)
         .map(|t| {
             title_menus
                 .iter()
                 .enumerate()
                 .find(|(_, &i)| {
-                    layout.menus[i].elements.iter().any(|e| {
-                        matches!(e.action, Some(Action::PlayTitle { title }) | Some(Action::PlayChapter { title, .. }) if title == t)
+                    layout.menus[i].elements.iter().any(|e| match &e.action {
+                        Some(Action::PlayTitle { title }) | Some(Action::PlayChapter { title, .. }) => *title == t,
+                        Some(Action::Menu { menu, .. }) => opens_root(menu, t),
+                        _ => false,
                     })
                 })
                 .map_or(vmgm_base, |(n, _)| vmgm_base + n as u32)
@@ -2823,6 +2827,21 @@ mod tests {
         let c2 = |m: usize, e: usize| nav2.commands[m][e].clone().unwrap();
         assert_eq!(c2(0, 4), "jump menu 3;");
         assert_eq!(c2(2, 3), "jump vmgm menu 2;");
+    }
+
+    /// A chapter title's thumbnail opens its root menu instead of playing; playback still returns
+    /// to the page showing that thumbnail.
+    #[test]
+    fn playback_returns_to_the_page_that_opens_the_root_menu() {
+        let l = layout(vec![
+            menu("p1", MenuRole::Title, None, vec![
+                text(10.0, 10.0, "film 1", Some(Action::PlayTitle { title: 1 })),
+                text(10.0, 70.0, "next", Some(Action::menu("p2"))),
+            ]),
+            menu("p2", MenuRole::Title, None, vec![text(10.0, 10.0, "film 2", Some(Action::menu("root2")))]),
+            menu("root2", MenuRole::Root, Some(2), vec![text(10.0, 10.0, "play", Some(Action::PlayTitle { title: 2 }))]),
+        ]);
+        assert_eq!(plan_navigation(&l, &titles(2)).unwrap().main_menu_pages, vec![1, 2]);
     }
 
     #[test]

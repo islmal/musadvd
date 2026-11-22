@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-22
+
+The 1.2.0 release build failed (ffmpeg download error), so 1.2.1 is the first published release with the 1.2.0 changes below.
+
+### Added
+
+- **Main window TV standard**: PAL/NTSC selector next to Medium and Video, in a compact two-column grid above the disc fill bar (same setting as on the settings page).
+
+### Changed
+
+- **Menu editor layout**: the add-element buttons form one compact row with icons; Test Remote sits next to the zoom buttons; the menu list keeps only "+ Menu", the reorder arrows and a "⋯" button, with Duplicate, Copy, Paste and Delete in the row's right-click menu.
+- **Menu editor look**: higher-contrast secondary text, pill-shaped view toggles, a TV bezel around the canvas, labelled safe-area guides (Action 5% / Title 10%), and an Elements list with type badges and truncated names instead of a sideways scrollbar.
+- **Chapter titles in drafted menus**: the video thumbnail itself opens the title's chapter menu (like a title without chapters plays on click); the caption below is a plain label. Playback still returns to the page showing the thumbnail.
+
+### Fixed
+
+- **Menu headings**: chains of scene/archive tags such as `[DD]+[GOOFY]+[MM]` are stripped from captions and the default heading.
+- **Test Remote** follows the disc-wide playback settings (play one after another, loop, return to the title menu) at the end of a title.
+- **Release workflow**: the ffmpeg download retries temporary server errors.
+
 ## [1.2.0] - 2026-11-22
 
 ### Added

@@ -32,17 +32,50 @@
           <ul id="title-list" class="title-list" aria-label="Titlesets"></ul>
 
           <footer class="left-footer">
-            <div class="row">
-              <label for="disc" data-i18n="app.medium">Medium</label>
-              <select id="disc">
-                <option value="dvd5">DVD-5 (4,3 GB)</option>
-                <option value="dvd9">DVD-9 (8,2 GB)</option>
-                <option value="bd25">BD-25 (22,9 GB)</option>
-                <option value="bd50">BD-50 (45,8 GB)</option>
-                <option value="avchd5">AVCHD (DVD-5, 4,3 GB)</option>
-                <option value="avchd9">AVCHD (DVD-9, 8,2 GB)</option>
-                <option value="custom" id="disc-custom" data-i18n="app.discCustom">Custom</option>
-              </select>
+            <div class="disc-grid">
+              <div class="row">
+                <label for="disc" data-i18n="app.medium">Medium</label>
+                <select id="disc">
+                  <option value="dvd5">DVD-5 (4,3 GB)</option>
+                  <option value="dvd9">DVD-9 (8,2 GB)</option>
+                  <option value="bd25">BD-25 (22,9 GB)</option>
+                  <option value="bd50">BD-50 (45,8 GB)</option>
+                  <option value="avchd5">AVCHD (DVD-5, 4,3 GB)</option>
+                  <option value="avchd9">AVCHD (DVD-9, 8,2 GB)</option>
+                  <option value="custom" id="disc-custom" data-i18n="app.discCustom">Custom</option>
+                </select>
+              </div>
+              <div class="row">
+                <label for="tv-standard" data-i18n="settings.tvNorm">TV standard</label>
+                <select id="tv-standard">
+                  <option value="PAL">PAL</option>
+                  <option value="NTSC">NTSC</option>
+                </select>
+              </div>
+              <div class="row" id="dvd-video-row">
+                <label for="dvd-video" data-i18n="app.bdVideo" data-i18n-title="settings.dvdVideoNote" title="">Video</label>
+                <select id="dvd-video" data-i18n-title="settings.dvdVideoNote">
+                  <option value="encode" data-i18n="settings.dvdVideoEncode">Re-encode</option>
+                  <option value="auto" data-i18n="settings.dvdVideoAuto">Auto (copy compliant MPEG-2)</option>
+                  <option value="strict" data-i18n="settings.dvdVideoStrict">Strict (copy only, error if incompatible)</option>
+                </select>
+              </div>
+              <div class="row" id="bd-video-row" hidden>
+                <label for="bd-video" data-i18n="app.bdVideo" data-i18n-title="app.bdVideoTip" title="">Video</label>
+                <select id="bd-video" data-i18n-title="app.bdVideoTip">
+                  <option value="encode" data-i18n="app.bdVideoEncode">Re-encode</option>
+                  <option value="auto" data-i18n="app.bdVideoAuto">Copy when compliant</option>
+                  <option value="strict" data-i18n="app.bdVideoStrict">Copy only (strict)</option>
+                </select>
+              </div>
+              <div class="row" id="bd-audio-row" hidden>
+                <label for="bd-audio" data-i18n="app.bdAudio" data-i18n-title="app.bdAudioTip" title="">Audio</label>
+                <select id="bd-audio" data-i18n-title="app.bdAudioTip">
+                  <option value="auto" data-i18n="app.bdAudioAuto">Copy when compliant</option>
+                  <option value="encode" data-i18n="app.bdAudioEncode">Re-encode</option>
+                  <option value="strict" data-i18n="app.bdAudioStrict">Copy only (strict)</option>
+                </select>
+              </div>
             </div>
             <div class="fill">
               <div class="fill-bar"><div id="fill-value" class="fill-value"></div></div>
@@ -51,30 +84,6 @@
             <div class="toggles">
               <label class="switch"><input id="two-pass" type="checkbox" /><span></span><span data-i18n="app.twoPass">2-pass encoding</span></label>
               <label class="switch"><input id="motion-menu" type="checkbox" /><span></span><span data-i18n="app.motionMenu">Motion menu</span></label>
-            </div>
-            <div class="row" id="dvd-video-row">
-              <label for="dvd-video" data-i18n="app.bdVideo" data-i18n-title="settings.dvdVideoNote" title="">Video</label>
-              <select id="dvd-video" data-i18n-title="settings.dvdVideoNote">
-                <option value="encode" data-i18n="settings.dvdVideoEncode">Re-encode</option>
-                <option value="auto" data-i18n="settings.dvdVideoAuto">Auto (copy compliant MPEG-2)</option>
-                <option value="strict" data-i18n="settings.dvdVideoStrict">Strict (copy only, error if incompatible)</option>
-              </select>
-            </div>
-            <div class="row" id="bd-video-row" hidden>
-              <label for="bd-video" data-i18n="app.bdVideo" data-i18n-title="app.bdVideoTip" title="">Video</label>
-              <select id="bd-video" data-i18n-title="app.bdVideoTip">
-                <option value="encode" data-i18n="app.bdVideoEncode">Re-encode</option>
-                <option value="auto" data-i18n="app.bdVideoAuto">Copy when compliant</option>
-                <option value="strict" data-i18n="app.bdVideoStrict">Copy only (strict)</option>
-              </select>
-            </div>
-            <div class="row" id="bd-audio-row" hidden>
-              <label for="bd-audio" data-i18n="app.bdAudio" data-i18n-title="app.bdAudioTip" title="">Audio</label>
-              <select id="bd-audio" data-i18n-title="app.bdAudioTip">
-                <option value="auto" data-i18n="app.bdAudioAuto">Copy when compliant</option>
-                <option value="encode" data-i18n="app.bdAudioEncode">Re-encode</option>
-                <option value="strict" data-i18n="app.bdAudioStrict">Copy only (strict)</option>
-              </select>
             </div>
             <div class="row output-row">
               <input id="output" type="text" data-i18n-placeholder="app.outputPlaceholder" placeholder="Output folder" spellcheck="false" />

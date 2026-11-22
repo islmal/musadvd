@@ -5,6 +5,7 @@
   --border: #dde2ea;
   --text: #1d2430;
   --muted: #687386;
+  --hint: #687386;
   --accent: #2f6fde;
   --accent-text: #ffffff;
   --accent-soft: #e5eefc;
@@ -23,7 +24,8 @@
     --panel-2: #232833;
     --border: #2f3542;
     --text: #e6e9ef;
-    --muted: #9099aa;
+    --muted: #a3adbd;
+    --hint: #7f8a9c;
     --accent: #4f8cf2;
     --accent-soft: #233552;
     --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
@@ -335,6 +337,30 @@ body.reordering {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Disc options: compact 2-column grid, label above its select. */
+.disc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.disc-grid > .row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+}
+
+.disc-grid > .row > label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.disc-grid select {
+  width: 100%;
+  min-width: 0;
 }
 
 .row > label {
@@ -3516,4 +3542,123 @@ input.time {
 .ed-menu-picked-count {
   font-weight: 600;
   margin-right: auto;
+}
+
+/* Editor polish ------------------------------------------------------------ */
+/* Add-element buttons: one compact bordered row. */
+.ed-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius);
+}
+
+.ed-add-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+}
+
+.ed-add-ico {
+  min-width: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Test Remote sits in the zoom bar and stands out there. */
+.ed-toolbar .ed-remote-toggle {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ed-toolbar .ed-remote-toggle:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+/* TV bezel around the canvas. */
+.ed-viewport > .ed-stage {
+  outline: 10px solid #0b0d11;
+  box-shadow: 0 0 0 11px #2a303b, var(--shadow);
+  border-radius: 2px;
+}
+
+.ed-safe-label {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.8);
+  font: 600 10px/1.5 "Segoe UI", system-ui, sans-serif;
+  white-space: nowrap;
+}
+
+.ed-safe.title .ed-safe-label {
+  top: auto;
+  bottom: 2px;
+}
+
+/* Elements list: no sideways scrolling, names truncate, type badges. */
+.ed-layers,
+.ed-layer-list {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ed-layer,
+.ed-layer-group {
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.ed-layer-icon {
+  width: auto;
+  min-width: 30px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 15px;
+}
+
+.ed-layer-action {
+  color: var(--muted);
+  opacity: 1;
+}
+
+/* Hierarchy: hints quieter than metadata, pills for view toggles, destructive items in red. */
+.ed-hint {
+  color: var(--hint);
+}
+
+.ed-seg .btn {
+  border-radius: 999px;
+}
+
+.ed-header-actions .btn.primary {
+  font-weight: 600;
+  padding-inline: 16px;
+}
+
+.ed-ctx-item.danger {
+  color: var(--bad);
+}
+
+.ed-ctx-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: transparent;
 }

@@ -17,6 +17,7 @@ import {
   pasteMenuClip,
   type MenuClip,
   afterPlaybackStep,
+  type DiscPlayback,
   startButtonId,
   INDICATOR_ICONS,
   type BatchScope,
@@ -96,6 +97,8 @@ export interface EditorInit {
   heading: string;
   /** `titlesKey` of the videos `layout` was made for (null = unknown). */
   layoutTitlesKey: string | null;
+  /** Disc-wide playback settings, for Test Remote's end of a title. */
+  playback?: DiscPlayback;
 }
 
 export interface EditorOptions extends EditorInit {
@@ -130,6 +133,8 @@ const ZOOM_PRESETS = [0.5, 0.75, 1];
 
 /** localStorage can throw (private mode, blocked data); preferences are a convenience only. */
 const MENU_CLIP_KEY = "musadvd-editor-menu-clip";
+/** Compact type badge of an element row in the Elements list. */
+const LAYER_BADGE: Record<LayoutElement["type"], string> = { text: "T", image: "IMG", video: "VID", rect: "RECT", icon: "ICON" };
 
 function readPref<T>(key: string, fallback: T): T {
   try {
@@ -788,16 +793,6 @@ export function mountMenuEditor(opts: EditorOptions) {
           tr("menuEditor.modeTimeline"),
         ),
       ),
-      el(
-        "button",
-        {
-          type: "button",
-          class: `btn ed-remote-toggle${remoteMode ? " active" : ""}`,
-          title: tr("menuEditor.remoteTestTip"),
-          onclick: () => (remoteMode ? exitRemoteMode() : enterRemoteMode()),
-        },
-        tr("menuEditor.remoteTestBtn"),
-      ),
       el("span", { class: "ed-spacer" }),
       el(
         "button",
@@ -825,7 +820,17 @@ export function mountMenuEditor(opts: EditorOptions) {
           "data-idx": String(i),
           "aria-pressed": String(i === menuIdx || menuSel.has(m.id)),
           onpointerdown: (ev: PointerEvent) => {
-            if (!(ev.ctrlKey || ev.metaKey || ev.shiftKey)) startMenuDrag(ev, i);
+            if (ev.button === 0 && !(ev.ctrlKey || ev.metaKey || ev.shiftKey)) startMenuDrag(ev, i);
+          },
+          oncontextmenu: (ev: MouseEvent) => {
+            ev.preventDefault();
+            if (i !== menuIdx) {
+              menuSel.clear();
+              menuIdx = i;
+              selIds = [];
+              renderAll();
+            }
+            openMenuRowCtx({ x: ev.clientX, y: ev.clientY });
           },
           onclick: (ev: MouseEvent) => {
             if (suppressMenuClick) return;
@@ -946,23 +951,43 @@ export function mountMenuEditor(opts: EditorOptions) {
       el(
         "div",
         { class: "ed-menu-actions" },
-        el("button", { class: "btn", type: "button", onclick: () => addMenu("title") }, tr("menuEditor.titelmenue2")),
-        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("root") }, tr("menuEditor.rootMenue2")),
-        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addMenu("settings") }, tr("menuEditor.einstellungen2")),
+        el(
+          "button",
+          {
+            class: "btn",
+            type: "button",
+            "aria-haspopup": "menu",
+            onclick: (ev: MouseEvent) => {
+              const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+              openMenuPopup({ x: r.left, y: r.bottom + 2 }, [
+                [tr("menuEditor.titelmenue2"), () => addMenu("title")],
+                [tr("menuEditor.rootMenue2"), () => addMenu("root"), titles.length === 0],
+                [tr("menuEditor.einstellungen2"), () => addMenu("settings"), titles.length === 0],
+              ]);
+            },
+          },
+          tr("editor.addMenu"),
+        ),
+        m ? el("button", { class: "btn", type: "button", title: tr("menuEditor.nachOben"), disabled: menuIdx === 0, onclick: () => moveMenu(-1) }, "↑") : null,
+        m ? el("button", { class: "btn", type: "button", title: tr("menuEditor.nachUnten"), disabled: menuIdx >= L.menus.length - 1, onclick: () => moveMenu(1) }, "↓") : null,
+        m
+          ? el(
+              "button",
+              {
+                class: "btn",
+                type: "button",
+                "aria-haspopup": "menu",
+                title: tr("editor.menuMore"),
+                "aria-label": tr("editor.menuMore"),
+                onclick: (ev: MouseEvent) => {
+                  const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+                  openMenuRowCtx({ x: r.left, y: r.bottom + 2 });
+                },
+              },
+              "⋯",
+            )
+          : null,
       ),
-      m
-        ? el(
-            "div",
-            { class: "ed-menu-actions" },
-            el("button", { class: "btn", type: "button", title: tr("menuEditor.nachOben"), disabled: menuIdx === 0, onclick: () => moveMenu(-1) }, "↑"),
-            el("button", { class: "btn", type: "button", title: tr("menuEditor.nachUnten"), disabled: menuIdx >= L.menus.length - 1, onclick: () => moveMenu(1) }, "↓"),
-            el("button", { class: "btn", type: "button", onclick: duplicateMenu }, tr("menuEditor.duplizieren")),
-            el("button", { class: "btn", type: "button", title: tr("editor.copyMenuTip"), onclick: copyMenu }, tr("editor.copyMenu")),
-            el("button", { class: "btn", type: "button", disabled: !menuClip, title: tr("editor.pasteMenuOverTip"), onclick: () => pasteMenu(true) }, tr("editor.pasteMenuOver")),
-            el("button", { class: "btn", type: "button", disabled: !menuClip, onclick: () => pasteMenu(false) }, tr("editor.pasteMenuNew")),
-            el("button", { class: "btn danger", type: "button", disabled: L.menus.length <= 1, onclick: deleteMenu }, tr("menuEditor.loeschen")),
-          )
-        : null,
       el(
         "p",
         { class: "ed-hint" },
@@ -1023,13 +1048,17 @@ export function mountMenuEditor(opts: EditorOptions) {
       return;
     }
     const buttons = menu()?.elements.filter(isButton).length ?? 0;
+    const ico = (glyph: string) => el("span", { class: "ed-add-ico", "aria-hidden": "true" }, glyph);
     toolbar.replaceChildren(
-      el("button", { class: "btn", type: "button", onclick: addText }, tr("menuEditor.text")),
-      el("button", { class: "btn", type: "button", onclick: addRect }, tr("menuEditor.rectangle")),
-      el("button", { class: "btn", type: "button", onclick: () => void addImage() }, tr("menuEditor.bild")),
-      el("button", { class: "btn", type: "button", "aria-haspopup": "true", onclick: (ev: MouseEvent) => openIconPopup(ev.currentTarget as HTMLElement) }, tr("editor.addIcon")),
-      el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addVideo() }, tr("menuEditor.video")),
-      el("button", { class: "btn", type: "button", onclick: () => void addExternalVideo() }, tr("menuEditor.externesVideo")),
+      el(
+        "div",
+        { class: "ed-add-row", role: "group" },
+        el("button", { class: "btn", type: "button", onclick: addText }, ico("T"), tr("menuEditor.text")),
+        el("button", { class: "btn", type: "button", onclick: addRect }, ico("▭"), tr("menuEditor.rectangle")),
+        el("button", { class: "btn", type: "button", onclick: () => void addImage() }, ico("▣"), tr("menuEditor.bild")),
+        el("button", { class: "btn", type: "button", "aria-haspopup": "true", onclick: (ev: MouseEvent) => openIconPopup(ev.currentTarget as HTMLElement) }, ico("★"), tr("editor.addIcon")),
+        el("button", { class: "btn", type: "button", disabled: titles.length === 0, onclick: () => addVideo() }, ico("▶"), tr("menuEditor.video")),
+        el("button", { class: "btn", type: "button", onclick: () => void addExternalVideo() }, ico("⧉"), tr("menuEditor.externesVideo")),
       el(
         "button",
         {
@@ -1042,7 +1071,9 @@ export function mountMenuEditor(opts: EditorOptions) {
             renderToolbar();
           },
         },
+        ico("⬚"),
         tr("menuEditor.addButtonArea"),
+      ),
       ),
       el("span", { class: "ed-spacer" }),
       el(
@@ -1058,6 +1089,17 @@ export function mountMenuEditor(opts: EditorOptions) {
         ),
       ),
       el("span", { class: "ed-zoom-readout ed-counter", title: tr("editor.zoomTip") }, `${Math.round((dispHpx / H()) * 100)}%`),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn ed-remote-toggle",
+          "aria-pressed": "false",
+          title: tr("menuEditor.remoteTestTip"),
+          onclick: () => enterRemoteMode(),
+        },
+        tr("menuEditor.remoteTestBtn"),
+      ),
       el(
         "label",
         { class: "ed-check" },
@@ -1422,7 +1464,7 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** Test Remote: what happens when the previewed title ends (its "after playback" setting). */
   function remoteEndOfTitle() {
     if (!remotePreview) return;
-    const step = afterPlaybackStep(L, titles, remotePreview.titleNum);
+    const step = afterPlaybackStep(L, titles, remotePreview.titleNum, opts.playback);
     if (step.type === "title" && titles[step.title - 1]) {
       openRemotePreview(tr("menuEditor.remotePreviewTitle", { title: titleName(step.title) }), "", step.title);
     } else if (step.type === "menu") {
@@ -1676,8 +1718,8 @@ export function mountMenuEditor(opts: EditorOptions) {
     if (showSafe) {
       const inset = (f: number) => `inset: ${f * 100}% ${f * 100}%`;
       stage.append(
-        el("div", { class: "ed-safe", "aria-hidden": "true", style: inset(ACTION_SAFE) }),
-        el("div", { class: "ed-safe title", "aria-hidden": "true", style: inset(TITLE_SAFE) }),
+        el("div", { class: "ed-safe", "aria-hidden": "true", style: inset(ACTION_SAFE) }, el("span", { class: "ed-safe-label" }, tr("editor.safeAction"))),
+        el("div", { class: "ed-safe title", "aria-hidden": "true", style: inset(TITLE_SAFE) }, el("span", { class: "ed-safe-label" }, tr("editor.safeTitle"))),
       );
     }
     if (remoteMode && remoteBadge) {
@@ -2877,11 +2919,12 @@ export function mountMenuEditor(opts: EditorOptions) {
         {
           type: "button",
           class: `ed-layer${isSel(e.id) ? " active" : ""}${indent ? " indent" : ""}`,
+          title: layerName(e),
           onclick: (ev: MouseEvent) => pickFromList([e.id], ev),
           onpointerenter: () => hoverStage([e.id], true),
           onpointerleave: () => hoverStage([e.id], false),
         },
-        el("span", { class: "ed-layer-icon", "aria-hidden": "true" }, e.type === "text" ? "T" : e.type === "image" ? "🖼" : e.type === "rect" ? "▭" : "▶"),
+        el("span", { class: `ed-layer-icon t-${e.type}`, "aria-hidden": "true" }, LAYER_BADGE[e.type]),
         el("span", { class: "ed-layer-name" }, layerName(e)),
         isButton(e) ? el("span", { class: "ed-layer-action" }, actionLabel(e.action)) : null,
       );
@@ -4187,6 +4230,41 @@ export function mountMenuEditor(opts: EditorOptions) {
       ),
     );
     showPopup(node, at);
+  }
+  /** A popup menu of `[label, action, disabled?, class?, tooltip?]` items at a client position. */
+  function openMenuPopup(at: { x: number; y: number }, items: [string, () => void, boolean?, string?, string?][]) {
+    const node = el(
+      "div",
+      { class: "ed-ctx", role: "menu" },
+      ...items.map(([label, run, disabled, cls, tip]) =>
+        el(
+          "button",
+          {
+            type: "button",
+            role: "menuitem",
+            class: `ed-ctx-item${cls ? ` ${cls}` : ""}`,
+            title: tip,
+            disabled: !!disabled,
+            onclick: () => {
+              closeCtx();
+              run();
+            },
+          },
+          label,
+        ),
+      ),
+    );
+    showPopup(node, at);
+  }
+  /** Secondary actions of the active menu (row context menu and the "⋯" button). */
+  function openMenuRowCtx(at: { x: number; y: number }) {
+    openMenuPopup(at, [
+      [tr("menuEditor.duplizieren"), duplicateMenu],
+      [tr("editor.copyMenu"), copyMenu, false, undefined, tr("editor.copyMenuTip")],
+      [tr("editor.pasteMenuOver"), () => pasteMenu(true), !menuClip, undefined, tr("editor.pasteMenuOverTip")],
+      [tr("editor.pasteMenuNew"), () => pasteMenu(false), !menuClip],
+      [tr("menuEditor.loeschen"), deleteMenu, L.menus.length <= 1, "danger"],
+    ]);
   }
   /** Shows a keyboard-navigable popup (items carry `.ed-ctx-item`) at a client position. */
   function showPopup(node: HTMLElement, at: { x: number; y: number }) {

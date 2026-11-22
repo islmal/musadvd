@@ -1238,6 +1238,8 @@ function renderFooter() {
   // DVD video copy is the app setting `dvd_video` (also on the settings page), mirrored here.
   $("dvd-video-row").hidden = isBluray() || !state.settings;
   if (state.settings) ($("dvd-video") as HTMLSelectElement).value = state.settings.dvd_video;
+  if (state.settings) ($("tv-standard") as HTMLSelectElement).value = state.settings.tv_standard;
+  ($("tv-standard") as HTMLSelectElement).disabled = !state.settings || state.converting;
   $("bd-audio-row").hidden = !isBluray();
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
@@ -2026,7 +2028,7 @@ async function refreshLayoutCheck() {
 }
 
 function menuHeading(): string {
-  return state.menuTitle.trim() || state.titles[0]?.label.trim() || (isBluray() ? tr("main.bluRay") : "DVD");
+  return state.menuTitle.trim() || (state.titles[0] ? cleanTitle(state.titles[0].label) : "") || (isBluray() ? tr("main.bluRay") : "DVD");
 }
 
 /** Emits refreshed editor data to an open Menu Editor window ONLY when the layout is still pristine. */
@@ -2083,6 +2085,9 @@ function editorInit(): EditorInit {
     tv: frameName(),
     heading: menuHeading(),
     layoutTitlesKey: state.customLayoutKey,
+    playback: state.settings
+      ? { sequential: state.settings.play_sequentially, loop: state.settings.loop_playback, returnToTitleMenu: state.settings.return_to_title_menu_after_title }
+      : undefined,
   };
 }
 
@@ -2393,7 +2398,8 @@ function renderTemplateChoice() {
 /** ConvertX default: the project (heading and DVD folder) is named after the first video. */
 function syncMenuTitle() {
   if (!state.menuTitleAuto) return;
-  state.menuTitle = state.titles[0]?.label.trim() ?? "";
+  // cleanTitle again: a label the user edited may still carry scene tags.
+  state.menuTitle = state.titles[0] ? cleanTitle(state.titles[0].label) : "";
   const input = document.getElementById("menu-title") as HTMLInputElement | null;
   if (input && document.activeElement !== input) input.value = state.menuTitle;
 }
@@ -3081,6 +3087,19 @@ async function init() {
     } catch (e) {
       status(String(e));
     }
+    scheduleCalc();
+    renderAll();
+  });
+  // TV standard is the app setting `tv_standard` (also on the settings page), mirrored here.
+  const tvStandard = $("tv-standard") as HTMLSelectElement;
+  tvStandard.addEventListener("change", async () => {
+    if (!state.settings || tvStandard.value === state.settings.tv_standard) return;
+    try {
+      state.settings = await storeSettings({ ...state.settings, tv_standard: tvStandard.value as AppSettings["tv_standard"] });
+    } catch (e) {
+      status(String(e));
+    }
+    if (!state.customLayoutEdited) syncMenuAfterChange(null);
     scheduleCalc();
     renderAll();
   });

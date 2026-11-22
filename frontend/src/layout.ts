@@ -384,6 +384,8 @@ export function cleanTitle(name: string): string {
   let s = base.replace(/\.(mkv|mp4|avi|mov|m4v|wmv|flv|webm|ts|m2ts|mpg|mpeg|vob|iso)$/i, "");
   // shortcut: an 11-char bracket needs a digit to count as a YouTube id, so "[Commentary]" survives.
   s = s.replace(/\s*\[(?:-?\d[\d_]*|(?=[^\]]*\d)[A-Za-z0-9_-]{11})\]/g, "").replace(/\s*\(\d{5,}\)/g, "");
+  // Two or more bracket tags in a row ("[DD]+[GOOFY]+[MM]") are scene/archive tags, not a caption.
+  s = s.replace(/\s*\[[^\]]*\](?:\s*\+?\s*\[[^\]]*\])+/g, "");
   if (!/\s/.test(s)) s = s.replace(/[_.]+/g, " ");
   // Run twice: adjacent tags share their separator, which the first match consumes.
   s = s.replace(RIP_TAG_RE, "$1").replace(RIP_TAG_RE, "$1");
@@ -800,10 +802,12 @@ export function draftLayout(titles: EditorTitle[], tv: string, heading: string, 
       const n = t.index;
       const x = 60 + (i % 3) * 210;
       const y = Y(120 + Math.floor(i / 3) * 180);
-      menu.elements.push(video(x, y, 180, Y(112), n, null, { type: "playTitle", title: n }));
       const root = rootIds[p * ITEMS_PER_PAGE + i];
+      // The thumbnail is the title's one button: it plays the title, or opens its root menu
+      // (chapters/settings, with "Play movie" there); the caption only names it.
+      menu.elements.push(video(x, y, 180, Y(112), n, null, root ? { type: "menu", menu: root } : { type: "playTitle", title: n }));
       const caption = root ? `${t.label} · ${hasChapters(t) ? tr("layout.kapitel2") : tr("layout.menue")}` : t.label;
-      menu.elements.push(text(x, y + Y(118), 180, Y(30), caption, { size: 18, action: root ? { type: "menu", menu: root } : null }));
+      menu.elements.push(text(x, y + Y(118), 180, Y(30), caption, { size: 18 }));
     });
   };
 
@@ -1113,20 +1117,41 @@ export function startButtonId(menu: CustomMenu): string | null {
 
 export type AfterPlaybackStep = { type: "title"; title: number } | { type: "menu"; menuId: string } | { type: "none" };
 
-/** Test Remote model of what follows the end of `title` (1-based); see `AfterPlayback`. */
-export function afterPlaybackStep(layout: CustomLayout, titles: EditorTitle[], title: number): AfterPlaybackStep {
+/** Disc-wide playback settings that steer a title's "default" end (Rust `author::PlaybackOptions`). */
+export interface DiscPlayback {
+  sequential: boolean;
+  loop: boolean;
+  returnToTitleMenu: boolean;
+}
+
+/**
+ * Test Remote model of what follows the end of `title` (1-based) outside Play All; see
+ * `AfterPlayback` and Rust `author::dispatcher_commands`.
+ */
+export function afterPlaybackStep(
+  layout: CustomLayout,
+  titles: EditorTitle[],
+  title: number,
+  disc: DiscPlayback = { sequential: false, loop: false, returnToTitleMenu: true },
+): AfterPlaybackStep {
   const mode = titles[title - 1]?.afterPlayback ?? "default";
-  const plays = (m: CustomMenu) => m.elements.some((e) => (e.action?.type === "playTitle" || e.action?.type === "playChapter") && e.action.title === title);
+  const rootIds = new Set(layout.menus.filter((m) => m.role === "root" && m.title === title).map((m) => m.id));
+  const plays = (m: CustomMenu) =>
+    m.elements.some((e) => ((e.action?.type === "playTitle" || e.action?.type === "playChapter") && e.action.title === title) || (e.action?.type === "menu" && rootIds.has(e.action.menu)));
   const main = layout.menus.find((m) => m.role === "title" && plays(m)) ?? layout.menus[0];
   const mainStep: AfterPlaybackStep = main ? { type: "menu", menuId: main.id } : { type: "none" };
+  const root = layout.menus.find((m) => m.role === "root" && m.title === title);
   switch (mode) {
     case "loop": return { type: "title", title };
     case "next": return titles[title] ? { type: "title", title: title + 1 } : mainStep;
-    case "titleMenu": {
-      const root = layout.menus.find((m) => m.role === "root" && m.title === title);
-      return root ? { type: "menu", menuId: root.id } : mainStep;
+    case "titleMenu": return root ? { type: "menu", menuId: root.id } : mainStep;
+    case "mainMenu": return mainStep;
+    default: {
+      const next = titles[title] ? title + 1 : disc.loop ? 1 : null;
+      const toMenu: AfterPlaybackStep = !disc.returnToTitleMenu && root ? { type: "menu", menuId: root.id } : mainStep;
+      if (disc.sequential) return next ? { type: "title", title: next } : toMenu;
+      return disc.loop ? { type: "title", title } : toMenu;
     }
-    default: return mainStep;
   }
 }
 
@@ -1397,7 +1422,7 @@ function candidateTitleSlots(page: CustomMenu, canvas: { width: number; height: 
   const fontSize = Math.round(18 * (isBd ? sy : 1));
 
   // If existing playTitle video thumbnails use a custom size, try that geometry first.
-  const existingVids = page.elements.filter((e): e is VideoElement => e.type === "video" && e.action?.type === "playTitle");
+  const existingVids = page.elements.filter((e): e is VideoElement => e.type === "video" && (e.action?.type === "playTitle" || e.action?.type === "menu"));
   const dims: [number, number, number][] = [];
   if (existingVids.length > 0) {
     const widths = existingVids.map((v) => Math.round(v.w)).sort((a, b) => a - b);
@@ -1713,7 +1738,7 @@ export function syncLayoutWithTitles(
 
     const chap = out.chapterMenus !== false && t.chapters > 1;
     const needsVtsm = chap || (!globalSettings && nav.settingsMode !== "none" && needsSettings(t));
-    const neededBtns = needsVtsm ? 2 : 1;
+    const neededBtns = 1;
 
     // New thumbnails go to the last episodes page (landing) or title page (classic), never to
     // the landing screen or the global settings menu while another page exists.
@@ -1724,7 +1749,7 @@ export function syncLayoutWithTitles(
     };
 
     const pickSlotOn = (page: CustomMenu): TitleSlot | null => {
-      const titleEntries = page.elements.filter((e) => e.action?.type === "playTitle").length;
+      const titleEntries = page.elements.filter((e) => e.action?.type === "playTitle" || (e.type === "video" && e.action?.type === "menu")).length;
       const btnCount = page.elements.filter(isButton).length;
       if (titleEntries >= 6 || btnCount + neededBtns > btnLimit) return null;
       const blocked = blockingBoxes(page, out.canvas);
@@ -1802,7 +1827,7 @@ export function syncLayoutWithTitles(
       slot.vid.y1 - slot.vid.y0,
       t.index,
       null,
-      { type: "playTitle", title: t.index },
+      rootId ? { type: "menu", menu: rootId } : { type: "playTitle", title: t.index },
     );
     vidEl.id = allocId("v");
 
@@ -1815,7 +1840,7 @@ export function syncLayoutWithTitles(
       color: style.textColor,
       italic: style.italic,
       shadow: style.shadow,
-      action: rootId ? { type: "menu", menu: rootId } : null,
+      action: null,
     });
 
     targetPage.elements.push(vidEl, capEl);

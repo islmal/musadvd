@@ -61,6 +61,8 @@ describe("cleanTitle", () => {
   it("strips YouTube ids but keeps ordinary brackets", () => {
     expect(cleanTitle("Holiday Video [dQw4w9WgXcQ].mp4")).toBe("Holiday Video");
     expect(cleanTitle("Film [Commentary].mkv")).toBe("Film [Commentary]");
+    expect(cleanTitle("Mickey Classics [DD]+[GOOFY]+[MM]+[PLUTO].mkv")).toBe("Mickey Classics");
+    expect(cleanTitle("Show [A] [B].mkv")).toBe("Show");
   });
   it("falls back to the original name instead of an empty label", () => {
     expect(cleanTitle("1080p.mkv")).toBe("1080p.mkv");
@@ -182,6 +184,17 @@ describe("draft menu choices", () => {
     expect(l.chapterMenus).toBe(false);
     expect(actions(draftLayout(eps, "PAL", "Disc", undefined, { chapterMenus: false, settingsMode: "global" }))).not.toContain("playChapter");
     expect(draftLayout(eps, "PAL", "Disc", undefined, { chapterMenus: false, settingsMode: "global" }).menus.some((m) => m.role === "root")).toBe(false);
+  });
+  it("the thumbnail is the only button: chapter titles open their root menu, others play", () => {
+    const mixed = [title(1, "a.mkv", { chapters: 4 }), title(2, "b.mkv")];
+    const l = draftLayout(mixed, "PAL", "Disc", undefined, { theme: "classic", settingsMode: "none" });
+    const page = l.menus.find((m) => m.role === "title" && m.elements.some((e) => e.type === "video"))!;
+    const vids = page.elements.filter((e) => e.type === "video");
+    const root1 = l.menus.find((m) => m.role === "root" && m.title === 1)!;
+    expect(vids.map((v) => v.action)).toEqual([{ type: "menu", menu: root1.id }, { type: "playTitle", title: 2 }]);
+    expect(page.elements.filter((e) => e.type === "text" && e.y > vids[0].y && e.y < vids[0].y + 200).every((e) => e.action == null)).toBe(true);
+    expect(root1.elements.some((e) => e.action?.type === "playTitle" && e.action.title === 1)).toBe(true);
+    expect(afterPlaybackStep(l, mixed, 1)).toEqual({ type: "menu", menuId: page.id });
   });
   it("settings none builds no settings menus at all", () => {
     for (const theme of ["landing", "classic"] as const) {
@@ -523,5 +536,14 @@ describe("batch styling, start button and after-playback", () => {
     expect(step(["titleMenu", "titleMenu"], 2)).toEqual({ type: "menu", menuId: "r" });
     expect(step(["titleMenu"], 1)).toEqual({ type: "menu", menuId: "a" }); // no root -> main
     expect(afterPlaybackStep({ ...l, menus: [] }, [ts()], 1)).toEqual({ type: "none" });
+    // "default" follows the disc-wide settings like the authored dispatcher.
+    const disc = (sequential: boolean, loop: boolean, returnToTitleMenu = true) => ({ sequential, loop, returnToTitleMenu });
+    const two = [ts(undefined, 1), ts(undefined, 2)];
+    expect(afterPlaybackStep(l, two, 1, disc(true, false))).toEqual({ type: "title", title: 2 });
+    expect(afterPlaybackStep(l, two, 2, disc(true, false))).toEqual({ type: "menu", menuId: "a" });
+    expect(afterPlaybackStep(l, two, 2, disc(true, true))).toEqual({ type: "title", title: 1 });
+    expect(afterPlaybackStep(l, two, 2, disc(false, true))).toEqual({ type: "title", title: 2 });
+    expect(afterPlaybackStep(l, two, 2, disc(false, false, false))).toEqual({ type: "menu", menuId: "r" });
+    expect(afterPlaybackStep(l, [ts("mainMenu", 1), ts(undefined, 2)], 1, disc(true, false))).toEqual({ type: "menu", menuId: "a" });
   });
 });
