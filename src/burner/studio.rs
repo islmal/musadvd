@@ -194,7 +194,7 @@ pub fn open_disc(drive: &DriveInfo, io: &StudioIo) -> Result<Box<dyn SectorSourc
 fn open_disc_with(t: &dyn ScsiTransport, device: &str) -> Result<Box<dyn SectorSource>, BurnError> {
     let cap = super::spti::query(t, "READ CAPACITY", &super::spti::read_capacity(), 8)?;
     let (last, _) = super::spti::parse_read_capacity(&cap).ok_or_else(|| BurnError::Backend("READ CAPACITY: unreadable answer".into()))?;
-    Ok(Box::new(FileSource::with_sectors(File::open(device)?, last as u64 + 1)))
+    Ok(Box::new(FileSource::with_sectors(power::open_raw_volume(device)?, last as u64 + 1)))
 }
 
 /// Queries the drive via MMC READ DISC STRUCTURE (format 0x01) whether the current disc is CSS/CPPM protected.

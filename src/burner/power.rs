@@ -12,10 +12,16 @@ pub fn drive_letter(path: &str) -> Option<char> {
 }
 
 #[cfg(windows)]
-pub use win::{DriveHandle, StandbyGuard, TrayLock};
+pub use win::{open_raw_volume, DriveHandle, StandbyGuard, TrayLock};
 
 #[cfg(not(windows))]
 pub use other::{DriveHandle, StandbyGuard, TrayLock};
+
+/// Opens a raw disc device for reading.
+#[cfg(not(windows))]
+pub fn open_raw_volume(path: &str) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
 
 #[cfg(windows)]
 mod win {
@@ -28,12 +34,26 @@ mod win {
     };
     use windows::Win32::System::IO::DeviceIoControl;
     use windows::Win32::System::Ioctl::{
-        FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_LOAD_MEDIA,
+        FSCTL_ALLOW_EXTENDED_DASD_IO, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_LOAD_MEDIA,
         IOCTL_STORAGE_MEDIA_REMOVAL, PREVENT_MEDIA_REMOVAL,
     };
     use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
 
     use super::BurnError;
+
+    /// Opens a raw volume (`\\.\X:`) for reading. Reads on a volume handle stop at the file
+    /// system's end, which on DVD-Video images is one sector before the image's last (the closing
+    /// UDF anchor), so a read-back verify would fail there; FSCTL_ALLOW_EXTENDED_DASD_IO lifts it.
+    pub fn open_raw_volume(path: &str) -> std::io::Result<std::fs::File> {
+        use std::os::windows::io::AsRawHandle;
+        let file = std::fs::File::open(path)?;
+        let mut returned = 0u32;
+        // Best effort: without it everything but the tail still reads.
+        let _ = unsafe {
+            DeviceIoControl(HANDLE(file.as_raw_handle()), FSCTL_ALLOW_EXTENDED_DASD_IO, None, 0, None, 0, Some(&mut returned), None)
+        };
+        Ok(file)
+    }
 
     /// No standby or display-off while it lives. The execution state belongs to the calling
     /// thread, so create and drop the guard on the thread that runs the operation.

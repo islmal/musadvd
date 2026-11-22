@@ -591,9 +591,8 @@ impl Toolchain {
             return Err("probe timed out".into());
         };
         let raw_log = String::from_utf8_lossy(&out.stderr);
-        let log = raw_log.to_ascii_lowercase();
         // ffmpeg silently falls back to software decoding when the hwaccel fails to set up.
-        if out.status.success() && !log.contains("failed") && !log.contains("error") {
+        if out.status.success() && !hwaccel_log_failed(&raw_log) {
             return Ok(());
         }
         let reason = raw_log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("probe failed").trim();
@@ -737,6 +736,15 @@ pub fn hwaccel_input_args(hw: &str) -> Vec<std::ffi::OsString> {
     }
 }
 
+/// True when a hwaccel probe log reports a failure. Demuxer lines (`[in#0 …]`, e.g. "UDTA
+/// parsing failed" on MP4s with broken metadata) say nothing about the GPU decoder.
+fn hwaccel_log_failed(log: &str) -> bool {
+    log.lines().filter(|l| !l.trim_start().starts_with("[in#")).any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.contains("failed") || l.contains("error")
+    })
+}
+
 fn probe_hwaccel_args(input: &Path, hw: &str, encoder: Option<BdEncoder>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> =
         ["-hide_banner", "-nostdin", "-loglevel", "warning"].into_iter().map(Into::into).collect();
@@ -800,6 +808,17 @@ mod tests {
     fn stray_quote_in_path() {
         let p = path_entries(std::ffi::OsStr::new(r#"C:\a;C:\Program Files\dotnet";C:\b; ;"C:\c d""#));
         assert_eq!(p, vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\Program Files\dotnet"), PathBuf::from(r"C:\b"), PathBuf::from(r"C:\c d")]);
+    }
+
+    #[test]
+    fn hwaccel_probe_ignores_demuxer_warnings() {
+        // KeepStreams MP4s: broken udta metadata, GPU decoding itself works.
+        let mp4 = "[in#0 @ 000001e0b9ad5dc0] UDTA parsing failed retrying raw\n    Last message repeated 2 times\n[in#0 @ 000001e0b9ad5dc0] stream 0, timescale not set\n";
+        assert!(!hwaccel_log_failed(mp4));
+        assert!(!hwaccel_log_failed(""));
+        let qsv = "[D3D11VA @ 000001e8376e35c0] Failed to find d3d11va adapter by vendor id 0x8086\nDevice creation failed: -1313558101.\n";
+        assert!(hwaccel_log_failed(qsv));
+        assert!(hwaccel_log_failed("[h264 @ 0x1] Error while decoding stream #0:0"));
     }
 
     #[test]

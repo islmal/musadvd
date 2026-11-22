@@ -918,7 +918,7 @@ fn burn_feed(
             return Err(BurnError::Backend("Verification not possible: the drive has no drive letter".into()));
         }
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Verifying disc …"));
-        let mut device = File::open(format!(r"\\.\{letter}"))?;
+        let mut device = power::open_raw_volume(&format!(r"\\.\{letter}"))?;
         verify(&mut device, &progress_tx)?;
     }
     drop(tray_lock);

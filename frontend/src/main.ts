@@ -11,7 +11,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
-import { moveItem, shapeMismatch } from "./order";
+import { mergeBlock, moveItem, shapeMismatch } from "./order";
 import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
 import { modal } from "./studio/ui";
@@ -599,12 +599,19 @@ async function addViaDialog() {
   if (picked) await addFiles(Array.isArray(picked) ? picked : [picked]);
 }
 
+/** Ctrl/Shift multi-selection of title cards (ids); `state.selected` stays the active card. */
+const multi = new Set<number>();
+let selAnchor: number | null = null;
+
+/** Removes the multi-selection when the active card is part of it, else the active card. */
 function removeSelected() {
   state.splitUndo = null;
   const i = state.titles.findIndex((t) => t.id === state.selected);
   if (i < 0) return;
   const oldGroupPaths = editorTitles().map((t) => t.path);
-  state.titles.splice(i, 1);
+  const doomed = multi.size > 1 && multi.has(state.selected!) ? multi : new Set([state.selected!]);
+  state.titles.splice(0, state.titles.length, ...state.titles.filter((t) => !doomed.has(t.id)));
+  multi.clear();
   normalizeMerge();
   state.selected = state.titles[Math.min(i, state.titles.length - 1)]?.id ?? null;
   syncMenuAfterChange(oldGroupPaths);
@@ -634,6 +641,75 @@ function toggleMerge(t: Title) {
   syncMenuAfterChange(oldGroupPaths);
   renderAll();
   scheduleCalc();
+}
+
+/** Batch merge (see `mergeBlock`) or unmerge of the titles `ids`. */
+function setMerged(ids: Set<number>, merge: boolean) {
+  const picked = state.titles.filter((t) => ids.has(t.id));
+  if (state.converting || picked.length === 0 || (merge && picked.length < 2)) return;
+  state.splitUndo = null;
+  const oldGroupPaths = editorTitles().map((t) => t.path);
+  if (merge) mergeBlock(state.titles, ids);
+  else picked.forEach((t) => (t.mergeWithPrevious = false));
+  normalizeMerge();
+  syncMenuAfterChange(oldGroupPaths);
+  renderAll();
+  scheduleCalc();
+}
+
+/** Card click: plain = single selection, Ctrl/Cmd = toggle, Shift = range from the anchor. */
+function pickTitle(id: number, e: MouseEvent | KeyboardEvent) {
+  const ids = state.titles.map((t) => t.id);
+  if (e.shiftKey) {
+    const a = ids.indexOf(selAnchor ?? state.selected ?? id);
+    const b = ids.indexOf(id);
+    multi.clear();
+    ids.slice(Math.min(a, b) < 0 ? b : Math.min(a, b), Math.max(a, b) + 1).forEach((x) => multi.add(x));
+  } else if (e.ctrlKey || e.metaKey) {
+    if (multi.size === 0 && state.selected !== null) multi.add(state.selected);
+    if (multi.has(id)) multi.delete(id);
+    else multi.add(id);
+    selAnchor = id;
+  } else {
+    multi.clear();
+    selAnchor = id;
+  }
+  select(multi.size === 0 || multi.has(id) ? id : [...multi][multi.size - 1]);
+}
+
+function clearMulti() {
+  multi.clear();
+  renderAll();
+}
+
+/** Right-click menu on a title card (styled like the menu editor's popups). */
+function openTitleCtx(at: { x: number; y: number }) {
+  document.querySelector(".title-ctx")?.remove();
+  const all = new Set(state.titles.map((t) => t.id));
+  const items: [string, () => void, boolean, string?][] = [
+    [tr("main.mergeAll"), () => setMerged(all, true), state.converting || all.size < 2],
+    [tr("main.unmergeAll"), () => setMerged(all, false), state.converting || !state.titles.some((t) => t.mergeWithPrevious)],
+    [tr("app.remove"), removeSelected, state.converting, "danger"],
+  ];
+  const close = () => {
+    node.remove();
+    document.removeEventListener("pointerdown", outside, true);
+    window.removeEventListener("blur", close);
+  };
+  const outside = (e: Event) => !node.contains(e.target as Node) && close();
+  const node = h(
+    "div",
+    { class: "ed-ctx title-ctx", role: "menu", onkeydown: (e: KeyboardEvent) => e.key === "Escape" && close() },
+    ...items.map(([label, run, disabled, cls]) =>
+      h("button", { type: "button", role: "menuitem", class: `ed-ctx-item${cls ? ` ${cls}` : ""}`, disabled, onclick: () => (close(), run()) }, label),
+    ),
+  );
+  document.body.append(node);
+  node.style.left = `${Math.max(4, Math.min(at.x, window.innerWidth - node.offsetWidth - 4))}px`;
+  node.style.top = `${Math.max(4, Math.min(at.y, window.innerHeight - node.offsetHeight - 4))}px`;
+  document.addEventListener("pointerdown", outside, true);
+  window.addEventListener("blur", close);
+  node.querySelector<HTMLElement>(".ed-ctx-item:not(:disabled)")?.focus();
 }
 
 function moveSelected(delta: number) {
@@ -1086,8 +1162,24 @@ function renderVideoTab(t: Title) {
 
 function renderTitleList() {
   const list = $("title-list");
+  const hadFocus = list.contains(document.activeElement);
   list.replaceChildren();
   $("dropzone").classList.toggle("compact", state.titles.length > 0);
+
+  for (const id of multi) if (!state.titles.some((t) => t.id === id)) multi.delete(id);
+  if (multi.size >= 2) {
+    const sel = new Set(multi);
+    list.append(
+      h(
+        "li",
+        { class: "title-selbar", role: "toolbar" },
+        h("span", { class: "title-selbar-count" }, tr("main.selectedCount", { count: multi.size })),
+        h("button", { class: "btn small pill", disabled: state.converting, onclick: () => setMerged(sel, true) }, tr("main.mergeSelected")),
+        h("button", { class: "btn small pill", disabled: state.converting, onclick: () => setMerged(sel, false) }, tr("main.unmergeSelected")),
+        h("button", { class: "btn small pill", title: tr("main.clearSelection"), "aria-label": tr("main.clearSelection"), onclick: clearMulti }, "×"),
+      ),
+    );
+  }
 
   const mismatches = mergeMismatches();
   state.titles.forEach((t, i) => {
@@ -1108,12 +1200,18 @@ function renderTitleList() {
       h(
         "li",
         {
-          class: `title-item${t.id === state.selected ? " selected" : ""}${i > 0 && t.mergeWithPrevious ? " merged" : ""}${bad ? " merge-bad" : ""}`,
+          class: `title-item${t.id === state.selected ? " selected" : ""}${multi.size > 1 && multi.has(t.id) ? " multi" : ""}${i > 0 && t.mergeWithPrevious ? " merged" : ""}${bad ? " merge-bad" : ""}`,
           "data-id": t.id,
           tabIndex: 0,
-          onclick: () => select(t.id),
+          onclick: (e: MouseEvent) => pickTitle(t.id, e),
           onkeydown: (e: KeyboardEvent) => {
-            if (e.key === "Enter" || e.key === " ") select(t.id);
+            if (e.key === "Enter" || e.key === " ") pickTitle(t.id, e);
+          },
+          oncontextmenu: (e: MouseEvent) => {
+            e.preventDefault();
+            if (!multi.has(t.id)) multi.clear();
+            select(t.id);
+            openTitleCtx({ x: e.clientX, y: e.clientY });
           },
         },
         h(
@@ -1166,6 +1264,8 @@ function renderTitleList() {
     );
   });
 
+  // Re-rendering drops focus; keep it in the list so Ctrl+A / Esc keep working.
+  if (hadFocus) list.querySelector<HTMLElement>(".title-item.selected")?.focus({ preventScroll: true });
   const hasSel = selectedTitle() !== null;
   ($("btn-remove") as HTMLButtonElement).disabled = !hasSel || state.converting;
   const idx = state.titles.findIndex((t) => t.id === state.selected);
@@ -1240,6 +1340,9 @@ function renderFooter() {
   if (state.settings) ($("dvd-video") as HTMLSelectElement).value = state.settings.dvd_video;
   if (state.settings) ($("tv-standard") as HTMLSelectElement).value = state.settings.tv_standard;
   ($("tv-standard") as HTMLSelectElement).disabled = !state.settings || state.converting;
+  $("dvd-res-row").hidden = isBluray() || !state.settings;
+  if (state.settings) ($("dvd-resolution") as HTMLSelectElement).value = state.settings.dvd_resolution;
+  ($("dvd-resolution") as HTMLSelectElement).disabled = state.converting;
   $("bd-audio-row").hidden = !isBluray();
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
@@ -2978,6 +3081,14 @@ async function init() {
   $("btn-up").addEventListener("click", () => moveSelected(-1));
   $("btn-down").addEventListener("click", () => moveSelected(1));
   initTitleDrag();
+  $("title-list").addEventListener("keydown", (e) => {
+    if ((e.target as HTMLElement).closest("input, select, textarea")) return;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "a" && state.titles.length > 1) {
+      e.preventDefault();
+      state.titles.forEach((t) => multi.add(t.id));
+      renderAll();
+    } else if (e.key === "Escape" && multi.size > 0) clearMulti();
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Delete" && !(e.target instanceof HTMLInputElement) && !state.converting) removeSelected();
   });
@@ -3100,6 +3211,18 @@ async function init() {
       status(String(e));
     }
     if (!state.customLayoutEdited) syncMenuAfterChange(null);
+    scheduleCalc();
+    renderAll();
+  });
+  // DVD title resolution is the app setting `dvd_resolution` (also on the settings page); menus stay Full D1.
+  const dvdRes = $("dvd-resolution") as HTMLSelectElement;
+  dvdRes.addEventListener("change", async () => {
+    if (!state.settings || dvdRes.value === state.settings.dvd_resolution) return;
+    try {
+      state.settings = await storeSettings({ ...state.settings, dvd_resolution: dvdRes.value as AppSettings["dvd_resolution"] });
+    } catch (e) {
+      status(String(e));
+    }
     scheduleCalc();
     renderAll();
   });
