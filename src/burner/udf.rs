@@ -208,7 +208,10 @@ impl IsoSide {
 /// A fully laid out image.
 #[derive(Debug, Clone)]
 pub struct ImagePlan {
+    /// ISO 9660 / Joliet volume identifier.
     pub label: String,
+    /// UDF volume identifier; `label` unless the caller sets its own.
+    pub udf_label: String,
     /// Files in the order the caller gave them (their data follows in this order).
     pub files: Vec<ImageFile>,
     /// Total sectors of the image.
@@ -726,6 +729,7 @@ pub fn plan_tree(label: &str, entries: &[TreeEntry], opts: &TreeOptions) -> Resu
     let total_sectors = (sector + 1).max(opts.min_sectors);
     Ok(ImagePlan {
         label: label.to_string(),
+        udf_label: label.to_string(),
         files,
         total_sectors,
         warnings,
@@ -1099,7 +1103,8 @@ pub fn write_to<W: Write>(
     let n = plan.total_sectors;
     let p = plan.partition_start;
     let partition_len = n - 1 - p;
-    let label = &plan.label;
+    // The ISO descriptors take `plan.label` themselves; everything below here is UDF.
+    let label = &plan.udf_label;
 
     // ---- ISO 9660 volume descriptors, then the UDF volume recognition sequence --------------
     w.put(ISO_PVD, &iso_volume_descriptor(plan, 0, ts))?;

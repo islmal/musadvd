@@ -15,7 +15,7 @@ use md5::{Digest, Md5};
 
 use crate::config::{StudioBuild, StudioFilter};
 
-use super::label::sanitize_volume_label;
+use super::label::{sanitize_udf_label, sanitize_volume_label};
 use super::layerbreak::{plan_disc_with, Capacities, LayerBreak, PlanError};
 use super::reader::{write_layout, Split, SplitWriter};
 use super::source::StreamSource;
@@ -316,6 +316,8 @@ pub struct BuildInput {
     pub sources: Vec<Source>,
     /// Empty = from the Blu-ray disc name or the default label.
     pub label: String,
+    /// UDF volume identifier (free text, see `sanitize_udf_label`); empty = the sanitised `label`.
+    pub udf_label: String,
     /// The user's answer when the detected content needs a question (`prompts = ask`).
     pub answer: Option<bool>,
     /// Dual-layer limits: DVD-Video content gets a layer break when it exceeds one layer.
@@ -344,6 +346,18 @@ impl BuildPlan {
 }
 
 pub fn plan_build(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, BuildError> {
+    let mut plan = plan_content(input, cfg)?;
+    let udf = sanitize_udf_label(&input.udf_label);
+    if !udf.is_empty() {
+        match &mut plan.image {
+            BuiltImage::Udf(p) => p.udf_label = udf,
+            BuiltImage::Bd(p) => p.udf_label = udf,
+        }
+    }
+    Ok(plan)
+}
+
+fn plan_content(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, BuildError> {
     let single_dir = (input.sources.len() == 1 && input.sources[0].path.is_dir()).then(|| input.sources[0].path.clone());
     let detected = single_dir.as_deref().map_or(Content::Data, detect);
     let content = resolve_content(detected, &cfg.prompts, input.answer)?;
@@ -618,6 +632,13 @@ mod tests {
         assert!(plan.total_sectors() >= cfg.min_sectors, "minimum size of 600 sectors");
         let BuiltImage::Udf(ref p) = plan.image else { panic!("UDF 1.02 expected") };
         assert!(p.files[1].is_duplicate(), "dedupe is on by default");
+        assert_eq!(p.udf_label, "MEINE_DATEN", "an empty UDF label follows the ISO label");
+        inp.udf_label = "  Meine Daten 2025 ".into();
+        let BuiltImage::Udf(own) = plan_build(&inp, &cfg).unwrap().image else { panic!("UDF 1.02 expected") };
+        assert_eq!((own.label.as_str(), own.udf_label.as_str()), ("MEINE_DATEN", "Meine Daten 2025"));
+        let bd = plan_build(&inp, &StudioBuild { fs: "udf250".into(), ..Default::default() }).unwrap();
+        let BuiltImage::Bd(bd) = bd.image else { panic!("UDF 2.50 expected") };
+        assert_eq!(bd.udf_label, "Meine Daten 2025");
 
         let out = dir.join("out.iso");
         let report = build_to_file(&plan, &out, Split::None, true, "auto", &AtomicBool::new(false), |_| {}).unwrap();

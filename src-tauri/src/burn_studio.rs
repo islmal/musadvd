@@ -179,6 +179,8 @@ pub struct BuildInputDto {
     sources: Vec<SourceDto>,
     #[serde(default)]
     label: String,
+    #[serde(default)]
+    udf_label: String,
     /// The answer to "build this folder as a disc?".
     answer: Option<bool>,
     layer_break: Option<BreakDto>,
@@ -189,6 +191,7 @@ impl BuildInputDto {
         BuildInput {
             sources: self.sources.iter().map(|s| Source { path: PathBuf::from(&s.path), dest: s.dest.clone() }).collect(),
             label: self.label.clone(),
+            udf_label: self.udf_label.clone(),
             answer: self.answer,
             dvd_caps: Some(Capacities::DVD),
             layer_break: self

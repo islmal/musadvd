@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-22
+
+### Added
+
+- **DVD video copy in the GUI**: a DVD video setting (Encode / Auto / Strict) in the settings and on the main window next to the disc options, saved in `.musadvd` projects. Titles that are already DVD-compliant MPEG-2 are copied unchanged; the title list and pre-flight show "Copied unchanged" or the reason a title is re-encoded.
+- **Burn Studio volume labels**: separate ISO 9660 label (A-Z, 0-9, _, 32 characters, cleaned up as you type) and UDF label (free Latin-1 text, 30 characters; UDF 1.02 on DVD/data discs, UDF 2.50 on Blu-ray). An empty UDF label uses the ISO label.
+
+### Fixed
+
+- **Menu highlight on strict players**: every DVD menu page with buttons now starts on button 1 (SetHL_BTN) unless it picks a button itself, so jumping from a page with more buttons no longer leaves SPRM 8 out of range (PgcEdit warning, missing highlight on some players).
+- Copied AC-3 audio no longer floods the log with paired "Discontinuity of 1" / "moves backwards by 1" warnings (1/90000 s rounding in ffmpeg's stream copy, resynced anyway).
+
 ## [1.1.2] - 2026-11-21
 
 ### Added

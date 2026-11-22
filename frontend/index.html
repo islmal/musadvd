@@ -52,6 +52,14 @@
               <label class="switch"><input id="two-pass" type="checkbox" /><span></span><span data-i18n="app.twoPass">2-pass encoding</span></label>
               <label class="switch"><input id="motion-menu" type="checkbox" /><span></span><span data-i18n="app.motionMenu">Motion menu</span></label>
             </div>
+            <div class="row" id="dvd-video-row">
+              <label for="dvd-video" data-i18n="app.bdVideo" data-i18n-title="settings.dvdVideoNote" title="">Video</label>
+              <select id="dvd-video" data-i18n-title="settings.dvdVideoNote">
+                <option value="encode" data-i18n="settings.dvdVideoEncode">Re-encode</option>
+                <option value="auto" data-i18n="settings.dvdVideoAuto">Auto (copy compliant MPEG-2)</option>
+                <option value="strict" data-i18n="settings.dvdVideoStrict">Strict (copy only, error if incompatible)</option>
+              </select>
+            </div>
             <div class="row" id="bd-video-row" hidden>
               <label for="bd-video" data-i18n="app.bdVideo" data-i18n-title="app.bdVideoTip" title="">Video</label>
               <select id="bd-video" data-i18n-title="app.bdVideoTip">

@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::eta::Medium;
 
-pub use label::{sanitize_volume_label, DEFAULT_LABEL};
+pub use label::{sanitize_udf_label, sanitize_volume_label, DEFAULT_LABEL};
 
 /// Sectors per second at 1x DVD speed (1,385,000 bytes/s).
 pub const DVD_1X_SECTORS_PER_SEC: f64 = 1_385_000.0 / 2048.0;

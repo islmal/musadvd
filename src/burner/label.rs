@@ -34,9 +34,29 @@ pub fn sanitize_volume_label(input: &str) -> String {
     }
 }
 
+/// UDF volume identifier: a 32-byte dstring holds 30 8-bit (OSTA CS0) characters.
+pub const MAX_UDF_LABEL_LEN: usize = 30;
+
+/// Cleans a free-text UDF volume label (UDF 1.02 bridge and UDF 2.50 alike): control characters
+/// and characters outside Latin-1 are removed (the dstring is 8-bit), trimmed, at most 30
+/// characters. Empty means "same as the ISO 9660 label".
+pub fn sanitize_udf_label(input: &str) -> String {
+    let out: String = input.chars().filter(|c| (*c as u32) < 256 && !c.is_control()).collect();
+    out.trim().chars().take(MAX_UDF_LABEL_LEN).collect::<String>().trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udf_rules() {
+        assert_eq!(sanitize_udf_label("  Urlaub 2025 – Teil 1 "), "Urlaub 2025  Teil 1", "en dash is outside Latin-1");
+        assert_eq!(sanitize_udf_label("Ärger & Öl"), "Ärger & Öl");
+        assert_eq!(sanitize_udf_label("Война"), "");
+        assert_eq!(sanitize_udf_label("a	b"), "ab");
+        assert_eq!(sanitize_udf_label(&"x".repeat(40)).len(), MAX_UDF_LABEL_LEN);
+    }
 
     #[test]
     fn rules() {

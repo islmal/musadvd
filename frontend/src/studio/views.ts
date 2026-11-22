@@ -6,6 +6,7 @@ import { openLayerBreak } from "./layerbreak";
 import { speedChoices } from "./speeds";
 import { el, fmtBytes, fmtSectors, modal } from "./ui";
 import { fmtNumber, t } from "../i18n";
+import { MAX_LABEL, MAX_UDF_LABEL, sanitizeLabel, sanitizeUdfLabel } from "../label";
 
 export type Mode = "home" | "write-image" | "write-files" | "read" | "build" | "verify" | "discovery" | "erase";
 
@@ -74,6 +75,7 @@ const CAPACITY: [string, string, number][] = [
 interface BuildState {
   paths: api.PathInfo[];
   label: string;
+  udfLabel: string;
   answer: boolean | null;
   layerBreak: api.BuildInput["layerBreak"];
   plan: api.PlanInfo | null;
@@ -82,11 +84,12 @@ interface BuildState {
   seq: number;
 }
 
-const bs: BuildState = { paths: [], label: "", answer: null, layerBreak: null, plan: null, planError: null, target: "disc", seq: 0 };
+const bs: BuildState = { paths: [], label: "", udfLabel: "", answer: null, layerBreak: null, plan: null, planError: null, target: "disc", seq: 0 };
 
 const buildInput = (): api.BuildInput => ({
   sources: bs.paths.map((p) => ({ path: p.path, dest: "" })),
   label: bs.label,
+  udfLabel: bs.udfLabel,
   answer: bs.answer,
   layerBreak: bs.layerBreak,
 });
@@ -201,9 +204,41 @@ function renderFileList(host: Host, rerender: () => void): HTMLElement {
       );
     }
   }
-  const label = el("input", { type: "text", value: bs.label, placeholder: plan?.label || t("studio.views.volumeLabelLeerAutomatisch"), maxLength: 32, spellcheck: false });
-  label.addEventListener("change", () => { bs.label = label.value; void replan(); });
-  root.append(toolbar, list, gauge, el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, t("studio.views.volumeLabel")), label), info);
+  // ISO 9660 label: the main burner's rules (A–Z, 0–9, _), cleaned while typing.
+  const label = el("input", { type: "text", value: bs.label, placeholder: plan?.label || t("studio.views.volumeLabelLeerAutomatisch"), maxLength: MAX_LABEL + 8, spellcheck: false });
+  label.addEventListener("input", () => {
+    const clean = sanitizeLabel(label.value, false);
+    if (clean !== label.value) {
+      label.value = clean;
+      label.setSelectionRange(clean.length, clean.length);
+    }
+  });
+  label.addEventListener("change", () => {
+    bs.label = label.value.trim() ? sanitizeLabel(label.value) : "";
+    label.value = bs.label;
+    void replan();
+  });
+  // UDF label (1.02 bridge on DVD/data, 2.50 on Blu-ray): free text, shown by Windows and players.
+  const udf = el("input", { type: "text", value: bs.udfLabel, placeholder: plan?.label || t("studio.views.udfLabelSame"), maxLength: MAX_UDF_LABEL, spellcheck: false });
+  udf.addEventListener("input", () => {
+    const clean = sanitizeUdfLabel(udf.value, false);
+    if (clean !== udf.value) udf.value = clean;
+  });
+  udf.addEventListener("change", () => {
+    bs.udfLabel = sanitizeUdfLabel(udf.value);
+    udf.value = bs.udfLabel;
+    void replan();
+  });
+  const field = (name: string, input: HTMLElement, hint: string) =>
+    el("label", { class: "opt-row" }, el("span", { class: "opt-label" }, name), el("div", {}, input, el("small", { class: "hint" }, hint)));
+  root.append(
+    toolbar,
+    list,
+    gauge,
+    field(t("studio.views.isoLabel"), label, t("burn.az09UndHoechstens")),
+    field(t("studio.views.udfLabel"), udf, t("studio.views.udfLabelHint")),
+    info,
+  );
   if (bs.paths.length && !bs.plan && !bs.planError) void replan();
   return root;
 }

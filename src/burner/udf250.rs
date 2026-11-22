@@ -93,6 +93,8 @@ struct Node {
 #[derive(Debug, Clone)]
 pub struct BdImagePlan {
     pub label: String,
+    /// UDF volume identifier written to the disc; `label` unless the caller sets its own.
+    pub udf_label: String,
     nodes: Vec<Node>,
     /// Nodes in tree order (parents first, children sorted by name).
     order: Vec<usize>,
@@ -253,6 +255,7 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
     let partition_len = meta2 + meta_blocks;
     Ok(BdImagePlan {
         label: label.to_string(),
+        udf_label: label.to_string(),
         nodes,
         order,
         meta_blocks,
@@ -359,9 +362,9 @@ fn metadata_area(plan: &BdImagePlan, ts: &Timestamp) -> Vec<u8> {
     put32(&mut d, 32, 1);
     put32(&mut d, 36, 1);
     charspec(&mut d, 48);
-    dstring(&mut d, 112, 128, &plan.label);
+    dstring(&mut d, 112, 128, &plan.udf_label);
     charspec(&mut d, 240);
-    dstring(&mut d, 304, 32, &plan.label);
+    dstring(&mut d, 304, 32, &plan.udf_label);
     put32(&mut d, 400, SECTOR as u32);
     put32(&mut d, 404, plan.nodes[0].efe);
     put16(&mut d, 408, 1); // partition reference: metadata partition
@@ -422,7 +425,7 @@ pub fn write_bd_to<W: Write>(
     let mut w = SectorWriter { out, sector: 0, path: path.to_path_buf() };
     let n = plan.total_sectors;
     let p = PARTITION_START;
-    let label = &plan.label;
+    let label = &plan.udf_label;
     let meta_bytes = plan.meta_blocks as u64 * SECTOR;
 
     // ---- Volume recognition sequence -------------------------------------------------------

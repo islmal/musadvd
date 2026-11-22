@@ -151,6 +151,8 @@ export interface PathInfo {
 export interface BuildInput {
   sources: { path: string; dest: string }[];
   label: string;
+  /** UDF volume identifier; empty = `label`. */
+  udfLabel: string;
   answer: boolean | null;
   layerBreak: { l0Sectors: number; vts: number; padding: number } | null;
 }

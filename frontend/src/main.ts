@@ -1235,6 +1235,9 @@ function renderFooter() {
   const motionSwitch = document.getElementById("motion-menu")?.closest("label");
   if (motionSwitch) motionSwitch.hidden = state.menuMode !== "template" || isBluray();
   $("bd-video-row").hidden = !isBluray();
+  // DVD video copy is the app setting `dvd_video` (also on the settings page), mirrored here.
+  $("dvd-video-row").hidden = isBluray() || !state.settings;
+  if (state.settings) ($("dvd-video") as HTMLSelectElement).value = state.settings.dvd_video;
   $("bd-audio-row").hidden = !isBluray();
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
@@ -3067,6 +3070,17 @@ async function init() {
   bdVideo.addEventListener("change", () => {
     state.bdVideo = bdVideo.value as BdVideo;
     saveSettings();
+    scheduleCalc();
+    renderAll();
+  });
+  const dvdVideo = $("dvd-video") as HTMLSelectElement;
+  dvdVideo.addEventListener("change", async () => {
+    if (!state.settings) return;
+    try {
+      state.settings = await storeSettings({ ...state.settings, dvd_video: dvdVideo.value as AppSettings["dvd_video"] });
+    } catch (e) {
+      status(String(e));
+    }
     scheduleCalc();
     renderAll();
   });

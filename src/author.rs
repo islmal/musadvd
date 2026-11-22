@@ -984,6 +984,28 @@ fn write_commands(x: &mut String, indent: &str, tag: &str, commands: &str, pgc: 
     Ok(())
 }
 
+/// All `pre` commands of a menu PGC: the domain's `pre`, then the menu's own. A page with
+/// buttons first resets the highlight to button 1 (SetHL_BTN), unless its own commands pick one:
+/// coming from a page with more buttons would leave SPRM 8 beyond this page's last button
+/// (PgcEdit warns, strict players show no highlight), and no PGC sets a forced-select button.
+fn menu_pre(menu: &MenuSpec, pre: &str) -> String {
+    let joined = match (&menu.pre, menu.is_command_only()) {
+        // Dispatchers rely on the registers the caller set; no domain reset in front.
+        (Some(own), true) => own.clone(),
+        (Some(own), false) if !pre.is_empty() => format!("{pre} {own}"),
+        (Some(own), false) => own.clone(),
+        (None, _) => pre.to_string(),
+    };
+    let sets_button = joined.contains("s8 =") || joined.contains("button =");
+    if menu.buttons.is_empty() || sets_button {
+        joined
+    } else if joined.is_empty() {
+        "s8 = 1k;".to_string()
+    } else {
+        format!("s8 = 1k; {joined}")
+    }
+}
+
 /// `pre` is put on every menu PGC (VMGM: reset the play-all flag).
 fn write_menus(
     x: &mut String,
@@ -1004,13 +1026,7 @@ fn write_menus(
         let entry = menu.entry.as_ref().map(|e| format!(r#" entry="{}""#, xml_escape(e))).unwrap_or_default();
         let _ = writeln!(x, "{indent}  <pgc{entry}>");
         let name = if menu.is_command_only() { format!("menu {menu_no} (dispatcher)") } else { menu.vob.clone() };
-        let all_pre = match (&menu.pre, menu.is_command_only()) {
-            // Dispatchers rely on the registers the caller set; no domain reset in front.
-            (Some(own), true) => own.clone(),
-            (Some(own), false) if !pre.is_empty() => format!("{pre} {own}"),
-            (Some(own), false) => own.clone(),
-            (None, _) => pre.to_string(),
-        };
+        let all_pre = menu_pre(menu, pre);
         if !all_pre.is_empty() {
             write_commands(x, &format!("{indent}    "), "pre", &all_pre, &name)?;
         }
@@ -1348,12 +1364,7 @@ fn menu_pgcs(menus: &[MenuSpec], domain: Domain, pre: &str, tv: TvStandard, aspe
             pgc.entries = entry_bits(e)?;
         }
         let name = if menu.is_command_only() { format!("menu {} (dispatcher)", i + 1) } else { menu.vob.clone() };
-        let all_pre = match (&menu.pre, menu.is_command_only()) {
-            (Some(own), true) => own.clone(),
-            (Some(own), false) if !pre.is_empty() => format!("{pre} {own}"),
-            (Some(own), false) => own.clone(),
-            (None, _) => pre.to_string(),
-        };
+        let all_pre = menu_pre(menu, pre);
         if !all_pre.is_empty() {
             pgc.prei = Some(parse_commands(&all_pre, &name)?);
         }
@@ -1782,8 +1793,9 @@ mod tests {
         let x = dvdauthor_xml(&layout).unwrap();
         assert!(x.contains("<fpc>g1 = 0; jump menu 1;</fpc>"));
         assert!(x.contains(r#"<pgc entry="title">"#));
-        // Visible pages only reset the play-all flag ...
-        assert_eq!(x.matches("<pre>g1 = 0;</pre>").count(), 2);
+        // Visible pages only reset the highlight and the play-all flag ...
+        assert_eq!(x.matches("<pre>s8 = 1k; g1 = 0;</pre>").count(), 2);
+        assert!(x.contains("<pre>s8 = 1k;</pre>"), "titleset menu without a domain pre");
         assert!(x.contains(r#"<button name="b1">g1 = 0; jump titleset 1 menu;</button>"#));
         // ... and each title has a tiny dispatcher PGC (menus 3 and 4) returning to its own page.
         assert!(x.contains("<pre>if (g1 eq 1) jump title 2; jump menu 1;</pre>"));
@@ -1808,6 +1820,35 @@ mod tests {
 
         let empty = DvdLayout { titlesets: vec![], ..layout };
         assert_eq!(dvdauthor_xml(&empty), Err(AuthorError::NoTitles));
+    }
+
+    /// Every page with buttons starts on button 1 (SetHL_BTN 1 = `56 00 00 00 04 00 00 00`) unless
+    /// its own `pre` picks a button (auto-action pages); dispatchers stay untouched.
+    #[test]
+    fn menu_pages_reset_the_highlight() {
+        let page = |pre: Option<&str>, buttons| MenuSpec {
+            vob: "m.mpg".into(),
+            buttons,
+            entry: None,
+            motion: false,
+            pre: pre.map(str::to_string),
+            intro_secs: None,
+            pause_secs: None,
+            post: None,
+        };
+        let b = || vec![button("b1", 0, 0, 10, 10), button("b2", 0, 20, 10, 30)];
+        assert_eq!(menu_pre(&page(None, b()), "g1 = 0;"), "s8 = 1k; g1 = 0;");
+        assert_eq!(menu_pre(&page(None, b()), ""), "s8 = 1k;");
+        assert_eq!(menu_pre(&page(Some("s8 = 2k;"), b()), "g1 = 0;"), "g1 = 0; s8 = 2k;", "auto-action focus kept");
+        assert_eq!(menu_pre(&page(None, vec![]), "g1 = 0;"), "g1 = 0;", "no buttons, nothing to highlight");
+        assert_eq!(menu_pre(&MenuSpec::commands("jump title 1;", None), "g1 = 0;"), "jump title 1;");
+
+        let ctx = crate::dvdvm::Context { group_entries: Some(vec![0x80]), all_menu_entries: vec![0x80], pgc: Some([1, 1, 1]), titles: None };
+        let code = crate::dvdvm::compile_str(&menu_pre(&page(None, b()), "g1 = 0;"), &ctx, crate::dvdvm::Domain::Vmgm).unwrap();
+        assert_eq!(code[0], [0x56, 0, 0, 0, 0x04, 0, 0, 0]);
+        let set = menu_pgcs(&[page(Some("s8 = 2k;"), b())], Domain::Vmgm, "g1 = 0;", TvStandard::Pal, "4:3").unwrap();
+        let pre = set.pgcs[0].prei.as_ref().unwrap();
+        assert_eq!(pre, &crate::dvdvm::parse("g1 = 0; s8 = 2k;").unwrap(), "no second SetHL_BTN");
     }
 
     /// Regression: 46 titles blew dvdauthor's limit of 128 commands per PGC.

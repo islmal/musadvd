@@ -1207,6 +1207,16 @@ impl VobFiles {
 /// Collects audio/video/subpicture information, remaps subpicture colours and writes the output
 /// VOB files of a domain, complete except for the NAV packs (`FindVobus`). `files` is `None` for a
 /// dry run. `kind` is the domain (menus count their VOB files from 0, titles from 1).
+/// Whether a PTS jump of `delta` ticks on private stream channel `audch` (audio below 32,
+/// subpictures from 32) deserves a warning; the muxer resyncs either way.
+/// - Audio: ffmpeg's audio stream copy rescales timestamps through a 1/sample_rate timebase, so
+///   copied AC-3 frames can land one 90 kHz tick off the 2880-tick grid.
+/// - Subpictures: spumux rounds SP_DCSQ display delays to 1024-tick units, so a picture's end can
+///   overshoot the next one's start on the same stream, which replaces it anyway.
+fn pts_jump_worth_warning(audch: i32, delta: i64) -> bool {
+    if audch < 32 { delta > 1 } else { delta >= 1024 }
+}
+
 pub fn find_vobus(input_dir: &Path, files: Option<&VobFiles>, set: &mut PgcSet, log: &mut Vec<String>) -> Result<()> {
     let kind = set.kind;
     let mut cursect: i32 = 0;
@@ -1442,14 +1452,13 @@ pub fn find_vobus(input_dir: &Path, files: Option<&VobFiles>, set: &mut PgcSet, 
                         }
                         if prev.pts[1] < pts0 {
                             if audch < 32 {
-                                log.push(format!("WARN: Discontinuity of {} in audio channel {audch} at inoffset {inoffset:#x}; please remultiplex input.", pts0 - prev.pts[1]));
+                                if pts_jump_worth_warning(audch, pts0 - prev.pts[1]) {
+                                    log.push(format!("WARN: Discontinuity of {} in audio channel {audch} at inoffset {inoffset:#x}; please remultiplex input.", pts0 - prev.pts[1]));
+                                }
                                 prev.pts[1] = pts0;
                             }
                         } else if prev.pts[1] > pts0 {
-                            // spumux rounds SP_DCSQ display delays to 1024-tick units, so a picture's
-                            // end can overshoot the next one's start on the same stream, which
-                            // replaces it anyway; only larger jumps are worth a warning.
-                            if audch < 32 || prev.pts[1] - pts0 >= 1024 {
+                            if pts_jump_worth_warning(audch, prev.pts[1] - pts0) {
                                 log.push(format!("WARN: pts for channel {audch} moves backwards by {} at inoffset {inoffset:#x}; please remultiplex input.", prev.pts[1] - pts0));
                             }
                             prev.pts[1] = pts0;
@@ -2244,6 +2253,15 @@ mod tests {
         let mut vd = VideoDesc::default();
         vd.set_format(true);
         vd
+    }
+
+    #[test]
+    fn pts_jitter_warnings() {
+        assert!(!pts_jump_worth_warning(0, 1), "1-tick AC-3 copy jitter");
+        assert!(pts_jump_worth_warning(0, 2));
+        assert!(pts_jump_worth_warning(7, 2880));
+        assert!(!pts_jump_worth_warning(32, 1023), "sub-SP_DCSQ overlap");
+        assert!(pts_jump_worth_warning(32, 1024));
     }
 
     #[test]
