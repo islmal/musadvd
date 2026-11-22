@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-22
+
+### Added
+
+- **Multi-select in the video list**: Ctrl/Cmd+click toggles, Shift+click selects a range, Ctrl+A selects all and Esc clears. With two or more selected, a bar offers Merge selected / Unmerge selected; Merge gathers the selection into one block at the first selected title. Remove and Delete remove the whole selection.
+- **Title context menu**: right-click a video for Merge all, Unmerge all and Remove – many short clips become one multi-chapter title in two clicks.
+- **DVD resolution on the main window**: Full D1 / Half D1 / SIF selector next to the TV standard (same setting as on the settings page; menus stay Full D1).
+
+### Fixed
+
+- **Verify after burning** no longer fails near the end of DVD-Video discs: Windows stopped reading at the file system's end, one sector before the image's closing UDF anchor. Burn Studio's disc read and verify had the same limit.
+- **GPU decoding** is no longer given up on MP4 files with broken metadata (ffmpeg's "UDTA parsing failed" warning made the decoder test fail and encode on the CPU).
+
 ## [1.2.1] - 2026-11-22
 
 The 1.2.0 release build failed (ffmpeg download error), so 1.2.1 is the first published release with the 1.2.0 changes below.
