@@ -355,11 +355,12 @@ pub fn mpls(p: &Playlist) -> Vec<u8> {
     pad2(&mut v);
     let marks = v.len();
     block32(&mut v, |v| {
-        let times: Vec<u32> = if p.marks.is_empty() {
-            vec![p.start]
-        } else {
-            p.marks.iter().map(|m| (m * 45000.0) as u32).filter(|&m| m <= p.end - p.start).map(|m| m + p.start).collect()
-        };
+        let mut times: Vec<u32> =
+            p.marks.iter().map(|m| (m * 45000.0) as u32).filter(|&m| m <= p.end - p.start).map(|m| m + p.start).collect();
+        // Strict players need at least one entry mark, even if every chapter lies beyond the clip.
+        if times.is_empty() {
+            times.push(p.start);
+        }
         be16(v, times.len() as u16);
         for t in times {
             v.extend([0, 1]); // mark_type: chapter
@@ -434,6 +435,17 @@ mod tests {
         let p = Playlist { clip: 0, start: 27_000_000, end: 27_090_090, marks: &[], still: true, streams: &streams };
         let want = unhex("4d504c53303230300000003a000000a60000000000000000000000000000000000000000000000000000000e000100000000000000000000400000000068000000010000006030303030304d325453000100019bfcc0019d5caa000000000000000000020000003e000001010001000000000000000009011011000000000000051b5100000009011100000000000000058131656e67090114000000000000000591656e670000000010000100010000019bfcc0ffff00000000");
         assert_eq!(hex(&mpls(&p)), hex(&want));
+    }
+
+    #[test]
+    fn chapters_beyond_end_keep_one_entry_mark() {
+        let streams = [video()];
+        let p = Playlist { clip: 0, start: 27_000_000, end: 27_090_090, marks: &[100.0, 200.0], still: false, streams: &streams };
+        let v = mpls(&p);
+        let n = v.len();
+        assert_eq!(u16::from_be_bytes([v[n - 16], v[n - 15]]), 1, "mark count");
+        assert_eq!(v[n - 13], 1, "entry mark type");
+        assert_eq!(u32::from_be_bytes(v[n - 10..n - 6].try_into().unwrap()), 27_000_000);
     }
 
     fn hex(b: &[u8]) -> String {

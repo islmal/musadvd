@@ -997,6 +997,9 @@ impl MuxJob {
         if packets == 0 {
             return Err(bad("ffmpeg delivered no data".into()));
         }
+        if ep.is_empty() {
+            return Err(bad(format!("{n:05}.m2ts: no IDR picture with SPS found, the clip cannot be played")));
+        }
 
         // Clip and playlist: the clip ends one frame after the last picture's PTS.
         let frames = ((max_idx_pts - BASE_PTS) as f64 / dur).round() + 1.0;
