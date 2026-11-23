@@ -1,6 +1,6 @@
 // Unit checks for frontend/src/order.ts. Zero dependencies (Node strips the types).
 import assert from "node:assert/strict";
-import { mergeBlock, moveItem, shapeMismatch } from "../frontend/src/order.ts";
+import { mergeBlock, moveItem, shapeMismatch, sortByOrder } from "../frontend/src/order.ts";
 import { speedChoices } from "../frontend/src/studio/speeds.ts";
 
 const mv = (a, f, t) => (moveItem(a, f, t), a);
@@ -20,6 +20,12 @@ assert.equal(mb("1 2 3 4", [1, 3]), "1 3m 2 4"); // gathered at the first one
 assert.equal(mb("1 2 3 4m", [1, 3]), "1 3m 2 4"); // 4 was merged into 3, must not join 2
 assert.equal(mb("1 2m 3 4", [2, 4]), "1 2m 4m 3"); // first keeps its own merge
 assert.equal(mb("1 2 3", [2]), "1 2 3"); // fewer than two: no-op
+
+const idx = (a) => a.map((t) => t.index);
+const tracks = [1, 2, 3, 4].map((index) => ({ index }));
+assert.deepEqual(idx(sortByOrder(tracks, [3, 1, 4, 2])), [3, 1, 4, 2]);
+assert.deepEqual(idx(sortByOrder(tracks, [4])), [4, 1, 2, 3]); // unlisted keep their order after the listed
+assert.equal(sortByOrder(tracks, undefined), tracks); // no saved order: untouched
 
 const s = (audio, subs) => ({ audio, subs });
 assert.deepEqual(shapeMismatch([[s(2, 1), s(2, 1)]]), [[false, false]]);

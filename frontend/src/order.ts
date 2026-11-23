@@ -6,6 +6,13 @@ export function moveItem<T>(arr: T[], from: number, to: number): void {
   arr.splice(to, 0, ...arr.splice(from, 1));
 }
 
+/** Copy of `arr` sorted by each item's `index` position in `order` (stable; items missing from `order` go last). */
+export function sortByOrder<T extends { index: number }>(arr: T[], order: number[] | undefined): T[] {
+  if (!order?.length) return arr;
+  const pos = (t: T) => (order.includes(t.index) ? order.indexOf(t.index) : order.length);
+  return [...arr].sort((a, b) => pos(a) - pos(b));
+}
+
 /** Per group and member: true when its track counts differ from the group's first member (the engine's `check_group_shapes` rule). */
 export function shapeMismatch(groups: { audio: number; subs: number }[][]): boolean[][] {
   return groups.map((g) => g.map((m) => m.audio !== g[0].audio || m.subs !== g[0].subs));

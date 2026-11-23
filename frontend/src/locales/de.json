@@ -866,6 +866,7 @@
  "main.mergeAll": "Alle zusammenführen",
  "main.unmergeAll": "Alle trennen",
  "main.clearSelection": "Auswahl aufheben",
+ "main.dragToReorder": "Ziehen zum Umsortieren",
  "main.mitVorherigemZusammenfuehren": "Mit vorherigem zusammenführen",
  "main.videoqualitaetGruenUeber10": "Videoqualität: grün über 10.000 kbps, gelb 5.000–10.000 kbps, rot unter 5.000 kbps",
  "main.videoqualitaetGruenUeber15": "Videoqualität: grün über 15.000 kbps, gelb 8.000–15.000 kbps, rot unter 8.000 kbps",

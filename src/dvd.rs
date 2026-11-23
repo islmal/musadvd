@@ -1240,6 +1240,9 @@ pub(crate) fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &Bui
             }
         })
         .collect();
+    if let Some(chosen) = &sel.audio {
+        audio.sort_by_key(|&a| chosen.iter().position(|&c| c == info.audio[a].index));
+    }
     if audio.is_empty() && !info.audio.is_empty() {
         notes.push(tf!(opts.ui_lang, "note_no_audio_match", label = label, langs = format!("{:?}", opts.audio_langs)));
         audio.push(0);
@@ -1274,10 +1277,13 @@ pub(crate) fn select_streams(info: &MediaInfo, sel: &StreamSelection, opts: &Bui
             }
             subtitles.push(n);
         }
+        if let Some(chosen) = &sel.subtitles {
+            subtitles.sort_by_key(|&n| chosen.iter().position(|&c| c == info.subtitles[n].index));
+        }
         subtitles.truncate(MAX_SUBTITLE_STREAMS);
     }
-    // Track order is preserved from the source file so menu buttons and player track lists
-    // match the original media. Preferred languages are activated on playback via VM commands.
+    // An explicit selection's order is the disc's track order (the GUI lets the user drag it);
+    // otherwise the source order. Preferred languages are activated on playback via VM commands.
     (audio, subtitles, notes)
 }
 
@@ -2710,6 +2716,11 @@ mod tests {
         let chosen = StreamSelection { audio: Some(vec![3]), subtitles: Some(vec![]), ..StreamSelection::default() };
         let (audio, subs, _) = select_streams(&src, &chosen, &opts, "Film");
         assert_eq!((audio, subs), (vec![2], vec![]));
+
+        // The chosen order is the disc's track order.
+        let reordered = StreamSelection { audio: Some(vec![3, 1]), ..StreamSelection::default() };
+        let (audio, _, _) = select_streams(&src, &reordered, &opts, "Film");
+        assert_eq!(audio, vec![2, 0]);
     }
 
     #[test]

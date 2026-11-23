@@ -11,7 +11,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
-import { mergeBlock, moveItem, shapeMismatch } from "./order";
+import { mergeBlock, moveItem, shapeMismatch, sortByOrder } from "./order";
 import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
 import { modal } from "./studio/ui";
@@ -904,6 +904,74 @@ function initTitleDrag() {
   }, true);
 }
 
+/** Checked stream indices in display order, which is the disc's track order. */
+const pickedInOrder = (list: { index: number }[], on: Set<number>) => list.filter((x) => on.has(x.index)).map((x) => x.index);
+
+/**
+ * Drag handle for track row `pos` among the sibling rows sharing `group`; `onMove(from, to)` runs on drop.
+ * Pointer events like `initTitleDrag`, captured on the handle so the row's label never toggles its checkbox.
+ */
+function trackGrip(group: string, pos: number, onMove: (from: number, to: number) => void) {
+  let drop: { pos: number; after: boolean } | null = null;
+  const rows = (grip: HTMLElement) => [...(grip.closest(".track-list")?.querySelectorAll<HTMLElement>(`.track[data-group="${group}"]`) ?? [])];
+  const clear = (grip: HTMLElement) => {
+    rows(grip).forEach((r) => r.classList.remove("dragging", "drag-over-top", "drag-over-bottom"));
+    document.body.classList.remove("reordering");
+  };
+  return h(
+    "span",
+    {
+      class: "track-grip",
+      title: tr("main.dragToReorder"),
+      onclick: (e: Event) => e.preventDefault(),
+      onpointerdown: (e: PointerEvent) => {
+        const grip = e.currentTarget as HTMLElement;
+        if (e.button !== 0 || state.converting) return;
+        e.preventDefault();
+        grip.setPointerCapture(e.pointerId);
+        document.body.classList.add("reordering");
+        grip.closest(".track")?.classList.add("dragging");
+        drop = null;
+      },
+      onpointermove: (e: PointerEvent) => {
+        const grip = e.currentTarget as HTMLElement;
+        if (!grip.hasPointerCapture(e.pointerId)) return;
+        const all = rows(grip);
+        all.forEach((r) => r.classList.remove("drag-over-top", "drag-over-bottom"));
+        const over = all.find((r) => { const b = r.getBoundingClientRect(); return e.clientY >= b.top && e.clientY <= b.bottom; });
+        drop = null;
+        if (!over) return;
+        const b = over.getBoundingClientRect();
+        drop = { pos: all.indexOf(over), after: e.clientY > b.top + b.height / 2 };
+        over.classList.add(drop.after ? "drag-over-bottom" : "drag-over-top");
+      },
+      onpointerup: (e: PointerEvent) => {
+        clear(e.currentTarget as HTMLElement);
+        if (!drop) return;
+        const at = drop.pos + (drop.after ? 1 : 0);
+        const to = at > pos ? at - 1 : at;
+        drop = null;
+        if (to !== pos) onMove(pos, to);
+      },
+      onpointercancel: (e: PointerEvent) => {
+        clear(e.currentTarget as HTMLElement);
+        drop = null;
+      },
+    },
+    "⠿",
+  );
+}
+
+/** Reorders one title's audio or embedded subtitle list; the copy keeps split siblings sharing `meta` untouched. */
+function moveTrack(t: Title, kind: "audio" | "subtitles", from: number, to: number) {
+  const list = [...t.meta[kind]];
+  moveItem(list, from, to);
+  t.meta = { ...t.meta, [kind]: list };
+  if (!state.customLayoutEdited) syncMenuAfterChange(null);
+  renderAll();
+  touchAutosave();
+}
+
 // ---------------------------------------------------------------------------
 // Bitrate calculation (debounced)
 // ---------------------------------------------------------------------------
@@ -1456,11 +1524,12 @@ function renderAudioTab(t: Title) {
       { class: "hint" },
       tr("main.passendeAc3Dts", { MAX_AUDIO }),
     ),
-    ...t.meta.audio.map((a) => {
+    ...t.meta.audio.map((a, pos) => {
       const checked = t.audio.has(a.index);
       return h(
         "label",
-        { class: "track" },
+        { class: "track sortable", "data-group": "audio" },
+        t.meta.audio.length > 1 ? trackGrip("audio", pos, (from, to) => moveTrack(t, "audio", from, to)) : h("span"),
         h("input", {
           type: "checkbox",
           checked,
@@ -1506,8 +1575,9 @@ async function relabelTitles() {
   for (const t of state.titles) {
     try {
       const m = await probeFile(t.meta.path);
-      t.meta.audio = m.audio;
-      t.meta.subtitles = m.subtitles;
+      // Keep the user's dragged track order.
+      t.meta.audio = sortByOrder(m.audio, t.meta.audio.map((a) => a.index));
+      t.meta.subtitles = sortByOrder(m.subtitles, t.meta.subtitles.map((s) => s.index));
     } catch (e) {
       status(tr("main.spurnamenKonntenNichtAktualisiert", { e }), "error");
     }
@@ -1644,10 +1714,11 @@ function renderSubtitleTab(t: Title) {
     h("span", { class: "hint" }, tr("main.subDropHint")),
   );
 
-  const embeddedRows = t.meta.subtitles.map((s) =>
+  const embeddedRows = t.meta.subtitles.map((s, pos) =>
     h(
       "label",
-      { class: `track${s.supported ? "" : " disabled"}` },
+      { class: `track sortable${s.supported ? "" : " disabled"}`, "data-group": "subs" },
+      t.meta.subtitles.length > 1 ? trackGrip("subs", pos, (from, to) => moveTrack(t, "subtitles", from, to)) : h("span"),
       h(
         "span",
         { class: "switch" },
@@ -1693,7 +1764,15 @@ function renderSubtitleTab(t: Title) {
       `${ext.codec} · ${fileBaseName(ext.path)}${ext.supported ? "" : tr("main.nichtUnterstuetzt")}`;
     return h(
       "div",
-      { class: `track track-external${ext.supported ? "" : " disabled"}` },
+      { class: `track track-external sortable${ext.supported ? "" : " disabled"}`, "data-group": "ext" },
+      t.externalSubtitles.length > 1
+        ? trackGrip("ext", idx, (from, to) => {
+            moveItem(t.externalSubtitles, from, to);
+            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            renderAll();
+            touchAutosave();
+          })
+        : h("span"),
       h(
         "label",
         { class: "switch" },
@@ -2710,8 +2789,8 @@ async function convert() {
     await startConversion({
       inputs: state.titles.map((t) => ({
         path: t.meta.path,
-        audio: [...t.audio],
-        subtitles: [...t.subs],
+        audio: pickedInOrder(t.meta.audio, t.audio),
+        subtitles: pickedInOrder(t.meta.subtitles, t.subs),
         label: t.label.trim() || null,
         chapters: effChapters(t),
         startSecs: t.trimStart,
@@ -2794,8 +2873,10 @@ function snapshotProject(): ProjectFile {
     output,
     titles: state.titles.map((t) => ({
       path: t.meta.path,
-      audio: [...t.audio],
-      subs: [...t.subs],
+      audio: pickedInOrder(t.meta.audio, t.audio),
+      subs: pickedInOrder(t.meta.subtitles, t.subs),
+      audioOrder: t.meta.audio.map((a) => a.index),
+      subOrder: t.meta.subtitles.map((s) => s.index),
       label: t.label,
       chapters: [...t.chapters],
       chapterNames: [...t.chapterNames],
@@ -2826,7 +2907,9 @@ function snapshotProject(): ProjectFile {
 }
 
 /** A saved title on a freshly probed file: selections survive only for streams that still exist. */
-function titleFromProject(p: ProjectTitle, meta: VideoMetadata, afterSkipped: boolean): Title {
+function titleFromProject(p: ProjectTitle, probed: VideoMetadata, afterSkipped: boolean): Title {
+  const { audioOrder, subOrder, ...rest } = p;
+  const meta = { ...probed, audio: sortByOrder(probed.audio, audioOrder), subtitles: sortByOrder(probed.subtitles, subOrder) };
   const audioIdx = new Set(meta.audio.map((a) => a.index));
   let audio = p.audio.filter((i) => audioIdx.has(i)).slice(0, MAX_AUDIO);
   if (audio.length === 0) audio = meta.audio.slice(0, MAX_AUDIO).map((a) => a.index);
@@ -2846,7 +2929,7 @@ function titleFromProject(p: ProjectTitle, meta: VideoMetadata, afterSkipped: bo
       ? pairedChapters.sort((a, b) => a.startSecs - b.startSecs)
       : [...meta.chapters].sort((a, b) => a.startSecs - b.startSecs).map((c) => ({ startSecs: c.startSecs, name: c.title ?? null }));
   return {
-    ...p,
+    ...rest,
     id: nextId++,
     meta,
     audio: new Set(audio),

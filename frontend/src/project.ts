@@ -30,6 +30,9 @@ export interface ProjectTitle {
   path: string;
   audio: number[];
   subs: number[];
+  /** Display (= disc) order of all audio / embedded subtitle stream indices; omitted = source order. */
+  audioOrder?: number[];
+  subOrder?: number[];
   label: string;
   chapters: number[];
   chapterNames?: (string | null)[];
@@ -154,6 +157,8 @@ function titleOf(v: unknown): ProjectTitle | null {
     path: v.path,
     audio: ints(v.audio),
     subs: ints(v.subs),
+    ...(Array.isArray(v.audioOrder) ? { audioOrder: ints(v.audioOrder) } : {}),
+    ...(Array.isArray(v.subOrder) ? { subOrder: ints(v.subOrder) } : {}),
     label: str(v.label),
     chapters,
     ...(chapterNames ? { chapterNames } : {}),

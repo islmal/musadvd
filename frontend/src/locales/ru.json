@@ -866,6 +866,7 @@
  "main.mergeAll": "Объединить все",
  "main.unmergeAll": "Разделить все",
  "main.clearSelection": "Снять выделение",
+ "main.dragToReorder": "Перетащите, чтобы изменить порядок",
  "main.mitVorherigemZusammenfuehren": "Объединить с предыдущим",
  "main.videoqualitaetGruenUeber10": "Качество видео: зеленое выше 10 000 кбит/с, желтое 5 000–10 000 кбит/с, красное ниже 5 000 кбит/с",
  "main.videoqualitaetGruenUeber15": "Качество видео: зеленое выше 15 000 кбит/с, желтое 8 000–15 000 кбит/с, красное ниже 8 000 кбит/с",

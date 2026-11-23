@@ -624,6 +624,33 @@ input.small {
   cursor: pointer;
 }
 
+.track.sortable {
+  grid-template-columns: auto auto 1fr auto;
+}
+
+.track-grip {
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.track-grip:hover {
+  color: var(--text);
+}
+
+.track.dragging {
+  opacity: 0.4;
+}
+
+.track.drag-over-top {
+  box-shadow: 0 -3px 0 0 var(--accent);
+}
+
+.track.drag-over-bottom {
+  box-shadow: 0 3px 0 0 var(--accent);
+}
+
 .track.disabled {
   opacity: 0.55;
   cursor: default;
