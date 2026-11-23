@@ -760,6 +760,15 @@ impl AppSettings {
     }
 
     /// The encoding profile setting as the engine's type.
+    /// The `dvd_resolution` setting (DVD titles; menus stay Full D1).
+    pub fn dvd_title_resolution(&self) -> Resolution {
+        match self.dvd_resolution.as_str() {
+            "Half D1" => Resolution::HalfD1,
+            "SIF" => Resolution::Sif,
+            _ => Resolution::FullD1,
+        }
+    }
+
     pub fn profile(&self) -> EncodingProfile {
         match self.encoding_profile.as_str() {
             "SP_Short" => EncodingProfile::Sp,
@@ -860,11 +869,7 @@ impl AppSettings {
         opts.resolution = if opts.disc.is_bluray() {
             if self.bd_resolution == "720p" { Resolution::Hd720 } else { Resolution::Hd1080 }
         } else {
-            match self.dvd_resolution.as_str() {
-                "Half D1" => Resolution::HalfD1,
-                "SIF" => Resolution::Sif,
-                _ => Resolution::FullD1,
-            }
+            self.dvd_title_resolution()
         };
         opts.bd_single_video = self.bd_single_video;
         opts.encoding_profile = self.profile();

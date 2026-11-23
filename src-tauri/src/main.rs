@@ -1110,13 +1110,26 @@ fn quality(kbps: u32, disc: DiscType) -> f64 {
 /// Live estimate with the encoding profile from the global settings.
 #[tauri::command]
 fn calculate_project(state: State<'_, AppState>, settings: ProjectSettings) -> Result<CalculationResult, String> {
-    project_calculation(settings, state.settings().profile())
+    let app = state.settings();
+    project_calculation(settings, app.profile(), app.dvd_title_resolution())
 }
 
 /// Size of an encoded Blu-ray menu clip per second.
 const BD_MENU_MB_PER_SEC: f64 = 1.1;
 
-fn project_calculation(settings: ProjectSettings, profile: EncodingProfile) -> Result<CalculationResult, String> {
+/// Full D1 bitrate with the same bits per pixel as `kbps` at the DVD title resolution, so the
+/// quality rating credits Half D1 / SIF with spending the same bitrate on fewer pixels.
+fn full_d1_equivalent_kbps(kbps: u32, disc: DiscType, res: musadvd::author::Resolution, profile: EncodingProfile) -> u32 {
+    if disc.is_bluray() {
+        return kbps;
+    }
+    let tv = musadvd::author::TvStandard::Pal; // the width/height ratios are the same for NTSC
+    let (w, h) = dvd::effective_resolution(res, profile, kbps).frame_size(tv);
+    let (fw, fh) = tv.size();
+    (kbps as f64 * (fw * fh) as f64 / (w * h) as f64).round() as u32
+}
+
+fn project_calculation(settings: ProjectSettings, profile: EncodingProfile, res: musadvd::author::Resolution) -> Result<CalculationResult, String> {
     let target_mb = settings.disc.target_mb();
     // A Blu-ray has menus only from the editor (8 Mbit/s H.264 + AC-3 + muxing ≈ 1.1 MB/s).
     let menu_mb = if settings.disc.is_bluray() {
@@ -1146,7 +1159,9 @@ fn project_calculation(settings: ProjectSettings, profile: EncodingProfile) -> R
         .iter()
         .map(|t| {
             let v = t.copy_video_kbps.unwrap_or_else(|| dvd::weighted_video_kbps(settings.disc, plan.video_kbps, t.weight, t.audio_kbps));
-            TitleCalc { video_kbps: v, quality_percent: quality(v, settings.disc), quality: Quality::for_disc(v, settings.disc) }
+            // Copied video keeps its own resolution.
+            let rated = if t.copy_video_kbps.is_some() { v } else { full_d1_equivalent_kbps(v, settings.disc, res, profile) };
+            TitleCalc { video_kbps: v, quality_percent: quality(rated, settings.disc), quality: Quality::for_disc(rated, settings.disc) }
         })
         .collect();
     Ok(CalculationResult {
@@ -1586,7 +1601,7 @@ mod tests {
             motion_duration: None,
             bd_menu_secs: vec![],
             custom_layout: None,
-        }, EncodingProfile::Auto)
+        }, EncodingProfile::Auto, musadvd::author::Resolution::FullD1)
         .unwrap();
         assert_eq!(r.target_mb, 4300);
         assert_eq!(r.clamp, "none");
@@ -1594,6 +1609,29 @@ mod tests {
         assert!(r.fill_percent > 90.0 && r.fill_percent <= 100.0, "{}", r.fill_percent);
         assert_eq!(r.titles.len(), 2);
         assert!(r.titles.iter().all(|t| t.quality_percent > 0.0 && t.quality_percent < 100.0));
+    }
+
+    #[test]
+    fn quality_rating_credits_lower_dvd_resolutions() {
+        use musadvd::author::Resolution;
+        // 4 h on a DVD-5: a low bitrate that rates far below "good" at Full D1.
+        let project = || ProjectSettings {
+            disc: DiscType::Dvd5,
+            titles: vec![TitleLoad { duration_secs: 4.0 * 3600.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
+            motion_menu: false,
+            motion_duration: None,
+            bd_menu_secs: vec![],
+            custom_layout: None,
+        };
+        let calc = |res| project_calculation(project(), EncodingProfile::Auto, res).unwrap();
+        let (full, half, sif) = (calc(Resolution::FullD1), calc(Resolution::HalfD1), calc(Resolution::Sif));
+        // Same bitrate and size: the resolution only changes how the bits are spent.
+        assert_eq!((full.video_kbps, full.estimated_mb), (half.video_kbps, half.estimated_mb));
+        let q = |r: &CalculationResult| r.titles[0].quality_percent;
+        assert!(q(&full) < q(&half) && q(&half) <= q(&sif), "{} {} {}", q(&full), q(&half), q(&sif));
+        assert_eq!(full_d1_equivalent_kbps(2000, DiscType::Dvd5, Resolution::HalfD1, EncodingProfile::Auto), 4091);
+        assert_eq!(full_d1_equivalent_kbps(2000, DiscType::Dvd5, Resolution::Sif, EncodingProfile::Auto), 8182);
+        assert_eq!(full_d1_equivalent_kbps(2000, DiscType::Bd25, Resolution::HalfD1, EncodingProfile::Auto), 2000);
     }
 
     #[test]
@@ -1605,7 +1643,7 @@ mod tests {
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
             custom_layout: None,
-        }, EncodingProfile::Auto)
+        }, EncodingProfile::Auto, musadvd::author::Resolution::FullD1)
         .unwrap();
         assert_eq!(r.clamp, "min");
         assert!(!r.fits);
@@ -1624,8 +1662,8 @@ mod tests {
             bd_menu_secs: vec![],
             custom_layout: None,
         };
-        let auto = project_calculation(project(), EncodingProfile::Auto).unwrap();
-        let lp = project_calculation(project(), EncodingProfile::Lp).unwrap();
+        let auto = project_calculation(project(), EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
+        let lp = project_calculation(project(), EncodingProfile::Lp, musadvd::author::Resolution::FullD1).unwrap();
         assert_eq!((auto.video_kbps, lp.video_kbps), (MAX_VIDEO_KBPS, 4000));
         assert_eq!(lp.clamp, "max");
         assert!(lp.estimated_mb < auto.estimated_mb);
@@ -1641,22 +1679,22 @@ mod tests {
             bd_menu_secs: vec![],
             custom_layout: None,
         };
-        let r = project_calculation(project(DiscType::Bd25), EncodingProfile::Auto).unwrap();
+        let r = project_calculation(project(DiscType::Bd25), EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
         assert_eq!(r.target_mb, 22_900);
         assert_eq!((r.menu_mb, r.clamp.as_str()), (0.0, "none"), "no menus without an editor layout");
         // Menus from the editor: a still (1 s) and a 20 s loop.
         let with_menus = ProjectSettings { bd_menu_secs: vec![1.0, 20.0], ..project(DiscType::Bd25) };
-        let m = project_calculation(with_menus, EncodingProfile::Auto).unwrap();
+        let m = project_calculation(with_menus, EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
         assert!((m.menu_mb - 21.0 * BD_MENU_MB_PER_SEC).abs() < 1e-9);
         assert!(r.fits && (20_000..35_000).contains(&r.video_kbps), "{}", r.video_kbps);
         assert_eq!(r.titles[0].quality, Quality::Good);
         assert!(r.titles[0].quality_percent > 50.0 && r.titles[0].quality_percent < 100.0);
         // The profile ceilings are the BD ones.
-        let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp).unwrap();
+        let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp, musadvd::author::Resolution::FullD1).unwrap();
         assert_eq!((lp.video_kbps, lp.clamp.as_str()), (12_000, "max"));
         // A 12 h project does not fit a BD-25 even at 4000 kbps and is rated poor.
         let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 12.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }], ..project(DiscType::Bd25) };
-        let r = project_calculation(long, EncodingProfile::Auto).unwrap();
+        let r = project_calculation(long, EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
         assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
         assert_eq!((r.titles[0].quality, r.titles[0].quality_percent), (Quality::Poor, 0.0));
     }
@@ -1666,7 +1704,7 @@ mod tests {
         let titles = vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }];
         let r = project_calculation(
             ProjectSettings { disc: DiscType::Avchd5, titles: titles.clone(), motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
-            EncodingProfile::Auto,
+            EncodingProfile::Auto, musadvd::author::Resolution::FullD1,
         )
         .unwrap();
         assert_eq!(r.target_mb, 4300);
@@ -1675,7 +1713,7 @@ mod tests {
         let long = TitleLoad { duration_secs: 10.0 * 3600.0, ..titles[0] };
         let r = project_calculation(
             ProjectSettings { disc: DiscType::Avchd5, titles: vec![long], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
-            EncodingProfile::Auto,
+            EncodingProfile::Auto, musadvd::author::Resolution::FullD1,
         )
         .unwrap();
         assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
@@ -1712,7 +1750,7 @@ mod tests {
 
     #[test]
     fn empty_project() {
-        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None }, EncodingProfile::Auto).unwrap();
+        let r = project_calculation(ProjectSettings { disc: DiscType::Dvd9, titles: vec![], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None }, EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
         assert_eq!(r.target_mb, 7950);
         assert!(r.fits);
     }
@@ -1749,7 +1787,7 @@ mod tests {
             bd_menu_secs: vec![],
             custom_layout: Some(l),
         };
-        let r = project_calculation(s, EncodingProfile::Auto).unwrap();
+        let r = project_calculation(s, EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
         // Custom layout has 1 still menu (0.15 MB), not the template estimate (7*0.15 + 2*5.5 = 12.05 MB)
         assert_eq!(r.menu_mb, 0.15);
     }
