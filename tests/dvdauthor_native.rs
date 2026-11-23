@@ -120,7 +120,9 @@ fn check(name: &str, layout: &DvdLayout, work: &Path) {
         assert_eq!(native.keys().map(String::as_str).collect::<Vec<_>>(), want.keys().copied().collect::<Vec<_>>(), "{name}: file lists differ");
         for (n, bytes) in &native {
             if digest(bytes) != want[n.as_str()] {
-                let detail = std::fs::read(fixtures().join(name).join(n)).map(|r| first_diff(&r, bytes)).unwrap_or_default();
+                // A BUP equals its IFO (checked above), and only the IFO is kept raw for field diffs.
+                let raw = n.strip_suffix(".BUP").map_or_else(|| n.clone(), |b| format!("{b}.IFO"));
+                let detail = std::fs::read(fixtures().join(name).join(raw)).map(|r| first_diff(&r, bytes)).unwrap_or_default();
                 panic!("{name}: {n} differs from the recorded dvdauthor output: {detail}");
             }
         }
