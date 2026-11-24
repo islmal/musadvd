@@ -1624,5 +1624,7 @@
  "main.cropBatchAll": "Für alle Videos erkennen",
  "main.cropBatchSelected": "Für {count} ausgewählte erkennen",
  "main.cropBatchProgress": "Schwarze Ränder werden erkannt: Video {i} von {count} …",
- "main.cropBatchDone": "Schwarze Ränder in {found} von {count} Videos gefunden ({failed} fehlgeschlagen)."
+ "main.cropBatchDone": "Schwarze Ränder in {found} von {count} Videos gefunden ({failed} fehlgeschlagen).",
+ "settings.avchdCamcorderLayout": "AVCHD: Camcorder-Disc-Aufbau",
+ "settings.avchdCamcorderLayoutHint": "Für AVCHD auf DVD: schreibt AVCHD/BDMV mit kurzen Dateinamen (INDEX.BDM, 00000.MTS) und AVCHD-1.0-Headern statt eines Blu-ray-BDMV-Ordners. Probiere es, wenn ein Player wie die PS3 die Disc als Daten-Disc anzeigt. Keine Wirkung bei BD-25/BD-50."
 }

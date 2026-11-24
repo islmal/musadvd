@@ -518,7 +518,7 @@ fn burn(
         eprintln!("error: {msg}");
         ExitCode::FAILURE
     };
-    let Some(video_ts) = [video_ts.clone(), video_ts.join("VIDEO_TS"), video_ts.join("BDMV")]
+    let Some(video_ts) = [video_ts.clone(), video_ts.join("VIDEO_TS"), video_ts.join("BDMV"), video_ts.join("AVCHD")]
         .into_iter()
         .find(|d| d.join("VIDEO_TS.IFO").is_file() || is_bdmv_folder(d))
     else {

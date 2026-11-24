@@ -96,6 +96,9 @@ pub struct AppSettings {
     pub bd_resolution: String,
     /// Blu-ray: only one video per disc (no playlist of several videos).
     pub bd_single_video: bool,
+    /// AVCHD on DVD media: camcorder layout (`AVCHD/BDMV`, 8.3 names, `0100` headers) instead of a
+    /// Blu-ray `BDMV` folder – some players (PS3) show the Blu-ray layout on a DVD as a data disc.
+    pub avchd_camcorder_layout: bool,
     pub aspect_ratio_policy: String,
     // Encoding
     pub encoding_profile: String,
@@ -179,6 +182,7 @@ impl Default for AppSettings {
             dvd_video: DVD_VIDEO_MODES[0].into(),
             bd_resolution: BD_RESOLUTIONS[0].into(),
             bd_single_video: false,
+            avchd_camcorder_layout: false,
             aspect_ratio_policy: ASPECT_POLICIES[0].into(),
             encoding_profile: ENCODING_PROFILES[0].into(),
             target_size_mb: DiscType::Dvd5.target_mb() as u64,
@@ -886,6 +890,7 @@ impl AppSettings {
         // `opts.disc` has to be set before the settings are applied.
         opts.resolution = self.title_resolution(opts.disc);
         opts.bd_single_video = self.bd_single_video;
+        opts.avchd_camcorder_layout = self.avchd_camcorder_layout;
         opts.encoding_profile = self.profile();
         opts.dvd_video = DvdVideoMode::from_setting(&self.dvd_video);
         opts.motion_audio = match self.menu_audio.as_str() {

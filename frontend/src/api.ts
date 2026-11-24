@@ -365,6 +365,8 @@ export interface AppSettings {
   dvd_video: "encode" | "auto" | "strict";
   bd_resolution: "1080p" | "720p";
   bd_single_video: boolean;
+  /** AVCHD on DVD media: camcorder layout (AVCHD/BDMV, 8.3 names, 0100 headers). */
+  avchd_camcorder_layout: boolean;
   aspect_ratio_policy: "Auto" | "4:3" | "16:9";
   encoding_profile: "Auto" | "SP_Short" | "MP_Medium" | "LP_Long";
   target_size_mb: number;

@@ -1624,5 +1624,7 @@
  "main.cropBatchAll": "Detect for all videos",
  "main.cropBatchSelected": "Detect for {count} selected",
  "main.cropBatchProgress": "Detecting black borders: video {i} of {count} …",
- "main.cropBatchDone": "Black borders found in {found} of {count} videos ({failed} failed)."
+ "main.cropBatchDone": "Black borders found in {found} of {count} videos ({failed} failed).",
+ "settings.avchdCamcorderLayout": "AVCHD: camcorder disc layout",
+ "settings.avchdCamcorderLayoutHint": "For AVCHD on DVD: writes AVCHD/BDMV with short file names (INDEX.BDM, 00000.MTS) and AVCHD 1.0 headers instead of a Blu-ray BDMV folder. Try this when a player such as the PS3 shows the disc as a data disc. No effect on BD-25/BD-50."
 }

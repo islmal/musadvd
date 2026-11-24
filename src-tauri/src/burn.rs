@@ -175,7 +175,7 @@ pub async fn probe_media(drive_id: String, video_ts: String, speed_pref: String,
 #[tauri::command]
 pub fn startup_burn() -> Option<String> {
     std::env::args_os().skip(1).map(PathBuf::from).find_map(|p| {
-        [p.clone(), p.join("VIDEO_TS"), p.join("BDMV")]
+        [p.clone(), p.join("VIDEO_TS"), p.join("BDMV"), p.join("AVCHD")]
             .into_iter()
             .find(|d| is_disc_folder(d))
             .map(|d| d.to_string_lossy().into_owned())
@@ -250,7 +250,7 @@ fn delete_dvd_output(video_ts: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !["VIDEO_TS", "AUDIO_TS", "BDMV", "CERTIFICATE"].iter().any(|k| n.eq_ignore_ascii_case(k)))
+        .filter(|n| !["VIDEO_TS", "AUDIO_TS", "BDMV", "CERTIFICATE", "AVCHD"].iter().any(|k| n.eq_ignore_ascii_case(k)))
         .collect();
     if !foreign.is_empty() {
         return Err(format!("{} contains other files ({}) and was not deleted", project.display(), foreign.join(", ")));

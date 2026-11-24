@@ -53,6 +53,7 @@ export const PROJECT_SETTING_KEYS = [
   "dvd_video",
   "bd_resolution",
   "bd_single_video",
+  "avchd_camcorder_layout",
   "menu_animations",
   "encoding_profile",
   "target_size_mb",
@@ -291,6 +292,7 @@ function projectSections(k: Kit, draft: AppSettings, changed: (rerender: boolean
           ]),
           note(t("settings.bluRayTitelSind")),
           check("bd_single_video", t("settings.nurEinVideoPro"), t("settings.mehrereVideosWerdenSonst")),
+          check("avchd_camcorder_layout", t("settings.avchdCamcorderLayout"), t("settings.avchdCamcorderLayoutHint")),
         ),
         group(
           t("settings.projekt"),
