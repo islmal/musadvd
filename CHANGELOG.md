@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-25
+
+### Fixed
+
+- **AVCHD discs play on PS3 and PS4**: AVCHD-5/9 were written exactly like a Blu-ray, so the PS3 showed them as a data disc. They now carry the AVCHD form tsMuxeR writes: `BDMV` at the disc root with its normal file names, version `0100` in the index, movie object, playlist and clip files, the `IDEX` block in `index.bdmv` and an `AUXDATA` folder, without the Blu-ray-only folders and `CERTIFICATE`. Verified on a PS3 and a PS4. BD-25/BD-50 output is unchanged.
+- **AVCHD and Blu-ray builds no longer exceed their target size** (e.g. 4322 MB on a 4300 MB AVCHD-5): the size estimate used too little for the BDAV container (now 8 % of the streams, measured 7.7 %) and for text subtitles rendered to Blu-ray images (now 40 kbit/s per track, measured ~32), and keeps 0.5 % free when a GPU encoder (NVENC/QSV/AMF) is selected. The same 4 episodes now build to 4102 MB.
+- **Nightly builds**: a push without a version change no longer fails the nightly upload; the nightly page holds only the current build.
+
 ## [1.5.0] - 2026-11-24
 
 ### Added
