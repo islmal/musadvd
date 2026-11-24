@@ -1144,7 +1144,11 @@ fn band(percent: f64) -> Quality {
 fn calculate_project(state: State<'_, AppState>, settings: ProjectSettings) -> Result<CalculationResult, String> {
     let app = state.settings();
     let res = app.title_resolution(settings.disc);
-    project_calculation(settings, app.profile(), res)
+    // Same hardware-encoder reserve as the build ([`dvd::hw_reserve_mb`]), from the same settings mapping.
+    let mut opts = BuildOptions { disc: settings.disc, ..BuildOptions::default() };
+    app.apply_to(&mut opts);
+    let reserve = dvd::hw_reserve_mb(settings.disc, opts.hw_accel);
+    project_calculation_with(settings, app.profile(), res, reserve)
 }
 
 /// Size of an encoded Blu-ray menu clip per second.
@@ -1162,7 +1166,14 @@ fn full_d1_equivalent_kbps(kbps: u32, disc: DiscType, res: musadvd::author::Reso
     (kbps as f64 * (fw * fh) as f64 / (w * h) as f64).round() as u32
 }
 
+/// [`project_calculation_with`] without a hardware-encoder reserve (the tests' fixed baseline).
+#[cfg(test)]
 fn project_calculation(settings: ProjectSettings, profile: EncodingProfile, res: musadvd::author::Resolution) -> Result<CalculationResult, String> {
+    project_calculation_with(settings, profile, res, 0.0)
+}
+
+/// [`project_calculation`] keeping `reserve_mb` free (hardware-encoder reserve, see [`dvd::hw_reserve_mb`]).
+fn project_calculation_with(settings: ProjectSettings, profile: EncodingProfile, res: musadvd::author::Resolution, reserve_mb: f64) -> Result<CalculationResult, String> {
     let target_mb = settings.disc.target_mb();
     // A Blu-ray has menus only from the editor (8 Mbit/s H.264 + AC-3 + muxing ≈ 1.1 MB/s).
     let menu_mb = if settings.disc.is_bluray() {
@@ -1187,7 +1198,7 @@ fn project_calculation(settings: ProjectSettings, profile: EncodingProfile, res:
         });
     }
     let floor = dvd::min_video_kbps(settings.disc, res);
-    let plan = dvd::bitrate_plan_at(settings.disc, &settings.titles, menu_mb, profile, floor).map_err(|e| e.to_string())?;
+    let plan = dvd::bitrate_plan_at(settings.disc, &settings.titles, menu_mb + reserve_mb, profile, floor).map_err(|e| e.to_string())?;
     let titles = settings
         .titles
         .iter()

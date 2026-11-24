@@ -41,6 +41,15 @@ pub const MAX_AUDIO_STREAMS: usize = 8;
 pub const MAX_SUBTITLE_STREAMS: usize = 32;
 /// Bitrate reserved per text subtitle stream for the size calculation.
 const SUBTITLE_KBPS: u32 = 10;
+/// The same on Blu-ray/AVCHD: text rendered to 1080p PGS measured ~32 kbit/s per track
+/// (four 24-min anime episodes, 5.8-6.2 MB each).
+const BD_SUBTITLE_KBPS: u32 = 40;
+/// BDAV (192-byte TS packets, PES headers, PCR/PAT/PMT) on top of the muxed streams: measured
+/// 7.42 % over the encoded files (7.7 % of the raw streams) on four AVCHD episodes at ~5.6 Mbit/s.
+pub const BD_STREAM_OVERHEAD_RATIO: f64 = 0.08;
+/// Size reserve for hardware video encoders (NVENC/QSV/AMF), whose average bitrate is less exact
+/// than x264's 2-pass: the measured NVENC run came in 2.9 % under, so the reserve is the 0.5 % buffer.
+pub const HW_ENCODER_RESERVE: f64 = 0.005;
 use crate::eta::{self, Eta, FrameEta, JobPhase};
 
 #[derive(Debug)]
@@ -706,25 +715,38 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
     bitrate_plan_at(disc, titles, menu_mb, profile, disc.limits().min_video_kbps)
 }
 
+/// Size kept free on `disc` (MB) when a hardware H.264 encoder is selected ([`HW_ENCODER_RESERVE`]);
+/// the planner treats it like menus. Blu-ray/AVCHD only: DVD-Video always encodes on the CPU.
+pub fn hw_reserve_mb(disc: DiscType, hw_accel: HwAccelMode) -> f64 {
+    if disc.is_bluray() && hw_accel.bd_encoder().is_some() {
+        disc.target_mb() as f64 * HW_ENCODER_RESERVE
+    } else {
+        0.0
+    }
+}
+
 /// [`bitrate_plan`] with the video bitrate floor `min_video` ([`min_video_kbps`]). Used by the
 /// build itself and by the GUI's live estimate.
 pub fn bitrate_plan_at(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile: EncodingProfile, min_video: u32) -> Result<BitratePlan, CalcError> {
-    let subs_kbit: f64 =
-        titles.iter().map(|t| (t.subtitle_streams as u32 * SUBTITLE_KBPS) as f64 * t.duration_secs).sum();
+    let sub_kbps = if disc.is_bluray() { BD_SUBTITLE_KBPS } else { SUBTITLE_KBPS };
+    let mut subs_kbit: f64 = titles.iter().map(|t| (t.subtitle_streams as u32 * sub_kbps) as f64 * t.duration_secs).sum();
     let (copied, encoded): (Vec<TitleLoad>, Vec<TitleLoad>) =
         titles.iter().partition(|t| t.copy_video_kbps.is_some() || t.copy_bytes.is_some());
-    let copied_kbit: f64 = copied
+    let mut copied_kbit: f64 = copied
         .iter()
         .map(|t| match t.copy_bytes {
             Some(bytes) => calculator::bytes_to_kbit(bytes),
             None => (t.copy_video_kbps.unwrap_or(0) + t.audio_kbps) as f64 * t.duration_secs,
         })
         .sum();
-    // Blu-ray keeps a share of the disc; DVD-Video overhead grows with playing time (NAV packs)
-    // and with the stream (pack/PES headers), not with the disc size – see `dvd_mux_kbit`.
+    // Both grow with the streams: DVD-Video by its NAV packs per second and pack/PES headers (see
+    // `dvd_mux_kbit`), Blu-ray by the BDAV transport stream around every muxed stream – also the
+    // copied and subtitle ones, which are re-muxed too.
     let all_secs: f64 = titles.iter().map(|t| t.duration_secs).sum();
     let (disc_share, ratio) = if disc.is_bluray() {
-        (disc.default_mux_overhead_kbit(), 0.0)
+        subs_kbit *= 1.0 + BD_STREAM_OVERHEAD_RATIO;
+        copied_kbit *= 1.0 + BD_STREAM_OVERHEAD_RATIO;
+        (0.0, BD_STREAM_OVERHEAD_RATIO)
     } else {
         (calculator::DVD_NAV_KBPS * all_secs + calculator::DVD_IFO_KBIT_PER_TITLE * titles.len() as f64, calculator::DVD_PACK_OVERHEAD_RATIO)
     };
@@ -2496,6 +2518,26 @@ mod tests {
     }
 
     #[test]
+    fn avchd_plan_leaves_room_for_the_measured_bdav_overhead() {
+        // Four 24.6-min episodes measured on AVCHD-5 with NVENC: 2x stereo AC-3, one rendered PGS
+        // track (~32 kbit/s), BDAV adding 7.7 % to the raw streams.
+        let ep = TitleLoad { duration_secs: 1473.0, audio_kbps: 384, subtitle_streams: 1, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
+        let loads = vec![ep; 4];
+        let disc = DiscType::Avchd5;
+        let reserve = hw_reserve_mb(disc, HwAccelMode::Nvidia);
+        assert_eq!(reserve, 4300.0 * HW_ENCODER_RESERVE);
+        assert_eq!(hw_reserve_mb(disc, HwAccelMode::None), 0.0);
+        assert_eq!(hw_reserve_mb(DiscType::Dvd5, HwAccelMode::Nvidia), 0.0, "DVD-Video encodes on the CPU");
+        let plan = bitrate_plan_at(disc, &loads, reserve, EncodingProfile::Auto, min_video_kbps(disc, Resolution::Hd1080)).unwrap();
+        // Worst case: the encoder hits the planned bitrate exactly (NVENC came in 2.9 % under).
+        let real_kbit: f64 = loads.iter().map(|t| ((plan.video_kbps + t.audio_kbps) as f64 + 32.0) * t.duration_secs * 1.077).sum();
+        let real_mb = real_kbit / 8192.0;
+        assert!(real_mb <= disc.target_mb() as f64, "{real_mb:.0} MB with {} kbit/s", plan.video_kbps);
+        // And the disc is still filled well (not a blunt cut).
+        assert!(real_mb > 0.97 * disc.target_mb() as f64, "{real_mb:.0} MB");
+    }
+
+    #[test]
     fn bd25_holds_a_19_hour_720p_collection() {
         assert_eq!(min_video_kbps(DiscType::Bd25, Resolution::Hd720), 1500);
         assert_eq!(min_video_kbps(DiscType::Bd50, Resolution::Hd1080), 2500);
@@ -2595,7 +2637,7 @@ mod tests {
         let loads = [mk(26_000.0, QUALITY_LOW), mk(12_000.0, QUALITY_HIGH)];
         let plan = bitrate_plan(DiscType::Bd25, &loads, 0.0, EncodingProfile::Auto).unwrap();
         assert!(weighted_video_kbps(DiscType::Bd25, plan.video_kbps, QUALITY_LOW, 448, DiscType::Bd25.limits().min_video_kbps) == DiscType::Bd25.limits().min_video_kbps);
-        let used = real_mb(DiscType::Bd25, &plan, &loads, DiscType::Bd25.default_mux_overhead_kbit());
+        let used = real_mb(DiscType::Bd25, &plan, &loads, plan.mux_overhead_kbit);
         assert!(used <= DiscType::Bd25.target_mb() as f64, "{used} MB");
         assert!((used - plan.estimated_mb).abs() < 1e-6 && plan.fits());
     }

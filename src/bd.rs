@@ -1014,7 +1014,8 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // One floor for the whole plan (the lowest of the titles' frame sizes), so the plan's size
     // estimate and every title's bitrate agree.
     let floor = titles.iter().map(|t| crate::dvd::min_video_kbps(opts.disc, t.resolution)).min().unwrap_or(opts.disc.limits().min_video_kbps);
-    let plan = crate::dvd::bitrate_plan_at(opts.disc, &loads, menu_mb, opts.encoding_profile, floor)?;
+    let reserve = crate::dvd::hw_reserve_mb(opts.disc, opts.hw_accel);
+    let plan = crate::dvd::bitrate_plan_at(opts.disc, &loads, menu_mb + reserve, opts.encoding_profile, floor)?;
     if plan.clamp == Clamp::Min {
         return Err(BuildError::DoesNotFit { disc: opts.disc, plan: Box::new(plan) });
     }
