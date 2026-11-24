@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-24
+
+### Added
+
+- **Split automatically**: when a merged DVD title would exceed 99 chapters, one click starts new titles where needed (as late as possible, e.g. every 14 episodes with 7 chapters each).
+- **Black-border detection for many videos**: "Detect for all videos" (or for the selected ones) next to "Detect automatically" and in the title right-click menu.
+- **Episode names in merged chapter menus**: in a merged title, each video's first chapter is named after the video, so the chapter menu shows where every episode starts.
+
+### Changed
+
+- **Lower minimum video bitrates for smaller frame sizes**, so long collections fit one disc: DVD Half D1 600 kbit/s and SIF 400 kbit/s (Full D1 stays at 1000); Blu-ray 720p 1500 kbit/s and 1080p 2500 kbit/s (was 4000). About 19 hours fit a DVD-9 at SIF or a BD-25 at 720p.
+- **Blu-ray quality rating** goes by bits per pixel, so 720p is credited for its smaller frame (2.1 Mbit/s at 720p rates Good instead of 0 % Low).
+- **"Does not fit" advice** no longer suggests DVD-9 when DVD-9 is already selected; it suggests a lower audio bitrate, Half D1/SIF or a second disc.
+- The 99-chapter warning refers to the "Separate" button on the video card.
+
+### Fixed
+
+- **Progress window**: a long output path no longer stretches the conversion/burn window past its edges.
+
 ## [1.4.1] - 2026-11-24
 
 ### Fixed

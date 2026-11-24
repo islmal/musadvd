@@ -1,6 +1,6 @@
 [package]
 name = "musadvd-gui"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 description = "Desktop GUI (Tauri) for the MusaDVD authoring engine"
 license = "GPL-3.0-or-later"
