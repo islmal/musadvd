@@ -441,37 +441,6 @@ fn avchd5_builds_a_dvd_sized_bdmv() {
     let plan = udf250::create_bd_image(&report.project_dir, &iso, "AVCHD", &AtomicBool::new(false), |_| {}).unwrap();
     assert_eq!(std::fs::metadata(&iso).unwrap().len(), plan.size_bytes());
     assert_eq!(&std::fs::read(&iso).unwrap()[17 * 2048 + 1..17 * 2048 + 6], b"NSR03");
-    // Default layout: the Blu-ray BDMV folder with long names and 0200 headers.
-    let head = |p: &Path| std::fs::read(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))[..8].to_vec();
-    assert_eq!(head(&report.project_dir.join("BDMV/index.bdmv")), b"INDX0200");
-    assert_eq!(head(&report.project_dir.join("BDMV/PLAYLIST/00000.mpls")), b"MPLS0200");
-
-    // Camcorder layout (opt-in, for players like the PS3): AVCHD/BDMV, 8.3 names, 0100 headers.
-    let cam = build(&rt, &BuildOptions { output: dir.join("out_cam"), avchd_camcorder_layout: true, ..opts }).unwrap_or_else(|e| panic!("build failed: {e}"));
-    let avchd = cam.project_dir.join("AVCHD");
-    assert_eq!(cam.video_ts, avchd);
-    let b = avchd.join("BDMV");
-    for (file, magic) in [
-        ("INDEX.BDM", b"INDX0100"),
-        ("MOVIEOBJ.BDM", b"MOBJ0100"),
-        ("PLAYLIST/00000.MPL", b"MPLS0100"),
-        ("CLIPINF/00000.CPI", b"HDMV0100"),
-        ("BACKUP/INDEX.BDM", b"INDX0100"),
-        ("BACKUP/PLAYLIST/00000.MPL", b"MPLS0100"),
-        ("BACKUP/CLIPINF/00000.CPI", b"HDMV0100"),
-    ] {
-        assert_eq!(head(&b.join(file)), magic, "{file}");
-    }
-    assert!(!cam.project_dir.join("BDMV").exists() && !cam.project_dir.join("CERTIFICATE").exists());
-    assert!(!b.join("STREAM/00000.m2ts").exists() && !b.join("index.bdmv").exists());
-    let v = probe(&tools, &b.join("STREAM/00000.MTS"), "v:0", "stream=codec_name,width");
-    assert!(v.contains("codec_name=h264") && v.contains("width=1920"), "{v}");
-    // Burning takes the AVCHD folder like a BDMV folder: DVD-sized, UDF 2.50 image with AVCHD at the root.
-    let content = DiscContent::of_folder(&cam.video_ts).unwrap();
-    assert!(content.bluray && content.fits_dvd && content.sectors <= DVD5_SECTORS, "{content:?}");
-    let iso = dir.join("avchd_cam.iso");
-    let plan = udf250::create_bd_image(&cam.project_dir, &iso, "AVCHD", &AtomicBool::new(false), |_| {}).unwrap();
-    assert!(plan.file_sector("AVCHD/BDMV/INDEX.BDM").is_some() && plan.file_sector("BDMV/index.bdmv").is_none());
     std::fs::remove_dir_all(&dir).ok();
 }
 

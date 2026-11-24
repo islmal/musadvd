@@ -1624,7 +1624,5 @@
  "main.cropBatchAll": "Определить для всех видео",
  "main.cropBatchSelected": "Определить для выбранных ({count})",
  "main.cropBatchProgress": "Поиск чёрных полос: видео {i} из {count} …",
- "main.cropBatchDone": "Чёрные полосы найдены в {found} из {count} видео (ошибок: {failed}).",
- "settings.avchdCamcorderLayout": "AVCHD: структура диска видеокамеры",
- "settings.avchdCamcorderLayoutHint": "Для AVCHD на DVD: записывает AVCHD/BDMV с короткими именами файлов (INDEX.BDM, 00000.MTS) и заголовками AVCHD 1.0 вместо папки BDMV Blu-ray. Попробуйте, если проигрыватель, например PS3, показывает диск как диск с данными. Не влияет на BD-25/BD-50."
+ "main.cropBatchDone": "Чёрные полосы найдены в {found} из {count} видео (ошибок: {failed})."
 }

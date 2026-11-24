@@ -171,10 +171,9 @@ pub const DVD5_SECTORS: u64 = 2_295_104;
 /// Sectors of a dual-layer DVD.
 pub const DVD9_SECTORS: u64 = 2_295_104 + 2_086_912;
 
-/// A `BDMV` folder (not `VIDEO_TS`): recognised by its `index.bdmv`, or an AVCHD camcorder-layout
-/// `AVCHD` folder (`BDMV/INDEX.BDM`), which takes the place of `BDMV` on the disc.
+/// A `BDMV` folder (not `VIDEO_TS`): recognised by its `index.bdmv`.
 pub fn is_bdmv_folder(folder: &Path) -> bool {
-    folder.join("index.bdmv").is_file() || folder.join("BDMV").join("INDEX.BDM").is_file()
+    folder.join("index.bdmv").is_file()
 }
 
 impl DiscContent {

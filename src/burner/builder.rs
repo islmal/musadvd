@@ -57,16 +57,10 @@ pub fn find_video_ts(root: &Path) -> Option<PathBuf> {
 /// The folder containing `BDMV` (`root` itself, or its parent when `root` is the `BDMV` folder).
 pub fn find_bd_root(root: &Path) -> Option<PathBuf> {
     let has_index = |bdmv: &Path| child(bdmv, "index.bdmv").is_some();
-    // AVCHD camcorder layout: `AVCHD/BDMV/INDEX.BDM` (the `AVCHD` folder stands where `BDMV` would).
-    let is_avchd = |avchd: &Path| child(avchd, "BDMV").and_then(|b| child(&b, "INDEX.BDM")).is_some();
-    let named = |n: &str| root.file_name().is_some_and(|x| x.to_string_lossy().eq_ignore_ascii_case(n));
-    if (named("BDMV") && has_index(root)) || (named("AVCHD") && is_avchd(root)) {
+    if root.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("BDMV")) && has_index(root) {
         return root.parent().map(Path::to_path_buf);
     }
-    child(root, "BDMV")
-        .filter(|p| p.is_dir() && has_index(p))
-        .or_else(|| child(root, "AVCHD").filter(|p| p.is_dir() && is_avchd(p)))
-        .map(|_| root.to_path_buf())
+    child(root, "BDMV").filter(|p| p.is_dir() && has_index(p)).map(|_| root.to_path_buf())
 }
 
 pub fn detect(root: &Path) -> Content {
@@ -400,15 +394,10 @@ fn plan_content(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, Buil
             let root = single_dir.as_deref().and_then(find_bd_root).ok_or_else(gone)?;
             let label = label(cfg.bd.read_bdmt.then(|| read_bdmt_label(&root)).flatten());
             let mut entries = Vec::new();
-            // AVCHD camcorder layout: the `AVCHD` folder takes BDMV's place and needs no CERTIFICATE.
-            let avchd = child(&root, "BDMV").is_none().then(|| child(&root, "AVCHD")).flatten();
-            match &avchd {
-                Some(dir) => scan(dir, "AVCHD", &mut entries)?,
-                None => scan(&child(&root, "BDMV").ok_or_else(gone)?, "BDMV", &mut entries)?,
-            }
+            scan(&child(&root, "BDMV").ok_or_else(gone)?, "BDMV", &mut entries)?;
             match child(&root, "CERTIFICATE") {
                 Some(cert) => scan(&cert, "CERTIFICATE", &mut entries)?,
-                None if cfg.bd.create_certificate && avchd.is_none() => {
+                None if cfg.bd.create_certificate => {
                     entries.push(TreeEntry::dir("CERTIFICATE"));
                     entries.push(TreeEntry::dir("CERTIFICATE/BACKUP"));
                 }
@@ -418,7 +407,7 @@ fn plan_content(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, Buil
                 let reset: Transform = reset_cpi;
                 for e in entries.iter_mut().filter(|e| !e.dir) {
                     let p = e.path.to_ascii_uppercase();
-                    if (p.starts_with("BDMV/STREAM/") && p.ends_with(".M2TS")) || (p.starts_with("AVCHD/BDMV/STREAM/") && p.ends_with(".MTS")) {
+                    if p.starts_with("BDMV/STREAM/") && p.ends_with(".M2TS") {
                         e.transform = Some(reset);
                     }
                 }
@@ -586,14 +575,6 @@ mod tests {
         std::fs::write(bd.join("BDMV").join("index.bdmv"), "x").unwrap();
         assert_eq!(detect(&bd), Content::Bluray);
         assert_eq!(find_bd_root(&bd.join("BDMV")), Some(bd.clone()));
-        // AVCHD camcorder layout: AVCHD/BDMV/INDEX.BDM, from the root or the AVCHD folder itself.
-        let cam = temp("detect_avchd");
-        std::fs::create_dir_all(cam.join("AVCHD/BDMV")).unwrap();
-        assert_eq!(detect(&cam), Content::Data, "no INDEX.BDM");
-        std::fs::write(cam.join("AVCHD/BDMV/INDEX.BDM"), "INDX0100").unwrap();
-        assert_eq!(detect(&cam), Content::Bluray);
-        assert_eq!(find_bd_root(&cam.join("AVCHD")), Some(cam.clone()));
-        assert!(crate::burner::is_bdmv_folder(&cam.join("AVCHD")));
 
         assert!(matches!(resolve_content(Content::DvdVideo, "ask", None), Err(BuildError::NeedsAnswer(Content::DvdVideo))));
         assert_eq!(resolve_content(Content::DvdVideo, "ask", Some(true)).unwrap(), Content::DvdVideo);

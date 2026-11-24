@@ -434,9 +434,6 @@ pub struct BuildOptions {
     pub project_name: Option<String>,
     /// Blu-ray: reject projects with more than one video (no playlist).
     pub bd_single_video: bool,
-    /// AVCHD (DVD media) only: write the camcorder layout `AVCHD/BDMV` with 8.3 names and `0100`
-    /// headers ([`crate::bd::to_avchd_layout`]) instead of a Blu-ray `BDMV` folder.
-    pub avchd_camcorder_layout: bool,
     /// Blu-ray / AVCHD: re-encode the video, copy compliant streams, or copy all of them.
     pub bd_video: crate::encoder::BdVideoMode,
     /// DVD-Video: re-encode the video, copy compliant MPEG-2 streams, or copy all of them.

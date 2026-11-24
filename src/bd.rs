@@ -524,65 +524,6 @@ struct MenuStage {
     warnings: Vec<String>,
 }
 
-/// Rewrites the finished Blu-ray folder `project_dir/BDMV` into the AVCHD camcorder layout:
-/// `AVCHD/BDMV` with 8.3 names (`INDEX.BDM`, `MOVIEOBJ.BDM`, `*.MPL`, `*.CPI`, `*.MTS`) and the
-/// AVCHD `0100` versions of the `INDX`/`MOBJ`/`MPLS`/`HDMV` headers (the formats are the same;
-/// playlists name clips by number only). Empty BD-only folders and `CERTIFICATE` are dropped.
-/// Returns the `AVCHD` folder, which takes the place of `BDMV` (its parent is the project).
-pub fn to_avchd_layout(project_dir: &Path) -> std::io::Result<PathBuf> {
-    let avchd = project_dir.join("AVCHD");
-    let bdmv = avchd.join("BDMV");
-    std::fs::create_dir_all(&avchd)?;
-    std::fs::rename(project_dir.join("BDMV"), &bdmv)?;
-    // Header version "0200" -> "0100" (bytes 4..8 of every navigation/clip file).
-    let to_0100 = |from: &Path, to: &Path| -> std::io::Result<()> {
-        let mut data = std::fs::read(from)?;
-        if data.get(4..8) == Some(b"0200") {
-            data[4..8].copy_from_slice(b"0100");
-        }
-        std::fs::write(to, &data)?;
-        std::fs::remove_file(from)
-    };
-    for dir in [bdmv.clone(), bdmv.join("BACKUP")] {
-        for (from, to) in [("index.bdmv", "INDEX.BDM"), ("MovieObject.bdmv", "MOVIEOBJ.BDM")] {
-            if dir.join(from).is_file() {
-                to_0100(&dir.join(from), &dir.join(to))?;
-            }
-        }
-        for (sub, ext, short) in [("PLAYLIST", "mpls", "MPL"), ("CLIPINF", "clpi", "CPI"), ("STREAM", "m2ts", "MTS")] {
-            let Ok(entries) = std::fs::read_dir(dir.join(sub)) else { continue };
-            for e in entries.flatten() {
-                let path = e.path();
-                if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext)) {
-                    continue;
-                }
-                let target = path.with_extension(short);
-                if sub == "STREAM" { std::fs::rename(&path, &target)? } else { to_0100(&path, &target)? }
-            }
-        }
-    }
-    remove_empty_dirs(&bdmv)?;
-    let certificate = project_dir.join("CERTIFICATE");
-    if certificate.is_dir() {
-        std::fs::remove_dir_all(certificate)?;
-    }
-    Ok(avchd)
-}
-
-/// Removes the empty folders below `dir` (bottom-up; `dir` itself stays).
-fn remove_empty_dirs(dir: &Path) -> std::io::Result<()> {
-    for e in std::fs::read_dir(dir)?.flatten() {
-        let path = e.path();
-        if path.is_dir() {
-            remove_empty_dirs(&path)?;
-            if std::fs::read_dir(&path)?.next().is_none() {
-                std::fs::remove_dir(&path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Writes `index.bdmv` and `MovieObject.bdmv` into `BDMV` and `BDMV/BACKUP`.
 fn write_navigation(bdmv: &Path, nav: &BdNav) -> std::io::Result<()> {
     let index = hdmv::index_bdmv(bd_menu::FIRST_PLAY_OBJECT, bd_menu::TOP_MENU_OBJECT, &nav.title_objects);
@@ -1234,11 +1175,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     // Players and the image expect the empty CERTIFICATE skeleton.
     let backup = project_dir.join("CERTIFICATE").join("BACKUP");
     std::fs::create_dir_all(&backup).at(&backup)?;
-    let bdmv = if opts.disc.is_avchd() && opts.avchd_camcorder_layout {
-        to_avchd_layout(&project_dir).at(&project_dir)?
-    } else {
-        project_dir.join("BDMV")
-    };
+    let bdmv = project_dir.join("BDMV");
     log(Event::Step(tf!(opts.ui_lang, "bd_folder", path = bdmv.display())));
 
     let work_dir = if crate::dvd::keep_work(opts) {

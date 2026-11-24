@@ -270,16 +270,11 @@ pub fn plan_entries(label: &str, entries: &[TreeEntry]) -> Result<BdImagePlan, I
 /// when present; other entries are not part of the disc).
 pub fn plan_bd_image(root: &Path, label: &str) -> Result<BdImagePlan, ImageError> {
     let bdmv = root.join("BDMV");
-    let avchd = root.join("AVCHD");
-    let mut entries = Vec::new();
-    if bdmv.join("index.bdmv").is_file() {
-        scan(&bdmv, "BDMV", &mut entries)?;
-    } else if avchd.join("BDMV").join("INDEX.BDM").is_file() {
-        // AVCHD camcorder layout (`crate::bd::to_avchd_layout`).
-        scan(&avchd, "AVCHD", &mut entries)?;
-    } else {
+    if !bdmv.join("index.bdmv").is_file() {
         return Err(ImageError::NotBluray("BDMV/index.bdmv missing".into()));
     }
+    let mut entries = Vec::new();
+    scan(&bdmv, "BDMV", &mut entries)?;
     let certificate = root.join("CERTIFICATE");
     if certificate.is_dir() {
         scan(&certificate, "CERTIFICATE", &mut entries)?;
