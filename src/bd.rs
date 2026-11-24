@@ -525,14 +525,44 @@ struct MenuStage {
 }
 
 /// Writes `index.bdmv` and `MovieObject.bdmv` into `BDMV` and `BDMV/BACKUP`.
-fn write_navigation(bdmv: &Path, nav: &BdNav) -> std::io::Result<()> {
-    let index = hdmv::index_bdmv(bd_menu::FIRST_PLAY_OBJECT, bd_menu::TOP_MENU_OBJECT, &nav.title_objects);
-    let objects = hdmv::movie_object_bdmv(&nav.objects);
+fn write_navigation(bdmv: &Path, nav: &BdNav, avchd: bool) -> std::io::Result<()> {
+    let mut index = hdmv::index_bdmv(bd_menu::FIRST_PLAY_OBJECT, bd_menu::TOP_MENU_OBJECT, &nav.title_objects);
+    let mut objects = hdmv::movie_object_bdmv(&nav.objects);
+    if avchd {
+        index = hdmv::avchd_index(&index);
+        objects[4..8].copy_from_slice(b"0100");
+    }
     for dir in [bdmv.to_path_buf(), bdmv.join("BACKUP")] {
         std::fs::write(dir.join("index.bdmv"), &index)?;
         std::fs::write(dir.join("MovieObject.bdmv"), &objects)?;
     }
     Ok(())
+}
+
+/// AVCHD on DVD media, as tsMuxeR writes it: `BDMV` stays at the root with its long names, but
+/// playlists and clip infos carry the AVCHD version "0100" (their structure is the BD one), and
+/// the Blu-ray-only folders (BD-J, META) are left out; `AUXDATA` stays. The index and movie
+/// objects get their AVCHD form in [`write_navigation`].
+fn avchd_versions(bdmv: &Path) -> std::io::Result<()> {
+    for dir in [bdmv.to_path_buf(), bdmv.join("BACKUP")] {
+        for (sub, ext) in [("PLAYLIST", "mpls"), ("CLIPINF", "clpi")] {
+            let Ok(entries) = std::fs::read_dir(dir.join(sub)) else { continue };
+            for path in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext))) {
+                let mut data = std::fs::read(&path)?;
+                if data.get(4..8) == Some(b"0200") {
+                    data[4..8].copy_from_slice(b"0100");
+                    std::fs::write(&path, &data)?;
+                }
+            }
+        }
+    }
+    for d in ["BDJO", "JAR", "META", "BACKUP/BDJO", "BACKUP/JAR"] {
+        let p = bdmv.join(d);
+        if p.is_dir() && std::fs::read_dir(&p)?.next().is_none() {
+            std::fs::remove_dir(&p)?;
+        }
+    }
+    std::fs::create_dir_all(bdmv.join("AUXDATA"))
 }
 
 /// Source time of each chapter's sample frame (3 s in, like the DVD chapter thumbnails), per
@@ -1157,7 +1187,11 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         mux_log.push_str(&cancellable(cancel, crate::bd_mux::mux_title(&tools, &job)).await?);
     }
     let nav = menus.as_ref().map_or_else(|| bd_menu::plan_without_menus(titles.len()), |m| m.nav.clone());
-    write_navigation(&bdmv_dir, &nav).at(&work)?;
+    let avchd = opts.disc.is_avchd();
+    write_navigation(&bdmv_dir, &nav, avchd).at(&work)?;
+    if avchd {
+        avchd_versions(&bdmv_dir).at(&bdmv_dir)?;
+    }
     cancel.check()?;
     std::fs::write(work.join("mux.log"), &mux_log).at(&work)?;
     let meta = mux_log;
@@ -1166,15 +1200,18 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         safe_folder_name(opts.project_name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(&default_project_name));
     let project_dir: PathBuf = unique_dir(&out, &project_name);
     std::fs::create_dir_all(&project_dir).at(&project_dir)?;
-    for folder in ["BDMV", "CERTIFICATE"] {
+    // Blu-ray players and the image expect the empty CERTIFICATE skeleton; AVCHD on DVD has none.
+    let folders: &[&str] = if avchd { &["BDMV"] } else { &["BDMV", "CERTIFICATE"] };
+    for folder in folders {
         let from = bd_root.join(folder);
         if from.is_dir() {
             std::fs::rename(&from, project_dir.join(folder)).at(&from)?;
         }
     }
-    // Players and the image expect the empty CERTIFICATE skeleton.
-    let backup = project_dir.join("CERTIFICATE").join("BACKUP");
-    std::fs::create_dir_all(&backup).at(&backup)?;
+    if !avchd {
+        let backup = project_dir.join("CERTIFICATE").join("BACKUP");
+        std::fs::create_dir_all(&backup).at(&backup)?;
+    }
     let bdmv = project_dir.join("BDMV");
     log(Event::Step(tf!(opts.ui_lang, "bd_folder", path = bdmv.display())));
 

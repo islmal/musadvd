@@ -163,6 +163,11 @@ fn two_clips_make_two_playlists_with_their_own_rates() {
     assert_eq!(index, musadvd::hdmv::index_bdmv(0, 1, &[2, 3]));
     let mobj = std::fs::read(bd.join("BDMV/MovieObject.bdmv")).unwrap();
     assert_eq!(mobj, musadvd::hdmv::movie_object_bdmv(&musadvd::bd_menu::plan_without_menus(2).objects));
+    // Blu-ray keeps the 0200 versions and its BD-J folders (the AVCHD changes do not touch it).
+    for (f, magic) in [("BDMV/PLAYLIST/00000.mpls", b"MPLS0200"), ("BDMV/CLIPINF/00000.clpi", b"HDMV0200")] {
+        assert_eq!(&std::fs::read(bd.join(f)).unwrap()[..8], magic, "{f}");
+    }
+    assert!(bd.join("BDMV/BDJO").is_dir() && bd.join("CERTIFICATE/BACKUP").is_dir());
 
     // Clip A keeps its 25 fps (1080i-flagged), clip B its 24 fps: H.264 High@4.1 1080 in both.
     let (ma, mb) = (bd.join("BDMV/STREAM/00000.m2ts"), bd.join("BDMV/STREAM/00001.m2ts"));
@@ -441,6 +446,49 @@ fn avchd5_builds_a_dvd_sized_bdmv() {
     let plan = udf250::create_bd_image(&report.project_dir, &iso, "AVCHD", &AtomicBool::new(false), |_| {}).unwrap();
     assert_eq!(std::fs::metadata(&iso).unwrap().len(), plan.size_bytes());
     assert_eq!(&std::fs::read(&iso).unwrap()[17 * 2048 + 1..17 * 2048 + 6], b"NSR03");
+
+    // AVCHD as tsMuxeR writes it: BDMV at the root with long names, version "0100" everywhere,
+    // the IDEX extension in index.bdmv, AUXDATA, no BD-J/META folders and no CERTIFICATE.
+    let bdmv = report.project_dir.join("BDMV");
+    assert_eq!(report.video_ts, bdmv);
+    let read = |p: &str| std::fs::read(bdmv.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    for (file, magic) in [
+        ("index.bdmv", b"INDX0100"),
+        ("MovieObject.bdmv", b"MOBJ0100"),
+        ("PLAYLIST/00000.mpls", b"MPLS0100"),
+        ("CLIPINF/00000.clpi", b"HDMV0100"),
+        ("BACKUP/index.bdmv", b"INDX0100"),
+        ("BACKUP/MovieObject.bdmv", b"MOBJ0100"),
+        ("BACKUP/PLAYLIST/00000.mpls", b"MPLS0100"),
+        ("BACKUP/CLIPINF/00000.clpi", b"HDMV0100"),
+    ] {
+        assert_eq!(&read(file)[..8], magic, "{file}");
+    }
+    let index = read("index.bdmv");
+    let ext = u32::from_be_bytes(index[12..16].try_into().unwrap()) as usize;
+    assert!(ext > 0 && ext.is_multiple_of(4) && &index[ext + 0x18..ext + 0x1c] == b"IDEX", "extension data at {ext}");
+    assert_eq!(index.len(), ext + musadvd::hdmv::AVCHD_INDEX_EXTENSION.len());
+    assert!(bdmv.join("AUXDATA").is_dir() && bdmv.join("STREAM/00000.m2ts").is_file());
+    assert!(!report.project_dir.join("CERTIFICATE").exists() && !report.project_dir.join("AVCHD").exists());
+    for d in ["BDJO", "JAR", "META"] {
+        assert!(!bdmv.join(d).exists(), "{d}");
+    }
+    // libbluray (a real BDMV/AVCHD reader) opens the 0100 navigation and finds the streams. ffmpeg's
+    // bluray protocol skips playlists under 3 minutes, so this needs a longer clip.
+    let protocols = Command::new(&tools.ffmpeg).args(["-hide_banner", "-protocols"]).output().unwrap();
+    if String::from_utf8_lossy(&protocols.stdout).lines().any(|l| l.trim() == "bluray") {
+        let long = dir.join("long.mkv");
+        ffmpeg(&tools, &["-f", "lavfi", "-i", "color=c=0x2060a0:s=1280x720:r=25:d=200", "-f", "lavfi", "-i", "sine=f=220:d=200", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "ac3", long.to_str().unwrap()]);
+        let long_opts = BuildOptions { inputs: vec![long], output: dir.join("out_long"), resolution: Resolution::Hd720, selections: vec![], ..opts };
+        let long_report = build(&rt, &long_opts).unwrap_or_else(|e| panic!("build failed: {e}"));
+        assert!(long_report.size_mb <= long_opts.disc.target_mb() as f64);
+        let url = format!("bluray:{}", long_report.project_dir.to_string_lossy().replace('\\', "/"));
+        let out = Command::new(&tools.ffprobe).args(["-v", "error", "-playlist", "0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", &url]).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && text.contains("h264") && text.contains("ac3"), "libbluray cannot read the AVCHD folder: {text} {}", String::from_utf8_lossy(&out.stderr));
+    } else {
+        eprintln!("bluray protocol not in this ffmpeg build: libbluray check skipped");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
