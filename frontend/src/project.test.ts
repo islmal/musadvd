@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fingerprint, layoutFiles, parseProject, PROJECT_FORMAT, PROJECT_VERSION } from "./project";
+import { fingerprint, layoutFiles, parseProject, withProjectSettings, PROJECT_FORMAT, PROJECT_VERSION } from "./project";
 import type { CustomLayout } from "./layout";
 
 const base = { format: PROJECT_FORMAT, version: PROJECT_VERSION };
@@ -92,6 +92,22 @@ describe("parseProject", () => {
   it("round-trips through JSON", () => {
     const p = parseProject({ ...base, disc: "bd25", twoPass: true, titles: [{ path: "a.mkv", label: "A" }] });
     expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p);
+  });
+});
+
+describe("withProjectSettings", () => {
+  const current = { audio_bitrate_kbps: 0, loudnorm: false, ui_language: "en", tv_standard: "PAL" };
+  const keys = ["audio_bitrate_kbps", "loudnorm", "tv_standard"];
+  it("applies saved project keys of the right type only", () => {
+    const out = withProjectSettings(current, { audio_bitrate_kbps: 256, loudnorm: "yes", ui_language: "de", tv_standard: "NTSC" }, keys);
+    expect(out).toEqual({ audio_bitrate_kbps: 256, loudnorm: false, ui_language: "en", tv_standard: "NTSC" });
+  });
+  it("keeps everything for files without settings", () => {
+    expect(withProjectSettings(current, undefined, keys)).toEqual(current);
+  });
+  it("round-trips through parseProject", () => {
+    const p = parseProject({ format: PROJECT_FORMAT, version: PROJECT_VERSION, titles: [], settings: { audio_bitrate_kbps: 384, bad: { x: 1 } } });
+    expect(p.settings).toEqual({ audio_bitrate_kbps: 384 });
   });
 });
 

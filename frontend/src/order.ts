@@ -39,6 +39,44 @@ export function mergeBlock<T extends { id: number; mergeWithPrevious: boolean }>
   });
 }
 
+/** One subtitle in disc order: embedded (`s`) or external file (`x`). */
+export type MixedSub<E, X> = { kind: "s"; item: E } | { kind: "x"; item: X };
+
+/**
+ * Disc order of a title's subtitles: walks `kinds` ("s"/"x" per track), taking the next embedded or
+ * external item; items the pattern does not cover follow (embedded first). Each list keeps its own order.
+ */
+export function mixSubs<E, X>(emb: E[], ext: X[], kinds: string | undefined): MixedSub<E, X>[] {
+  const out: MixedSub<E, X>[] = [];
+  let s = 0;
+  let x = 0;
+  for (const k of kinds ?? "") {
+    if (k === "s" && s < emb.length) out.push({ kind: "s", item: emb[s++] });
+    else if (k === "x" && x < ext.length) out.push({ kind: "x", item: ext[x++] });
+  }
+  for (; s < emb.length; s++) out.push({ kind: "s", item: emb[s] });
+  for (; x < ext.length; x++) out.push({ kind: "x", item: ext[x] });
+  return out;
+}
+
+/** Inverse of {@link mixSubs}: both lists in their relative disc order plus the kind pattern. */
+export function unmixSubs<E, X>(mixed: MixedSub<E, X>[]): { emb: E[]; ext: X[]; kinds: string } {
+  const emb: E[] = [];
+  const ext: X[] = [];
+  for (const m of mixed) {
+    if (m.kind === "s") emb.push(m.item);
+    else ext.push(m.item);
+  }
+  return { emb, ext, kinds: mixed.map((m) => m.kind).join("") };
+}
+
+/** `kinds` without the `n`-th external entry (the file at external index `n` was removed). */
+export function dropExternalKind(kinds: string | undefined, n: number): string | undefined {
+  if (kinds === undefined) return undefined;
+  let seen = -1;
+  return [...kinds].filter((k) => k !== "x" || ++seen !== n).join("");
+}
+
 /**
  * Stable reorder: items whose key is in `prefs` come first, in `prefs` order; the others keep their
  * relative order behind them. `keyOf` gets the item and its current position (language or slot).

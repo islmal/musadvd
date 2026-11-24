@@ -531,6 +531,20 @@ pub struct StreamSelection {
     /// Standalone external subtitle files attached to this title.
     #[serde(default)]
     pub external_subtitles: Vec<ExternalSubtitle>,
+    /// Disc order of all subtitles, embedded and external mixed: stream indices and
+    /// `EXTERNAL_SUB_SOURCE_BASE + i` (`i` into `external_subtitles`). Unlisted tracks follow.
+    #[serde(default)]
+    pub subtitle_order: Option<Vec<u32>>,
+}
+
+/// Disc order of a title's subtitles as positions into `natural` (embedded stream indices, then
+/// `EXTERNAL_SUB_SOURCE_BASE + i`), sorted by `wanted`; unlisted tracks keep their order at the end.
+pub(crate) fn subtitle_order(natural: &[u32], wanted: Option<&[u32]>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..natural.len()).collect();
+    if let Some(w) = wanted {
+        order.sort_by_key(|&m| w.iter().position(|&s| s == natural[m]).unwrap_or(usize::MAX));
+    }
+    order
 }
 
 /// Index ranges of the menu entries: an input plus all directly following inputs that are merged
@@ -873,8 +887,10 @@ struct TitlePlan {
     audio: Vec<usize>,
     /// Indices into `info.subtitles` (text subtitles only).
     subtitles: Vec<usize>,
-    /// Standalone external subtitle files muxed after `subtitles`.
+    /// Standalone external subtitle files, numbered after `subtitles`.
     external_subtitles: Vec<ExternalSubtitle>,
+    /// Disc track `k` plays natural subtitle `sub_order[k]` (`subtitles`, then `external_subtitles`).
+    sub_order: Vec<usize>,
     /// Chapter starts in seconds, first is 0.
     chapters: Vec<f64>,
     chapter_titles: Vec<Option<String>>,
@@ -941,19 +957,33 @@ impl TitlePlan {
         let emb = self.subtitles.iter().map(|&i| all[i].clone());
         let ext_start = self.info.subtitles.len();
         let ext = (0..self.external_subtitles.len()).map(|i| all[ext_start + i].clone());
-        emb.chain(ext).collect()
+        self.in_disc_order(emb.chain(ext).collect())
     }
 
     fn subtitle_sources(&self) -> Vec<u32> {
         let emb = self.subtitles.iter().map(|&s| self.info.subtitles[s].index);
         let ext = (0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32);
-        emb.chain(ext).collect()
+        self.in_disc_order(emb.chain(ext).collect())
     }
 
     fn subtitle_langs_raw(&self) -> impl Iterator<Item = Option<&str>> {
         let emb = self.subtitles.iter().map(|&s| self.info.subtitles[s].language.as_deref());
         let ext = self.external_subtitles.iter().map(|e| e.language.as_deref());
-        emb.chain(ext)
+        self.in_disc_order(emb.chain(ext).collect()).into_iter()
+    }
+
+    /// Reorders a natural-order subtitle list (embedded, then external) into disc order.
+    fn in_disc_order<T: Clone>(&self, natural: Vec<T>) -> Vec<T> {
+        self.sub_order.iter().map(|&m| natural[m].clone()).collect()
+    }
+
+    /// Disc subtitle stream id of natural subtitle `m` (for the encoder).
+    fn sub_stream_ids(&self) -> Vec<u32> {
+        let mut ids = vec![0; self.sub_order.len()];
+        for (k, &m) in self.sub_order.iter().enumerate() {
+            ids[m] = k as u32;
+        }
+        ids
     }
 
     fn total_subtitles(&self) -> usize {
@@ -1211,7 +1241,7 @@ async fn encode_title(
     // Frames done count over both runs of a 2-pass encode; never let them go backwards (the
     // closing report of a run carries no frame number).
     let mut frames_seen = 0.0f64;
-    let logs = encoder::run_encode_with_external(tools, &job, &t.external_subtitles, |phase, p| {
+    let logs = encoder::run_encode_with_external(tools, &job, &t.external_subtitles, &t.sub_stream_ids(), |phase, p| {
         let (fraction, base) = match phase {
             EncodePhase::Single => (0.98 * p.fraction, 0.0),
             EncodePhase::Analysis => (0.49 * p.fraction, 0.0),
@@ -1446,6 +1476,12 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             warn(log, note);
         }
         apply_selection(&mut info, &sel, &label)?;
+        let natural: Vec<u32> = subtitles
+            .iter()
+            .map(|&s| info.subtitles[s].index)
+            .chain((0..external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32))
+            .collect();
+        let sub_order = subtitle_order(&natural, sel.subtitle_order.as_deref());
 
         let chapters = match &sel.chapters {
             Some(starts) => custom_chapters(starts, info.duration_secs),
@@ -1464,6 +1500,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             audio,
             subtitles,
             external_subtitles,
+            sub_order,
             chapters: chapters.iter().map(|c| c.0).collect(),
             chapter_titles: chapters.into_iter().map(|c| c.1).collect(),
             aspect,
@@ -2859,6 +2896,7 @@ mod tests {
             audio: vec![0, 1],
             subtitles: vec![],
             external_subtitles: vec![],
+            sub_order: vec![],
             chapters: vec![0.0],
             chapter_titles: vec![None],
             aspect: Aspect::Wide,
@@ -2935,12 +2973,13 @@ mod tests {
             width: None,
             height: None,
         }];
-        let plan = TitlePlan {
+        let mut plan = TitlePlan {
             info: src,
             label: "Film".into(),
             audio: vec![],
             subtitles: vec![0],
             external_subtitles: ext,
+            sub_order: vec![0, 1],
             chapters: vec![0.0],
             chapter_titles: vec![None],
             aspect: Aspect::Wide,
@@ -2967,6 +3006,18 @@ mod tests {
         // Merged group shape counts embedded + external subtitles.
         assert!(check_group_shapes(&[("A", 1, plan.total_subtitles()), ("B", 1, 2)]).is_ok());
         assert!(check_group_shapes(&[("A", 1, plan.total_subtitles()), ("B", 1, 1)]).is_err());
+
+        // A mixed order puts the external track first on the disc (labels, menu sources, IFO
+        // languages and spumux stream ids all follow it).
+        plan.sub_order = subtitle_order(&[2, EXTERNAL_SUB_SOURCE_BASE], Some(&[EXTERNAL_SUB_SOURCE_BASE, 2]));
+        assert_eq!(plan.sub_order, vec![1, 0]);
+        assert_eq!(plan.subtitle_sources(), vec![EXTERNAL_SUB_SOURCE_BASE, 2]);
+        assert_eq!(plan.subtitle_labels(), vec!["English - SDH (forced)", "German"]);
+        assert_eq!(plan.subtitle_langs_raw().collect::<Vec<_>>(), vec![Some("eng"), Some("ger")]);
+        assert_eq!(plan.sub_stream_ids(), vec![1, 0]);
+        // Unlisted tracks keep their natural order after the listed ones.
+        assert_eq!(subtitle_order(&[4, 5, 6], Some(&[6])), vec![2, 0, 1]);
+        assert_eq!(subtitle_order(&[4, 5], None), vec![0, 1]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

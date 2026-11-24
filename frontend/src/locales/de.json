@@ -1610,5 +1610,8 @@
  "landing.studioDesc": "Discs brennen, kopieren und prüfen",
  "landing.recent": "Zuletzt verwendete Projekte",
  "landing.empty": "Noch keine zuletzt verwendeten Projekte.",
- "landing.forget": "Aus der Liste entfernen"
+ "landing.forget": "Aus der Liste entfernen",
+ "app.tab.project": "Projekteinstellungen",
+ "settings.projectSettingsHint": "Wird mit dem Projekt gespeichert. Änderungen wirken sofort: Größenschätzung und Qualitätsanzeigen passen sich direkt an.",
+ "settings.projectSettingsMoved": "Ausgabe-, Kodierungs-, Video-, Audio-, Untertitel-, Menü- und Kapiteloptionen stehen im Hauptfenster unter „Projekteinstellungen“ und werden mit jedem Projekt gespeichert."
 }

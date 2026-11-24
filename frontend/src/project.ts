@@ -33,6 +33,8 @@ export interface ProjectTitle {
   /** Display (= disc) order of all audio / embedded subtitle stream indices; omitted = source order. */
   audioOrder?: number[];
   subOrder?: number[];
+  /** Disc order of embedded ("s") and external ("x") subtitles; omitted = embedded first. */
+  subKinds?: string;
   label: string;
   chapters: number[];
   chapterNames?: (string | null)[];
@@ -83,6 +85,8 @@ export interface ProjectFile {
   menuTitleAuto: boolean;
   output: string;
   titles: ProjectTitle[];
+  /** Project settings (`PROJECT_SETTING_KEYS` of the app settings); absent in older files. */
+  settings?: Record<string, string | number | boolean>;
 }
 
 // --- validation -------------------------------------------------------------------------------
@@ -178,6 +182,7 @@ function titleOf(v: unknown): ProjectTitle | null {
     subtitleStyle: styleOf(v.subtitleStyle),
     ...(afterPlayback !== "default" ? { afterPlayback } : {}),
     ...(externalSubtitles ? { externalSubtitles } : {}),
+    ...(typeof v.subKinds === "string" && /^[sx]*$/.test(v.subKinds) ? { subKinds: v.subKinds } : {}),
   };
 }
 
@@ -215,7 +220,27 @@ export function parseProject(raw: unknown): ProjectFile {
     menuTitleAuto: raw.menuTitleAuto !== false,
     output: str(raw.output),
     titles: (Array.isArray(raw.titles) ? raw.titles : []).map(titleOf).filter((t): t is ProjectTitle => t !== null),
+    // Plain values only; which keys apply and their types are checked against the live settings on load.
+    ...(isObj(raw.settings)
+      ? {
+          settings: Object.fromEntries(
+            Object.entries(raw.settings).filter(([, v]) => typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))),
+          ) as Record<string, string | number | boolean>,
+        }
+      : {}),
   };
+}
+
+/**
+ * `current` with the project's saved settings applied: only `keys`, and only values of the same
+ * type as the current one (the backend sanitises the rest on save).
+ */
+export function withProjectSettings<S extends object>(current: S, saved: Record<string, unknown> | undefined, keys: readonly string[]): S {
+  const out = { ...current } as Record<string, unknown>;
+  for (const k of keys) {
+    if (saved && k in saved && typeof saved[k] === typeof out[k]) out[k] = saved[k];
+  }
+  return out as S;
 }
 
 /** Files a layout reads from disk (menu sound, background image/video, external video elements). */

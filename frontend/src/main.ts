@@ -1,6 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getVersion } from "@tauri-apps/api/app";
-import { openSettings } from "./settings";
+import { openSettings, renderProjectSettings, PROJECT_SETTING_KEYS } from "./settings";
 import { openBurner } from "./burn";
 import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
@@ -8,10 +8,10 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
 import { AFTER_PLAYBACK, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, refreshTrackButtons, syncLayoutWithTitles, titlesKey, type AfterPlayback, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
+import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, withProjectSettings, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
-import { mergeBlock, moveItem, reorderByLanguages, shapeMismatch, sortByOrder } from "./order";
+import { dropExternalKind, mergeBlock, mixSubs, moveItem, reorderByLanguages, shapeMismatch, sortByOrder, unmixSubs } from "./order";
 import { ac3EncodeKbps, autoMenuAspect, fpsMatches, tvMismatch } from "./discRules";
 import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
@@ -94,6 +94,8 @@ interface Title {
   chapterNames: (string | null)[];
   /** Standalone external subtitle files attached to this title. */
   externalSubtitles: ExternalSubtitleEntry[];
+  /** Disc order of embedded ("s") and external ("x") subtitles, see `mixSubs` (unset = embedded first). */
+  subKinds?: string;
   /** Used section in seconds of the source (null = file start / end). */
   trimStart: number | null;
   trimEnd: number | null;
@@ -124,7 +126,7 @@ type BdRes = "1080" | "720";
 /** Frame rates a Blu-ray title may have per frame size (engine `BdRate::allowed`). */
 const BD_RATES: Record<BdRes, string[]> = { "1080": ["23.976", "24", "25i", "29.97i"], "720": ["23.976", "24", "50", "59.94"] };
 
-type Tab = "audio" | "subtitles" | "chapters" | "edit" | "video" | "template";
+type Tab = "audio" | "subtitles" | "chapters" | "edit" | "video" | "template" | "project";
 
 type DiscChoice = "dvd5" | "dvd9" | "bd25" | "bd50" | "avchd5" | "avchd9" | "custom";
 
@@ -364,6 +366,24 @@ function effChapters(t: Title): number[] {
 const enabledEmbeddedSubs = (t: Title) => t.meta.subtitles.filter((s) => t.subs.has(s.index) && s.supported);
 const enabledExternalSubs = (t: Title) => t.externalSubtitles.filter((e) => e.enabled && e.supported);
 const totalEnabledSubs = (t: Title) => enabledEmbeddedSubs(t).length + enabledExternalSubs(t).length;
+/** All subtitles of a title in disc order (embedded and external mixed). */
+const discSubs = (t: Title) => mixSubs(t.meta.subtitles, t.externalSubtitles, t.subKinds);
+/** Enabled subtitles in disc order with their engine source id (stream index, or base + position among enabled externals). */
+function enabledDiscSubs(t: Title) {
+  const ext = enabledExternalSubs(t);
+  return discSubs(t).flatMap((m) =>
+    m.kind === "s"
+      ? t.subs.has(m.item.index) && m.item.supported ? [{ source: m.item.index, label: m.item.displayLabel }] : []
+      : ext.includes(m.item) ? [{ source: EXTERNAL_SUB_SOURCE_BASE + ext.indexOf(m.item), label: externalSubLabel(t, m.item) }] : [],
+  );
+}
+/** Writes a new mixed subtitle order back (new meta object: split siblings share `meta`, see moveTrack). */
+function setDiscSubs(t: Title, mixed: ReturnType<typeof discSubs>) {
+  const { emb, ext, kinds } = unmixSubs(mixed);
+  t.meta = { ...t.meta, subtitles: emb };
+  t.externalSubtitles = ext;
+  t.subKinds = kinds;
+}
 
 const LANG_MAP: Record<string, string> = {};
 for (const [b, term, one] of [
@@ -806,6 +826,7 @@ async function splitByChapters(t: Title) {
       chapters: [0],
       chapterNames: [customName],
       externalSubtitles: t.externalSubtitles.map((e) => ({ ...e })),
+      subKinds: t.subKinds,
       trimStart: s.start > 0.05 ? s.start : null,
       trimEnd: s.end < dur - 0.05 ? s.end : null,
       crop: t.crop ? { ...t.crop } : null,
@@ -1073,9 +1094,10 @@ function openReorderDialog(ids: Set<number>) {
           t.meta = {
             ...t.meta,
             audio: reorderByLanguages(t.meta.audio, byLang ? (a) => lang(a.language) : (_a, i) => String(i), lists.audio),
-            subtitles: reorderByLanguages(t.meta.subtitles, byLang ? (x) => lang(x.language) : (_x, i) => String(i), lists.subs),
+            subtitles: byLang ? t.meta.subtitles : reorderByLanguages(t.meta.subtitles, (_x, i) => String(i), lists.subs),
           };
-          if (byLang) t.externalSubtitles = reorderByLanguages(t.externalSubtitles, (e) => lang(e.language), lists.subs);
+          // By language, external files take part: a Japanese .srt can move above embedded English.
+          if (byLang) setDiscSubs(t, reorderByLanguages(discSubs(t), (m) => lang(m.item.language), lists.subs));
         }
         afterTrackChange();
         renderAll();
@@ -1604,11 +1626,18 @@ function renderTabs() {
   });
   const body = $("tab-body");
   void disposePlayer();
+  const scroll = body.scrollTop;
   body.replaceChildren();
   const t = selectedTitle();
 
   if (state.tab === "template") {
     body.append(renderTemplateTab());
+    return;
+  }
+  if (state.tab === "project") {
+    if (state.settings) body.append(renderProjectSettings(state.settings, settingsApplied));
+    // Every change re-renders this tab: stay where the user was.
+    body.scrollTop = scroll;
     return;
   }
   if (!t) {
@@ -1880,11 +1909,25 @@ function renderSubtitleTab(t: Title) {
     h("span", { class: "hint" }, tr("main.subDropHint")),
   );
 
-  const embeddedRows = t.meta.subtitles.map((s, pos) =>
+  // One list in disc order: embedded and external rows share the grip group and can pass each other.
+  const mixed = discSubs(t);
+  const grip = (item: unknown) =>
+    mixed.length > 1
+      ? trackGrip("subs", mixed.findIndex((m) => m.item === item), (from, to) => {
+          const next = [...mixed];
+          moveItem(next, from, to);
+          setDiscSubs(t, next);
+          afterTrackChange();
+          renderAll();
+          touchAutosave();
+        })
+      : h("span");
+
+  const embeddedRows = t.meta.subtitles.map((s) =>
     h(
       "label",
       { class: `track sortable${s.supported ? "" : " disabled"}`, "data-group": "subs" },
-      t.meta.subtitles.length > 1 ? trackGrip("subs", pos, (from, to) => moveTrack(t, "subtitles", from, to)) : h("span"),
+      grip(s),
       h(
         "span",
         { class: "switch" },
@@ -1930,15 +1973,8 @@ function renderSubtitleTab(t: Title) {
       `${ext.codec} · ${fileBaseName(ext.path)}${ext.supported ? "" : tr("main.nichtUnterstuetzt")}`;
     return h(
       "div",
-      { class: `track track-external sortable${ext.supported ? "" : " disabled"}`, "data-group": "ext" },
-      t.externalSubtitles.length > 1
-        ? trackGrip("ext", idx, (from, to) => {
-            moveItem(t.externalSubtitles, from, to);
-            afterTrackChange();
-            renderAll();
-            touchAutosave();
-          })
-        : h("span"),
+      { class: `track track-external sortable${ext.supported ? "" : " disabled"}`, "data-group": "subs" },
+      grip(ext),
       h(
         "label",
         { class: "switch" },
@@ -2022,6 +2058,7 @@ function renderSubtitleTab(t: Title) {
             title: tr("main.extSubRemove"),
             onclick: () => {
               t.externalSubtitles.splice(idx, 1);
+              t.subKinds = dropExternalKind(t.subKinds, idx);
               afterTrackChange();
               renderAll();
               scheduleCalc();
@@ -2039,8 +2076,7 @@ function renderSubtitleTab(t: Title) {
     dropBox,
     hasAnySub ? h("p", { class: "hint" }, tr("main.textUntertitelSrtAss")) : h("div", { class: "empty" }, tr("main.extSubNoTracks")),
     hasTextSub ? subtitleStyleControls(t) : null,
-    ...embeddedRows,
-    ...externalRows,
+    ...mixed.map((m) => (m.kind === "s" ? embeddedRows[t.meta.subtitles.indexOf(m.item)] : externalRows[t.externalSubtitles.indexOf(m.item)])),
   );
 }
 
@@ -2336,13 +2372,7 @@ function editorTitles(): EditorTitle[] {
       audioTracks: t.meta.audio
         .filter((a) => t.audio.has(a.index))
         .map((a) => ({ source: a.index, label: audioLabel(t, a) })),
-      subtitleTracks: [
-        ...enabledEmbeddedSubs(t).map((s) => ({ source: s.index, label: s.displayLabel })),
-        ...enabledExternalSubs(t).map((e, idx) => ({
-          source: EXTERNAL_SUB_SOURCE_BASE + idx,
-          label: externalSubLabel(t, e),
-        })),
-      ],
+      subtitleTracks: enabledDiscSubs(t),
     };
   });
 }
@@ -2790,6 +2820,34 @@ function syncMenuTitle() {
   if (input && document.activeElement !== input) input.value = state.menuTitle;
 }
 
+async function switchLanguage(code: string) {
+  await loadLanguage(code);
+  applyStatic();
+  renderAll();
+  ($("ui-lang") as HTMLSelectElement).value = code;
+  void relabelTitles();
+}
+
+/** Stored settings changed (Settings dialog or Project settings tab): everything that depends on them follows. */
+async function settingsApplied(saved: AppSettings) {
+  const previousTemplateDir = state.settings?.template_dir;
+  const prevTv = state.settings?.tv_standard;
+  const langChanged = saved.ui_language !== state.settings?.ui_language;
+  const relabel = langChanged || saved.track_label_mode !== state.settings?.track_label_mode;
+  state.settings = saved;
+  if (langChanged) await switchLanguage(saved.ui_language);
+  else if (relabel) void relabelTitles();
+  if (saved.tv_standard !== prevTv && !state.customLayoutEdited) syncMenuAfterChange(null);
+  if (saved.template_dir !== previousTemplateDir) await refreshTemplates();
+  syncControls();
+  updateCustomDiscLabel();
+  reapplyAspect();
+  renderAll(); // DVD copy badges, quality tips and audio kbps follow tv/resolution/dvd_video/audio bitrate
+  void refreshLayoutCheck();
+  scheduleCalc();
+  touchAutosave();
+}
+
 function renderAll() {
   syncMenuTitle();
   renderTvBanner();
@@ -3019,6 +3077,7 @@ async function convert() {
           title: e.title,
           forced: e.forced,
         })),
+        subtitleOrder: enabledDiscSubs(t).map((s) => s.source),
       })),
       disc: currentDisc(),
       template: state.menuMode === "template" ? state.template : "",
@@ -3107,7 +3166,9 @@ function snapshotProject(): ProjectFile {
         forced: e.forced,
         enabled: e.enabled,
       })),
+      ...(t.subKinds ? { subKinds: t.subKinds } : {}),
     })),
+    ...(state.settings ? { settings: Object.fromEntries(PROJECT_SETTING_KEYS.map((k) => [k, state.settings![k]])) } : {}),
   };
 }
 
@@ -3222,6 +3283,8 @@ async function applyProject(data: ProjectFile, path: string | null) {
         try {
           const title = titleFromProject(p, await probeFile(p.path), afterSkipped);
           title.externalSubtitles = await restoreExternalSubtitles(p.externalSubtitles, gone, lostSubs);
+          // A lost file shifts the external slots: fall back to embedded first.
+          if (title.externalSubtitles.length !== (p.externalSubtitles?.length ?? 0)) title.subKinds = undefined;
           loaded.push(title);
           afterSkipped = false;
         } catch (e) {
@@ -3272,12 +3335,14 @@ async function applyProject(data: ProjectFile, path: string | null) {
     let note = "";
     const tvChange = data.tvStandard && state.settings && data.tvStandard !== state.settings.tv_standard ? data.tvStandard : null;
     const dvdChange = data.dvdVideo && state.settings && data.dvdVideo !== state.settings.dvd_video ? data.dvdVideo : null;
-    if (state.settings && (tvChange || dvdChange)) {
+    const projectSettings = state.settings && withProjectSettings(state.settings, data.settings, PROJECT_SETTING_KEYS);
+    const settingsChange = projectSettings && PROJECT_SETTING_KEYS.some((k) => projectSettings[k] !== state.settings![k]);
+    if (state.settings && (tvChange || dvdChange || settingsChange)) {
       try {
         state.settings = await storeSettings({
-          ...state.settings,
-          tv_standard: tvChange ?? state.settings.tv_standard,
-          dvd_video: dvdChange ?? state.settings.dvd_video,
+          ...projectSettings!,
+          tv_standard: tvChange ?? projectSettings!.tv_standard,
+          dvd_video: dvdChange ?? projectSettings!.dvd_video,
         });
         if (tvChange) note = " " + tr("project.tvApplied", { tv: tvChange });
         if (dvdChange) {
@@ -3509,13 +3574,6 @@ async function init() {
 
   // Header language picker: same setting as Settings → Language, saved right away.
   const langPicker = $("ui-lang") as HTMLSelectElement;
-  const switchLanguage = async (code: string) => {
-    await loadLanguage(code);
-    applyStatic();
-    renderAll();
-    langPicker.value = code;
-    void relabelTitles();
-  };
   void availableLanguages().then((list) => {
     langPicker.replaceChildren(...list.map((l) => new Option(l.name, l.code)));
     langPicker.value = state.settings?.ui_language ?? "en";
@@ -3539,24 +3597,8 @@ async function init() {
     if (state.converting || !state.settings) return;
     const [info, languages] = await Promise.all([settingsInfo(), availableLanguages()]);
     openSettings(state.settings, info, languages, async (saved) => {
-      const previousTemplateDir = state.settings?.template_dir;
-      const prevTv = state.settings?.tv_standard;
-      const langChanged = saved.ui_language !== state.settings?.ui_language;
-      const relabel = langChanged || saved.track_label_mode !== state.settings?.track_label_mode;
-      state.settings = saved;
-      if (langChanged) await switchLanguage(saved.ui_language);
-      else if (relabel) void relabelTitles();
-      if (saved.tv_standard !== prevTv && !state.customLayoutEdited) syncMenuAfterChange(null);
-      if (saved.template_dir !== previousTemplateDir) {
-        await refreshTemplates();
-        renderAll();
-      }
-      updateCustomDiscLabel();
-      reapplyAspect();
-      renderAll(); // DVD copy badges, quality tips and audio kbps follow tv/resolution/dvd_video/audio bitrate
+      await settingsApplied(saved);
       status(tr("main.einstellungenGespeichert"));
-      void refreshLayoutCheck();
-      scheduleCalc();
     });
   });
 

@@ -1079,20 +1079,23 @@ pub async fn run_encode(
     job: &EncodeJob<'_>,
     progress: impl FnMut(EncodePhase, FfmpegProgress),
 ) -> Result<Vec<String>, ToolError> {
-    run_encode_with_external(tools, job, &[], progress).await
+    run_encode_with_external(tools, job, &[], &[], progress).await
 }
 
-/// [`run_encode`] with additional standalone external subtitle files (`external_subtitles`), muxed
-/// immediately after `job.subtitles` in disc stream order.
+/// [`run_encode`] with additional standalone external subtitle files (`external_subtitles`),
+/// numbered after `job.subtitles`. Subtitle `n` of that list becomes disc stream
+/// `stream_ids[n]` (stream `n` when `stream_ids` is empty).
 pub async fn run_encode_with_external(
     tools: &Toolchain,
     job: &EncodeJob<'_>,
     external_subtitles: &[ExternalSubtitle],
+    stream_ids: &[u32],
     mut progress: impl FnMut(EncodePhase, FfmpegProgress),
 ) -> Result<Vec<String>, ToolError> {
     let duration = job.info.duration_secs;
     let io = |error| ToolError::Io { tool: "work folder".into(), error };
     let mut stages = Vec::new();
+    let id = |n: usize| stream_ids.get(n).copied().unwrap_or(n as u32);
     if let Some(args) = job.subtitle_args() {
         tools.ffmpeg(&args, duration, |_| {}).await?;
     }
@@ -1104,14 +1107,14 @@ pub async fn run_encode_with_external(
             bitmap_subtitle_xml(tools, job, n, sub).await?
         };
         std::fs::write(job.dir.join(&xml), text).map_err(io)?;
-        stages.push((xml, n as u32));
+        stages.push((xml, id(n)));
     }
     for (i, ext) in external_subtitles.iter().enumerate() {
         let n = job.subtitles.len() + i;
         let xml = job.subtitle_xml(n);
         let text = external_subtitle_xml(tools, job, n, ext).await?;
         std::fs::write(job.dir.join(&xml), text).map_err(io)?;
-        stages.push((xml, n as u32));
+        stages.push((xml, id(n)));
     }
     let cleanup = |job: &EncodeJob| {
         job.cleanup_passlogs().map_err(|error| ToolError::Io { tool: "2-pass log cleanup".into(), error })

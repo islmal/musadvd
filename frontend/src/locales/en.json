@@ -1610,5 +1610,8 @@
  "landing.studioDesc": "Burn, copy and verify discs",
  "landing.recent": "Recent projects",
  "landing.empty": "No recent projects yet.",
- "landing.forget": "Remove from list"
+ "landing.forget": "Remove from list",
+ "app.tab.project": "Project settings",
+ "settings.projectSettingsHint": "Saved with the project. Changes apply immediately: the size estimate and quality badges update as you go.",
+ "settings.projectSettingsMoved": "Output, encoding, video, audio, subtitle, menu and chapter options are in the main window under \"Project settings\" and are saved with each project."
 }

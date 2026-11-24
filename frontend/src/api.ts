@@ -234,6 +234,8 @@ export interface InputConfig {
   subtitleStyle?: SubtitleStyle;
   /** Standalone external subtitle files attached to this title. */
   externalSubtitles?: ExternalSubtitle[];
+  /** Disc order of all subtitles: stream indices and 10000 + position in `externalSubtitles`. */
+  subtitleOrder?: number[];
 }
 
 /** Mirrors `textsub::SubtitleStyle`; null/absent fields keep the default look. */

@@ -1239,6 +1239,9 @@ struct InputConfig {
     /// Standalone external subtitle files attached to this title.
     #[serde(default)]
     external_subtitles: Vec<ExternalSubtitle>,
+    /// Disc order of all subtitles, embedded and external mixed ([`StreamSelection::subtitle_order`]).
+    #[serde(default)]
+    subtitle_order: Option<Vec<u32>>,
 }
 
 #[derive(Deserialize)]
@@ -1325,6 +1328,7 @@ fn start_conversion(app: AppHandle, state: State<'_, AppState>, config: Conversi
                 saturation: i.saturation,
                 subtitle_style: i.subtitle_style.clone(),
                 external_subtitles: i.external_subtitles.clone(),
+                subtitle_order: i.subtitle_order.clone(),
             })
             .collect(),
         ..BuildOptions::default()

@@ -55,7 +55,8 @@ export function modal(
   buttons: ModalButton[] = [{ label: t("studio.ui.schliessen"), primary: true }],
   wide = false,
 ): () => void {
-  const overlay = el("div", { class: "overlay" });
+  // Own layer: a modal opened from a sheet (burn sheet, Burn Studio) must sit above it.
+  const overlay = el("div", { class: "overlay modal-overlay" });
   const close = () => overlay.remove();
   const footer = el("div", { class: "settings-footer" }, el("span", { class: "settings-path" }));
   for (const b of buttons) {

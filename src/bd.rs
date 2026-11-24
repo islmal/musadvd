@@ -191,8 +191,10 @@ struct BdTitle {
     audio: Vec<usize>,
     /// Indices into `info.subtitles` (text and PGS only).
     subs: Vec<usize>,
-    /// Standalone external subtitle files attached after `subs`.
+    /// Standalone external subtitle files, numbered after `subs`.
     external_subtitles: Vec<(ExternalSubtitle, SubKind)>,
+    /// Disc track `k` plays natural subtitle `sub_order[k]` (`subs`, then `external_subtitles`).
+    sub_order: Vec<usize>,
     chapters: Vec<f64>,
     stem: String,
     rate: BdRate,
@@ -222,31 +224,41 @@ impl BdTitle {
 
     /// The stream playing the role of disc subtitle track `k` (same kind as the track).
     fn sub_for(&self, layout: &Layout, k: usize) -> Option<TitleSub<'_>> {
-        if k < self.subs.len() {
-            let s = &self.info.subtitles[self.subs[k]];
+        let m = *self.sub_order.get(k)?;
+        if m < self.subs.len() {
+            let s = &self.info.subtitles[self.subs[m]];
             (sub_track(s).kind == layout.subs[k].kind).then_some(TitleSub::Embedded(s))
         } else {
             self.external_subtitles
-                .get(k - self.subs.len())
+                .get(m - self.subs.len())
                 .filter(|(_, kind)| *kind == layout.subs[k].kind)
                 .map(|(ext, kind)| TitleSub::External(ext, *kind))
         }
     }
 
     fn sub_tracks(&self) -> Vec<BdSubTrack> {
-        self.subs
-            .iter()
-            .map(|&s| sub_track(&self.info.subtitles[s]))
-            .chain(self.external_subtitles.iter().map(|(ext, kind)| BdSubTrack { kind: *kind, lang: ext.language.clone() }))
-            .collect()
+        self.in_disc_order(
+            self.subs
+                .iter()
+                .map(|&s| sub_track(&self.info.subtitles[s]))
+                .chain(self.external_subtitles.iter().map(|(ext, kind)| BdSubTrack { kind: *kind, lang: ext.language.clone() }))
+                .collect(),
+        )
     }
 
     fn subtitle_sources(&self) -> Vec<u32> {
-        self.subs
-            .iter()
-            .map(|&s| self.info.subtitles[s].index)
-            .chain((0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32))
-            .collect()
+        self.in_disc_order(
+            self.subs
+                .iter()
+                .map(|&s| self.info.subtitles[s].index)
+                .chain((0..self.external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32))
+                .collect(),
+        )
+    }
+
+    /// Reorders a natural-order subtitle list (embedded, then external) into disc order.
+    fn in_disc_order<T: Clone>(&self, natural: Vec<T>) -> Vec<T> {
+        self.sub_order.iter().map(|&m| natural[m].clone()).collect()
     }
 
     /// Output plan of every disc audio track (silent filler where this title has none).
@@ -278,7 +290,7 @@ impl BdTitle {
         let emb = self.subs.iter().map(|&i| all[i].clone());
         let ext_start = self.info.subtitles.len();
         let ext = (0..exts.len()).map(|i| all[ext_start + i].clone());
-        emb.chain(ext).collect()
+        self.in_disc_order(emb.chain(ext).collect())
     }
 }
 
@@ -761,6 +773,12 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             let kind = if probed.subtitle_kind() == SubtitleKind::Text { SubKind::Text } else { SubKind::Pgs };
             external_subtitles.push((ext, kind));
         }
+        let natural: Vec<u32> = subs
+            .iter()
+            .map(|&s| info.subtitles[s].index)
+            .chain((0..external_subtitles.len()).map(|i| EXTERNAL_SUB_SOURCE_BASE + i as u32))
+            .collect();
+        let sub_order = crate::dvd::subtitle_order(&natural, sel.subtitle_order.as_deref());
         let chapters = match &sel.chapters {
             Some(starts) => custom_chapters(starts, info.duration_secs),
             None => chapter_starts(&info, opts.chapters.interval_secs, opts.chapters.min_video_secs),
@@ -788,6 +806,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             audio,
             subs,
             external_subtitles,
+            sub_order,
             chapters: chapters.iter().map(|c| c.0).collect(),
             stem: format!("title_{:02}", i + 1),
             rate,
@@ -830,14 +849,9 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         &titles.iter().map(|t| t.sub_tracks()).collect::<Vec<_>>(),
     );
     for t in &titles {
-        let total = t.subs.len() + t.external_subtitles.len();
-        for k in 0..total.min(layout.subs.len()) {
+        let sources = t.subtitle_sources();
+        for (k, &idx) in sources.iter().enumerate().take(layout.subs.len()) {
             if t.sub_for(&layout, k).is_none() {
-                let idx = if k < t.subs.len() {
-                    t.info.subtitles[t.subs[k]].index
-                } else {
-                    EXTERNAL_SUB_SOURCE_BASE + (k - t.subs.len()) as u32
-                };
                 warn(log, tf!(opts.ui_lang, "bd_sub_kind_mismatch", label = t.label, index = idx, track = k + 1));
             }
         }
@@ -1305,7 +1319,7 @@ mod tests {
             audio_names: Default::default(),
         };
 
-        let title = BdTitle {
+        let mut title = BdTitle {
             info,
             label: "Film".into(),
             audio: vec![],
@@ -1314,6 +1328,7 @@ mod tests {
                 (ExternalSubtitle { path: srt, language: Some("eng".into()), title: None, forced: false }, SubKind::Text),
                 (ExternalSubtitle { path: sup.clone(), language: Some("ger".into()), title: None, forced: true }, SubKind::Pgs),
             ],
+            sub_order: vec![0, 1],
             chapters: vec![0.0],
             stem: "title_01".into(),
             rate: BdRate { fps: (25, 1), fake_interlaced: true },
@@ -1355,6 +1370,19 @@ mod tests {
         assert!(out_srt_sup.is_file());
         assert_eq!(&std::fs::read(&out_srt_sup).unwrap()[..2], b"PG");
         assert_eq!(std::fs::read(&out_pgs_sup).unwrap(), sup_bytes);
+
+        // A user order puts the second file first: the disc tracks and their .sup files follow it.
+        title.sub_order = vec![1, 0];
+        let tracks = title.sub_tracks();
+        assert_eq!(tracks[0], BdSubTrack { kind: SubKind::Pgs, lang: Some("ger".into()) });
+        assert_eq!(title.subtitle_sources(), vec![EXTERNAL_SUB_SOURCE_BASE + 1, EXTERNAL_SUB_SOURCE_BASE]);
+        assert_eq!(title.subtitle_labels(), vec!["German (forced)", "English"]);
+        let layout = harmonise(&[vec![]], &[tracks]);
+        std::fs::remove_file(&out_srt_sup).unwrap();
+        std::fs::remove_file(&out_pgs_sup).unwrap();
+        rt.block_on(prepare_bd_subtitles(&tools, &title, &layout, &dir)).unwrap();
+        assert_eq!(std::fs::read(&out_srt_sup).unwrap(), sup_bytes);
+        assert_eq!(&std::fs::read(&out_pgs_sup).unwrap()[..2], b"PG");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

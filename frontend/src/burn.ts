@@ -144,8 +144,13 @@ export async function openBurner(
     }),
   ];
 
+  /** Closes the open "Burn now?" confirmation; it must never outlive the sheet (it would still start a burn). */
+  let closeConfirm: (() => void) | null = null;
+
   function close() {
     if (burning) return;
+    closeConfirm?.();
+    closeConfirm = null;
     stopCountdown();
     window.clearInterval(poll);
     unlisten.forEach((u) => u());
@@ -245,7 +250,7 @@ export async function openBurner(
     const kind = confirmKind(media.media, media.needsErase && (autoErase || eraseConfirmed));
     if (kind === "none") return void burn();
     render();
-    modal(
+    closeConfirm = modal(
       t("burn.confirmTitle"),
       el("p", {}, t(kind === "erase" ? "burn.confirmErase" : "burn.confirmPermanent", { media: media.media.physical })) as HTMLElement,
       [{ label: t("burn.abbrechen") }, { label: t("burn.brennen"), primary: true, onClick: () => void burn() }],
@@ -253,7 +258,8 @@ export async function openBurner(
   }
 
   async function burn() {
-    if (burning || !media || media.problem || !driveId || !eraseOk()) return;
+    closeConfirm = null;
+    if (!root.isConnected || burning || !media || media.problem || !driveId || !eraseOk()) return;
     stopCountdown();
     countdownCancelled = true;
     window.clearInterval(poll);
@@ -399,7 +405,8 @@ export async function openBurner(
               render();
             },
           },
-          ...(media?.speeds ?? [{ value: "max" as WriteSpeed, label: t("burn.maximal") }]).map((s) => {
+          // Until the disc is read, show the stored preference (default Auto), not a made-up "Maximum".
+          ...(media?.speeds ?? [{ value: "max" as WriteSpeed, label: speedPref === "auto" ? t("burn.autoBest") : speedPref === "max" ? t("burn.maximal") : `${speedPref}x` }]).map((s) => {
             const isDefault = media && speedKey(s.value) === speedKey(media.defaultSpeed);
             const selected = speedKey(speed ?? media?.defaultSpeed ?? "max") === speedKey(s.value);
             return el("option", { value: speedKey(s.value), selected }, isDefault ? t("burn.recommended", { label: s.label }) : s.label);
