@@ -55,6 +55,19 @@ jobs:
         run: |
           '{"bundle":{"resources":{"../target/release/musadvd.exe":"musadvd.exe"}}}' | Set-Content -NoNewline -Encoding Ascii src-tauri/tauri.windows.ci.conf.json
 
+      # The rolling nightly holds only the current build: its files are named after the version, so
+      # a push without a version bump would collide with the last nightly (tauri-action never overwrites).
+      # The Linux job runs after this one, so clearing here covers both. Tagged releases are untouched.
+      - name: Clear old nightly files
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $names = gh release view nightly --json assets --jq '.assets[].name' 2>$null
+          foreach ($n in $names) { gh release delete-asset nightly $n --yes }
+          exit 0
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
