@@ -57,6 +57,26 @@ export function chapterOverflows(groups: number[][], max: number): { group: numb
   return out;
 }
 
+/**
+ * Where to start new titles so no merge group exceeds `max` chapters: per group, the member
+ * indices that become a title of their own (greedy, as late as possible). A single member over
+ * `max` cannot be fixed by splitting and is left alone.
+ */
+export function autoSplitPoints(groups: number[][], max: number): [group: number, member: number][] {
+  const out: [number, number][] = [];
+  groups.forEach((members, group) => {
+    let sum = 0;
+    members.forEach((n, i) => {
+      if (i > 0 && sum + n > max) {
+        out.push([group, i]);
+        sum = 0;
+      }
+      sum += n;
+    });
+  });
+  return out;
+}
+
 /** One subtitle in disc order: embedded (`s`) or external file (`x`). */
 export type MixedSub<E, X> = { kind: "s"; item: E } | { kind: "x"; item: X };
 

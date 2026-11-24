@@ -36,3 +36,24 @@ export function snapAc3Kbps(kbps: number, medium: "dvd" | "bd"): number {
 /** Mirror of `ac3_settings`: the AC-3 rate of an encoded track (0 = automatic: 448 for 5+ source channels, else 192). */
 export const ac3EncodeKbps = (channels: number, want: number, medium: "dvd" | "bd") =>
   want <= 0 ? (channels >= 5 ? 448 : 192) : snapAc3Kbps(want, medium);
+
+/**
+ * Locale key of the "does not fit" advice for `disc`: a bigger medium while there is one, else
+ * what is left on the largest disc (audio bitrate, smaller DVD frame size, a second disc).
+ */
+export function overflowHintKey(disc: string, dvdRes: string): string {
+  switch (disc) {
+    case "dvd5":
+      return "main.dvd9WaehlenOder";
+    case "bd25":
+      return "main.bd50WaehlenOder";
+    case "avchd5":
+      return "main.avchdDvd9Waehlen";
+    case "bd50":
+    case "avchd9":
+      return "main.videosKuerzenOderTonspuren";
+    default:
+      // DVD-9 or a custom size: no bigger DVD to suggest.
+      return dvdRes === "SIF" ? "main.overflowSifFull" : "main.overflowDvd9Full";
+  }
+}

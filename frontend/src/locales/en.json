@@ -1615,5 +1615,14 @@
  "settings.projectSettingsHint": "Saved with the project. Changes apply immediately: the size estimate and quality badges update as you go.",
  "settings.projectSettingsMoved": "Output, encoding, video, audio, subtitle, menu and chapter options are in the main window under \"Project settings\" and are saved with each project.",
  "main.dvdMenuLimitFooterMerged": "DVD limit exceeded ({titles} titles from {videos} videos + {menus} menus = {total}, max 99)",
- "main.dvdChapterLimit": "Merged title {n} has {chapters} chapters (DVD max 99 per title) – untick \"Merge with previous\" on \"{label}\" to start a new title there"
+ "main.dvdChapterLimit": "Merged title {n} has {chapters} chapters (DVD max 99 per title) – click \"Separate\" on \"{label}\" to start a new title there, or use \"Split automatically\"",
+ "main.overflowDvd9Full": "Lower the audio bitrate, switch to Half D1 or SIF, or split the videos across two discs.",
+ "main.overflowSifFull": "Lower the audio bitrate, deselect audio tracks or split the videos across two discs.",
+ "main.autoSplitDone": "Started {count} new title(s) so every title has at most 99 chapters.",
+ "app.autoSplit": "Split automatically",
+ "app.autoSplitTip": "Start new titles where merged titles would exceed 99 chapters",
+ "main.cropBatchAll": "Detect for all videos",
+ "main.cropBatchSelected": "Detect for {count} selected",
+ "main.cropBatchProgress": "Detecting black borders: video {i} of {count} …",
+ "main.cropBatchDone": "Black borders found in {found} of {count} videos ({failed} failed)."
 }

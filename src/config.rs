@@ -775,6 +775,17 @@ impl AppSettings {
         }
     }
 
+    /// Title frame size on `disc`: `bd_resolution` for Blu-ray/AVCHD, else `dvd_resolution`.
+    pub fn title_resolution(&self, disc: DiscType) -> Resolution {
+        if !disc.is_bluray() {
+            self.dvd_title_resolution()
+        } else if self.bd_resolution == "720p" {
+            Resolution::Hd720
+        } else {
+            Resolution::Hd1080
+        }
+    }
+
     pub fn profile(&self) -> EncodingProfile {
         match self.encoding_profile.as_str() {
             "SP_Short" => EncodingProfile::Sp,
@@ -873,11 +884,7 @@ impl AppSettings {
         }
         opts.tv_standard = if self.tv_standard == "NTSC" { TvStandard::Ntsc } else { TvStandard::Pal };
         // `opts.disc` has to be set before the settings are applied.
-        opts.resolution = if opts.disc.is_bluray() {
-            if self.bd_resolution == "720p" { Resolution::Hd720 } else { Resolution::Hd1080 }
-        } else {
-            self.dvd_title_resolution()
-        };
+        opts.resolution = self.title_resolution(opts.disc);
         opts.bd_single_video = self.bd_single_video;
         opts.encoding_profile = self.profile();
         opts.dvd_video = DvdVideoMode::from_setting(&self.dvd_video);

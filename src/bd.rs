@@ -981,7 +981,10 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = crate::dvd::avg_audio_kbps(&loads);
-    let plan = crate::dvd::bitrate_plan(opts.disc, &loads, menu_mb, opts.encoding_profile)?;
+    // One floor for the whole plan (the lowest of the titles' frame sizes), so the plan's size
+    // estimate and every title's bitrate agree.
+    let floor = titles.iter().map(|t| crate::dvd::min_video_kbps(opts.disc, t.resolution)).min().unwrap_or(opts.disc.limits().min_video_kbps);
+    let plan = crate::dvd::bitrate_plan_at(opts.disc, &loads, menu_mb, opts.encoding_profile, floor)?;
     if plan.clamp == Clamp::Min {
         return Err(BuildError::DoesNotFit { disc: opts.disc, plan: Box::new(plan) });
     }
@@ -1035,7 +1038,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         .zip(&encoders)
         .map(|(t, &encoder)| {
             let (t, tools, work, layout) = (t.clone(), tools.clone(), work.clone(), layout.clone());
-            let video_kbps = t.copy_kbps.unwrap_or_else(|| crate::dvd::weighted_video_kbps(opts.disc, plan.video_kbps, t.weight, t.audio_kbps(&layout)));
+            let video_kbps = t.copy_kbps.unwrap_or_else(|| crate::dvd::weighted_video_kbps(opts.disc, plan.video_kbps, t.weight, t.audio_kbps(&layout), floor));
             let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
                 encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, progress).await

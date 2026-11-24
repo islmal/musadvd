@@ -1615,5 +1615,14 @@
  "settings.projectSettingsHint": "Wird mit dem Projekt gespeichert. Änderungen wirken sofort: Größenschätzung und Qualitätsanzeigen passen sich direkt an.",
  "settings.projectSettingsMoved": "Ausgabe-, Kodierungs-, Video-, Audio-, Untertitel-, Menü- und Kapiteloptionen stehen im Hauptfenster unter „Projekteinstellungen“ und werden mit jedem Projekt gespeichert.",
  "main.dvdMenuLimitFooterMerged": "DVD-Limit überschritten ({titles} Titel aus {videos} Videos + {menus} Menüs = {total}, max. 99)",
- "main.dvdChapterLimit": "Zusammengeführter Titel {n} hat {chapters} Kapitel (DVD max. 99 pro Titel) – entferne bei „{label}“ das Häkchen „Mit vorherigem zusammenführen“, um dort einen neuen Titel zu beginnen"
+ "main.dvdChapterLimit": "Zusammengeführter Titel {n} hat {chapters} Kapitel (DVD max. 99 pro Titel) – klicke bei „{label}“ auf „Trennen“, um dort einen neuen Titel zu beginnen, oder nutze „Automatisch aufteilen“",
+ "main.overflowDvd9Full": "Audio-Bitrate senken, auf Half D1 oder SIF wechseln oder die Videos auf zwei Discs verteilen.",
+ "main.overflowSifFull": "Audio-Bitrate senken, Tonspuren abwählen oder die Videos auf zwei Discs verteilen.",
+ "main.autoSplitDone": "{count} neue(r) Titel begonnen, damit jeder Titel höchstens 99 Kapitel hat.",
+ "app.autoSplit": "Automatisch aufteilen",
+ "app.autoSplitTip": "Neue Titel beginnen, wo zusammengeführte Titel 99 Kapitel überschreiten würden",
+ "main.cropBatchAll": "Für alle Videos erkennen",
+ "main.cropBatchSelected": "Für {count} ausgewählte erkennen",
+ "main.cropBatchProgress": "Schwarze Ränder werden erkannt: Video {i} von {count} …",
+ "main.cropBatchDone": "Schwarze Ränder in {found} von {count} Videos gefunden ({failed} fehlgeschlagen)."
 }

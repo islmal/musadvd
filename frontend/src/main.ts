@@ -11,8 +11,8 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, withProjectSettings, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
-import { chapterOverflows, dropExternalKind, mergeBlock, mixSubs, moveItem, reorderByLanguages, shapeMismatch, sortByOrder, unmixSubs } from "./order";
-import { ac3EncodeKbps, autoMenuAspect, fpsMatches, tvMismatch } from "./discRules";
+import { autoSplitPoints, chapterOverflows, dropExternalKind, mergeBlock, mixSubs, moveItem, reorderByLanguages, shapeMismatch, sortByOrder, unmixSubs } from "./order";
+import { ac3EncodeKbps, autoMenuAspect, fpsMatches, overflowHintKey, tvMismatch } from "./discRules";
 import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
 import { modal } from "./studio/ui";
@@ -22,6 +22,7 @@ import { renderLanding } from "./landing";
 import {
   checkLayout,
   calculateProject,
+  detectCrop,
   cancelConversion,
   onBuildCancelled,
   defaultOutputDir,
@@ -534,6 +535,21 @@ function getMenuAndVideoCounts(): MenuVideoCount {
   return { videos, titles, menus, total, overLimit };
 }
 
+/** "Split automatically": starts new titles wherever a merged DVD title would exceed 99 chapters. */
+function autoSplitTitles() {
+  if (state.converting) return;
+  const groups = titleGroups();
+  const points = autoSplitPoints(groups.map((g) => g.map((t) => effChapters(t).length)), MAX_CHAPTERS);
+  if (points.length === 0) return;
+  state.splitUndo = null;
+  const oldGroupPaths = editorTitles().map((t) => t.path);
+  for (const [g, m] of points) groups[g][m].mergeWithPrevious = false;
+  syncMenuAfterChange(oldGroupPaths);
+  renderAll();
+  scheduleCalc();
+  status(tr("main.autoSplitDone", { count: points.length }));
+}
+
 /** First merged DVD title over 99 chapters (the engine refuses it), with the video where a new title should start. */
 function chapterOverflow(): { title: number; chapters: number; splitAt: Title } | null {
   if (isBluray()) return null;
@@ -743,6 +759,7 @@ function openTitleCtx(at: { x: number; y: number }) {
     multi.size >= 2
       ? [tr("main.reorderBatch"), () => openReorderDialog(new Set(multi)), state.converting]
       : [tr("main.reorderAll"), () => openReorderDialog(all), state.converting || state.titles.length === 0],
+    [editHooks.detectAllLabel(), editHooks.detectAll, state.converting || cropBatchRunning || state.titles.length === 0],
     [tr("app.remove"), removeSelected, state.converting, "danger"],
   ];
   const close = () => {
@@ -1555,14 +1572,7 @@ function renderFooter() {
     fill.style.width = `${Math.min(100, calc.fillPercent)}%`;
     fill.className = `fill-value ${calc.fits ? (calc.fillPercent > 97 ? "full" : "ok") : "over"}`;
     const base = `${fmtNum(calc.estimatedMb)} / ${fmtNum(calc.targetMb)} MB (${fmtNum(calc.fillPercent)} %)`;
-    const hint =
-      state.disc === "bd25"
-        ? tr("main.bd50WaehlenOder")
-        : state.disc === "bd50" || state.disc === "avchd9"
-          ? tr("main.videosKuerzenOderTonspuren")
-          : state.disc === "avchd5"
-            ? tr("main.avchdDvd9Waehlen")
-            : tr("main.dvd9WaehlenOder");
+    const hint = tr(overflowHintKey(state.disc, state.settings?.dvd_resolution ?? "Full D1"));
     const counts = getMenuAndVideoCounts();
     const overflow = chapterOverflow();
     text.textContent = singleVideoViolated()
@@ -1620,6 +1630,7 @@ function renderFooter() {
   ($("btn-convert") as HTMLButtonElement).disabled = !canConvert;
   ($("btn-split-undo") as HTMLButtonElement).hidden = splitUndoIndex() < 0 || state.converting;
   ($("btn-fit") as HTMLButtonElement).hidden = !(calc && !calc.fits) || state.converting || !state.titles.some((t) => bdCopy(t)?.kbps != null);
+  ($("btn-auto-split") as HTMLButtonElement).hidden = state.converting || !chapterOverflow();
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,7 +1698,42 @@ function renderTabs() {
 }
 
 /** Connects the "Trim & picture" tab to the title list and the size estimate. */
+/** Titles a batch action covers: the multi-selection, else every title. */
+const batchTargets = () => (multi.size >= 2 ? state.titles.filter((t) => multi.has(t.id)) : [...state.titles]);
+
+let cropBatchRunning = false;
+/** "Detect automatically" for many titles: one cropdetect per file, in turn (each scans the whole file). */
+async function detectCropBatch(targets: Title[]) {
+  if (cropBatchRunning || state.converting || targets.length === 0) return;
+  cropBatchRunning = true;
+  let found = 0;
+  let failed = 0;
+  try {
+    for (const [i, t] of targets.entries()) {
+      status(tr("main.cropBatchProgress", { i: i + 1, count: targets.length }));
+      try {
+        const c = await detectCrop(t.meta.path, t.trimStart, t.trimEnd);
+        const even = (v: number) => Math.round(v / 2) * 2;
+        const crop = { top: even(c.top), bottom: even(c.bottom), left: even(c.left), right: even(c.right) };
+        t.crop = crop.top || crop.bottom || crop.left || crop.right ? crop : null;
+        if (t.crop) found++;
+      } catch {
+        failed++;
+      }
+    }
+  } finally {
+    cropBatchRunning = false;
+  }
+  editHooks.changed();
+  renderTabs();
+  touchAutosave();
+  status(tr("main.cropBatchDone", { found, count: targets.length, failed }), failed ? "error" : "info");
+}
+
 const editHooks = {
+  /** Batch crop detection over the selection or all titles; the label names which. */
+  detectAll: () => void detectCropBatch(batchTargets()),
+  detectAllLabel: () => (multi.size >= 2 ? tr("main.cropBatchSelected", { count: multi.size }) : tr("main.cropBatchAll")),
   changed: () => {
     if (!state.customLayoutEdited) syncMenuAfterChange(null);
     renderTitleList();
@@ -2371,7 +2417,8 @@ function editorTitles(): EditorTitle[] {
     for (const m of members) {
       const own = effChaptersWithNames(m);
       starts.push(...own.map((c) => c.startSecs + offset));
-      names.push(...own.map((c) => c.name));
+      // In a merged title each video's first chapter carries the video's name, so the chapter menu shows where every episode starts.
+      names.push(...own.map((c, k) => (members.length > 1 && k === 0 ? m.label.trim() || cleanTitle(m.meta.fileName) : c.name)));
       offset += effDuration(m);
     }
     return {
@@ -3553,6 +3600,7 @@ async function init() {
   $("btn-remove").addEventListener("click", removeSelected);
   $("btn-split-undo").addEventListener("click", undoSplit);
   $("btn-fit").addEventListener("click", () => void fitToDisc());
+  $("btn-auto-split").addEventListener("click", autoSplitTitles);
   $("btn-up").addEventListener("click", () => moveSelected(-1));
   $("btn-down").addEventListener("click", () => moveSelected(1));
   initTitleDrag();

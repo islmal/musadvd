@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chapterOverflows, dropExternalKind, mixSubs, moveItem, reorderByLanguages, unmixSubs } from "./order";
+import { autoSplitPoints, chapterOverflows, dropExternalKind, mixSubs, moveItem, reorderByLanguages, unmixSubs } from "./order";
 
 const tr = [
   { l: "eng", n: 1 },
@@ -37,6 +37,20 @@ describe("chapterOverflows", () => {
   it("counts every member's chapters, not only one per video", () => {
     expect(chapterOverflows([[1], [40, 40, 30]], 99)).toEqual([{ group: 1, chapters: 110, splitAt: 2 }]);
     expect(chapterOverflows([[99]], 99)).toEqual([]);
+  });
+});
+
+describe("autoSplitPoints", () => {
+  const ones = (n: number) => Array<number>(n).fill(1);
+  it("splits 151 one-chapter videos into titles of at most 99", () => {
+    expect(autoSplitPoints([ones(151)], 99)).toEqual([[0, 99]]);
+    expect(chapterOverflows([ones(99), ones(52)], 99)).toEqual([]);
+  });
+  it("splits 7-chapter episodes after 14 episodes each", () => {
+    expect(autoSplitPoints([Array<number>(30).fill(7)], 99)).toEqual([[0, 14], [0, 28]]);
+  });
+  it("leaves fitting groups alone and only splits the ones over the limit", () => {
+    expect(autoSplitPoints([ones(50), [60, 30, 20]], 99)).toEqual([[1, 2]]);
   });
 });
 

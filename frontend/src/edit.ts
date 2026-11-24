@@ -37,6 +37,9 @@ export interface EditTarget {
 export interface EditHooks {
   /** A value changed: refresh the title list and the size estimate (the tab itself is kept). */
   changed(): void;
+  /** Crop detection for the selected videos (or all of them); `detectAllLabel` says which. */
+  detectAll(): void;
+  detectAllLabel(): string;
   /** Frame aspect (width / height) the picture of display aspect `dar` ends up in on the disc. */
   targetAspect(dar: number): number;
   status(text: string, kind?: "info" | "error"): void;
@@ -655,6 +658,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
     },
     tr("edit.automatischErkennen"),
   );
+  const detectAll = h("button", { class: "btn", type: "button", onclick: () => hooks.detectAll() }, hooks.detectAllLabel());
   const reset = h(
     "button",
     {
@@ -685,7 +689,7 @@ function renderCrop(t: EditTarget, hooks: EditHooks): HTMLElement {
         "div",
         { class: "crop-side" },
         h("div", { class: "crop-fields" }, ...(["top", "bottom", "left", "right"] as const).map((e) => h("label", {}, labels[e], fields[e]))),
-        h("div", { class: "row" }, detect, reset, h("button", { class: "btn", type: "button", onclick: () => loadImage(player?.pos() ?? midpoint()) }, tr("edit.bildVonAbspielposition"))),
+        h("div", { class: "row" }, detect, detectAll, reset, h("button", { class: "btn", type: "button", onclick: () => loadImage(player?.pos() ?? midpoint()) }, tr("edit.bildVonAbspielposition"))),
         h("div", { class: "crop-output-box" }, out, info),
       ),
     ),

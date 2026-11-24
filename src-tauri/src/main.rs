@@ -1107,11 +1107,44 @@ fn quality(kbps: u32, disc: DiscType) -> f64 {
     ((kbps as f64 - l.min_video_kbps as f64) / (l.max_video_kbps - l.min_video_kbps) as f64 * 100.0).clamp(0.0, 100.0)
 }
 
+/// Quality percent of H.264 video (Blu-ray / AVCHD) from its bits per pixel at `res`, so 720p is
+/// credited for its smaller frame. Points (bpp → %), linear in log(bpp) between them; the label
+/// bands are 40 fair / 65 good / 85 excellent.
+// shortcut: assumes 23.976 fps (the GUI estimate knows no per-title rate); 50/59.94 fps titles rate
+// about twice too high – pass the frame rate in TitleLoad if that matters.
+fn h264_quality(kbps: u32, res: musadvd::author::Resolution) -> f64 {
+    const POINTS: [(f64, f64); 5] = [(0.03, 0.0), (0.05, 40.0), (0.09, 65.0), (0.16, 85.0), (0.30, 100.0)];
+    let (w, h) = res.frame_size(musadvd::author::TvStandard::Pal);
+    let bpp = kbps as f64 * 1000.0 / (w as f64 * h as f64 * 23.976);
+    if bpp <= POINTS[0].0 {
+        return 0.0;
+    }
+    for pair in POINTS.windows(2) {
+        let ((b0, p0), (b1, p1)) = (pair[0], pair[1]);
+        if bpp <= b1 {
+            return p0 + (p1 - p0) * (bpp / b0).ln() / (b1 / b0).ln();
+        }
+    }
+    100.0
+}
+
+/// Quality band of a percent from [`h264_quality`] (same bands as the GUI's labels).
+fn band(percent: f64) -> Quality {
+    if percent >= 65.0 {
+        Quality::Good
+    } else if percent >= 40.0 {
+        Quality::Medium
+    } else {
+        Quality::Poor
+    }
+}
+
 /// Live estimate with the encoding profile from the global settings.
 #[tauri::command]
 fn calculate_project(state: State<'_, AppState>, settings: ProjectSettings) -> Result<CalculationResult, String> {
     let app = state.settings();
-    project_calculation(settings, app.profile(), app.dvd_title_resolution())
+    let res = app.title_resolution(settings.disc);
+    project_calculation(settings, app.profile(), res)
 }
 
 /// Size of an encoded Blu-ray menu clip per second.
@@ -1153,12 +1186,17 @@ fn project_calculation(settings: ProjectSettings, profile: EncodingProfile, res:
             titles: vec![],
         });
     }
-    let plan = dvd::bitrate_plan(settings.disc, &settings.titles, menu_mb, profile).map_err(|e| e.to_string())?;
+    let floor = dvd::min_video_kbps(settings.disc, res);
+    let plan = dvd::bitrate_plan_at(settings.disc, &settings.titles, menu_mb, profile, floor).map_err(|e| e.to_string())?;
     let titles = settings
         .titles
         .iter()
         .map(|t| {
-            let v = t.copy_video_kbps.unwrap_or_else(|| dvd::weighted_video_kbps(settings.disc, plan.video_kbps, t.weight, t.audio_kbps));
+            let v = t.copy_video_kbps.unwrap_or_else(|| dvd::weighted_video_kbps(settings.disc, plan.video_kbps, t.weight, t.audio_kbps, floor));
+            if settings.disc.is_bluray() {
+                let p = h264_quality(v, res);
+                return TitleCalc { video_kbps: v, quality_percent: p, quality: band(p) };
+            }
             // Copied video keeps its own resolution.
             let rated = if t.copy_video_kbps.is_some() { v } else { full_d1_equivalent_kbps(v, settings.disc, res, profile) };
             TitleCalc { video_kbps: v, quality_percent: quality(rated, settings.disc), quality: Quality::for_disc(rated, settings.disc) }
@@ -1639,6 +1677,22 @@ mod tests {
     }
 
     #[test]
+    fn bluray_quality_rates_bits_per_pixel() {
+        use musadvd::author::Resolution;
+        // 2.1 Mbit/s at 720p (~0.095 bpp) is good H.264, not "0 % · Low".
+        let p720 = h264_quality(2100, Resolution::Hd720);
+        assert!((65.0..85.0).contains(&p720), "{p720}");
+        assert_eq!(band(p720), Quality::Good);
+        // The same bitrate at 1080p has fewer bits per pixel.
+        assert!(h264_quality(2100, Resolution::Hd1080) < 40.0);
+        // 15 Mbit/s 1080p (the old "good" mark) is excellent; the floors stay above zero.
+        assert!(h264_quality(15_000, Resolution::Hd1080) >= 85.0);
+        assert!(h264_quality(1500, Resolution::Hd720) > 0.0 && h264_quality(2500, Resolution::Hd1080) > 0.0);
+        assert_eq!(h264_quality(100, Resolution::Hd1080), 0.0);
+        assert_eq!(h264_quality(80_000, Resolution::Hd720), 100.0);
+    }
+
+    #[test]
     fn calculation_too_long_for_dvd5() {
         let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
@@ -1683,24 +1737,25 @@ mod tests {
             bd_menu_secs: vec![],
             custom_layout: None,
         };
-        let r = project_calculation(project(DiscType::Bd25), EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
+        use musadvd::author::Resolution::Hd1080;
+        let r = project_calculation(project(DiscType::Bd25), EncodingProfile::Auto, Hd1080).unwrap();
         assert_eq!(r.target_mb, 22_900);
         assert_eq!((r.menu_mb, r.clamp.as_str()), (0.0, "none"), "no menus without an editor layout");
         // Menus from the editor: a still (1 s) and a 20 s loop.
         let with_menus = ProjectSettings { bd_menu_secs: vec![1.0, 20.0], ..project(DiscType::Bd25) };
-        let m = project_calculation(with_menus, EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
+        let m = project_calculation(with_menus, EncodingProfile::Auto, Hd1080).unwrap();
         assert!((m.menu_mb - 21.0 * BD_MENU_MB_PER_SEC).abs() < 1e-9);
         assert!(r.fits && (20_000..35_000).contains(&r.video_kbps), "{}", r.video_kbps);
         assert_eq!(r.titles[0].quality, Quality::Good);
-        assert!(r.titles[0].quality_percent > 50.0 && r.titles[0].quality_percent < 100.0);
+        assert!(r.titles[0].quality_percent >= 85.0, "{}", r.titles[0].quality_percent);
         // The profile ceilings are the BD ones.
-        let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp, musadvd::author::Resolution::FullD1).unwrap();
+        let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp, Hd1080).unwrap();
         assert_eq!((lp.video_kbps, lp.clamp.as_str()), (12_000, "max"));
-        // A 12 h project does not fit a BD-25 even at 4000 kbps and is rated poor.
-        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 12.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }], ..project(DiscType::Bd25) };
-        let r = project_calculation(long, EncodingProfile::Auto, musadvd::author::Resolution::FullD1).unwrap();
-        assert_eq!((r.clamp.as_str(), r.fits), ("min", false));
-        assert_eq!((r.titles[0].quality, r.titles[0].quality_percent), (Quality::Poor, 0.0));
+        // 24 h at 1080p does not fit a BD-25 even at the 2500 kbps floor.
+        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 24.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }], ..project(DiscType::Bd25) };
+        let r = project_calculation(long, EncodingProfile::Auto, Hd1080).unwrap();
+        assert_eq!((r.clamp.as_str(), r.fits, r.video_kbps), ("min", false, 2500));
+        assert!(r.titles[0].quality_percent <= 45.0, "{}", r.titles[0].quality_percent);
     }
 
     #[test]

@@ -89,7 +89,7 @@ impl fmt::Display for BuildError {
                 f,
                 "content does not fit on {disc:?}: even at the minimum of {} kbps it needs {:.0} MB of {} MB \
                  (would need {:.0} kbps). Use {}, fewer audio tracks or shorter inputs.",
-                disc.limits().min_video_kbps,
+                plan.video_kbps,
                 plan.estimated_mb,
                 disc.target_mb(),
                 plan.raw_video_kbps,
@@ -678,17 +678,37 @@ pub fn quality_weight(name: Option<&str>) -> f64 {
     }
 }
 
-/// Video bitrate of an encoded title: the plan's base bitrate times the title's weight, kept inside
-/// the disc's limits beside the title's audio.
-pub fn weighted_video_kbps(disc: DiscType, base_kbps: u32, weight: f64, audio_kbps: u32) -> u32 {
+/// Lowest video bitrate of a title at `res`: smaller frames keep the same bits per pixel far
+/// lower (Half D1 / SIF have a half / a quarter of Full D1's pixels, 720p under half of 1080p), so
+/// long collections fit one disc. Blu-ray itself sets no minimum; these floors keep H.264 watchable.
+pub fn min_video_kbps(disc: DiscType, res: Resolution) -> u32 {
+    let floor = disc.limits().min_video_kbps;
+    match res {
+        Resolution::HalfD1 if !disc.is_bluray() => floor.min(600),
+        Resolution::Sif if !disc.is_bluray() => floor.min(400),
+        Resolution::Hd720 if disc.is_bluray() => floor.min(1500),
+        Resolution::Hd1080 if disc.is_bluray() => floor.min(2500),
+        _ => floor,
+    }
+}
+
+/// Video bitrate of an encoded title: the plan's base bitrate times the title's weight, kept between
+/// `min_video` ([`min_video_kbps`]) and the disc's ceiling beside the title's audio.
+pub fn weighted_video_kbps(disc: DiscType, base_kbps: u32, weight: f64, audio_kbps: u32, min_video: u32) -> u32 {
     let l = disc.limits();
     let top = l.max_video_kbps.min(l.max_total_kbps.saturating_sub(audio_kbps));
-    ((base_kbps as f64 * weight).round() as u32).min(top).max(l.min_video_kbps.min(top))
+    ((base_kbps as f64 * weight).round() as u32).min(top).max(min_video.min(top))
 }
 
 /// Video bitrate for `titles` on `disc`, with `menu_mb` of menus already on the disc, limited by
-/// `profile`. Used by the build itself and by the GUI's live estimate.
+/// `profile`, with the disc's bitrate floor ([`bitrate_plan_at`] for a frame-size floor).
 pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile: EncodingProfile) -> Result<BitratePlan, CalcError> {
+    bitrate_plan_at(disc, titles, menu_mb, profile, disc.limits().min_video_kbps)
+}
+
+/// [`bitrate_plan`] with the video bitrate floor `min_video` ([`min_video_kbps`]). Used by the
+/// build itself and by the GUI's live estimate.
+pub fn bitrate_plan_at(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile: EncodingProfile, min_video: u32) -> Result<BitratePlan, CalcError> {
     let subs_kbit: f64 =
         titles.iter().map(|t| (t.subtitle_streams as u32 * SUBTITLE_KBPS) as f64 * t.duration_secs).sum();
     let (copied, encoded): (Vec<TitleLoad>, Vec<TitleLoad>) =
@@ -733,11 +753,11 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
     // The stream overhead depends on the bitrate being solved: fold it into the calculator's
     // fixed overhead at the bitrate that exactly fills the disc (`overhead + (1+ratio)·stream = target`).
     let full_stream_kbit = (disc.target_kbit() - overhead).max(0.0) / (1.0 + ratio);
-    let plan = calculator::calculate_capped(disc, weighted_secs, audio_kbps, overhead + ratio * full_stream_kbit, profile.max_video_kbps_for(disc))?;
+    let plan = calculator::calculate_floored(disc, weighted_secs, audio_kbps, overhead + ratio * full_stream_kbit, profile.max_video_kbps_for(disc), min_video)?;
     // The calculator assumes every title gets `base * weight`, but `weighted_video_kbps` pins
     // titles at the disc's floor/ceiling. Re-solve the base against the real per-title sizes.
     let real_kbit = |base: u32| -> f64 {
-        let stream: f64 = encoded.iter().map(|t| (weighted_video_kbps(disc, base, t.weight, t.audio_kbps) + t.audio_kbps) as f64 * t.duration_secs).sum();
+        let stream: f64 = encoded.iter().map(|t| (weighted_video_kbps(disc, base, t.weight, t.audio_kbps, min_video) + t.audio_kbps) as f64 * t.duration_secs).sum();
         overhead + (1.0 + ratio) * stream
     };
     let with_real = |plan: BitratePlan| {
@@ -755,7 +775,7 @@ pub fn bitrate_plan(disc: DiscType, titles: &[TitleLoad], menu_mb: f64, profile:
         // Even every title at its floor overflows: report that honestly (the floor base also keeps
         // `weighted_video_kbps` at the floor for each title).
         let max_w = encoded.iter().map(|t| t.weight).fold(1.0, f64::max);
-        (((disc.limits().min_video_kbps as f64 / max_w).floor() as u32).min(plan.video_kbps), Clamp::Min)
+        (((min_video as f64 / max_w).floor() as u32).min(plan.video_kbps), Clamp::Min)
     } else {
         // real_kbit is monotone in the base: largest base that still fits.
         let (mut lo, mut hi) = (0, plan.video_kbps);
@@ -2044,7 +2064,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
         .collect();
     let total_secs: f64 = loads.iter().map(|l| l.duration_secs).sum();
     let avg_audio = avg_audio_kbps(&loads);
-    let plan = bitrate_plan(opts.disc, &loads, menu_mb, opts.encoding_profile)?;
+    let plan = bitrate_plan_at(opts.disc, &loads, menu_mb, opts.encoding_profile, min_video_kbps(opts.disc, opts.resolution))?;
     if plan.clamp == Clamp::Min {
         return Err(BuildError::DoesNotFit { disc: opts.disc, plan: Box::new(plan) });
     }
@@ -2459,6 +2479,43 @@ mod tests {
     }
 
     #[test]
+    fn sif_floor_fits_a_19_hour_collection_on_dvd9() {
+        assert_eq!(min_video_kbps(DiscType::Dvd9, Resolution::FullD1), 1000);
+        assert_eq!(min_video_kbps(DiscType::Dvd9, Resolution::HalfD1), 600);
+        assert_eq!(min_video_kbps(DiscType::Dvd9, Resolution::Sif), 400);
+        assert_eq!(min_video_kbps(DiscType::Bd25, Resolution::Sif), DiscType::Bd25.limits().min_video_kbps);
+        // 151 episodes of ~7.5 min (~19 h), dual stereo AC-3 and two subtitle tracks each.
+        let ep = TitleLoad { duration_secs: 453.0, audio_kbps: 384, subtitle_streams: 2, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
+        let loads = vec![ep; 151];
+        let full = bitrate_plan_at(DiscType::Dvd9, &loads, 10.0, EncodingProfile::Auto, min_video_kbps(DiscType::Dvd9, Resolution::FullD1)).unwrap();
+        assert_eq!(full.clamp, Clamp::Min, "Full D1 cannot hold 19 h on a DVD-9");
+        let sif = bitrate_plan_at(DiscType::Dvd9, &loads, 10.0, EncodingProfile::Auto, min_video_kbps(DiscType::Dvd9, Resolution::Sif)).unwrap();
+        assert_ne!(sif.clamp, Clamp::Min);
+        assert!(sif.fits() && sif.estimated_mb <= DiscType::Dvd9.target_mb() as f64, "{sif:?}");
+        assert!(sif.video_kbps >= 400 && sif.video_kbps < 1000, "{}", sif.video_kbps);
+    }
+
+    #[test]
+    fn bd25_holds_a_19_hour_720p_collection() {
+        assert_eq!(min_video_kbps(DiscType::Bd25, Resolution::Hd720), 1500);
+        assert_eq!(min_video_kbps(DiscType::Bd50, Resolution::Hd1080), 2500);
+        // AVCHD's own floor (2000) is already below the 1080p one.
+        assert_eq!(min_video_kbps(DiscType::Avchd9, Resolution::Hd1080), 2000);
+        assert_eq!(min_video_kbps(DiscType::Avchd9, Resolution::Hd720), 1500);
+        // 151 episodes of ~7.5 min (~19 h), dual stereo AC-3 and two subtitle tracks each.
+        let ep = TitleLoad { duration_secs: 453.0, audio_kbps: 384, subtitle_streams: 2, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
+        let loads = vec![ep; 151];
+        let plan = |floor| bitrate_plan_at(DiscType::Bd25, &loads, 0.0, EncodingProfile::Auto, floor).unwrap();
+        assert_eq!(plan(DiscType::Bd25.limits().min_video_kbps).clamp, Clamp::Min, "the old 4000 kbit/s floor overflows");
+        let hd720 = plan(min_video_kbps(DiscType::Bd25, Resolution::Hd720));
+        assert_ne!(hd720.clamp, Clamp::Min);
+        assert!(hd720.fits() && hd720.estimated_mb <= DiscType::Bd25.target_mb() as f64, "{hd720:?}");
+        assert!(hd720.video_kbps >= 1500 && hd720.video_kbps < 4000, "{}", hd720.video_kbps);
+        // 1080p needs more than a BD-25 even at its floor: the plan says so instead of overflowing silently.
+        assert_eq!(plan(min_video_kbps(DiscType::Bd25, Resolution::Hd1080)).clamp, Clamp::Min);
+    }
+
+    #[test]
     fn bitrate_plan_matches_calculator() {
         let loads = [
             TitleLoad { duration_secs: 3600.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
@@ -2501,7 +2558,7 @@ mod tests {
         let plan = bitrate_plan(DiscType::Bd25, &[low, high], 0.0, EncodingProfile::Auto).unwrap();
         // Equal weights on both sides average out to 1.0, so the base bitrate stays the same.
         assert!(plan.video_kbps.abs_diff(flat.video_kbps) <= 1, "{} vs {}", plan.video_kbps, flat.video_kbps);
-        let (lo, hi) = (weighted_video_kbps(DiscType::Bd25, plan.video_kbps, low.weight, 448), weighted_video_kbps(DiscType::Bd25, plan.video_kbps, high.weight, 448));
+        let (lo, hi) = (weighted_video_kbps(DiscType::Bd25, plan.video_kbps, low.weight, 448, DiscType::Bd25.limits().min_video_kbps), weighted_video_kbps(DiscType::Bd25, plan.video_kbps, high.weight, 448, DiscType::Bd25.limits().min_video_kbps));
         assert!(hi > lo && hi as f64 / lo as f64 > 1.6);
         let used_mb = (((lo + hi) as f64 + 2.0 * 448.0) * 7200.0 + plan.mux_overhead_kbit) / 8192.0;
         assert!(used_mb <= DiscType::Bd25.target_mb() as f64 + 1.0, "{used_mb} MB");
@@ -2514,7 +2571,7 @@ mod tests {
     fn real_mb(disc: DiscType, plan: &BitratePlan, loads: &[TitleLoad], overhead_kbit: f64) -> f64 {
         let kbit: f64 = loads
             .iter()
-            .map(|t| (weighted_video_kbps(disc, plan.video_kbps, t.weight, t.audio_kbps) + t.audio_kbps) as f64 * t.duration_secs)
+            .map(|t| (weighted_video_kbps(disc, plan.video_kbps, t.weight, t.audio_kbps, disc.limits().min_video_kbps) + t.audio_kbps) as f64 * t.duration_secs)
             .sum();
         (kbit + overhead_kbit) / 8192.0
     }
@@ -2529,7 +2586,7 @@ mod tests {
         let used = real_mb(DiscType::Dvd5, &plan, &loads, plan.mux_overhead_kbit);
         assert!(used <= DiscType::Dvd5.target_mb() as f64, "{used} MB");
         assert!((used - plan.estimated_mb).abs() < 1e-6 && plan.fits());
-        assert_eq!(weighted_video_kbps(DiscType::Dvd5, plan.video_kbps, QUALITY_LOW, 192), DiscType::Dvd5.limits().min_video_kbps);
+        assert_eq!(weighted_video_kbps(DiscType::Dvd5, plan.video_kbps, QUALITY_LOW, 192, DiscType::Dvd5.limits().min_video_kbps), DiscType::Dvd5.limits().min_video_kbps);
     }
 
     #[test]
@@ -2537,7 +2594,7 @@ mod tests {
         let mk = |secs: f64, weight: f64| TitleLoad { duration_secs: secs, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight };
         let loads = [mk(26_000.0, QUALITY_LOW), mk(12_000.0, QUALITY_HIGH)];
         let plan = bitrate_plan(DiscType::Bd25, &loads, 0.0, EncodingProfile::Auto).unwrap();
-        assert!(weighted_video_kbps(DiscType::Bd25, plan.video_kbps, QUALITY_LOW, 448) == DiscType::Bd25.limits().min_video_kbps);
+        assert!(weighted_video_kbps(DiscType::Bd25, plan.video_kbps, QUALITY_LOW, 448, DiscType::Bd25.limits().min_video_kbps) == DiscType::Bd25.limits().min_video_kbps);
         let used = real_mb(DiscType::Bd25, &plan, &loads, DiscType::Bd25.default_mux_overhead_kbit());
         assert!(used <= DiscType::Bd25.target_mb() as f64, "{used} MB");
         assert!((used - plan.estimated_mb).abs() < 1e-6 && plan.fits());

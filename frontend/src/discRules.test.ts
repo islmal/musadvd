@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ac3EncodeKbps, autoMenuAspect, snapAc3Kbps, tvMismatch } from "./discRules";
+import { ac3EncodeKbps, autoMenuAspect, overflowHintKey, snapAc3Kbps, tvMismatch } from "./discRules";
 
 describe("tvMismatch", () => {
   it("suggests NTSC for mostly 23.976/29.97/59.94 under PAL", () => {
@@ -48,4 +48,20 @@ describe("ac3EncodeKbps", () => {
     expect(ac3EncodeKbps(6, 0, "bd")).toBe(448);
   });
   it("a setting wins and is snapped", () => expect(ac3EncodeKbps(6, 320, "dvd")).toBe(256));
+});
+
+describe("overflowHintKey", () => {
+  it("suggests DVD-9 only while DVD-5 is selected", () => {
+    expect(overflowHintKey("dvd5", "Full D1")).toBe("main.dvd9WaehlenOder");
+    expect(overflowHintKey("dvd9", "Full D1")).toBe("main.overflowDvd9Full");
+    expect(overflowHintKey("custom", "Half D1")).toBe("main.overflowDvd9Full");
+  });
+  it("drops the frame-size advice once SIF is chosen", () => {
+    expect(overflowHintKey("dvd9", "SIF")).toBe("main.overflowSifFull");
+  });
+  it("keeps the Blu-ray and AVCHD advice", () => {
+    expect(overflowHintKey("bd25", "SIF")).toBe("main.bd50WaehlenOder");
+    expect(overflowHintKey("avchd5", "SIF")).toBe("main.avchdDvd9Waehlen");
+    expect(overflowHintKey("bd50", "SIF")).toBe("main.videosKuerzenOderTonspuren");
+  });
 });

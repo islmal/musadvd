@@ -836,6 +836,8 @@ input.time {
   box-shadow: var(--shadow);
   padding: 22px 24px;
   display: grid;
+  /* minmax(0, …): no child may widen the column past the card. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -899,6 +901,8 @@ input.time {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* A flex item never shrinks below its text otherwise: a long path widened the whole card. */
+  min-width: 0;
 }
 
 .progress-label span:last-child {

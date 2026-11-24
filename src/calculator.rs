@@ -316,6 +316,19 @@ pub fn calculate_capped(
     mux_overhead_kbit: f64,
     max_video_kbps: u32,
 ) -> Result<BitratePlan, CalcError> {
+    calculate_floored(disc, duration_secs, audio_kbps, mux_overhead_kbit, max_video_kbps, disc.limits().min_video_kbps)
+}
+
+/// Like [`calculate_capped`] with the video bitrate floor `min_video_kbps` instead of the disc's
+/// (smaller DVD frame sizes need fewer bits for the same picture).
+pub fn calculate_floored(
+    disc: DiscType,
+    duration_secs: f64,
+    audio_kbps: u32,
+    mux_overhead_kbit: f64,
+    max_video_kbps: u32,
+    min_video_kbps: u32,
+) -> Result<BitratePlan, CalcError> {
     if !duration_secs.is_finite() || duration_secs <= 0.0 {
         return Err(CalcError::InvalidDuration(duration_secs));
     }
@@ -323,7 +336,7 @@ pub fn calculate_capped(
         return Err(CalcError::InvalidOverhead(mux_overhead_kbit));
     }
     let limits = disc.limits();
-    let min_video = limits.min_video_kbps;
+    let min_video = min_video_kbps;
     let cap = max_video_kbps.clamp(min_video, limits.max_video_kbps);
     let max_video = cap.min(limits.max_total_kbps.saturating_sub(audio_kbps));
     if max_video < min_video {
