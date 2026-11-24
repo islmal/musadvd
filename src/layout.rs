@@ -102,6 +102,10 @@ pub struct CustomLayout {
     /// Editor draft metadata: `Some(false)` = drafted without chapter menus; ignored by the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_menus: Option<bool>,
+    /// DVD menu display aspect, `4:3` (default) or `16:9` (anamorphic: the canvas keeps the 720
+    /// frame pixels, each drawn 4/3 wider). Blu-ray menus are always 16:9 and ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<String>,
     pub menus: Vec<CustomMenu>,
 }
 
@@ -599,6 +603,11 @@ impl CustomLayout {
             .map_err(|e| LayoutError(vec![format!("{}: {e}", path.display())]))?;
         Self::from_json(&text)
     }
+
+    /// `DvdLayout::menu_aspect` of a disc with these menus: `16:9` or `4:3`.
+    pub fn menu_aspect(&self) -> &'static str {
+        if self.aspect.as_deref() == Some("16:9") { "16:9" } else { "4:3" }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -798,6 +807,7 @@ fn color_pairs(layout: &CustomLayout, menu: &CustomMenu) -> Vec<([u8; 3], [u8; 3
 pub fn element_text_lines(e: &Element, canvas: Canvas, tv: impl Into<MenuFrame> + Copy) -> Option<Vec<String>> {
     let Content::Text { text, font, size, bold, italic, wrap, .. } = &e.content else { return None };
     let (_, _, w, h) = frame_box(e, canvas, tv);
+    let w = (w as f64 * text_squeeze(tv.into())).round() as u32;
     Some(menu::text_lines(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, w, h))
 }
 
@@ -865,7 +875,7 @@ pub fn apply_default_menu_audio(layout: &mut CustomLayout, path: &std::path::Pat
 /// Checks the layout against the DVD limits and the project's titles. Navigation command
 /// counts are checked by [`plan_navigation`] (also called here).
 pub fn validate(layout: &CustomLayout, titles: &[LayoutTitle], tv: TvStandard) -> Result<(), LayoutError> {
-    validate_impl(layout, titles, tv.into(), false)
+    validate_impl(layout, titles, tv.menu_frame(layout.menu_aspect()), false)
 }
 
 /// Blu-ray rules: 16:9 canvas, axis-aligned non-overlapping buttons, at most [`MAX_BD_BUTTONS`]
@@ -1145,7 +1155,13 @@ fn validate_impl(layout: &CustomLayout, titles: &[LayoutTitle], frame: MenuFrame
         if menu_buttons.peek().is_some() && menu_buttons.all(|e| e.auto_execute) {
             errs.push(menu("every button runs on focus – the menu would act on entry; keep at least one button without auto-execute".into()));
         }
-        let max_buttons = if bd { MAX_BD_BUTTONS } else { MAX_BUTTONS };
+        let max_buttons = if bd {
+            MAX_BD_BUTTONS
+        } else if layout.menu_aspect() == "16:9" {
+            author::MAX_WIDE_MENU_BUTTONS
+        } else {
+            MAX_BUTTONS
+        };
         if rects.len() > max_buttons {
             errs.push(menu(format!("{} buttons, a {medium} menu page allows at most {max_buttons}", rects.len())));
         }
@@ -1810,6 +1826,47 @@ pub(crate) fn draw_text_element(
     canvas: Canvas,
     frame: impl Into<MenuFrame>,
 ) -> (RgbaImage, menu::Coverage) {
+    let frame = frame.into();
+    let f = text_squeeze(frame);
+    if f == 1.0 {
+        return draw_text_square(content, w, h, canvas, frame);
+    }
+    // Drawn on square pixels `f` times wider, then squeezed into the anamorphic box.
+    let (img, cov) = draw_text_square(content, ((w as f64 * f).round() as u32).max(1), h, canvas, frame);
+    let (sw, mut out_img, mut out_cov) = (img.width(), RgbaImage::new(w, h), menu::Coverage::new(w, h));
+    for y in 0..h {
+        for x in 0..w {
+            // Box filter over the source columns this pixel covers, colour premultiplied by alpha.
+            let (end, mut c) = ((x + 1) as f64 * f, x as f64 * f);
+            let (mut acc, mut cv) = ([0.0f64; 4], 0.0f64);
+            while c < end - 1e-9 {
+                let next = (c.floor() + 1.0).min(end);
+                let (sx, wt) = ((c.floor() as u32).min(sw - 1), next - c);
+                let p = img.get_pixel(sx, y).0;
+                let al = p[3] as f64 * wt;
+                for (k, a) in acc.iter_mut().take(3).enumerate() {
+                    *a += p[k] as f64 * al;
+                }
+                acc[3] += al;
+                cv += cov.at(sx as i64, y as i64) as f64 * wt;
+                c = next;
+            }
+            let rgb = |k: usize| if acc[3] > 0.0 { (acc[k] / acc[3]).round() as u8 } else { 0 };
+            out_img.put_pixel(x, y, image::Rgba([rgb(0), rgb(1), rgb(2), (acc[3] / f).round().min(255.0) as u8]));
+            out_cov.data[(y * w + x) as usize] = (cv / f) as f32;
+        }
+    }
+    (out_img, out_cov)
+}
+
+/// Horizontal text squeeze of `frame`: its pixel aspect on anamorphic (16:9 DVD) frames, else 1.
+/// shortcut: 4:3 DVD text keeps square-pixel glyphs (PAL 7 % wide, NTSC 11 % narrow) so the
+/// existing menus stay byte-identical; drop the threshold to correct them too.
+fn text_squeeze(frame: MenuFrame) -> f64 {
+    if frame.pixel_aspect > 1.2 { frame.pixel_aspect } else { 1.0 }
+}
+
+fn draw_text_square(content: &Content, w: u32, h: u32, canvas: Canvas, frame: MenuFrame) -> (RgbaImage, menu::Coverage) {
     let Content::Text {
         text,
         font,
@@ -1836,7 +1893,6 @@ pub(crate) fn draw_text_element(
     else {
         return (RgbaImage::new(w, h), menu::Coverage::new(w, h));
     };
-    let frame = frame.into();
     let unit = |v: f32| frame_font_size(v, canvas, frame);
     let mut img = RgbaImage::new(w, h);
     if let Some([r, g, b]) = bg_color.as_deref().and_then(parse_color) {
@@ -1927,12 +1983,13 @@ fn render_custom_page(
     commands: &[Option<String>],
     titles: &[LayoutTitle],
     tv: TvStandard,
+    frame: MenuFrame,
     out_dir: &Path,
     prefix: &str,
     default_secs: f64,
 ) -> Result<PageOutput, LayoutError> {
     let io = |p: &Path, e: &dyn fmt::Display| LayoutError(vec![format!("{}: {e}", p.display())]);
-    let (fw, fh) = tv.size();
+    let (fw, fh) = (frame.width, frame.height);
     let canvas = layout.canvas;
     let mut warnings = Vec::new();
     let mut layers: Vec<MenuLayer> = Vec::new();
@@ -1981,7 +2038,7 @@ fn render_custom_page(
     let mut indicator_covs: Vec<(usize, (menu::Coverage, i64, i64))> = Vec::new();
 
     for (n, e) in menu.elements.iter().enumerate() {
-        let (x, y, w, h) = frame_box(e, canvas, tv);
+        let (x, y, w, h) = frame_box(e, canvas, frame);
         let unrotated = is_unrotated(e.rotation);
         let opacity = (e.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         // Indicators only add their shape to their button's masks (after this loop).
@@ -1994,11 +2051,11 @@ fn render_custom_page(
             menu_anim::Sprite { pixels, rect: (rx as f64, ry as f64, rw as f64, rh as f64), opacity: e.opacity, keys }
         };
         let visible = !indicator && (e.opacity > 0.0 || !e.intro.is_empty());
-        let pa = tv.menu_pixel_aspect();
+        let pa = frame.pixel_aspect;
 
         match &e.content {
             c @ Content::Text { .. } => {
-                let (img, cov) = draw_text_element(c, w, h, canvas, tv);
+                let (img, cov) = draw_text_element(c, w, h, canvas, frame);
                 let (img, rx, ry) = rotate_rgba(img, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
                 if !indicator {
@@ -2043,7 +2100,7 @@ fn render_custom_page(
             }
             Content::Rect { color, border_color, border_width } => {
                 let fill = parse_color(color).unwrap_or([255, 255, 255]);
-                let raw = rect_image(fill, rect_border(border_color, border_width, canvas, tv, w, h), w, h, 255);
+                let raw = rect_image(fill, rect_border(border_color, border_width, canvas, frame, w, h), w, h, 255);
                 let (img, rx, ry) = rotate_rgba(raw, e.rotation, pa, (x, y));
                 let (rw, rh) = img.dimensions();
                 if indicator {
@@ -2081,7 +2138,7 @@ fn render_custom_page(
             continue;
         }
         let Some(cmd) = commands.get(n).cloned().flatten() else { continue };
-        let Some(rect) = button_rect(e, canvas, tv) else {
+        let Some(rect) = button_rect(e, canvas, frame) else {
             warnings.push(format!("{}: button lies outside the picture and was skipped", element_name(e, n)));
             continue;
         };
@@ -2140,7 +2197,7 @@ fn render_custom_page(
         }
         let value = pairs.iter().position(|p| *p == button_colors(layout, owner)).unwrap_or(0).min(MAX_COLOR_PAIRS - 1) as u8 + 1;
         paint_mask(&mut highlight, &mut select, cov, (*ox, *oy), (0, 0, fw as i64, fh as i64), smooth_edges, value);
-        if let Some(r) = button_rect(ind, canvas, tv) {
+        if let Some(r) = button_rect(ind, canvas, frame) {
             b.rect = rect_union(b.rect, r);
         }
     }
@@ -2199,6 +2256,7 @@ fn render_custom_page(
     highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
     select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
     std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, intro_secs.unwrap_or(0.0))).map_err(|e| io(&xml_path, &e))?;
+    let letterbox_xml = write_letterbox(out_dir, prefix, tv, frame, &highlight, &select, &buttons, intro_secs.unwrap_or(0.0))?;
     let files = MenuPageFiles {
         background: out_dir.join(&hl_name),
         highlight: out_dir.join(&hl_name),
@@ -2212,8 +2270,66 @@ fn render_custom_page(
         custom: Some(CustomMenuMedia { background, overlay: menu.background.overlay, layers }),
         intro,
         intro_fill: [0; 3],
+        frame,
+        letterbox_xml,
     };
     Ok(PageOutput { files, buttons, motion: moving, warnings })
+}
+
+/// Row `y` of a 16:9 frame of height `h` in letterbox display on a 4:3 TV: full width, 3/4
+/// height, centred (DVD-Video display mode "letterbox"; the player scales the video, not the
+/// subpicture, so the letterbox highlight is its own stream).
+fn letterbox_y(y: u32, h: u32) -> f64 {
+    h as f64 / 8.0 + y as f64 * 0.75
+}
+
+/// `r` in letterbox display, with the even rows [`button_rect`] keeps.
+fn letterbox_rect(r: Rect, h: u32) -> Rect {
+    let y0 = letterbox_y(r.y0, h).floor() as u32 & !1;
+    let y1 = ((letterbox_y(r.y1, h).ceil() as u32 + 1) & !1).min(h);
+    Rect { y0, y1, ..r }
+}
+
+/// `m` squeezed into letterbox display; a row keeps any painted pixel of the rows it covers.
+fn letterbox_mask(m: &IndexedImage) -> IndexedImage {
+    let (w, h) = (m.width, m.height);
+    let mut out = IndexedImage::new(w, h, m.palette);
+    let top = h / 8;
+    for t in 0..h * 3 / 4 {
+        let rows = t * 4 / 3..((t + 1) * 4).div_ceil(3).min(h);
+        for x in 0..w {
+            let v = rows.clone().map(|sy| m.get(x, sy)).find(|&v| v != menu::IDX_BACKGROUND).unwrap_or(menu::IDX_BACKGROUND);
+            out.pixels[((top + t) * w + x) as usize] = v;
+        }
+    }
+    out
+}
+
+/// 16:9 frames: writes the letterbox highlight (`{prefix}_lb_hl.png`, `_lb_sel.png`) and its
+/// spumux XML (subpicture stream 1, see `author::menu_pgcs`); `None` for 4:3.
+#[allow(clippy::too_many_arguments)]
+fn write_letterbox(
+    out_dir: &Path,
+    prefix: &str,
+    tv: TvStandard,
+    frame: MenuFrame,
+    highlight: &IndexedImage,
+    select: &IndexedImage,
+    buttons: &[MenuButton],
+    start_secs: f64,
+) -> Result<Option<PathBuf>, LayoutError> {
+    if !frame.is_wide() || buttons.is_empty() {
+        return Ok(None);
+    }
+    let io = |p: &Path, e: &dyn fmt::Display| LayoutError(vec![format!("{}: {e}", p.display())]);
+    let (hl_name, sel_name) = (format!("{prefix}_lb_hl.png"), format!("{prefix}_lb_sel.png"));
+    let xml_path = out_dir.join(format!("{prefix}_lb_spumux.xml"));
+    for (img, name) in [(highlight, &hl_name), (select, &sel_name)] {
+        letterbox_mask(img).write_png(&out_dir.join(name)).map_err(|e| io(&out_dir.join(name), &e))?;
+    }
+    let lb: Vec<MenuButton> = buttons.iter().map(|b| MenuButton { rect: letterbox_rect(b.rect, frame.height), ..b.clone() }).collect();
+    std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &lb, start_secs)).map_err(|e| io(&xml_path, &e))?;
+    Ok(Some(xml_path))
 }
 
 /// Paints a coverage at `origin` into both button masks, clipped to `bounds` (`x0, y0, x1, y1`):
@@ -2255,10 +2371,11 @@ fn render_fastplay_page(
     main_menu_target: FastPlayMenuTarget,
     titles: &[LayoutTitle],
     tv: TvStandard,
+    frame: MenuFrame,
     out_dir: &Path,
 ) -> Result<(MenuSpec, MenuPageFiles), LayoutError> {
     let io = |p: &Path, e: &dyn fmt::Display| LayoutError(vec![format!("{}: {e}", p.display())]);
-    let (fw, fh) = tv.size();
+    let (fw, fh) = (frame.width, frame.height);
     let prefix = "cm_fastplay";
 
     let (background, overlay) = match &fp.splash {
@@ -2376,6 +2493,7 @@ fn render_fastplay_page(
     highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
     select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
     std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, 0.0)).map_err(|e| io(&xml_path, &e))?;
+    let letterbox_xml = write_letterbox(out_dir, prefix, tv, frame, &highlight, &select, &buttons, 0.0)?;
 
     let moving = matches!(background, MenuBackground::Video { .. }) || audio.is_some();
     let duration = fp.timeout_secs as f64;
@@ -2403,6 +2521,8 @@ fn render_fastplay_page(
         custom: Some(CustomMenuMedia { background, overlay, layers }),
         intro: None,
         intro_fill: [0; 3],
+        frame,
+        letterbox_xml,
     };
     Ok((spec, files))
 }
@@ -2433,6 +2553,7 @@ pub fn build_custom_menus(
     default_secs: f64,
 ) -> Result<CustomMenus, LayoutError> {
     validate(layout, titles, tv)?;
+    let frame = tv.menu_frame(layout.menu_aspect());
     let has_fastplay = layout.fast_play.as_ref().is_some_and(|fp| fp.enabled);
     let vmgm_base = if has_fastplay { 2 } else { 1 };
     let nav = plan_navigation_with_offset(layout, titles, vmgm_base)?;
@@ -2440,7 +2561,7 @@ pub fn build_custom_menus(
         .menus
         .par_iter()
         .enumerate()
-        .map(|(i, m)| render_custom_page(layout, m, &nav.commands[i], titles, tv, out_dir, &format!("cm{:02}", i + 1), default_secs))
+        .map(|(i, m)| render_custom_page(layout, m, &nav.commands[i], titles, tv, frame, out_dir, &format!("cm{:02}", i + 1), default_secs))
         .collect::<Result<_, _>>()?;
 
     let mut vmgm_menus = Vec::new();
@@ -2454,7 +2575,7 @@ pub fn build_custom_menus(
     let mut warnings = Vec::new();
 
     if let Some(fp) = layout.fast_play.as_ref().filter(|fp| fp.enabled) {
-        let (fp_spec, fp_files) = render_fastplay_page(fp, fp.menu_target, titles, tv, out_dir)?;
+        let (fp_spec, fp_files) = render_fastplay_page(fp, fp.menu_target, titles, tv, frame, out_dir)?;
         vmgm_menus.push(fp_spec.clone());
         pages.push((fp_spec, fp_files));
     }
@@ -2555,6 +2676,8 @@ pub fn build_custom_menus(
             custom: Some(CustomMenuMedia { background: bg, overlay: BackgroundOverlay::None, layers: vec![] }),
             intro: None,
             intro_fill: [0; 3],
+            frame,
+            letterbox_xml: None,
         };
         match bridge.placement {
             Placement::Vmgm(_) => {
@@ -2667,7 +2790,7 @@ mod tests {
     }
 
     fn layout(menus: Vec<CustomMenu>) -> CustomLayout {
-        CustomLayout { title_screen: None, chapter_menus: None, version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, theme: None, settings_mode: None, menus }
+        CustomLayout { title_screen: None, chapter_menus: None, aspect: None, version: 1, canvas: Canvas::default(), highlight: Highlight::default(), animations: true, fast_play: None, theme: None, settings_mode: None, menus }
     }
 
     #[test]
@@ -3879,5 +4002,74 @@ mod tests {
         }
         let err = validate(&bad, &titles(1), TvStandard::Pal).unwrap_err().to_string();
         assert!(err.contains("opacity") && err.contains("Outline colour") && err.contains("0 and 100"), "{err}");
+    }
+
+    #[test]
+    fn wide_frame_squeezes_text_by_its_pixel_aspect() {
+        let c = styled_text();
+        let wide = TvStandard::Pal.menu_frame("16:9");
+        assert!(wide.is_wide() && !MenuFrame::from(TvStandard::Pal).is_wide());
+        assert_eq!(TvStandard::Ntsc.menu_frame("4:3"), MenuFrame::from(TvStandard::Ntsc), "4:3 frame unchanged");
+        let (_, narrow) = draw(&c);
+        let (img, cov) = draw_text_element(&c, 200, 80, Canvas::default(), wide);
+        assert_eq!((img.width(), cov.width), (200, 200));
+        let (a, b) = (cov_bounds(&narrow), cov_bounds(&cov));
+        if a.2 == 0 {
+            eprintln!("skipping: no Arial");
+            return;
+        }
+        // Square-pixel glyphs on the 4:3 frame, 1 / (16/9 * 576/720) as wide on the 16:9 one.
+        let ratio = (b.2 - b.0 + 1) as f64 / (a.2 - a.0 + 1) as f64;
+        assert!((ratio - 1.0 / wide.pixel_aspect).abs() < 0.06, "ratio {ratio}");
+        assert!(((b.0 + b.2) as i64 - (a.0 + a.2) as i64).abs() <= 2, "stays centred");
+        assert_eq!((a.1, a.3), (b.1, b.3), "rows unchanged");
+    }
+
+    #[test]
+    fn wide_layout_renders_anamorphic_with_a_letterbox_highlight() {
+        let dir = std::env::temp_dir().join(format!("cx_layout_wide_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut l = layout(vec![menu("main", MenuRole::Title, None, vec![text(100.0, 100.0, "Play", Some(Action::PlayTitle { title: 1 }))])]);
+        l.aspect = Some("16:9".into());
+        assert_eq!(l.menu_aspect(), "16:9");
+        let out = build_custom_menus(&l, &titles(1), TvStandard::Pal, &dir, 10.0).unwrap();
+        let (spec, files) = &out.pages[0];
+        assert_eq!(files.frame, TvStandard::Pal.menu_frame("16:9"));
+        // The canvas is the 720-pixel frame: the button keeps its pixels, only its content is squeezed.
+        assert_eq!(spec.buttons[0].rect, Rect { x0: 100, y0: 100, x1: 400, y1: 150 });
+        let xml = std::fs::read_to_string(files.letterbox_xml.as_ref().expect("letterbox stream")).unwrap();
+        // Letterbox rows: 72 + 3/4 y, kept even.
+        assert!(xml.contains(r#"x0="100" y0="146" x1="400" y1="186""#), "{xml}");
+        assert!(xml.contains("cm01_lb_hl.png") && xml.contains("cm01_lb_sel.png"), "{xml}");
+        let hl = image::open(dir.join("cm01_hl.png")).unwrap().to_rgba8();
+        let lb = image::open(dir.join("cm01_lb_hl.png")).unwrap().to_rgba8();
+        let rows = |img: &RgbaImage| (0..img.height()).filter(|&y| (0..img.width()).any(|x| img.get_pixel(x, y)[3] > 0)).collect::<Vec<_>>();
+        let (full, boxed) = (rows(&hl), rows(&lb));
+        if !full.is_empty() {
+            assert!(boxed.iter().all(|&y| (146..186).contains(&y)), "{boxed:?}");
+            assert!(boxed.len() < full.len());
+        }
+
+        let mut four = l.clone();
+        four.aspect = None;
+        let out = build_custom_menus(&four, &titles(1), TvStandard::Pal, &dir, 10.0).unwrap();
+        assert!(out.pages[0].1.letterbox_xml.is_none());
+        assert_eq!(out.pages[0].1.frame, MenuFrame::from(TvStandard::Pal));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wide_menus_allow_18_buttons() {
+        let buttons = (0..19).map(|i| {
+            let mut e = text(10.0 + (i % 2) as f64 * 360.0, 10.0 + (i / 2) as f64 * 56.0, &format!("b{i}"), Some(Action::PlayTitle { title: 1 }));
+            e.w = 340.0;
+            e
+        });
+        let mut l = layout(vec![menu("main", MenuRole::Title, None, buttons.collect())]);
+        assert!(validate(&l, &titles(1), TvStandard::Pal).is_ok());
+        l.aspect = Some("16:9".into());
+        let err = validate(&l, &titles(1), TvStandard::Pal).unwrap_err().to_string();
+        assert!(err.contains("at most 18"), "{err}");
     }
 }

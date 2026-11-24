@@ -3,7 +3,7 @@
 //! timestamps follow the decode-time rules tsMuxeR 2.7.0 applied to the same cues (plane clear
 //! 32 MB/s, object decode 16 MB/s; verified against its output).
 
-use crate::igs::{rgb_to_ycrcb, rle_encode, segment};
+use crate::igs::{ods_segments, rgb_to_ycrcb, rle_encode, segment, IgObject};
 use crate::subpic::Picture;
 use crate::textsub::{render_cue_on, Canvas, Cue};
 
@@ -102,18 +102,13 @@ pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fp
             let [y_c, cr, cb] = rgb_to_ycrcb(c[0], c[1], c[2]);
             pds.extend([(i as u8) + 1, y_c, cr, cb, c[3]]);
         }
-        let mut ods = Vec::new();
-        ods.extend(0u16.to_be_bytes());
-        ods.extend([0, 0xC0]);
-        ods.extend(&(rle.len() as u32 + 4).to_be_bytes()[1..]);
-        ods.extend((iw as u16).to_be_bytes());
-        ods.extend((ih as u16).to_be_bytes());
-        ods.extend(&rle);
+        // Busy cues (outlines, anti-aliasing, typesetting) easily exceed one 64 KiB segment.
+        let ods = ods_segments(dts + obj, dts, &IgObject { id: 0, width: iw as u16, height: ih as u16, rle });
 
         out.extend(segment(start as u32, dts, 0x16, &pcs(0x80, &[(x as u16, y as u16)])));
         out.extend(segment(start as u32 - win, dts, 0x17, &wds(x as u16, y as u16, iw as u16, ih as u16)));
         out.extend(segment(dts, 0, 0x14, &pds));
-        out.extend(segment(dts + obj, dts, 0x15, &ods));
+        out.extend(ods.concat());
         out.extend(segment(dts + obj, 0, 0x80, &[]));
 
         // Clear set: the window is released at `end`.
@@ -184,6 +179,41 @@ mod tests {
         let o = &ods.3;
         assert_eq!(u32::from_be_bytes([0, o[4], o[5], o[6]]) as usize, o.len() - 7);
         assert_eq!(o[3], 0xC0);
+    }
+
+    /// A 400x200 picture of per-pixel noise over 200 colours: about one RLE byte per pixel.
+    fn noisy_picture(start: f64, end: f64) -> Picture {
+        let mut seed = 1u32;
+        let image = image::RgbaImage::from_fn(400, 200, |_, _| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let v = (seed >> 16) % 200;
+            image::Rgba([v as u8, 255 - v as u8, 40, 255])
+        });
+        Picture { start, end, forced: false, x: 100, y: 800, image }
+    }
+
+    #[test]
+    fn objects_over_64k_are_fragmented_and_round_trip() {
+        let pics = [noisy_picture(1.0, 2.0), noisy_picture(3.0, 4.0)];
+        let sup = build_sup_from_pictures(&pics, (1920, 1080), (24000, 1001));
+        crate::bd_mux::validate_sup(&sup).unwrap();
+        let segs = parse(&sup);
+        let ods: Vec<_> = segs.iter().filter(|s| s.0 == 0x15).collect();
+        assert_eq!(ods.len(), 4, "two fragments per object");
+        assert_eq!((ods[0].3[3], ods[1].3[3]), (0x80, 0x40));
+        // Every fragment of an object shares the decode stamps.
+        assert_eq!((ods[0].1, ods[0].2), (ods[1].1, ods[1].2));
+        let decoded = crate::subpic::decode_pgs(&sup).unwrap();
+        assert_eq!(decoded.pictures.len(), 2);
+        for (d, p) in decoded.pictures.iter().zip(&pics) {
+            assert_eq!((d.x, d.y, d.image.dimensions()), (p.x, p.y, p.image.dimensions()));
+            // Colours pass through lossy YCrCb, so check the RLE round trip as a consistent colour map.
+            let mut map = std::collections::HashMap::new();
+            for (a, b) in p.image.pixels().zip(d.image.pixels()) {
+                assert_eq!(*map.entry(a.0).or_insert(b.0), b.0);
+            }
+            assert_eq!(map.len(), 200);
+        }
     }
 
     #[test]

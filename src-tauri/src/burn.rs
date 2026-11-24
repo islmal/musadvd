@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use musadvd::burner::layerbreak::Capacities;
 use musadvd::burner::{
-    burn_video_ts, default_iso_path as iso_path, is_bdmv_folder, media_problem, preferred_speed, speed_label, speed_x,
+    burn_video_ts, default_iso_path as iso_path, is_bdmv_folder, media_problem, auto_speed_text, preferred_speed_for, speed_label, speed_x,
     system_burner, BurnError, BurnJob, BurnOptions, BurnOutcome, BurnPhase, BurnProgress, DiscContent, DriveInfo, MediaInfo,
     MediaType, WriteSpeed,
 };
@@ -102,6 +102,10 @@ pub struct MediaView {
     pub media: MediaInfo,
     pub speeds: Vec<SpeedOption>,
     pub default_speed: WriteSpeed,
+    /// What `auto` resolves to for this disc ("6x"); `None` without a disc.
+    pub auto_speed: Option<String>,
+    /// "Auto (6x for this disc)" / "Auto (best for the disc)".
+    pub auto_speed_label: String,
     /// Burning is not possible (shown instead of the burn button).
     pub problem: Option<String>,
     /// Burning is possible but needs confirmation (e.g. overwriting a rewritable disc).
@@ -128,7 +132,7 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
     };
     let mut speeds = vec![option(WriteSpeed::Max, "Maximum".into())];
     speeds.extend(media.speeds.iter().map(|&s| option(WriteSpeed::Specific(s), speed_label(s, media.media_type))));
-    let default = preferred_speed(media.media_type, &media.speeds, speed_pref);
+    let default = preferred_speed_for(&media, speed_pref);
     let capacity = if media.blank { media.free_sectors } else { media.total_sectors };
     let problem = media_problem(&media, &needs.content());
     let needs_erase = problem.is_none() && !media.blank;
@@ -148,7 +152,12 @@ fn media_view(media: MediaInfo, needs: &DiscNeeds, speed_pref: &str, auto_erase:
     }
     let room = capacity >= needs.sectors;
     let auto_ok = problem.is_none() && room && (media.blank || auto_erase);
-    MediaView { media, speeds, default_speed: default, problem, warning, needs_erase, auto_ok }
+    let auto_speed = auto_speed_text(&media);
+    let auto_speed_label = match &auto_speed {
+        Some(x) => format!("Auto ({x} for this disc)"),
+        None => "Auto (best for the disc)".into(),
+    };
+    MediaView { media, speeds, default_speed: default, auto_speed, auto_speed_label, problem, warning, needs_erase, auto_ok }
 }
 
 #[tauri::command]
@@ -366,6 +375,20 @@ mod tests {
             speeds: vec![10_820, 5_410, 2_705],
             layer_break_supported: true,
         }
+    }
+
+    #[test]
+    fn auto_speed_label_follows_the_disc() {
+        let small = DiscNeeds { sectors: 1_000_000, size_gb: 2.0, dual_layer: false, bluray: false, fits_dvd: true };
+        let v = media_view(media(true, false, MediaType::Dvd5, 2_295_104), &small, "auto", false);
+        assert_eq!(v.auto_speed_label, "Auto (8x for this disc)");
+        let mut rw = media(false, true, MediaType::Dvd5, 2_295_104);
+        rw.physical = "DVD-RW".into();
+        rw.speeds = vec![4_056, 2_705]; // 6x, 4x
+        let v = media_view(rw, &small, "auto", true);
+        assert_eq!(v.auto_speed_label, "Auto (6x for this disc)");
+        assert_eq!(v.default_speed, WriteSpeed::Specific(4_056));
+        assert_eq!(media_view(MediaInfo::none(), &small, "auto", false).auto_speed_label, "Auto (best for the disc)");
     }
 
     #[test]

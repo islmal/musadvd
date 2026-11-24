@@ -12,6 +12,8 @@
       <header class="toolbar">
         <div class="brand"><img class="brand-logo" src="/logo.png" alt="" aria-hidden="true" />MusaDVD<span id="app-version" class="app-version"></span><select id="ui-lang" class="ui-lang" data-i18n-title="settings.uiLanguage" title="Interface language"></select></div>
         <div class="toolbar-actions">
+          <button id="btn-home" class="btn" data-i18n="app.home" data-i18n-title="app.homeTip" title="Back to the start page">Home</button>
+          <button id="btn-new" class="btn" data-i18n="app.newProject" data-i18n-title="app.newProjectTip" title="Start a new project">New project</button>
           <button id="btn-add" class="btn" data-i18n="app.addVideos">＋ Add videos</button>
           <button id="btn-remove" class="btn" disabled data-i18n="app.remove">Remove</button>
           <button id="btn-up" class="btn icon" data-i18n-title="app.moveUp" title="Move up" disabled>▲</button>
@@ -23,12 +25,15 @@
         </div>
       </header>
 
-      <main class="split">
+      <main id="landing" class="landing-host" hidden></main>
+
+      <main class="split" id="workspace">
         <aside class="left">
           <div id="dropzone" class="dropzone">
             <strong data-i18n="app.dropTitle">Drop videos here</strong>
             <span data-i18n="app.dropHint">MKV, MP4, AVI, MOV, TS … – each video becomes its own titleset</span>
           </div>
+          <div id="tv-banner" class="tv-banner" hidden></div>
           <ul id="title-list" class="title-list" aria-label="Titlesets"></ul>
 
           <footer class="left-footer">
@@ -54,10 +59,18 @@
               </div>
               <div class="row" id="dvd-res-row">
                 <label for="dvd-resolution" data-i18n="settings.aufloesung">Resolution</label>
-                <select id="dvd-resolution">
+                <select id="dvd-resolution" data-i18n-title="app.dvdResHint" title="Half D1 and SIF are 4:3-only per the DVD-Video spec; 16:9 sources are letterboxed automatically.">
                   <option value="Full D1" data-i18n="settings.fullD1720576">Full D1 (720×576)</option>
                   <option value="Half D1" data-i18n="settings.halfD1352576Ntsc">Half D1 (352×576, NTSC 352×480)</option>
                   <option value="SIF" data-i18n="settings.sif352288Ntsc352240">SIF (352×288, NTSC 352×240)</option>
+                </select>
+              </div>
+              <div class="row" id="menu-aspect-row">
+                <label for="menu-aspect" data-i18n="app.menuAspect" data-i18n-title="app.menuAspectTip" title="">Menu aspect</label>
+                <select id="menu-aspect" data-i18n-title="app.menuAspectTip">
+                  <option value="auto" data-i18n="app.menuAspectAuto">Auto</option>
+                  <option value="4:3">4:3</option>
+                  <option value="16:9">16:9</option>
                 </select>
               </div>
               <div class="row" id="dvd-video-row">

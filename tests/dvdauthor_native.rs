@@ -342,3 +342,87 @@ fn two_audio_and_two_subpicture_streams() {
     let t = title(&[("t1.mpg", &["0", "0:01"])], "16:9", &[("ac3", Some("de")), ("dts", Some("en"))], &[Some("de"), Some("en")]);
     check("av", &layout(TvStandard::Pal, vec![], vec![plain(t)], PlaybackOptions::default()), &work);
 }
+
+// --- 16:9 menus (no dvdauthor fixture: checked field by field) ------------------------------
+
+fn be16(b: &[u8], at: usize) -> u32 {
+    u16::from_be_bytes([b[at], b[at + 1]]) as u32
+}
+
+fn be32(b: &[u8], at: usize) -> usize {
+    u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as usize
+}
+
+/// SPST of the first PGC of the first language unit of the menu PGCI-UT at sector `ut_sector`.
+fn first_menu_pgc_spst(ifo: &[u8], ut_sector: usize) -> [u8; 4] {
+    let ut = ut_sector * 2048;
+    let lu = ut + be32(ifo, ut + 8 + 4);
+    let pgc = lu + be32(ifo, lu + 8 + 4);
+    ifo[pgc + 0x1C..pgc + 0x20].try_into().unwrap()
+}
+
+/// `(x1, y1, x2, y2)` of BTN_IT `n` (0-based, over all groups) in the PCI of the first NAV pack.
+fn btn_it(vob: &[u8], n: usize) -> (u32, u32, u32, u32) {
+    let o = &vob[0xBB + 18 * n..];
+    let (x1, x2) = (((o[0] as u32 & 0x3F) << 4) | (o[1] as u32 >> 4), ((o[1] as u32 & 0xF) << 8) | o[2] as u32);
+    let (y1, y2) = (((o[3] as u32 & 0x3F) << 4) | (o[4] as u32 >> 4), ((o[4] as u32 & 0xF) << 8) | o[5] as u32);
+    (x1, y1, x2, y2)
+}
+
+#[test]
+fn wide_menus_have_widescreen_and_letterbox_highlights() {
+    let work = temp_dir("wide");
+    let menu_src = input("in_menu.mpg", &[]);
+    copy_in(&work, &input("in_audio_4s.mpg", &[]), "t1.mpg");
+    // VMGM: highlight stream 0 (widescreen) plus stream 1 (letterbox: rows 72 + 3/4 y, even).
+    let main = grid(vec![ButtonAction::OpenTitleset(1), ButtonAction::PlayAll]);
+    menu_vob(&work, &menu_src, "main0.vob", TvStandard::Pal, &main, 0.0);
+    let mut lb = main.clone();
+    for b in &mut lb {
+        b.rect = Rect { y0: 146, y1: 200, ..b.rect };
+    }
+    mask(&lb, SELECTION).write_png(&work.join("lb.hl.png")).unwrap();
+    mask(&lb, ACTION).write_png(&work.join("lb.sel.png")).unwrap();
+    let xml = author::spumux_xml(TvStandard::Pal, "lb.hl.png", "lb.sel.png", &lb, 0.0);
+    let mut out = Vec::new();
+    spumux::mux(std::fs::File::open(work.join("main0.vob")).unwrap(), &mut out, spumux::parse_xml(&xml, &work).unwrap(), 1).unwrap();
+    std::fs::write(work.join("main.vob"), out).unwrap();
+    // VTSM: only stream 0, so letterbox falls back to it.
+    let root = grid(vec![ButtonAction::PlayTitle(1), ButtonAction::MainMenu(1)]);
+    menu_vob(&work, &menu_src, "root.vob", TvStandard::Pal, &root, 0.0);
+    let t = title(&[("t1.mpg", &["0", "0:02"])], "4:3", &[("ac3", None)], &[]);
+    let sets = vec![TitlesetSpec { menus: vec![menu_spec("root.vob", root, Some("root"))], title: t, main_menu_page: 1 }];
+    let mut l = layout(TvStandard::Pal, vec![menu_spec("main.vob", main, Some("title"))], sets, PlaybackOptions::default());
+    l.menu_aspect = "16:9".into();
+    let xml = author::dvdauthor_xml(&l).unwrap();
+    assert!(xml.contains(r#"<video format="pal" aspect="16:9" widescreen="nopanscan"/>"#) && xml.contains(r#"<stream id="1" mode="letterbox"/>"#), "{xml}");
+
+    author::author_dvd(&l, &work, &work.join("native")).unwrap();
+    let dir = work.join("native").join("VIDEO_TS");
+    let vmg = std::fs::read(dir.join("VIDEO_TS.IFO")).unwrap();
+    let vts = std::fs::read(dir.join("VTS_01_0.IFO")).unwrap();
+    // Video attributes: aspect (bits 11-10) 3 = 16:9, permitted display (9-8) 2 = letterbox only.
+    for (name, v) in [("VMGM", be16(&vmg, 0x100)), ("VTSM", be16(&vts, 0x100))] {
+        assert_eq!(((v >> 10) & 3, (v >> 8) & 3), (3, 2), "{name} video attributes {v:#06x}");
+    }
+    assert_eq!((be16(&vts, 0x200) >> 10) & 3, 0, "the 4:3 title keeps its own attributes");
+    assert_eq!((be16(&vmg, 0x154), be16(&vts, 0x154)), (1, 1), "one menu subpicture stream");
+    // PGC SPST: available, 4:3 -, widescreen 0, letterbox 1 (VTSM: 0), pan-scan -.
+    assert_eq!(first_menu_pgc_spst(&vmg, be32(&vmg, 0xC8)), [0x80, 0, 1, 0]);
+    assert_eq!(first_menu_pgc_spst(&vts, be32(&vts, 0xD0)), [0x80, 0, 0, 0]);
+
+    for (vob, lb_y0) in [("VIDEO_TS.VOB", 146), ("VTS_01_0.VOB", 100)] {
+        let v = std::fs::read(dir.join(vob)).unwrap();
+        assert_eq!(v[0x26..0x2A], [0, 0, 1, 0xBF], "{vob}: NAV pack first");
+        // BTN_MD: 2 groups, group 1 widescreen (1), group 2 letterbox (2); 18 slots per group.
+        assert_eq!(be16(&v, 0x9B), 0x2120, "{vob}");
+        assert_eq!(v[0x9E], 2, "{vob}");
+        let (wide, letterbox) = (btn_it(&v, 0), btn_it(&v, 18));
+        assert_eq!((wide.0, wide.1, wide.2), (80, 100, letterbox.2), "{vob}");
+        assert_eq!((letterbox.0, letterbox.1), (80, lb_y0), "{vob}");
+        // The muxer marks the MPEG-2 sequence header 16:9 (aspect_ratio_information 3).
+        let seq = v.windows(4).position(|w| w == [0, 0, 1, 0xB3]).unwrap();
+        assert_eq!(v[seq + 7] >> 4, 3, "{vob}");
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}

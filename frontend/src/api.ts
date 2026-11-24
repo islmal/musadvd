@@ -366,6 +366,8 @@ export interface AppSettings {
   aspect_ratio_policy: "Auto" | "4:3" | "16:9";
   encoding_profile: "Auto" | "SP_Short" | "MP_Medium" | "LP_Long";
   target_size_mb: number;
+  /** AC-3 encode bitrate in kbit/s for every encoded track; 0 = automatic (192 stereo, 448 5.1). */
+  audio_bitrate_kbps: number;
   max_concurrent_encodes: number;
   process_priority: "Normal" | "BelowNormal" | "Idle";
   auto_chapter_enabled: boolean;
@@ -462,6 +464,9 @@ export interface MediaView {
   warning: string | null;
   needsErase: boolean;
   autoOk: boolean;
+  /** The speed "auto" resolves to for the inserted disc, e.g. "6x"; null without a disc. */
+  autoSpeed: string | null;
+  autoSpeedLabel: string;
 }
 
 export interface DiscNeeds {

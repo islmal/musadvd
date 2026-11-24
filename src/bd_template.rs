@@ -562,7 +562,7 @@ pub fn layout_from_template(
 
     let mut seen = HashSet::new();
     warnings.retain(|w| seen.insert(w.clone()));
-    let layout = CustomLayout { title_screen: None, chapter_menus: None,
+    let layout = CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
         version: LAYOUT_VERSION,
         canvas: Canvas { width: CANVAS_W as u32, height: CANVAS_H as u32 },
         highlight: Highlight::default(),

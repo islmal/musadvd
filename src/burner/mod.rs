@@ -302,12 +302,48 @@ pub fn auto_speed_x(media: MediaType) -> f64 {
 /// tolerance), the slowest offered one when all are faster, the target itself when the drive
 /// lists none.
 pub fn default_speed(media: MediaType, speeds: &[u32]) -> WriteSpeed {
-    let want = auto_speed_x(media) * media.sectors_per_sec_1x();
+    pick_speed(media, speeds, auto_speed_x(media))
+}
+
+fn pick_speed(media: MediaType, speeds: &[u32], x: f64) -> WriteSpeed {
+    let want = x * media.sectors_per_sec_1x();
     if speeds.is_empty() {
         return WriteSpeed::Specific(want.round() as u32);
     }
     let pick = speeds.iter().copied().filter(|&s| s as f64 <= want * 1.03).max().or_else(|| speeds.iter().copied().min()).unwrap();
     WriteSpeed::Specific(pick)
+}
+
+/// Medium-aware `auto` speed from the speeds the drive reports for the inserted disc: the
+/// [`auto_speed_x`] ceiling, lowered for BD-RE (2x) and lifted for rewritable DVDs, which are
+/// rated for 6x/8x at most anyway, so the fastest reported speed is already safe. BD-R keeps 4x.
+pub fn auto_speed(media: &MediaInfo) -> WriteSpeed {
+    let t = media.media_type;
+    match (media.rewritable, t.is_bd()) {
+        (true, true) => pick_speed(t, &media.speeds, 2.0),
+        (true, false) if !media.speeds.is_empty() => WriteSpeed::Specific(*media.speeds.iter().max().unwrap()),
+        _ => default_speed(t, &media.speeds),
+    }
+}
+
+/// The resolved [`auto_speed`] as "6x"; `None` without a disc.
+pub fn auto_speed_text(media: &MediaInfo) -> Option<String> {
+    if !media.present {
+        return None;
+    }
+    Some(speed_label(match auto_speed(media) {
+        WriteSpeed::Specific(s) => s,
+        WriteSpeed::Max => return None,
+    }, media.media_type))
+}
+
+/// Like [`preferred_speed`], but `auto` goes through [`auto_speed`].
+pub fn preferred_speed_for(media: &MediaInfo, pref: &str) -> WriteSpeed {
+    let p = pref.trim().trim_end_matches(['x', 'X']);
+    if p.replace(',', ".").parse::<f64>().is_err() && !pref.trim().eq_ignore_ascii_case("max") {
+        return auto_speed(media);
+    }
+    preferred_speed(media.media_type, &media.speeds, pref)
 }
 
 /// Speed from the "write speed" setting: `auto` (8x DVD, 4x DVD-9/Blu-ray, see [`default_speed`]),
@@ -748,6 +784,31 @@ mod tests {
         assert_eq!(default_speed(MediaType::Dvd9, &[x(12.0), x(8.0)]), WriteSpeed::Specific(x(8.0)), "slowest offered");
         assert_eq!(default_speed(MediaType::Dvd9, &[]), WriteSpeed::Specific(x(4.0)), "target without a list");
         assert_eq!(default_speed(MediaType::Bd25, &[26_341, 13_170, 8_780]), WriteSpeed::Specific(8_780), "BD at 4x");
+    }
+
+    #[test]
+    fn auto_speed_follows_the_medium() {
+        let with = |t, phys: &str, rw: bool, speeds: &[f64]| {
+            let mut m = media(t, phys, true, rw, 1);
+            m.speeds = speeds.iter().map(|&v| (v * t.sectors_per_sec_1x()).round() as u32).collect();
+            m
+        };
+        let sp = |t: MediaType, v: f64| WriteSpeed::Specific((v * t.sectors_per_sec_1x()).round() as u32);
+        let rw = with(MediaType::Dvd5, "DVD-RW", true, &[6.0, 4.0]);
+        assert_eq!(auto_speed(&rw), sp(MediaType::Dvd5, 6.0));
+        let rw8 = with(MediaType::Dvd5, "DVD+RW", true, &[8.0, 4.0, 2.4]);
+        assert_eq!(auto_speed(&rw8), sp(MediaType::Dvd5, 8.0));
+        let bdre = with(MediaType::Bd25, "BD-RE", true, &[6.0, 4.0, 2.0]);
+        assert_eq!(auto_speed(&bdre), sp(MediaType::Bd25, 2.0));
+        let dvdr = with(MediaType::Dvd5, "DVD-R", false, &[16.0, 8.0, 4.0]);
+        assert_eq!(auto_speed(&dvdr), sp(MediaType::Dvd5, 8.0));
+        let bdr = with(MediaType::Bd25, "BD-R", false, &[12.0, 6.0, 4.0, 2.0]);
+        assert_eq!(auto_speed(&bdr), sp(MediaType::Bd25, 4.0));
+        assert_eq!(auto_speed_text(&rw).as_deref(), Some("6x"));
+        assert_eq!(auto_speed_text(&MediaInfo::none()), None);
+        assert_eq!(preferred_speed_for(&rw, "auto"), sp(MediaType::Dvd5, 6.0));
+        assert_eq!(preferred_speed_for(&rw, "max"), WriteSpeed::Max);
+        assert_eq!(preferred_speed_for(&rw, "4"), sp(MediaType::Dvd5, 4.0));
     }
 
     #[test]

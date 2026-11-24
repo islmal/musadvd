@@ -16,7 +16,10 @@ import {
   madeForOtherTitles,
   menuGroup,
   pixelAspectOf,
+  refreshTrackButtons,
   referencedTitles,
+  rect,
+  icon,
   syncLayoutWithTitles,
   remapLayoutByPaths,
   titlesKey,
@@ -545,5 +548,94 @@ describe("batch styling, start button and after-playback", () => {
     expect(afterPlaybackStep(l, two, 2, disc(false, true))).toEqual({ type: "title", title: 2 });
     expect(afterPlaybackStep(l, two, 2, disc(false, false, false))).toEqual({ type: "menu", menuId: "r" });
     expect(afterPlaybackStep(l, [ts("mainMenu", 1), ts(undefined, 2)], 1, disc(true, false))).toEqual({ type: "menu", menuId: "a" });
+  });
+});
+
+describe("refreshTrackButtons", () => {
+  const trk = (...labels: string[]) => labels.map((label, i) => ({ source: i + 1, label }));
+  const withTracks = (audio: string[], subs: string[]) => [title(1, "a.mkv", { audioTracks: trk(...audio), subtitleTracks: trk(...subs) })];
+  const draft = (titles: EditorTitle[], mode: "perTitle" | "global" = "perTitle") => draftLayout(titles, "PAL", "H", undefined, { settingsMode: mode });
+  const subLabels = (l: CustomLayout) =>
+    l.menus.flatMap((m) => m.elements).filter((e) => e.type === "text" && (e.action?.type === "setSubtitle" || e.action?.type === "setGlobalSubtitle")).map((e) => (e as { text: string }).text);
+
+  it("returns null when nothing changed", () => {
+    const titles = withTracks(["De", "En"], ["Fr"]);
+    expect(refreshTrackButtons(draft(titles), titles, "PAL")).toBeNull();
+  });
+
+  it("adds a button for a new subtitle track, keeping the page style", () => {
+    const titles = withTracks(["De", "En"], ["Fr"]);
+    const l = draft(titles);
+    const more = withTracks(["De", "En"], ["Fr", "Ja"]);
+    const r = refreshTrackButtons(l, more, "PAL")!;
+    expect(subLabels(r).slice(1)).toEqual(["Fr", "Ja"]);
+    expect(subLabels(l).length).toBe(2); // input untouched
+  });
+
+  it("follows a reorder and drops removed tracks", () => {
+    const titles = withTracks(["De", "En"], ["Fr", "Ja"]);
+    const l = draft(titles);
+    const r = refreshTrackButtons(l, withTracks(["De", "En"], ["Ja"]), "PAL")!;
+    expect(subLabels(r).slice(1)).toEqual(["Ja"]);
+  });
+
+  it("generates the subtitle column when the page had none", () => {
+    const titles = withTracks(["De", "En"], []);
+    const l = draft(titles);
+    const r = refreshTrackButtons(l, withTracks(["De", "En"], ["Fr"]), "PAL")!;
+    expect(subLabels(r).slice(1)).toEqual(["Fr"]);
+  });
+
+  it("leaves unrelated custom elements untouched and updates the global page", () => {
+    const titles = withTracks(["De", "En"], ["Fr"]);
+    const l = draft(titles, "global");
+    const settings = l.menus.find((m) => m.group === "settings" && m.title == null)!;
+    const extra = rect(1, 2, 3, 4, "#123456");
+    settings.elements.push(extra);
+    const r = refreshTrackButtons(l, withTracks(["De", "En"], ["Fr", "Ja"]), "PAL")!;
+    const rs = r.menus.find((m) => m.id === settings.id)!;
+    expect(rs.elements).toContainEqual(extra);
+    expect(subLabels(r).slice(1)).toEqual(["Fr", "Ja"]);
+  });
+});
+
+describe("aspect", () => {
+  it("16:9 DVD menus use a wider pixel; BD ignores it", () => {
+    const c = canvasSize("PAL");
+    expect(pixelAspectOf("PAL", c, "16:9")).toBeCloseTo((16 / 9) * (576 / 720), 6);
+    expect(pixelAspectOf("PAL", c)).toBeCloseTo(pixelAspectOf("PAL", c, "4:3"), 9);
+    expect(pixelAspectOf("BD1080", canvasSize("BD1080"), "16:9")).toBe(1);
+  });
+});
+
+describe("refreshTrackButtons references", () => {
+  const trk = (...labels: string[]) => labels.map((label, i) => ({ source: i + 1, label }));
+  const mk = (subs: string[]) => [title(1, "a.mkv", { audioTracks: trk("De", "En"), subtitleTracks: trk(...subs) })];
+  const page = (l: CustomLayout) => l.menus.find((m) => m.role === "settings")!;
+  const btn = (l: CustomLayout, label: string) => page(l).elements.find((e) => e.type === "text" && e.text === label)!;
+
+  it("repairs nav and indicators that pointed at removed buttons", () => {
+    const l = draftLayout(mk(["Fr", "Ja"]), "PAL", "H", undefined, { settingsMode: "perTitle" });
+    const p = page(l);
+    const fr = btn(l, "Fr"), ja = btn(l, "Ja");
+    btn(l, "De").nav = { right: ja.id, down: fr.id };
+    const ind = icon(0, 0, 10, 10, "pointer", "#FFFFFF", { indicatorFor: ja.id });
+    p.elements.push(ind);
+    const r = refreshTrackButtons(l, mk([]), "PAL")!;
+    const ids = new Set(page(r).elements.map((e) => e.id));
+    for (const e of page(r).elements) {
+      for (const v of Object.values(e.nav ?? {})) if (v) expect(ids.has(v)).toBe(true);
+      if (e.indicatorFor) expect(ids.has(e.indicatorFor)).toBe(true);
+    }
+    expect(page(r).elements.some((e) => e.id === ind.id)).toBe(false);
+  });
+
+  it("appended buttons carry no stale nav and keep ids unique", () => {
+    const l = draftLayout(mk(["Fr"]), "PAL", "H", undefined, { settingsMode: "perTitle" });
+    btn(l, "Fr").nav = { up: btn(l, "De").id };
+    const r = refreshTrackButtons(l, mk(["Fr", "Ja", "Ko"]), "PAL")!;
+    for (const label of ["Ja", "Ko"]) expect((btn(r, label) as { nav?: unknown }).nav ?? null).toBeNull();
+    const ids = page(r).elements.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

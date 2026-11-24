@@ -44,6 +44,10 @@ pub struct SubtitleStyle {
     pub bottom_margin_pct: Option<f32>,
     /// Shifts every cue by this many milliseconds (negative = earlier) before rendering.
     pub offset_ms: i64,
+    /// Han-unification region of the track being rendered ([`crate::fonts::cjk_region`]; set per
+    /// track by the builders, never saved): picks Japanese / Korean / Chinese glyph forms.
+    #[serde(skip)]
+    pub lang: Option<String>,
 }
 
 const FILL: Rgba<u8> = Rgba([255, 255, 255, 255]);
@@ -377,18 +381,20 @@ pub struct Canvas {
     scale: f32,
     /// User-chosen font family (see [`SubtitleStyle::font_family`]).
     font: Option<String>,
+    /// Track region (see [`SubtitleStyle::lang`]).
+    lang: Option<String>,
 }
 
 impl Canvas {
     pub fn dvd(tv: TvStandard) -> Canvas {
-        Canvas { size: tv.size(), em: EM_PX, pitch: LINE_PITCH, outline: OUTLINE, side: SIDE_MARGIN, bottom: BOTTOM_MARGIN, baseline_above: BASELINE_ABOVE_BOX, trim: FRAME_TRIM, scale: 1.0, font: None }
+        Canvas { size: tv.size(), em: EM_PX, pitch: LINE_PITCH, outline: OUTLINE, side: SIDE_MARGIN, bottom: BOTTOM_MARGIN, baseline_above: BASELINE_ABOVE_BOX, trim: FRAME_TRIM, scale: 1.0, font: None, lang: None }
     }
 
     /// HD canvas: em 65 px at 1080 lines (what tsMuxeR was configured with), the rest scaled from the DVD metrics.
     pub fn hd(width: u32, height: u32) -> Canvas {
         let s = 65.0 * height as f32 / 1080.0 / EM_PX;
         let px = |v: f32| (v * s).round();
-        Canvas { size: (width, height), em: EM_PX * s, pitch: px(LINE_PITCH as f32) as i32, outline: px(OUTLINE as f32) as i32, side: px(SIDE_MARGIN as f32) as u32, bottom: px(BOTTOM_MARGIN as f32) as u32, baseline_above: px(BASELINE_ABOVE_BOX as f32) as i32, trim: 0, scale: s, font: None }
+        Canvas { size: (width, height), em: EM_PX * s, pitch: px(LINE_PITCH as f32) as i32, outline: px(OUTLINE as f32) as i32, side: px(SIDE_MARGIN as f32) as u32, bottom: px(BOTTOM_MARGIN as f32) as u32, baseline_above: px(BASELINE_ABOVE_BOX as f32) as i32, trim: 0, scale: s, font: None, lang: None }
     }
 }
 
@@ -409,7 +415,39 @@ impl Canvas {
             self.bottom = (self.size.1 as f32 * m.clamp(0.0, 30.0) / 100.0).round() as u32;
         }
         self.font = st.font_family.as_ref().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+        self.lang.clone_from(&st.lang);
         self
+    }
+
+    /// Font chain of this canvas: the chosen family and DejaVu Sans, then the fonts the track's
+    /// language prefers for Han characters, then the Chinese-first system fallbacks.
+    fn fonts(&self) -> Vec<FontArc> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        let mut chain = crate::menu::subtitle_font_chain_for(self.font.as_deref());
+        let preferred = self.lang.as_deref().map(crate::fonts::preferred_families).unwrap_or_default();
+        let Some(&key) = preferred.first() else { return chain };
+        static CACHE: OnceLock<Mutex<HashMap<&'static str, Vec<FontArc>>>> = OnceLock::new();
+        let extra = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_insert_with(|| {
+                // Collections (Noto CJK, msjh, mingliu, simsun, msgothic) hold several families:
+                // load the face of the wanted one, not face 0.
+                preferred
+                    .iter()
+                    .filter_map(|f| crate::fonts::find_family(f))
+                    .filter_map(|f| ab_glyph::FontVec::try_from_vec_and_index(std::fs::read(&f.path).ok()?, f.index).ok())
+                    .map(FontArc::new)
+                    .collect()
+            })
+            .clone();
+        // `subtitle_font_chain_for` = optional chosen font + `subtitle_font_chain` (DejaVu first).
+        let at = chain.len() + 1 - crate::menu::subtitle_font_chain().len();
+        chain.splice(at..at, extra);
+        chain
     }
 }
 
@@ -658,7 +696,7 @@ pub fn render_cue(tv: TvStandard, cue_lines: &[String]) -> Option<(RgbaImage, u3
 
 /// [`render_cue`] on any [`Canvas`].
 pub fn render_cue_on(c: &Canvas, cue_lines: &[String]) -> Option<(RgbaImage, u32, u32)> {
-    let fonts = crate::menu::subtitle_font_chain_for(c.font.as_deref());
+    let fonts = c.fonts();
     let (fw, fh) = c.size;
     let max_w = (fw - 2 * c.side) as f32;
     let (alignment, cue_lines) = extract_alignment(cue_lines);
@@ -820,6 +858,22 @@ fn render_cues_on(cues: &[Cue], tv: TvStandard, canvas: &Canvas) -> Decoded {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_picks_its_own_han_glyphs() {
+        // Only where both regional fonts are installed (Windows with Japanese and Chinese fonts).
+        if crate::fonts::find_family("Yu Gothic").is_none() || crate::fonts::find_family("Microsoft YaHei").is_none() {
+            return eprintln!("skipping: Yu Gothic / Microsoft YaHei not installed");
+        }
+        let draw = |lang: Option<&str>| {
+            let c = Canvas::hd(1920, 1080).with_style(&SubtitleStyle { lang: lang.map(Into::into), ..Default::default() });
+            render_cue_on(&c, &["線 直 骨".into()]).unwrap().0
+        };
+        let (ja, cn, none) = (draw(Some("ja")), draw(Some("zh-CN")), draw(None));
+        assert_ne!(ja.as_raw(), cn.as_raw(), "Japanese and Chinese forms differ");
+        // Untagged tracks keep today's chain, whose first CJK font is Microsoft YaHei.
+        assert_eq!(cn.as_raw(), none.as_raw());
+    }
 
     fn ink_rows(img: &RgbaImage, y: u32) -> (u32, u32) {
         let top = (0..img.height()).find(|&r| (0..img.width()).any(|x| img.get_pixel(x, r)[3] > 0)).unwrap();

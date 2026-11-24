@@ -121,6 +121,8 @@ export interface DriveDetails {
 export interface DriveView {
   media: MediaInfo | null;
   mediaError: string | null;
+  /** What the `auto` write speed resolves to for the inserted disc ("6x"). */
+  autoSpeed: string | null;
   details: DriveDetails | null;
   detailsError: string | null;
 }

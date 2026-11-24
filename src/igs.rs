@@ -83,8 +83,10 @@ pub fn rgb_to_ycrcb(r: u8, g: u8, b: u8) -> [u8; 3] {
     [q(16.0 + 219.0 * y), q(128.0 + 224.0 * cr), q(128.0 + 224.0 * cb)]
 }
 
-/// One `.sup` segment; `dts` 0 = none.
+/// One `.sup` segment; `dts` 0 = none. Payloads over 64 KiB must be split by the caller (objects:
+/// [`ods_segments`]); a truncated length would desync every following segment.
 pub(crate) fn segment(pts: u32, dts: u32, ty: u8, payload: &[u8]) -> Vec<u8> {
+    assert!(payload.len() <= 0xFFFF, "segment 0x{ty:02X} payload of {} bytes exceeds 65535", payload.len());
     let mut s = Vec::with_capacity(13 + payload.len());
     s.extend(b"PG");
     s.extend(pts.to_be_bytes());
@@ -95,7 +97,8 @@ pub(crate) fn segment(pts: u32, dts: u32, ty: u8, payload: &[u8]) -> Vec<u8> {
     s
 }
 
-fn ods_segments(pts: u32, o: &IgObject) -> Vec<Vec<u8>> {
+/// ODS segments of `o`, fragmented at the 64 KiB segment limit; every fragment carries the same stamps.
+pub(crate) fn ods_segments(pts: u32, dts: u32, o: &IgObject) -> Vec<Vec<u8>> {
     // First fragment: id, version, sequence flag, u24 length (data + 4), w, h, data.
     const MAX: usize = 65535;
     let mut out = Vec::new();
@@ -110,7 +113,7 @@ fn ods_segments(pts: u32, o: &IgObject) -> Vec<Vec<u8>> {
     p.extend(o.width.to_be_bytes());
     p.extend(o.height.to_be_bytes());
     p.extend(head);
-    out.push(segment(pts, 0, 0x15, &p));
+    out.push(segment(pts, dts, 0x15, &p));
     while !rest.is_empty() {
         let (chunk, r) = rest.split_at(rest.len().min(MAX - 4));
         rest = r;
@@ -119,7 +122,7 @@ fn ods_segments(pts: u32, o: &IgObject) -> Vec<Vec<u8>> {
         p.push(0);
         p.push(if rest.is_empty() { 0x40 } else { 0x00 });
         p.extend(chunk);
-        out.push(segment(pts, 0, 0x15, &p));
+        out.push(segment(pts, dts, 0x15, &p));
     }
     out
 }
@@ -189,7 +192,7 @@ pub fn build_sup(m: &IgMenu) -> Vec<u8> {
     }
     out.extend(segment(m.pts, 0, 0x14, &pds));
     for o in &m.objects {
-        for s in ods_segments(m.pts, o) {
+        for s in ods_segments(m.pts, 0, o) {
             out.extend(s);
         }
     }

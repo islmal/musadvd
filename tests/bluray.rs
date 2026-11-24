@@ -678,7 +678,7 @@ mod menus {
 
     /// Title menu, root menu of title 1 and its settings menu.
     fn layout() -> CustomLayout {
-        CustomLayout { title_screen: None, chapter_menus: None,
+        CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
             version: 1,
             canvas: Canvas { width: 1920, height: 1080 },
             highlight: Highlight::default(),

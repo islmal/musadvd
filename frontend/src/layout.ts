@@ -229,6 +229,8 @@ export interface CustomLayout {
   titleScreen?: boolean;
   /** Draft metadata: false = no chapter menus; omitted = true. */
   chapterMenus?: boolean;
+  /** DVD display aspect of the menus; omitted = "4:3". Blu-ray frames are always 16:9. */
+  aspect?: "4:3" | "16:9";
   menus: CustomMenu[];
 }
 
@@ -439,9 +441,9 @@ export function canvasSize(tv: string): { width: number; height: number } {
   return { width: 720, height: tv === "NTSC" ? 480 : 576 };
 }
 
-/** Width of a canvas pixel on the screen relative to its height: 1 on Blu-ray, else the 4:3 TV's. */
-export function pixelAspectOf(tv: string, canvas: { width: number; height: number }): number {
-  return isBdFrame(tv) ? 1 : (4 / 3) * (canvas.height / canvas.width);
+/** Width of a canvas pixel on the screen relative to its height: 1 on Blu-ray, else the TV's (default 4:3). The DVD canvas keeps 720 px either way (anamorphic), so `canvasSize` needs no aspect. */
+export function pixelAspectOf(tv: string, canvas: { width: number; height: number }, aspect: "4:3" | "16:9" = "4:3"): number {
+  return isBdFrame(tv) ? 1 : ((aspect === "16:9" ? 16 / 9 : 4 / 3) * canvas.height) / canvas.width;
 }
 
 /** Length of every menu clip in seconds (a still is 1 s): what a Blu-ray's menus add to its size. */
@@ -1847,4 +1849,97 @@ export function syncLayoutWithTitles(
   }
 
   return out;
+}
+
+type TrackKind = "audio" | "subtitle";
+
+function trackKindOf(e: LayoutElement): TrackKind | null {
+  if (e.type !== "text" || !e.action) return null;
+  const a = e.action.type;
+  if (a === "setAudio" || a === "setGlobalAudio") return "audio";
+  if (a === "setSubtitle" || a === "setGlobalSubtitle") return "subtitle";
+  return null;
+}
+
+/**
+ * Rebuilds the audio/subtitle track buttons of every settings page (global and per title) so they
+ * match `titles`. Existing buttons are reused slot by slot (keeping style and position), extra
+ * ones continue the column, a missing kind is generated like `draftLayout` does. Returns null when
+ * nothing changed. shortcut: a title that had no settings page before gets none, and extra
+ * buttons that would not fit above the bottom row are dropped; upgrade by paging if that bites.
+ */
+export function refreshTrackButtons(layout: CustomLayout, titles: EditorTitle[], tv: string): CustomLayout | null {
+  const next = structuredClone(layout);
+  const bd = isBdFrame(tv) || next.canvas.width > 720;
+  const base = bd ? { width: 720, height: 576 } : next.canvas;
+  const Y = (v: number) => Math.round((v * base.height) / 576);
+  const richest = (count: (t: EditorTitle) => number) => titles.reduce((a, t) => (count(t) > count(a) ? t : a), titles[0]);
+  const withOff = (off: Action, rest: [string, Action][]): [string, Action][] => (rest.length ? [[tr("layout.aus"), off], ...rest] : []);
+  for (const m of next.menus) {
+    const slotsOf = (k: TrackKind) =>
+      m.elements.filter((e): e is TextElement => trackKindOf(e) === k).sort((a, b) => Math.round(a.x / 100) - Math.round(b.x / 100) || a.y - b.y);
+    const existing = { audio: slotsOf("audio"), subtitle: slotsOf("subtitle") };
+    const global = [...existing.audio, ...existing.subtitle].some((e) => e.action?.type.startsWith("setGlobal")) || (m.group === "settings" && m.title == null);
+    if (!global && !(m.role === "settings" && m.title != null)) continue;
+    const t = global ? null : titles.find((x) => x.index === m.title);
+    if (titles.length === 0 || (!global && !t)) continue;
+    const want: Record<TrackKind, [string, Action][]> = global
+      ? (() => {
+          const a = richest((x) => x.audioTracks?.length ?? 0).audioTracks ?? [];
+          const s = richest((x) => x.subtitleTracks?.length ?? 0).subtitleTracks ?? [];
+          return {
+            audio: a.length > 1 ? a.map((x, k): [string, Action] => [x.label, { type: "setGlobalAudio", track: k + 1 }]) : [],
+            subtitle: withOff({ type: "setGlobalSubtitle", track: null }, s.map((x, k): [string, Action] => [x.label, { type: "setGlobalSubtitle", track: k + 1 }])),
+          };
+        })()
+      : {
+          audio: (t!.audioTracks ?? []).map((x): [string, Action] => [x.label, { type: "setAudio", source: x.source }]),
+          subtitle: withOff({ type: "setSubtitle", source: null }, (t!.subtitleTracks ?? []).map((x): [string, Action] => [x.label, { type: "setSubtitle", source: x.source }])),
+        };
+    const removed = new Map<string, string | null>(); // removed button id -> surviving neighbour
+    for (const kind of ["audio", "subtitle"] as TrackKind[]) {
+      const old = existing[kind];
+      const entries = want[kind].slice(0, kind === "audio" ? 8 : 16);
+      if (old.length === 0) {
+        if (entries.length === 0) continue;
+        // Generate header and buttons like the draft, styled after a plain button of this page.
+        const tmp = emptyMenu("", "settings");
+        const tracks = kind === "audio" ? entries : entries.slice(1);
+        fillSettings(tmp, Y, kind === "audio" ? tracks : [], kind === "subtitle" ? tracks : [], entries[0][1]);
+        if (bd) scaleMenuToBluray(tmp, base, next.canvas);
+        const ref = m.elements.find((e): e is TextElement => e.type === "text" && !e.bold && !!e.action);
+        for (const e of tmp.elements) {
+          if (e.type === "text" && ref) Object.assign(e, { font: ref.font, italic: ref.italic, shadow: ref.shadow, color: e.bold ? e.color : ref.color });
+          e.id = newId("e");
+        }
+        m.elements.push(...tmp.elements);
+        continue;
+      }
+      const last = old[old.length - 1];
+      const prev = old.length > 1 ? old[old.length - 2] : null;
+      const step = prev && Math.abs(prev.x - last.x) < 50 ? last.y - prev.y : Y(38);
+      const made: TextElement[] = entries
+        .map(([label, action], k): TextElement => (old[k] ? { ...old[k], text: label, action } : { ...last, id: newId("e"), y: last.y + step * (k - old.length + 1), text: label, action, nav: null, indicatorFor: null }))
+        .filter((e) => e.y + e.h <= next.canvas.height * 0.85);
+      const kept = new Set(made.map((e) => e.id));
+      for (const e of old) if (!kept.has(e.id)) removed.set(e.id, made[made.length - 1]?.id ?? null);
+      const first = Math.min(...old.map((e) => m.elements.indexOf(e)));
+      const rest = m.elements.filter((e) => !old.includes(e as TextElement));
+      rest.splice(first, 0, ...made);
+      m.elements = rest;
+    }
+    if (removed.size) {
+      // Repair references to removed buttons: redirect to the neighbour, or drop (nav falls back to automatic routing; an orphaned indicator is deleted).
+      m.elements = m.elements.filter((e) => !(e.indicatorFor && removed.has(e.indicatorFor) && !removed.get(e.indicatorFor)));
+      for (const e of m.elements) {
+        if (e.indicatorFor && removed.has(e.indicatorFor)) e.indicatorFor = removed.get(e.indicatorFor);
+        if (!e.nav) continue;
+        for (const d of ["up", "down", "left", "right"] as const) {
+          const v = e.nav[d];
+          if (v && removed.has(v)) e.nav[d] = removed.get(v) !== e.id ? removed.get(v) : null;
+        }
+      }
+    }
+  }
+  return JSON.stringify(next) === JSON.stringify(layout) ? null : next;
 }

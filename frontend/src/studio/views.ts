@@ -5,6 +5,7 @@ import * as api from "./api";
 import { openLayerBreak } from "./layerbreak";
 import { speedChoices } from "./speeds";
 import { el, fmtBytes, fmtSectors, modal } from "./ui";
+import { confirmKind, eraseDefault } from "../burnConfirm";
 import { fmtNumber, t } from "../i18n";
 import { MAX_LABEL, MAX_UDF_LABEL, sanitizeLabel, sanitizeUdfLabel } from "../label";
 
@@ -41,8 +42,9 @@ const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 const oneX = (media: api.MediaInfo) => (media.media_type === "bd25" || media.media_type === "bd50" ? 4_495_500 / 2048 : 1_385_000 / 2048);
 
-export function speedOptions(media: api.MediaInfo | null): [string, string][] {
-  const opts: [string, string][] = [["auto", t("studio.views.auto")], ["max", t("studio.views.maximal")]];
+export function speedOptions(media: api.MediaInfo | null, autoSpeed: string | null = null): [string, string][] {
+  const auto = autoSpeed ? t("studio.views.autoForDisc", { speed: autoSpeed }) : t("studio.views.autoBest");
+  const opts: [string, string][] = [["auto", auto], ["max", t("studio.views.maximal")]];
   const reportedX: number[] = [];
   if (media?.present) {
     for (const s of media.speeds) {
@@ -255,6 +257,20 @@ function pathInput(initial: string, placeholder: string, pick: () => Promise<str
   return { input, row };
 }
 
+/** Asks before writing when the disc is rewritable with data (erased) or write-once (permanent). */
+function confirmWrite(host: Host, erase: boolean, start: () => void) {
+  const media = host.view()?.media;
+  const kind = confirmKind(media, erase);
+  if (kind === "none") return start();
+  modal(t("studio.views.confirmBurnTitle"), el("p", {}, t(kind === "erase" ? "studio.views.confirmBurnErase" : "studio.views.confirmBurnPermanent", { media: media?.physical ?? "" })), [
+    { label: t("studio.views.abbrechen") },
+    { label: t("studio.views.brennen"), primary: true, onClick: start },
+  ]);
+}
+
+/** The remembered erase choice, or the pre-tick for a rewritable disc with data (never remembered). */
+const eraseTicked = (host: Host) => remembered.erase || eraseDefault(host.view()?.media);
+
 const remembered = { image: "", output: "", verifyImage: "", discoverySectors: "", erase: false, eraseFull: false, verifyMode: "image" };
 
 function viewWriteImage(host: Host): HTMLElement {
@@ -264,16 +280,15 @@ function viewWriteImage(host: Host): HTMLElement {
   });
   input.addEventListener("change", () => (remembered.image = input.value));
   row.querySelector("button")!.addEventListener("click", () => setTimeout(() => (remembered.image = input.value), 0));
-  const erase = el("input", { type: "checkbox", checked: remembered.erase, onchange: (e: Event) => (remembered.erase = (e.target as HTMLInputElement).checked) });
+  const erase = el("input", { type: "checkbox", checked: eraseTicked(host), onchange: (e: Event) => (remembered.erase = (e.target as HTMLInputElement).checked) });
   const go = el("button", { class: "btn primary big" }, t("studio.views.brennen"));
   go.addEventListener("click", async () => {
     const d = host.drive();
     if (!d) return host.note(t("studio.views.bitteEinLaufwerkWaehlen"));
     if (!input.value.trim()) return host.note(t("studio.views.bitteEinImageWaehlen"));
     const image = input.value.trim();
-    const startBurn = () => {
-      host.run(t("studio.views.imageSchreiben", { baseName: baseName(image) }), () => api.writeImage(d.id, image, host.speed(), remembered.erase));
-    };
+    const doErase = erase.checked;
+    const startBurn = () => confirmWrite(host, doErase, () => host.run(t("studio.views.imageSchreiben", { baseName: baseName(image) }), () => api.writeImage(d.id, image, host.speed(), doErase)));
 
     const isScrambled = await api.imageScrambled(image).catch(() => null);
     if (isScrambled === true) {
@@ -302,12 +317,13 @@ function viewWriteImage(host: Host): HTMLElement {
 function viewFiles(host: Host, mode: "write-files" | "build", rerender: () => void): HTMLElement {
   const wrap = el("div", {}, renderFileList(host, rerender));
   if (mode === "write-files") {
-    const erase = el("input", { type: "checkbox", checked: remembered.erase, onchange: (e: Event) => (remembered.erase = (e.target as HTMLInputElement).checked) });
+    const erase = el("input", { type: "checkbox", checked: eraseTicked(host), onchange: (e: Event) => (remembered.erase = (e.target as HTMLInputElement).checked) });
     const go = el("button", { class: "btn primary big", disabled: !bs.plan }, t("studio.views.brennen"));
     go.addEventListener("click", () => {
       const d = host.drive();
       if (!d) return host.note(t("studio.views.bitteEinLaufwerkWaehlen"));
-      host.run(t("studio.views.dateienSchreiben"), () => api.writeFiles(d.id, buildInput(), host.speed(), remembered.erase));
+      const doErase = erase.checked;
+      confirmWrite(host, doErase, () => host.run(t("studio.views.dateienSchreiben"), () => api.writeFiles(d.id, buildInput(), host.speed(), doErase)));
     });
     wrap.append(
       el("label", { class: "opt-check" }, erase, el("span", {}, t("studio.views.wiederbeschreibbareDiscMitInhalt"))),

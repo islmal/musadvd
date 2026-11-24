@@ -16,7 +16,7 @@ use musadvd::burner::layerbreak::{Capacities, LayerBreak};
 use musadvd::burner::spti::DriveDetails;
 use musadvd::burner::studio::{self, Ctx, Event, Outcome};
 use musadvd::burner::tools::{self, Candidate, CandidateOptions};
-use musadvd::burner::{power, sidecar, system_burner, DriveInfo, MediaInfo};
+use musadvd::burner::{auto_speed_text, power, sidecar, system_burner, DriveInfo, MediaInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -95,6 +95,8 @@ pub async fn studio_drives(state: State<'_, AppState>) -> Result<Vec<DriveInfo>,
 pub struct DriveView {
     media: Option<MediaInfo>,
     media_error: Option<String>,
+    /// What the `auto` write speed resolves to for the inserted disc ("6x").
+    auto_speed: Option<String>,
     details: Option<DriveDetails>,
     details_error: Option<String>,
 }
@@ -108,6 +110,7 @@ pub async fn studio_drive_info(state: State<'_, AppState>, drive_id: String) -> 
         let media = studio::media_of(&drive);
         let details = studio::drive_details(&drive, &io);
         Ok(DriveView {
+            auto_speed: media.as_ref().ok().and_then(auto_speed_text),
             media: media.as_ref().ok().cloned(),
             media_error: media.err(),
             details: details.as_ref().ok().cloned(),

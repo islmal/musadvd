@@ -6,15 +6,19 @@ import { chapterSegments, disposePlayer, renderEditTab } from "./edit";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { EditorInit } from "./menuEditor";
-import { AFTER_PLAYBACK, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, syncLayoutWithTitles, titlesKey, type AfterPlayback, type CustomLayout, type EditorTitle } from "./layout";
+import { AFTER_PLAYBACK, cleanTitle, draftLayout, isButton, isMoving, madeForOtherTitles, menuClipSecs, refreshTrackButtons, syncLayoutWithTitles, titlesKey, type AfterPlayback, type CustomLayout, type EditorTitle } from "./layout";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
-import { mergeBlock, moveItem, shapeMismatch, sortByOrder } from "./order";
+import { mergeBlock, moveItem, reorderByLanguages, shapeMismatch, sortByOrder } from "./order";
+import { ac3EncodeKbps, autoMenuAspect, fpsMatches, tvMismatch } from "./discRules";
 import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
 import { modal } from "./studio/ui";
+import { bitsPerPixel, dvdResOf, frameOf, qualityHint, rate, ratingKey } from "./quality";
+import { loadRecent, pushRecent, removeRecent } from "./recent";
+import { renderLanding } from "./landing";
 import {
   checkLayout,
   calculateProject,
@@ -155,6 +159,8 @@ const state = {
   calc: null as CalculationResult | null,
   probing: 0,
   converting: false,
+  /** Menu aspect choice (DVD): "auto" follows the titles' picture shape; a forced value is kept in the layout. */
+  menuAspect: "auto" as "auto" | "4:3" | "16:9",
   /** One-step undo of "In separate Titel aufteilen". */
   splitUndo: null as { original: Title; ids: number[]; index: number } | null,
 };
@@ -185,6 +191,7 @@ function switchMedium(from: Medium, to: Medium) {
   state.customLayoutKey = next.key;
   state.menuMode = next.mode;
   state.customLayoutEdited = next.edited;
+  state.menuAspect = aspectChoiceOf(next.layout);
   state.layoutErrors = [];
 }
 
@@ -215,6 +222,7 @@ function loadSettings() {
     }
     const live = slots[mediumOf(state.disc)];
     [state.menuMode, state.customLayout, state.customLayoutKey, state.customLayoutEdited] = [live.mode, live.layout, live.key, live.edited];
+    state.menuAspect = aspectChoiceOf(live.layout);
   } catch {
     /* storage unavailable: defaults */
   }
@@ -421,6 +429,16 @@ const samePath = (a: string, b: string) => a.replace(/\\/g, "/").toLowerCase() =
 
 /** What happens to an audio track with the current disc and settings (copy, AC-3 or LPCM). */
 function audioChoice(t: Title, a: AudioTrack): AudioChoice {
+  return withAudioBitrate(basePlan(t, a), a);
+}
+
+/** Encoded AC-3 gets the engine's rate: the setting snapped to the medium's set, 0 = auto (192 stereo / 448 for 5+ ch). Plans may have been probed under another setting. */
+function withAudioBitrate(p: AudioChoice, a: AudioTrack): AudioChoice {
+  if (p.copy || p.codec !== "ac3") return p;
+  return { ...p, kbps: ac3EncodeKbps(a.channels, state.settings?.audio_bitrate_kbps ?? 0, isBluray() ? "bd" : "dvd") };
+}
+
+function basePlan(t: Title, a: AudioTrack): AudioChoice {
   const mode = state.settings?.audio_mode ?? "auto";
   if (isBluray()) {
     const plans = a.plans[planKey()];
@@ -535,6 +553,7 @@ async function addFiles(paths: string[]): Promise<Title[]> {
     status(tr("main.keineUnterstuetztenVideodateien"), "error");
     return [];
   }
+  showLanding(false);
   const added: Title[] = [];
   state.probing += videos.length;
   renderFooter();
@@ -689,6 +708,9 @@ function openTitleCtx(at: { x: number; y: number }) {
   const items: [string, () => void, boolean, string?][] = [
     [tr("main.mergeAll"), () => setMerged(all, true), state.converting || all.size < 2],
     [tr("main.unmergeAll"), () => setMerged(all, false), state.converting || !state.titles.some((t) => t.mergeWithPrevious)],
+    multi.size >= 2
+      ? [tr("main.reorderBatch"), () => openReorderDialog(new Set(multi)), state.converting]
+      : [tr("main.reorderAll"), () => openReorderDialog(all), state.converting || state.titles.length === 0],
     [tr("app.remove"), removeSelected, state.converting, "danger"],
   ];
   const close = () => {
@@ -967,9 +989,141 @@ function moveTrack(t: Title, kind: "audio" | "subtitles", from: number, to: numb
   const list = [...t.meta[kind]];
   moveItem(list, from, to);
   t.meta = { ...t.meta, [kind]: list };
-  if (!state.customLayoutEdited) syncMenuAfterChange(null);
+  afterTrackChange();
   renderAll();
   touchAutosave();
+}
+
+/** Batch reorder of audio and subtitle tracks over `ids` (dialog with two draggable lists). */
+function openReorderDialog(ids: Set<number>) {
+  const targets = state.titles.filter((t) => ids.has(t.id));
+  if (state.converting || targets.length === 0) return;
+  let mode: "language" | "slot" = "language";
+  const lists: Record<"audio" | "subs", string[]> = { audio: [], subs: [] };
+  const lang = (l: string | null) => (l ?? "").trim().toLowerCase();
+  const uniq = (xs: string[]) => [...new Set(xs)];
+  const range = (n: number) => Array.from({ length: n }, (_, i) => String(i));
+  const build = () => {
+    if (mode === "language") {
+      lists.audio = uniq(targets.flatMap((t) => t.meta.audio.map((a) => lang(a.language))));
+      lists.subs = uniq(targets.flatMap((t) => [...t.meta.subtitles.map((x) => lang(x.language)), ...t.externalSubtitles.map((e) => lang(e.language))]));
+    } else {
+      lists.audio = range(Math.max(...targets.map((t) => t.meta.audio.length)));
+      lists.subs = range(Math.max(...targets.map((t) => t.meta.subtitles.length)));
+    }
+  };
+  const label = (key: string) => (mode === "language" ? languageDisplayName(key) : tr("main.reorderSlot", { n: Number(key) + 1 }));
+  const cols = h("div", { class: "ro-cols" });
+  const draw = () => {
+    cols.replaceChildren(
+      ...(["audio", "subs"] as const).map((kind) =>
+        h(
+          "div",
+          {},
+          h("h3", {}, tr(kind === "audio" ? "main.reorderAudio" : "main.reorderSubs")),
+          h(
+            "div",
+            { class: "track-list ro-list" },
+            ...lists[kind].map((key, pos) =>
+              h(
+                "div",
+                { class: "track sortable", "data-group": `ro-${kind}` },
+                trackGrip(`ro-${kind}`, pos, (from, to) => {
+                  moveItem(lists[kind], from, to);
+                  draw();
+                }),
+                h("span", { class: "track-lang" }, label(key)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  };
+  build();
+  draw();
+  const modeSel = h(
+    "select",
+    {
+      onchange: (e: Event) => {
+        mode = (e.target as HTMLSelectElement).value as typeof mode;
+        build();
+        draw();
+      },
+    },
+    h("option", { value: "language" }, tr("main.reorderByLanguage")),
+    h("option", { value: "slot" }, tr("main.reorderBySlot")),
+  );
+  const body = h(
+    "div",
+    { class: "ro-dialog" },
+    h("p", { class: "hint" }, tr("main.reorderHint", { count: targets.length })),
+    h("label", { class: "ro-mode" }, h("span", {}, tr("main.reorderBy")), modeSel),
+    cols,
+  );
+  modal(tr("main.reorderTitle"), body, [
+    { label: tr("app.overlay.cancel") },
+    {
+      label: tr("main.reorderApply"),
+      primary: true,
+      onClick: () => {
+        for (const t of targets) {
+          // New meta object per title: split siblings share `meta` and must not follow (see moveTrack).
+          const byLang = mode === "language";
+          t.meta = {
+            ...t.meta,
+            audio: reorderByLanguages(t.meta.audio, byLang ? (a) => lang(a.language) : (_a, i) => String(i), lists.audio),
+            subtitles: reorderByLanguages(t.meta.subtitles, byLang ? (x) => lang(x.language) : (_x, i) => String(i), lists.subs),
+          };
+          if (byLang) t.externalSubtitles = reorderByLanguages(t.externalSubtitles, (e) => lang(e.language), lists.subs);
+        }
+        afterTrackChange();
+        renderAll();
+        touchAutosave();
+        status(tr("main.reorderApplied", { count: targets.length }));
+      },
+    },
+  ]);
+}
+
+let toastTimer: number | undefined;
+/** Small non-blocking notice with one action button; replaces an earlier one. */
+function showToast(text: string, actionLabel: string, onAction: () => void) {
+  document.querySelector(".toast")?.remove();
+  window.clearTimeout(toastTimer);
+  const el = h(
+    "div",
+    { class: "toast", role: "status" },
+    h("span", {}, text),
+    h("button", { class: "btn small", type: "button", onclick: () => (el.remove(), onAction()) }, actionLabel),
+  );
+  document.body.append(el);
+  toastTimer = window.setTimeout(() => el.remove(), 8000);
+}
+
+/** After any audio/subtitle change: pristine menus are regenerated; a user-edited menu only gets its Subtitles & Audio buttons refreshed (with Undo). */
+function afterTrackChange() {
+  if (!state.customLayoutEdited) {
+    syncMenuAfterChange(null);
+    return;
+  }
+  const before = state.customLayout;
+  if (!before || state.menuMode !== "custom") return;
+  const titles = editorTitles();
+  const next = refreshTrackButtons(before, titles, frameName());
+  if (!next) return;
+  state.customLayout = next;
+  state.customLayoutKey = titlesKey(titles);
+  saveSettings();
+  void refreshLayoutCheck();
+  showToast(tr("main.menuTracksUpdated"), tr("main.undo"), () => {
+    state.customLayout = before;
+    state.customLayoutKey = titlesKey(editorTitles());
+    saveSettings();
+    void refreshLayoutCheck();
+    touchAutosave();
+    renderAll();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1228,6 +1382,16 @@ function renderVideoTab(t: Title) {
   );
 }
 
+const isDualLayer = () => ["dvd9", "bd50", "avchd9"].includes(state.disc);
+
+/** Tooltip of the quality readout: planned video bitrate and bits per pixel of this title's frame. */
+function qualityTip(t: Title, kbps: number): string {
+  const tv = state.settings?.tv_standard ?? "PAL";
+  const bdRes = t.bdResolution ? `${t.bdResolution}p` : state.settings?.bd_resolution;
+  const f = frameOf(planKey(), dvdResOf(state.settings?.dvd_resolution), tv, bdRes);
+  return tr("quality.tooltip", { kbps: fmtNum(kbps), bpp: bitsPerPixel(kbps, f).toFixed(3), w: f.w, h: f.h, fps: f.fps });
+}
+
 function renderTitleList() {
   const list = $("title-list");
   const hadFocus = list.contains(document.activeElement);
@@ -1244,6 +1408,7 @@ function renderTitleList() {
         h("span", { class: "title-selbar-count" }, tr("main.selectedCount", { count: multi.size })),
         h("button", { class: "btn small pill", disabled: state.converting, onclick: () => setMerged(sel, true) }, tr("main.mergeSelected")),
         h("button", { class: "btn small pill", disabled: state.converting, onclick: () => setMerged(sel, false) }, tr("main.unmergeSelected")),
+        h("button", { class: "btn small pill", disabled: state.converting, onclick: () => openReorderDialog(sel) }, tr("main.reorderBatch")),
         h("button", { class: "btn small pill", title: tr("main.clearSelection"), "aria-label": tr("main.clearSelection"), onclick: clearMulti }, "×"),
       ),
     );
@@ -1263,6 +1428,8 @@ function renderTitleList() {
     const subsSummary = subCount > 0 ? tr("main.untertitel", { size: subCount }) : "";
     const quality = calc ? calc.qualityPercent : 0;
     const qualityClass = calc ? calc.quality : "medium";
+    const rating = rate(quality);
+    const hintKey = calc ? qualityHint(rating, planKey(), dvdResOf(state.settings?.dvd_resolution), isDualLayer()) : null;
 
     list.append(
       h(
@@ -1317,17 +1484,12 @@ function renderTitleList() {
           : "",
         h(
           "div",
-          {
-            class: "quality",
-            title: isAvchd()
-              ? tr("main.videoqualitaetGruenUeber10")
-              : isBluray()
-              ? tr("main.videoqualitaetGruenUeber15")
-              : tr("main.videoqualitaetGruenUeber2"),
-          },
+          { class: "quality", title: calc ? qualityTip(t, calc.videoKbps) : "" },
+          calc ? h("span", { class: `q-badge q-${rating}` }, `${fmtNum(quality)}% · ${tr(ratingKey(rating))}`) : null,
           h("div", { class: "quality-bar" }, h("div", { class: `quality-value ${qualityClass}`, style: `width:${quality}%` })),
           h("span", { class: "quality-text" }, calc ? `${fmtNum(calc.videoKbps)} kbps` : "…"),
         ),
+        hintKey ? h("div", { class: "quality-hint" }, tr(hintKey)) : null,
       ),
     );
   });
@@ -1408,6 +1570,10 @@ function renderFooter() {
   if (state.settings) ($("dvd-video") as HTMLSelectElement).value = state.settings.dvd_video;
   if (state.settings) ($("tv-standard") as HTMLSelectElement).value = state.settings.tv_standard;
   ($("tv-standard") as HTMLSelectElement).disabled = !state.settings || state.converting;
+  $("menu-aspect-row").hidden = isBluray() || !state.settings;
+  const aspectSel = $("menu-aspect") as HTMLSelectElement;
+  aspectSel.value = state.menuAspect;
+  aspectSel.disabled = state.converting || state.settings?.dvd_resolution !== "Full D1";
   $("dvd-res-row").hidden = isBluray() || !state.settings;
   if (state.settings) ($("dvd-resolution") as HTMLSelectElement).value = state.settings.dvd_resolution;
   ($("dvd-resolution") as HTMLSelectElement).disabled = state.converting;
@@ -1537,7 +1703,7 @@ function renderAudioTab(t: Title) {
           onchange: (e: Event) => {
             if ((e.target as HTMLInputElement).checked) t.audio.add(a.index);
             else t.audio.delete(a.index);
-            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            afterTrackChange();
             renderAll();
             scheduleCalc();
           },
@@ -1557,7 +1723,7 @@ function renderAudioTab(t: Title) {
               const v = (e.target as HTMLInputElement).value.trim();
               if (v) t.audioNames[a.index] = v;
               else delete t.audioNames[a.index];
-              if (!state.customLayoutEdited) syncMenuAfterChange(null);
+              afterTrackChange();
               renderAll();
             },
           }),
@@ -1582,7 +1748,7 @@ async function relabelTitles() {
       status(tr("main.spurnamenKonntenNichtAktualisiert", { e }), "error");
     }
   }
-  if (!state.customLayoutEdited) syncMenuAfterChange(null);
+  afterTrackChange();
   renderAll();
 }
 
@@ -1678,7 +1844,7 @@ async function attachExternalSubtitles(t: Title, paths: string[]) {
     }
   }
   if (added > 0) {
-    if (!state.customLayoutEdited) syncMenuAfterChange(null);
+    afterTrackChange();
     renderAll();
     scheduleCalc();
   }
@@ -1729,7 +1895,7 @@ function renderSubtitleTab(t: Title) {
           onchange: (e: Event) => {
             if ((e.target as HTMLInputElement).checked) t.subs.add(s.index);
             else t.subs.delete(s.index);
-            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            afterTrackChange();
             renderAll();
             scheduleCalc();
           },
@@ -1755,7 +1921,7 @@ function renderSubtitleTab(t: Title) {
     const syncExtMeta = () => {
       for (const item of externalLabelRefs) item.labelEl.textContent = externalSubLabel(t, item.ext);
       forcedBadge.hidden = !ext.forced;
-      if (!state.customLayoutEdited) syncMenuAfterChange(null);
+      afterTrackChange();
       if (state.menuMode === "custom") void refreshLayoutCheck();
       touchAutosave();
     };
@@ -1768,7 +1934,7 @@ function renderSubtitleTab(t: Title) {
       t.externalSubtitles.length > 1
         ? trackGrip("ext", idx, (from, to) => {
             moveItem(t.externalSubtitles, from, to);
-            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            afterTrackChange();
             renderAll();
             touchAutosave();
           })
@@ -1782,7 +1948,7 @@ function renderSubtitleTab(t: Title) {
           disabled: !ext.supported,
           onchange: (e: Event) => {
             ext.enabled = (e.target as HTMLInputElement).checked;
-            if (!state.customLayoutEdited) syncMenuAfterChange(null);
+            afterTrackChange();
             renderAll();
             scheduleCalc();
           },
@@ -1856,7 +2022,7 @@ function renderSubtitleTab(t: Title) {
             title: tr("main.extSubRemove"),
             onclick: () => {
               t.externalSubtitles.splice(idx, 1);
-              if (!state.customLayoutEdited) syncMenuAfterChange(null);
+              afterTrackChange();
               renderAll();
               scheduleCalc();
             },
@@ -2245,6 +2411,7 @@ function syncMenuAfterChange(oldPaths: string[] | null) {
   if (!state.customLayoutEdited || !state.customLayout) {
     state.customLayoutEdited = false;
     state.customLayout = draftLayout(titles, tv, heading);
+    applyMenuAspect(state.customLayout);
     state.customLayoutKey = key;
     saveSettings();
     void refreshLayoutCheck();
@@ -2257,6 +2424,39 @@ function syncMenuAfterChange(oldPaths: string[] | null) {
     state.customLayoutKey = key;
     saveSettings();
     void refreshLayoutCheck();
+  }
+  if (applyMenuAspect(state.customLayout)) saveSettings();
+}
+
+type MenuAspectChoice = typeof state.menuAspect;
+type AspectStamped = CustomLayout & { aspectMode?: MenuAspectChoice };
+
+/** The aspect the DVD menus get: Half D1 / SIF are 4:3 only; Full D1 follows the choice, auto = 16:9 when most titles are. */
+function effectiveMenuAspect(): "4:3" | "16:9" {
+  return autoMenuAspect(state.titles.map((t) => t.meta.video?.dvdAspect), state.settings?.dvd_resolution, state.menuAspect, isBluray());
+}
+
+/** Stamps the effective aspect (omitted = 4:3) and the user's choice onto `l`; true when something changed. */
+function applyMenuAspect(l: CustomLayout): boolean {
+  const x = l as AspectStamped;
+  const [aspect, mode] = isBluray() ? [undefined, undefined] : ([effectiveMenuAspect() === "16:9" ? "16:9" : undefined, state.menuAspect] as const);
+  const changed = x.aspect !== aspect || x.aspectMode !== mode;
+  if (aspect) x.aspect = aspect;
+  else delete x.aspect;
+  if (mode) x.aspectMode = mode;
+  else delete x.aspectMode;
+  return changed;
+}
+
+/** Restores the menu aspect choice stored with a layout (a layout without the stamp = auto). */
+const aspectChoiceOf = (l: CustomLayout | null): MenuAspectChoice => (l as AspectStamped | null)?.aspectMode ?? "auto";
+
+/** The aspect inputs changed (choice, resolution, titles): update the live layout and the saved copies. */
+function reapplyAspect() {
+  if (state.customLayout && applyMenuAspect(state.customLayout)) {
+    saveSettings();
+    void refreshLayoutCheck();
+    touchAutosave();
   }
 }
 
@@ -2276,6 +2476,10 @@ function editorInit(): EditorInit {
 // The editor lives in its own window ("menu-editor", editor.html) and talks via events.
 void listen("editor-ready", () => emitTo("menu-editor", "editor-init", editorInit()));
 void listen<CustomLayout>("editor-apply", ({ payload }) => {
+  // An aspect the editor changed itself counts as the user's explicit choice.
+  const edited = payload.aspect ?? "4:3";
+  if (!isBluray() && edited !== effectiveMenuAspect()) state.menuAspect = edited;
+  applyMenuAspect(payload);
   state.customLayout = payload;
   state.customLayoutKey = titlesKey(editorTitles());
   state.menuMode = "custom";
@@ -2588,6 +2792,7 @@ function syncMenuTitle() {
 
 function renderAll() {
   syncMenuTitle();
+  renderTvBanner();
   renderTitleList();
   renderTabs();
   renderFooter();
@@ -2708,7 +2913,7 @@ function onDone(d: ConversionDone) {
   $("btn-cancel").hidden = true;
   status(d.ok ? d.message : tr("main.fehler", { d: d.message.split("\n")[0] }), d.ok ? "info" : "error");
   renderAll();
-  // Finished DVD: offer burning right away (the dialog's countdown starts only with a blank disc).
+  // Finished DVD: offer burning right away (the dialog's countdown starts only with a blank disc, or a rewritable one when auto-erase is on).
   lastDvd = d.ok && d.videoTs ? { videoTs: d.videoTs, projectName: d.projectName } : null;
   $("btn-burn").hidden = !lastDvd;
   $("eta-line").textContent = "";
@@ -3060,7 +3265,9 @@ async function applyProject(data: ProjectFile, path: string | null) {
     };
     const live = slots[mediumOf(state.disc)];
     [state.menuMode, state.customLayout, state.customLayoutKey, state.customLayoutEdited] = [live.mode, live.layout, live.key, live.edited];
+    state.menuAspect = aspectChoiceOf(live.layout);
     state.layoutErrors = [];
+    tvBannerDismissed = false;
 
     let note = "";
     const tvChange = data.tvStandard && state.settings && data.tvStandard !== state.settings.tv_standard ? data.tvStandard : null;
@@ -3090,7 +3297,11 @@ async function applyProject(data: ProjectFile, path: string | null) {
     renderAll();
     scheduleCalc();
     savedPrint = fingerprint(snapshotProject());
-    if (path) void clearAutosave();
+    if (path) {
+      void clearAutosave();
+      noteRecent(path);
+    }
+    showLanding(false);
     const name = path ? (path.split(/[\\/]/).pop() ?? path) : tr("project.recovered");
     const layoutLost = [...layoutFiles(data.customLayout), ...layoutFiles(data.customLayoutBd)].filter((p) => gone.has(p));
     const totalMissing = lostTitles.length + layoutLost.length + lostSubs.length;
@@ -3108,13 +3319,111 @@ async function applyProject(data: ProjectFile, path: string | null) {
 async function openProject() {
   if (state.converting || projectBusy) return;
   const path = await pickOpenPath();
-  if (!path) return;
+  if (path) await openProjectAt(path, false);
+}
+
+/** Opens the project file `path`; a recent entry whose file cannot be read may be dropped from the list. */
+async function openProjectAt(path: string, fromRecent: boolean) {
+  if (state.converting || projectBusy) return;
+  let data: ProjectFile;
+  try {
+    data = await readProject(path);
+  } catch (e) {
+    status(tr("project.openFailed", { e: e instanceof Error ? e.message : String(e) }), "error");
+    if (fromRecent && (await ask(tr("project.recentForget", { path }), { title: tr("project.recentMissing"), kind: "warning" }))) {
+      removeRecent(path);
+      if (landingOn) showLanding(true);
+    }
+    return;
+  }
   if (state.titles.length > 0 && !(await ask(tr("project.replaceAsk"), { title: tr("project.replaceTitle"), kind: "warning" }))) return;
   try {
-    await applyProject(await readProject(path), path);
+    await applyProject(data, path);
   } catch (e) {
     status(tr("project.openFailed", { e: e instanceof Error ? e.message : String(e) }), "error");
   }
+}
+
+/** Remembers a saved/opened project on the start page. */
+function noteRecent(path: string) {
+  const disc = ($("disc") as HTMLSelectElement).selectedOptions[0]?.text.replace(/\s*\(.*$/, "") ?? state.disc;
+  pushRecent({ name: fileBaseName(path).replace(/\.[^.]*$/, ""), path, medium: disc, modified: Date.now() });
+}
+
+let landingOn = false;
+/** The start page replaces the workspace; the workspace state stays untouched underneath. */
+function showLanding(on: boolean) {
+  landingOn = on;
+  $("landing").hidden = !on;
+  $("workspace").hidden = on;
+  if (!on) return;
+  renderLanding($("landing"), loadRecent(), {
+    onNew: () => void newProject(),
+    onOpen: () => void openProject(),
+    onStudio: () => void openStudio(),
+    onOpenRecent: (path) => void openProjectAt(path, true),
+    onForgetRecent: (path) => {
+      removeRecent(path);
+      showLanding(true);
+    },
+  });
+}
+
+/** Empties the project (titles, tracks, chapters, menus) and starts from scratch; app settings stay. */
+async function newProject() {
+  if (state.converting || projectBusy) return;
+  if (state.titles.length > 0 && fingerprint(snapshotProject()) !== savedPrint) {
+    if (!(await ask(tr("project.discardAsk"), { title: tr("project.discardTitle"), kind: "warning" }))) return;
+  }
+  state.splitUndo = null;
+  state.titles = [];
+  state.selected = null;
+  state.calc = null;
+  state.menuTitle = "";
+  state.menuTitleAuto = true;
+  state.menuAspect = "auto";
+  tvBannerDismissed = false;
+  multi.clear();
+  selAnchor = null;
+  for (const m of ["dvd", "bd"] as const) slots[m] = { layout: null, key: null, mode: slots[m].mode, edited: false };
+  syncMenuAfterChange(null); // no titles: clears the live layout and saves
+  projectPath = null;
+  savedPrint = fingerprint(snapshotProject());
+  void clearAutosave();
+  showLanding(false);
+  renderAll();
+  scheduleCalc();
+  status(tr("main.bereitVideosPerDrag"));
+}
+
+let tvBannerDismissed = false;
+/** DVD only: most sources run at the other TV standard's frame rate (23.976/29.97/59.94 vs 25/50). */
+function renderTvBanner() {
+  const el = $("tv-banner");
+  const tv = state.settings?.tv_standard;
+  const fpsOf = (t: Title) => t.meta.video?.fps ?? 0;
+  const other = tv ? tvMismatch(state.titles.map(fpsOf), tv) : null;
+  el.hidden = isBluray() || tvBannerDismissed || !tv || !other;
+  if (el.hidden || !tv || !other) return;
+  const sample = state.titles.find((t) => fpsMatches(fpsOf(t), other));
+  el.replaceChildren(
+    h("span", {}, tr("main.tvMismatch", { fps: +fpsOf(sample ?? state.titles[0]).toFixed(3), tv, other })),
+    h("button", { class: "btn small", type: "button", disabled: state.converting, onclick: () => void setTvStandard(other) }, tr("main.tvBannerSwitch", { other })),
+    h("button", { class: "btn small", type: "button", onclick: () => ((tvBannerDismissed = true), renderTvBanner()) }, tr("main.tvBannerDismiss")),
+  );
+}
+
+/** TV standard is the app setting `tv_standard` (also on the settings page); the footer select and the banner both end here. */
+async function setTvStandard(value: AppSettings["tv_standard"]) {
+  if (!state.settings || value === state.settings.tv_standard) return;
+  try {
+    state.settings = await storeSettings({ ...state.settings, tv_standard: value });
+  } catch (e) {
+    status(String(e));
+  }
+  if (!state.customLayoutEdited) syncMenuAfterChange(null);
+  scheduleCalc();
+  renderAll();
 }
 
 async function saveProjectFile(saveAs: boolean) {
@@ -3127,6 +3436,7 @@ async function saveProjectFile(saveAs: boolean) {
     projectPath = path;
     savedPrint = fingerprint(p);
     void clearAutosave();
+    noteRecent(path);
     status(tr("project.saved", { path }));
   } catch (e) {
     status(tr("project.saveFailed", { e: e instanceof Error ? e.message : String(e) }), "error");
@@ -3173,8 +3483,10 @@ async function init() {
     } else if (e.key === "Escape" && multi.size > 0) clearMulti();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Delete" && !(e.target instanceof HTMLInputElement) && !state.converting) removeSelected();
+    if (e.key === "Delete" && !(e.target instanceof HTMLInputElement) && !state.converting && !landingOn) removeSelected();
   });
+  $("btn-home").addEventListener("click", () => showLanding(true));
+  $("btn-new").addEventListener("click", () => void newProject());
   $("btn-open-project").addEventListener("click", () => void openProject());
   $("btn-save-project").addEventListener("click", () => void saveProjectFile(false));
   document.addEventListener("keydown", (e) => {
@@ -3240,7 +3552,8 @@ async function init() {
         renderAll();
       }
       updateCustomDiscLabel();
-      renderTitleList(); // DVD copy badges follow tv/resolution/dvd_video
+      reapplyAspect();
+      renderAll(); // DVD copy badges, quality tips and audio kbps follow tv/resolution/dvd_video/audio bitrate
       status(tr("main.einstellungenGespeichert"));
       void refreshLayoutCheck();
       scheduleCalc();
@@ -3286,15 +3599,10 @@ async function init() {
   });
   // TV standard is the app setting `tv_standard` (also on the settings page), mirrored here.
   const tvStandard = $("tv-standard") as HTMLSelectElement;
-  tvStandard.addEventListener("change", async () => {
-    if (!state.settings || tvStandard.value === state.settings.tv_standard) return;
-    try {
-      state.settings = await storeSettings({ ...state.settings, tv_standard: tvStandard.value as AppSettings["tv_standard"] });
-    } catch (e) {
-      status(String(e));
-    }
-    if (!state.customLayoutEdited) syncMenuAfterChange(null);
-    scheduleCalc();
+  tvStandard.addEventListener("change", () => void setTvStandard(tvStandard.value as AppSettings["tv_standard"]));
+  $("menu-aspect").addEventListener("change", (e) => {
+    state.menuAspect = (e.target as HTMLSelectElement).value as MenuAspectChoice;
+    reapplyAspect();
     renderAll();
   });
   // DVD title resolution is the app setting `dvd_resolution` (also on the settings page); menus stay Full D1.
@@ -3306,6 +3614,7 @@ async function init() {
     } catch (e) {
       status(String(e));
     }
+    reapplyAspect();
     scheduleCalc();
     renderAll();
   });
@@ -3366,6 +3675,7 @@ async function init() {
   const dropzone = $("dropzone");
   const clearDropHighlights = () => {
     dropzone.classList.remove("hover");
+    $("landing").classList.remove("drop-hover");
     document.querySelectorAll(".title-item.drop-target").forEach((el) => el.classList.remove("drop-target"));
     document.querySelectorAll(".tab-dropzone.hover").forEach((el) => el.classList.remove("hover"));
   };
@@ -3451,6 +3761,8 @@ async function init() {
         subZone.classList.add("hover");
       } else if (chapterZone) {
         chapterZone.classList.add("hover");
+      } else if (landingOn) {
+        $("landing").classList.add("drop-hover");
       } else if (videoZone || dragKinds.hasVideo) {
         dropzone.classList.add("hover");
       }
@@ -3477,7 +3789,10 @@ async function init() {
 
   const initial = await startupFiles().catch(() => [] as string[]);
   if (initial.length > 0) await addFiles(initial);
-  else void offerRecovery();
+  else {
+    showLanding(true);
+    void offerRecovery(); // a recovered project switches to the workspace
+  }
   // `musadvd-gui <DVD folder>`: burn an existing DVD folder.
   const burnDir = await startupBurn().catch(() => null);
   if (burnDir) {

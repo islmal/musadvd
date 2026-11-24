@@ -166,7 +166,7 @@ async function refreshDrive() {
 
 function renderDriveBar() {
   driveBar.hidden = !needsDrive(mode);
-  const speeds = speedOptions(view?.media ?? null);
+  const speeds = speedOptions(view?.media ?? null, view?.autoSpeed ?? null);
   if (!speeds.some(([v]) => v === speed)) speed = "auto";
   driveBar.replaceChildren(
     el(

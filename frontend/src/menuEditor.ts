@@ -435,12 +435,13 @@ export function mountMenuEditor(opts: EditorOptions) {
   /** Line breaks of wrapped texts, computed by the engine (same fonts and metrics as the build). */
   const lineCache = new Map<string, Promise<string[]>>();
   function linesOf(e: TextElement): Promise<string[]> {
-    const key = JSON.stringify([e.text, e.font, e.size, e.bold, e.italic, e.wrap, e.w, e.h, e.rotation, e.padding ?? 0, L.canvas, opts.tv]);
+    const sq = textSqueeze();
+    const key = JSON.stringify([e.text, e.font, e.size, e.bold, e.italic, e.wrap, e.w, e.h, e.rotation, e.padding ?? 0, L.canvas, opts.tv, sq]);
     let p = lineCache.get(key);
     if (!p) {
       // Wrap inside the padded text area (the engine insets by padding itself, so this is only the width fed to it).
       const pad = e.padding ?? 0;
-      p = textLines(pad > 0 ? { ...e, w: Math.max(1, e.w - 2 * pad) } : e, L.canvas, opts.tv);
+      p = textLines(pad > 0 || sq !== 1 ? { ...e, w: Math.max(1, e.w * sq - 2 * pad) } : e, L.canvas, opts.tv);
       p.catch(() => lineCache.delete(key));
       if (lineCache.size > 200) lineCache.clear();
       lineCache.set(key, p);
@@ -448,8 +449,10 @@ export function mountMenuEditor(opts: EditorOptions) {
     return p;
   }
 
-  /** Width of a canvas pixel on the 4:3 TV screen relative to its height (PAL 16/15). */
-  const pixelAspect = () => pixelAspectOf(tv, L.canvas);
+  /** Width of a canvas pixel on the TV screen relative to its height (4:3 PAL 16/15; 16:9 menus are anamorphic). */
+  const pixelAspect = () => pixelAspectOf(tv, L.canvas, L.aspect);
+  /** Like the build (`layout::text_squeeze`): texts on anamorphic 16:9 DVD menus are laid out this much wider, then squeezed. */
+  const textSqueeze = () => (pixelAspect() > 1.2 ? pixelAspect() : 1);
 
   /**
    * Size and position of a square-pixel picture of `iw`×`ih` fitted into a `bw`×`bh` box of
@@ -568,14 +571,14 @@ export function mountMenuEditor(opts: EditorOptions) {
   document.body.append(editor);
   applyPanes();
 
-  // ---- stage scaling (TV frame shown at 4:3) ----------------------------------------------------
+  // ---- stage scaling (TV frame shown at its display aspect) ------------------------------------
   let scaleX = 1;
   let scaleY = 1;
   function layoutStage() {
     const pad = 24;
     const vw = viewport.clientWidth - pad;
     const vh = viewport.clientHeight - pad;
-    const aspect = isBdFrame(tv) ? 16 / 9 : 4 / 3;
+    const aspect = isBdFrame(tv) || L.aspect === "16:9" ? 16 / 9 : 4 / 3;
     const dispH = zoom === "fit" ? Math.max(100, Math.min(vh, vw / aspect)) : H() * zoom;
     const dispW = dispH * aspect;
     dispWpx = dispW;
@@ -1158,11 +1161,13 @@ export function mountMenuEditor(opts: EditorOptions) {
       return;
     }
     if (inner) {
-      inner.style.width = `${e.w}px`;
+      const sq = e.type === "text" ? textSqueeze() : 1;
+      inner.style.width = `${e.w * sq}px`;
       inner.style.height = `${e.h}px`;
       inner.style.left = "0px";
       inner.style.top = "0px";
-      inner.style.transform = "";
+      inner.style.transformOrigin = sq === 1 ? "" : "0 0";
+      inner.style.transform = sq === 1 ? "" : `scaleX(${1 / sq})`;
     }
     if (e.type === "image" || e.type === "icon") {
       const img = inner?.querySelector<HTMLImageElement>("img.ed-media");

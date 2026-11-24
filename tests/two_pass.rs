@@ -77,6 +77,7 @@ fn job<'a>(info: &'a MediaInfo, dir: &Path, two_pass: bool) -> EncodeJob<'a> {
         audio_mode: Default::default(),
         audio_modes: vec![],
         audio_filters: vec![],
+        ac3_kbps: 0,
         copy_video: false,
         subtitle_style: Default::default(),
     }

@@ -78,7 +78,7 @@ fn custom_menu_two_cell_intro_and_closed_gop_structure() {
         elements: vec![elem],
     };
 
-    let layout = CustomLayout { title_screen: None, chapter_menus: None,
+    let layout = CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),
@@ -236,7 +236,7 @@ fn easter_egg_transparent_mask() {
         elements: vec![normal_btn, easter_egg_btn],
     };
 
-    let layout = CustomLayout { title_screen: None, chapter_menus: None,
+    let layout = CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),
@@ -365,7 +365,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
         group: None,
         elements: vec![video, play],
     };
-    let layout = CustomLayout { title_screen: None, chapter_menus: None,
+    let layout = CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),
@@ -393,7 +393,7 @@ fn external_video_files_reach_menu_args_with_their_offsets() {
     assert_eq!((&clips[0].path, clips[0].start_secs), (&el_file, 2.0));
 
     // The ffmpeg command: each file is an input seeked to its own start.
-    let args = encoder::custom_menu_args(TvStandard::Pal, media, 6.0, None, None, &dir.join("m.mpg"));
+    let args = encoder::custom_menu_args(TvStandard::Pal, &musadvd::author::MenuFrame::from(TvStandard::Pal), media, 6.0, None, None, &dir.join("m.mpg"));
     let seeks = |file: &std::path::Path, start: &str| {
         args.windows(6).any(|w| w[0] == "-ss" && w[1] == start && w[4] == "-i" && w[5] == file)
     };

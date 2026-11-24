@@ -28,7 +28,7 @@ use crate::dvd::{
     run_limited, safe_folder_name, select_streams, unique_dir, AtPath, BuildError, BuildOptions, BuildPhase, BuildReport,
     Event, Job, JobEvent, JobProgress, TitleLoad, TitleReport, WORK_DIR,
 };
-use crate::encoder::{self, bd_audio_copy, plan_audio_bd, Aspect, AudioMode, AudioOut, AudioTarget, BdAudioMode, BdEncodeJob, BdEncoder, BdVideoMode, EncodePhase, VideoProcessing, SILENCE_OUT};
+use crate::encoder::{self, bd_audio_copy, plan_audio_with, Aspect, AudioMode, AudioOut, AudioTarget, BdAudioMode, BdEncodeJob, BdEncoder, BdVideoMode, EncodePhase, VideoProcessing, SILENCE_OUT};
 use crate::eta::{self, Eta, FrameEta, JobPhase, Medium};
 use crate::i18n::{tr, UiLang};
 use crate::tf;
@@ -197,6 +197,7 @@ struct BdTitle {
     stem: String,
     rate: BdRate,
     audio_mode: AudioMode,
+    ac3_kbps: u32,
     bd_audio: BdAudioMode,
     track_label_mode: probe::TrackLabelMode,
     ui_lang: UiLang,
@@ -252,7 +253,7 @@ impl BdTitle {
     fn audio_outs(&self, layout: &Layout) -> Vec<AudioOut> {
         self.audio_streams(layout)
             .into_iter()
-            .map(|a| a.map_or(SILENCE_OUT, |a| plan_audio_bd(a, self.audio_target, self.audio_mode, self.bd_audio, self.loudnorm || self.info.trim.is_some())))
+            .map(|a| a.map_or(SILENCE_OUT, |a| plan_audio_with(a, self.audio_target, self.audio_mode, self.bd_audio, self.loudnorm || self.info.trim.is_some(), self.ac3_kbps)))
             .collect()
     }
 
@@ -346,7 +347,7 @@ async fn prepare_bd_subtitles(tools: &Toolchain, t: &BdTitle, layout: &Layout, w
             let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
             let text = std::fs::read(&srt).at(&srt)?;
             let (cues, _skipped) = crate::textsub::parse_srt(&String::from_utf8_lossy(&text));
-            let st = &t.subtitle_style;
+            let st = &crate::textsub::SubtitleStyle { lang: crate::fonts::cjk_region(s.language.as_deref(), s.title.as_deref()).map(Into::into), ..t.subtitle_style.clone() };
             let cues = crate::textsub::apply_offset(cues, st.offset_ms);
             std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h).with_style(st), t.rate.fps)).at(&sup)?;
         } else if matches!(s.codec.as_str(), "dvd_subtitle" | "dvb_subtitle" | "xsub") {
@@ -389,9 +390,24 @@ async fn prepare_bd_subtitles(tools: &Toolchain, t: &BdTitle, layout: &Layout, w
         let temp_srt = work.join(encoder::subtitle_file(&t.stem, k, "srt"));
         let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
         let cues = encoder::load_external_text_cues(tools, &ext.path, &temp_srt, t.info.trim).await?;
-        let st = &t.subtitle_style;
+        let hints = format!("{} {}", ext.title.as_deref().unwrap_or(""), ext.path.file_name().unwrap_or_default().to_string_lossy());
+        let st = &crate::textsub::SubtitleStyle { lang: crate::fonts::cjk_region(ext.language.as_deref(), Some(&hints)).map(Into::into), ..t.subtitle_style.clone() };
         let cues = crate::textsub::apply_offset(cues, st.offset_ms);
         std::fs::write(&sup, crate::pgs::build_sup(&cues, &crate::textsub::Canvas::hd(w, h).with_style(st), t.rate.fps)).at(&sup)?;
+    }
+    // A corrupt `.sup` (copied verbatim or produced above) fails here with its track named, not
+    // deep inside the muxer.
+    for k in 0..layout.subs.len() {
+        let sup = work.join(encoder::subtitle_file(&t.stem, k, SUB_EXT));
+        let (codec, source) = match t.sub_for(layout, k) {
+            Some(TitleSub::Embedded(s)) => (s.codec.as_str(), t.info.path.as_path()),
+            Some(TitleSub::External(ext, _)) => (ext.path.extension().and_then(|e| e.to_str()).unwrap_or("external"), ext.path.as_path()),
+            None => ("placeholder", sup.as_path()),
+        };
+        let data = std::fs::read(&sup).at(&sup)?;
+        if let Err(e) = crate::bd_mux::validate_sup(&data) {
+            return Err(BuildError::Internal(format!("subtitle track {} ({codec}, {}): {e}", k + 1, source.display())));
+        }
     }
     Ok(())
 }
@@ -442,6 +458,7 @@ async fn encode_bd_title(
         maxrate_kbps,
         bufsize_kbit,
         copy_video: t.copy_kbps.is_some(),
+        ac3_kbps: t.ac3_kbps,
     };
     let frames_per_run = duration * rate.fps_f64();
     // Frames done count over both runs of a 2-pass encode; never let them go backwards.
@@ -777,6 +794,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
             resolution,
             video_mode,
             audio_mode: opts.audio_mode,
+            ac3_kbps: opts.audio_bitrate_kbps,
             bd_audio: opts.bd_audio,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
@@ -1145,7 +1163,8 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let bdmv = project_dir.join("BDMV");
     log(Event::Step(tf!(opts.ui_lang, "bd_folder", path = bdmv.display())));
 
-    let work_dir = if opts.keep_work {
+    let work_dir = if crate::dvd::keep_work(opts) {
+        log(Event::Step(format!("Work folder kept: {}", work.display())));
         Some(work)
     } else {
         if let Err(e) = remove_old_output(&work).await {
@@ -1299,6 +1318,7 @@ mod tests {
             stem: "title_01".into(),
             rate: BdRate { fps: (25, 1), fake_interlaced: true },
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             bd_audio: BdAudioMode::Auto,
             track_label_mode: probe::TrackLabelMode::SmartMetadata,
             ui_lang: UiLang::EN,

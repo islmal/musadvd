@@ -308,13 +308,25 @@ pub fn video_filter(v: &VideoStream, aspect: Aspect, tv: TvStandard, resolution:
     f.join(",")
 }
 
-/// AC-3 settings for a source track: (bitrate kbps, output channels).
-pub fn ac3_settings(channels: u32) -> (u32, u32) {
-    if channels >= 5 {
-        (448, 6)
-    } else {
-        (192, 2)
+/// AC-3 bit rates (kbit/s) a DVD-Video disc allows (the format maximum is 448).
+pub const AC3_KBPS_DVD: [u32; 8] = [96, 128, 160, 192, 224, 256, 384, 448];
+/// AC-3 bit rates (kbit/s) Blu-ray / AVCHD allow (up to 640).
+pub const AC3_KBPS_BD: [u32; 9] = [192, 224, 256, 320, 384, 448, 512, 576, 640];
+
+/// Snaps a user bit rate to the nearest one `target` allows (0 = automatic stays 0).
+pub fn snap_ac3_kbps(kbps: u32, target: AudioTarget) -> u32 {
+    let set: &[u32] = if target == AudioTarget::Dvd { &AC3_KBPS_DVD } else { &AC3_KBPS_BD };
+    if kbps == 0 {
+        return 0;
     }
+    set.iter().copied().min_by_key(|s| s.abs_diff(kbps)).unwrap_or(kbps)
+}
+
+/// AC-3 settings for a source track: (bitrate kbps, output channels). `want_kbps` is the user's
+/// choice (0 = automatic: 448 for 5.1, else 192), snapped to what `target` allows.
+pub fn ac3_settings(channels: u32, target: AudioTarget, want_kbps: u32) -> (u32, u32) {
+    let (auto, ch) = if channels >= 5 { (448, 6) } else { (192, 2) };
+    (if want_kbps == 0 { auto } else { snap_ac3_kbps(want_kbps, target) }, ch)
 }
 
 /// How audio tracks are written ("Audio-Modus").
@@ -514,8 +526,19 @@ pub fn plan_audio(a: &AudioStream, target: AudioTarget, mode: AudioMode, filtere
     plan_audio_bd(a, target, mode, BdAudioMode::Auto, filtered)
 }
 
+/// [`plan_audio`] with the AC-3 bit rate of re-encoded tracks (`ac3_kbps`, 0 = automatic).
+pub fn plan_audio_kbps(a: &AudioStream, target: AudioTarget, mode: AudioMode, filtered: bool, ac3_kbps: u32) -> AudioOut {
+    plan_audio_with(a, target, mode, BdAudioMode::Auto, filtered, ac3_kbps)
+}
+
 /// [`plan_audio`] with the Blu-ray / AVCHD copy policy `bd` (ignored on DVD).
 pub fn plan_audio_bd(a: &AudioStream, target: AudioTarget, mode: AudioMode, bd: BdAudioMode, filtered: bool) -> AudioOut {
+    plan_audio_with(a, target, mode, bd, filtered, 0)
+}
+
+/// [`plan_audio_bd`] with the AC-3 bit rate of re-encoded tracks (0 = automatic). Copied tracks
+/// keep their own rate: a copy is lossless, so it may exceed the setting.
+pub fn plan_audio_with(a: &AudioStream, target: AudioTarget, mode: AudioMode, bd: BdAudioMode, filtered: bool, ac3_kbps: u32) -> AudioOut {
     if !filtered {
         if target == AudioTarget::Dvd {
             if mode == AudioMode::Auto {
@@ -539,7 +562,7 @@ pub fn plan_audio_bd(a: &AudioStream, target: AudioTarget, mode: AudioMode, bd: 
         (AudioMode::Lpcm, AudioTarget::Bluray) => AudioOut::Pcm { codec: "pcm_s24le", ch: a.channels.clamp(1, 8), rate: 48_000 },
         (AudioMode::Lpcm, AudioTarget::Avchd) => AudioOut::Pcm { codec: "pcm_s16le", ch: 2, rate: 48_000 },
         _ => {
-            let (kbps, ch) = ac3_settings(a.channels);
+            let (kbps, ch) = ac3_settings(a.channels, target, ac3_kbps);
             AudioOut::Ac3 { kbps, ch }
         }
     }
@@ -801,6 +824,8 @@ pub struct EncodeJob<'a> {
     /// Hardware decoder for the source (`-hwaccel`), see [`Toolchain::probe_hwaccel`].
     pub hwaccel: Option<&'static str>,
     pub audio_mode: AudioMode,
+    /// AC-3 bit rate of re-encoded tracks in kbit/s (0 = automatic).
+    pub ac3_kbps: u32,
     /// Per-track audio mode overrides; if empty or index not found, falls back to `audio_mode`.
     pub audio_modes: Vec<AudioMode>,
     /// Audio filter (loudnorm) per audio track; a filtered track is never copied. Missing
@@ -956,7 +981,7 @@ impl EncodeJob<'_> {
             .enumerate()
             .map(|(n, a)| {
                 let mode = self.audio_modes.get(n).copied().unwrap_or(self.audio_mode);
-                plan_audio(a, AudioTarget::Dvd, mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some())
+                plan_audio_kbps(a, AudioTarget::Dvd, mode, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some(), self.ac3_kbps)
             })
             .collect()
     }
@@ -1432,6 +1457,8 @@ pub struct BdEncodeJob<'a> {
     pub hwaccel: Option<&'static str>,
     pub encoder: BdEncoder,
     pub audio_mode: AudioMode,
+    /// AC-3 bit rate of re-encoded tracks in kbit/s (0 = automatic).
+    pub ac3_kbps: u32,
     pub bd_audio: BdAudioMode,
     /// [`AudioTarget::Bluray`] or [`AudioTarget::Avchd`].
     pub audio_target: AudioTarget,
@@ -1463,7 +1490,7 @@ impl BdEncodeJob<'_> {
             .iter()
             .enumerate()
             .map(|(n, a)| {
-                a.map_or(SILENCE_OUT, |a| plan_audio_bd(a, self.audio_target, self.audio_mode, self.bd_audio, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some()))
+                a.map_or(SILENCE_OUT, |a| plan_audio_with(a, self.audio_target, self.audio_mode, self.bd_audio, filter_of(&self.audio_filters, n).is_some() || self.info.trim.is_some(), self.ac3_kbps))
             })
             .collect()
     }
@@ -1803,7 +1830,7 @@ async fn text_subtitle_xml(job: &EncodeJob<'_>, n: usize, sub: &SubtitleStream) 
         job.dir.clone(),
         job.tv,
         format!("{}_s{}", job.stem, n + 1),
-        job.subtitle_style.clone(),
+        textsub::SubtitleStyle { lang: crate::fonts::cjk_region(sub.language.as_deref(), sub.title.as_deref()).map(Into::into), ..job.subtitle_style.clone() },
         cues,
         sub.forced,
     )
@@ -1824,7 +1851,10 @@ async fn external_subtitle_xml(tools: &Toolchain, job: &EncodeJob<'_>, n: usize,
             job.dir.clone(),
             job.tv,
             folder,
-            job.subtitle_style.clone(),
+            {
+                let hints = format!("{} {}", ext.title.as_deref().unwrap_or(""), ext.path.file_name().unwrap_or_default().to_string_lossy());
+                textsub::SubtitleStyle { lang: crate::fonts::cjk_region(ext.language.as_deref(), Some(&hints)).map(Into::into), ..job.subtitle_style.clone() }
+            },
             cues,
             ext.forced,
         )
@@ -2204,6 +2234,7 @@ pub fn intro_slot_stream(frame: &MenuFrame, rate: BdRate, layer: &MenuLayer, fra
 /// long DVD MPEG-2 program stream. The `-filter_complex` graph is built from the layer list.
 pub fn custom_menu_args(
     tv: TvStandard,
+    frame: &MenuFrame,
     media: &CustomMenuMedia,
     duration_secs: f64,
     audio: Option<&ClipSource>,
@@ -2211,11 +2242,11 @@ pub fn custom_menu_args(
     output: &Path,
 ) -> Vec<OsString> {
     let d = format!("{duration_secs:.3}");
-    let frame = MenuFrame::from(tv);
-    let mut a = custom_menu_graph(&frame, tv.frame_rate(), media, duration_secs, audio, "4/3", intro_secs);
+    let (dar, aspect) = if frame.is_wide() { ("16/9", "16:9") } else { ("4/3", "4:3") };
+    let mut a = custom_menu_graph(frame, tv.frame_rate(), media, duration_secs, audio, dar, intro_secs);
     a.extend(
         [
-            "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", "4:3",
+            "-map", "[vout]", "-map", "[aout]", "-t", &d, "-target", tv.ffmpeg_target(), "-aspect", aspect,
             "-b:v", "5000k", "-maxrate", "8000k", "-c:a", "ac3", "-b:a", "192k",
         ]
         .map(OsString::from),
@@ -2543,10 +2574,16 @@ mod tests {
 
     #[test]
     fn audio_and_rates() {
-        assert_eq!(ac3_settings(6), (448, 6));
-        assert_eq!(ac3_settings(8), (448, 6));
-        assert_eq!(ac3_settings(2), (192, 2));
-        assert_eq!(ac3_settings(1), (192, 2));
+        assert_eq!(ac3_settings(6, AudioTarget::Dvd, 0), (448, 6));
+        assert_eq!(ac3_settings(8, AudioTarget::Dvd, 0), (448, 6));
+        assert_eq!(ac3_settings(2, AudioTarget::Dvd, 0), (192, 2));
+        assert_eq!(ac3_settings(1, AudioTarget::Bluray, 0), (192, 2));
+        // Explicit rates snap per medium: DVD caps at 448, BD floors at 192.
+        assert_eq!(ac3_settings(6, AudioTarget::Dvd, 640), (448, 6));
+        assert_eq!(ac3_settings(2, AudioTarget::Dvd, 128), (128, 2));
+        assert_eq!(ac3_settings(2, AudioTarget::Bluray, 128), (192, 2));
+        assert_eq!(ac3_settings(6, AudioTarget::Avchd, 640), (640, 6));
+        assert_eq!(snap_ac3_kbps(500, AudioTarget::Bluray), 512);
         assert_eq!(max_video_rate(192), 9588);
         assert_eq!(max_video_rate(448 + 192), 9140);
     }
@@ -2580,6 +2617,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,
@@ -2742,7 +2780,7 @@ mod tests {
                 MenuLayer::Image("over.png".into()),
             ],
         };
-        let a = joined(&custom_menu_args(TvStandard::Pal, &media, 20.0, Some(&clip("music.mp3")), None, Path::new("m.mpg")));
+        let a = joined(&custom_menu_args(TvStandard::Pal, &MenuFrame::from(TvStandard::Pal), &media, 20.0, Some(&clip("music.mp3")), None, Path::new("m.mpg")));
         // Inputs in order: background, layers, sound.
         let order: Vec<usize> = ["bg.jpg", "under.png", "movie.mkv", "over.png", "music.mp3"]
             .iter()
@@ -2763,7 +2801,7 @@ mod tests {
 
         // Colour background, no layers, silence, NTSC.
         let still = CustomMenuMedia { background: MenuBackground::Color([0x10, 0x20, 0xA0]), overlay: BackgroundOverlay::None, layers: vec![] };
-        let a = joined(&custom_menu_args(TvStandard::Ntsc, &still, 1.0, None, None, Path::new("m.mpg")));
+        let a = joined(&custom_menu_args(TvStandard::Ntsc, &MenuFrame::from(TvStandard::Ntsc), &still, 1.0, None, None, Path::new("m.mpg")));
         assert!(a.contains("color=c=0x1020A0:s=720x480:r=30000/1001:d=1.000"), "{a}");
         assert!(a.contains("[bg]format=yuv420p,setdar=4/3[vout]") && a.contains("[1:a]asetpts=N/SR/TB[aout]"), "{a}");
         assert!(a.contains("-target ntsc-dvd"));
@@ -2771,7 +2809,7 @@ mod tests {
         // Shading over the background.
         let with = |overlay| {
             let m = CustomMenuMedia { overlay, ..media.clone() };
-            joined(&custom_menu_args(TvStandard::Pal, &m, 20.0, None, None, Path::new("m.mpg")))
+            joined(&custom_menu_args(TvStandard::Pal, &MenuFrame::from(TvStandard::Pal), &m, 20.0, None, None, Path::new("m.mpg")))
         };
         let a = with(BackgroundOverlay::Vignette);
         assert!(a.contains("gblur=sigma=8.0,vignette=angle=PI/4,format=rgba,setsar=1[bg]"), "{a}");
@@ -2784,7 +2822,7 @@ mod tests {
         assert!(a.contains("[bg0][shade]overlay=0:0:format=rgb[bg];") && a.contains("[bg][l0]overlay"), "{a}");
 
         // Custom menu with intro: forced closed GOP at intro split boundary
-        let intro_args = joined(&custom_menu_args(TvStandard::Pal, &still, 23.0, None, Some(3.0), Path::new("m.mpg")));
+        let intro_args = joined(&custom_menu_args(TvStandard::Pal, &MenuFrame::from(TvStandard::Pal), &still, 23.0, None, Some(3.0), Path::new("m.mpg")));
         assert!(intro_args.contains("-force_key_frames expr:gte(t,3.000)"), "{intro_args}");
         assert!(intro_args.contains("-flags +cgop -sc_threshold 1000000000"), "{intro_args}");
     }
@@ -2870,6 +2908,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             bd_audio: BdAudioMode::Auto,
             audio_target: AudioTarget::Bluray,
             audio_filters: vec![],
@@ -3190,6 +3229,23 @@ mod tests {
     }
 
     #[test]
+    fn explicit_ac3_rate_reaches_the_ffmpeg_args_and_plan() {
+        let a = AudioStream {
+            index: 1, codec: "dts".into(), channels: 6, channel_layout: "5.1".into(), language: None, title: None,
+            default: false, bit_rate: Some(1_509_000), sample_rate: Some(96_000), profile: None, bits_per_raw_sample: None,
+        };
+        let out = plan_audio_kbps(&a, AudioTarget::Dvd, AudioMode::Ac3, false, 256);
+        assert_eq!((out.kbps(), out.layout_label()), (256, "5.1"));
+        assert!(strings(audio_track_args(0, out, None)).contains("-b:a:0 256k"));
+        // The same setting snaps per medium; automatic keeps 448 for 5.1.
+        assert_eq!(plan_audio_with(&a, AudioTarget::Bluray, AudioMode::Ac3, BdAudioMode::Encode, false, 100).kbps(), 192);
+        assert_eq!(plan_audio_kbps(&a, AudioTarget::Dvd, AudioMode::Ac3, false, 0).kbps(), 448);
+        // A copied track keeps its own rate whatever the setting says.
+        let ac3 = AudioStream { codec: "ac3".into(), bit_rate: Some(448_000), sample_rate: Some(48_000), ..a };
+        assert!(matches!(plan_audio_kbps(&ac3, AudioTarget::Dvd, AudioMode::Auto, false, 192), AudioOut::Copy { kbps: 448, .. }));
+    }
+
+    #[test]
     fn bd_audio_mode_policy() {
         use AudioTarget::*;
         assert_eq!(BdAudioMode::from_setting("strict"), BdAudioMode::Strict);
@@ -3249,6 +3305,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,
@@ -3281,6 +3338,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             audio_modes: vec![AudioMode::Auto, AudioMode::Ac3],
             audio_filters: vec![],
             copy_video: false,
@@ -3323,6 +3381,7 @@ mod tests {
             video: Default::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,
@@ -3761,6 +3820,7 @@ mod tests {
             video: VideoProcessing::default(),
             hwaccel: Some("cuda"),
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: true,
@@ -3853,6 +3913,7 @@ mod tests {
             video: VideoProcessing::default(),
             hwaccel: None,
             audio_mode: AudioMode::Auto,
+            ac3_kbps: 0,
             audio_modes: vec![],
             audio_filters: vec![],
             copy_video: false,

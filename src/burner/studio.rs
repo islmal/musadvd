@@ -19,7 +19,7 @@ use super::source::{Bin2352Source, FileSource, SectorSource, ZeroSource};
 use super::spti::{DriveDetails, ScsiTransport};
 use super::verifier::{self, VerifyError, VerifyOptions};
 use super::{
-    isoread, power, preferred_speed, speed_label, speed_x, system_burner, BurnEta, BurnError, BurnOptions, BurnPhase, DriveInfo,
+    isoread, power, preferred_speed_for, speed_label, speed_x, system_burner, BurnEta, BurnError, BurnOptions, BurnPhase, DriveInfo,
     MediaInfo, Telemetry, TelemetryHook, WriteSpeed,
 };
 use crate::config::{BurnStudioSettings, StudioIo};
@@ -564,7 +564,7 @@ pub fn write(ctx: &Ctx, job: &WriteJob, make_source: &(dyn Fn() -> Result<Box<dy
         let details = drive_details(&job.drive, io).ok();
         let media_id = details.as_ref().and_then(|d| d.media_id.clone()).unwrap_or_default();
         let wish = resolve_speed(s, &job.drive, &media_id, &job.speed);
-        let speed = preferred_speed(media.media_type, &media.speeds, &wish);
+        let speed = preferred_speed_for(&media, &wish);
         let x = speed_x(speed, &media.speeds, media.media_type);
         let source = make_source()?;
         let sectors = source.sectors();
@@ -941,6 +941,7 @@ pub fn build_input(paths: &[PathBuf], label: &str) -> BuildInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::burner::preferred_speed;
     use crate::burner::MediaType;
     use crate::config::SpeedRule;
 

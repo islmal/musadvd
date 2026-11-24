@@ -38,3 +38,18 @@ export function mergeBlock<T extends { id: number; mergeWithPrevious: boolean }>
     if (!ids.has(t.id) && prevOf.get(t.id) !== arr[i - 1]?.id) t.mergeWithPrevious = false;
   });
 }
+
+/**
+ * Stable reorder: items whose key is in `prefs` come first, in `prefs` order; the others keep their
+ * relative order behind them. `keyOf` gets the item and its current position (language or slot).
+ */
+export function reorderByLanguages<T>(items: T[], keyOf: (x: T, i: number) => string, prefs: string[]): T[] {
+  const rank = (x: T, i: number) => {
+    const r = prefs.indexOf(keyOf(x, i));
+    return r < 0 ? prefs.length : r;
+  };
+  return items
+    .map((x, i) => ({ x, i, r: rank(x, i) }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map((e) => e.x);
+}

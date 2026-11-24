@@ -34,7 +34,7 @@ use musadvd::chapters::{self, ImportedChapter};
 use musadvd::config::AppSettings;
 use musadvd::dvd::{self, BuildError, BuildOptions, CancelToken, Event, StreamSelection, TitleLoad};
 use musadvd::encoder::{
-    self, ac3_settings, max_video_rate, parse_psnr_average, plan_audio, psnr_verdict,
+    self, ac3_settings, max_video_rate, parse_psnr_average, plan_audio_kbps, psnr_verdict,
     quality_psnr_args, Aspect, AudioMode, AudioOut, AudioTarget, VBV_BUFFER_KBIT,
 };
 use musadvd::menu::{UiLang, DEFAULT_MOTION_SECS};
@@ -219,14 +219,14 @@ fn audio_choice(out: AudioOut, base: &str, mode: TrackLabelMode) -> AudioChoice 
     }
 }
 
-fn audio_plans(a: &probe::AudioStream, base: &str, mode: TrackLabelMode) -> AudioPlans {
+fn audio_plans(a: &probe::AudioStream, base: &str, mode: TrackLabelMode, ac3_kbps: u32) -> AudioPlans {
     // `auto` is the copy candidate; `ac3` / `lpcm` are the pure re-encode targets the GUI falls
     // back to (Blu-ray Auto with an explicit format copies only tracks already in that format).
     let encode = musadvd::encoder::BdAudioMode::Encode;
     let modes = |t| AudioModes {
-        auto: audio_choice(plan_audio(a, t, AudioMode::Auto, false), base, mode),
-        ac3: audio_choice(musadvd::encoder::plan_audio_bd(a, t, AudioMode::Ac3, encode, false), base, mode),
-        lpcm: audio_choice(musadvd::encoder::plan_audio_bd(a, t, AudioMode::Lpcm, encode, false), base, mode),
+        auto: audio_choice(plan_audio_kbps(a, t, AudioMode::Auto, false, ac3_kbps), base, mode),
+        ac3: audio_choice(musadvd::encoder::plan_audio_with(a, t, AudioMode::Ac3, encode, false, ac3_kbps), base, mode),
+        lpcm: audio_choice(musadvd::encoder::plan_audio_with(a, t, AudioMode::Lpcm, encode, false, ac3_kbps), base, mode),
     };
     AudioPlans { dvd: modes(AudioTarget::Dvd), bluray: modes(AudioTarget::Bluray), avchd: modes(AudioTarget::Avchd) }
 }
@@ -364,7 +364,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
             .iter()
             .enumerate()
             .map(|(n, a)| {
-                let (kbps, ch) = ac3_settings(a.channels);
+                let (kbps, ch) = ac3_settings(a.channels, AudioTarget::Dvd, settings.audio_bitrate_kbps);
                 AudioTrack {
                     index: a.index,
                     codec: a.codec.clone(),
@@ -377,7 +377,7 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
                     default: a.default,
                     ac3_kbps: kbps,
                     dvd_layout: if ch == 6 { "5.1".into() } else { "Stereo".into() },
-                    plans: audio_plans(a, &audio_labels[n], label_mode),
+                    plans: audio_plans(a, &audio_labels[n], label_mode, settings.audio_bitrate_kbps),
                 }
             })
             .collect(),
@@ -1734,7 +1734,7 @@ mod tests {
             profile: None,
             bits_per_raw_sample: None,
         };
-        let p = audio_plans(&ac3, "Spanisch - Latino", TrackLabelMode::SmartMetadata);
+        let p = audio_plans(&ac3, "Spanisch - Latino", TrackLabelMode::SmartMetadata, 0);
         // The label carries the plan's own layout: the DVD plan is 5.1 AC-3 too, LPCM on AVCHD is stereo.
         assert_eq!(p.dvd.auto.label, "Spanisch - Latino (5.1)");
         assert_eq!(p.avchd.lpcm.label, "Spanisch - Latino (Stereo)");
@@ -1769,7 +1769,7 @@ mod tests {
             group: None,
             elements: vec![],
         };
-        let l = musadvd::layout::CustomLayout { title_screen: None, chapter_menus: None,
+        let l = musadvd::layout::CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
             version: 1,
             canvas: musadvd::layout::Canvas::default(),
             highlight: musadvd::layout::Highlight::default(),

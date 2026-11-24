@@ -21,6 +21,8 @@ import {
 } from "./api";
 import { DEFAULT_LABEL, MAX_LABEL, sanitizeLabel } from "./label";
 import { fmtNumber, t } from "./i18n";
+import { confirmKind, eraseDefault } from "./burnConfirm";
+import { modal } from "./studio/ui";
 
 type Child = Node | string | null | undefined | false;
 
@@ -110,6 +112,7 @@ export async function openBurner(
   let eject = !quiet;
   let deleteAfter = settings?.delete_after_burn ?? false;
   let eraseConfirmed = false;
+  let eraseTouched = false; // the user changed the checkbox: stop pre-ticking it
   let burning = false;
   let finished: BurnDone | null = null;
   let countdown: number | null = null; // seconds left
@@ -212,7 +215,11 @@ export async function openBurner(
     try {
       const id = driveId;
       const m = await probeMedia(id, videoTs, speedPref, autoErase);
-      if (id === driveId) media = m;
+      if (id === driveId) {
+        media = m;
+        // A rewritable disc with data: erasing is pre-ticked (the confirmation still asks).
+        if (!eraseTouched) eraseConfirmed = eraseDefault(m.media);
+      }
       if (speed !== null && !m.speeds.some((s) => speedKey(s.value) === speedKey(speed!))) speed = null;
     } catch (e) {
       media = null;
@@ -229,6 +236,21 @@ export async function openBurner(
 
   /** Old content on a rewritable disc needs an explicit OK unless erasing is automatic. */
   const eraseOk = () => !media?.needsErase || autoErase || eraseConfirmed;
+
+  /** The Burn button: confirms first when the disc is erased or written permanently. */
+  function askBurn() {
+    if (burning || !media || media.problem || !driveId || !eraseOk()) return;
+    countdownCancelled = true;
+    stopCountdown();
+    const kind = confirmKind(media.media, media.needsErase && (autoErase || eraseConfirmed));
+    if (kind === "none") return void burn();
+    render();
+    modal(
+      t("burn.confirmTitle"),
+      el("p", {}, t(kind === "erase" ? "burn.confirmErase" : "burn.confirmPermanent", { media: media.media.physical })) as HTMLElement,
+      [{ label: t("burn.abbrechen") }, { label: t("burn.brennen"), primary: true, onClick: () => void burn() }],
+    );
+  }
 
   async function burn() {
     if (burning || !media || media.problem || !driveId || !eraseOk()) return;
@@ -383,6 +405,7 @@ export async function openBurner(
             return el("option", { value: speedKey(s.value), selected }, isDefault ? t("burn.recommended", { label: s.label }) : s.label);
           }),
         ),
+        media && speedPref === "auto" ? el("small", { class: "opt-hint" }, media.autoSpeed ? t("burn.autoForDisc", { speed: media.autoSpeed }) : t("burn.autoBest")) : null,
       ),
       el(
         "div",
@@ -392,9 +415,10 @@ export async function openBurner(
         check(t("burn.discDanachAuswerfen"), eject, (v) => (eject = v), disabled),
         check(t("burn.ordnerDanachLoeschen", { discKind: discKind() }), deleteAfter, (v) => ((deleteAfter = v), render()), disabled),
         media?.needsErase && !autoErase
-          ? check(t("burn.inhaltDerDiscLoeschen"), eraseConfirmed, (v) => ((eraseConfirmed = v), render()), disabled)
+          ? check(t("burn.eraseFirst"), eraseConfirmed, (v) => ((eraseTouched = true), (eraseConfirmed = v), render()), disabled)
           : null,
       ),
+      media?.needsErase && !autoErase && !eraseConfirmed && !disabled ? el("div", { class: "media-note" }, t("burn.eraseRequired", { media: media.media.physical })) : null,
       estimateLine(),
     );
   }
@@ -488,7 +512,7 @@ export async function openBurner(
         ? el(
             "div",
             { class: "burn-countdown", role: "status" },
-            el("span", {}, t("burn.brennenStartetAutomatischIn", { countdown })),
+            el("span", {}, t(media?.needsErase ? "burn.countdownErase" : "burn.brennenStartetAutomatischIn", { countdown, media: media?.media.physical ?? "" })),
             el(
               "button",
               {
@@ -525,7 +549,7 @@ export async function openBurner(
             )
           : el("button", { class: "btn", type: "button", onclick: close }, t("burn.schliessen")),
         !burning && !finished
-          ? el("button", { class: "btn primary", type: "button", disabled: !canBurn, onclick: () => void burn() }, t("burn.brennen"))
+          ? el("button", { class: "btn primary", type: "button", disabled: !canBurn, onclick: askBurn }, t("burn.brennen"))
           : null,
         finished && !finished.ok && !finished.cancelled
           ? el(

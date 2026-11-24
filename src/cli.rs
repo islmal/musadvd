@@ -163,6 +163,10 @@ enum Command {
         /// audio (Blu-ray/AVCHD; DVD falls back to AC-3). On Blu-ray --bd-audio decides copying.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// AC-3 bit rate of re-encoded audio in kbit/s, or auto (192 stereo, 448 for 5.1). DVD
+        /// snaps to 96-448, Blu-ray/AVCHD to 192-640. Copied tracks keep their own rate.
+        #[arg(long, default_value = "auto", value_name = "KBPS|auto", value_parser = parse_audio_bitrate)]
+        audio_bitrate: u32,
         /// DVD video: encode always re-encodes, auto copies MPEG-2 streams that already meet the
         /// DVD-Video spec (untrimmed, uncropped), strict copies every title or fails.
         #[arg(long, value_enum, default_value = "encode")]
@@ -296,6 +300,19 @@ impl From<Profile> for EncodingProfile {
             Profile::Mp => EncodingProfile::Mp,
             Profile::Lp => EncodingProfile::Lp,
         }
+    }
+}
+
+/// `auto` (0) or one of the AC-3 rates of either medium.
+fn parse_audio_bitrate(s: &str) -> Result<u32, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(0);
+    }
+    let k: u32 = s.parse().map_err(|_| format!("'{s}' is not a bit rate in kbit/s or 'auto'"))?;
+    if crate::encoder::AC3_KBPS_DVD.contains(&k) || crate::encoder::AC3_KBPS_BD.contains(&k) {
+        Ok(k)
+    } else {
+        Err(format!("{k} is not an AC-3 rate (DVD: 96-448, Blu-ray: 192-640 kbit/s)"))
     }
 }
 
@@ -490,7 +507,7 @@ fn burn(
 ) -> ExitCode {
     use crate::burner::layerbreak::Capacities;
     use crate::burner::{
-        burn_video_ts, default_iso_path, is_bdmv_folder, media_problem, preferred_speed, speed_label, speed_x, system_burner,
+        burn_video_ts, default_iso_path, is_bdmv_folder, media_problem, preferred_speed_for, speed_label, speed_x, system_burner,
         BurnError, BurnJob, BurnOptions, BurnPhase, BurnUpdate, DiscContent, WriteSpeed,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -569,7 +586,7 @@ fn burn(
     if dual_layer && !content.bluray && !media.layer_break_supported {
         eprintln!("warning: {}: the drive decides the layer break.", media.physical);
     }
-    let speed = preferred_speed(media.media_type, &media.speeds, &speed);
+    let speed = preferred_speed_for(&media, &speed);
     let x = speed_x(speed, &media.speeds, media.media_type);
     println!(
         "{}: {} – {} ({:.2} GB) at {}{}{}",
@@ -913,6 +930,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             no_hw_encode,
             no_menu_animations,
             audio,
+            audio_bitrate,
             dvd_video,
             bd_video,
             bd_audio,
@@ -997,6 +1015,7 @@ fn dispatch(cli: Cli) -> ExitCode {
                 },
                 menu_animations: !no_menu_animations,
                 audio_mode: audio.into(),
+                audio_bitrate_kbps: audio_bitrate,
                 dvd_video: dvd_video.into(),
                 bd_video: match bd_video {
                     BdVideoArg::Encode => crate::encoder::BdVideoMode::Encode,

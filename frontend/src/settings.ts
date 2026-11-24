@@ -118,6 +118,26 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
       hint ? el("small", { class: "opt-hint" }, hint) : null,
     );
 
+  const numSelect = (key: NumKey, label: string, options: [number, string][], hint?: string) =>
+    el(
+      "label",
+      { class: "opt-row" },
+      el("span", { class: "opt-label" }, label),
+      el(
+        "select",
+        {
+          onchange: (e: Event) => {
+            (draft[key] as number) = Number((e.target as HTMLSelectElement).value);
+            render();
+          },
+        },
+        ...options.map(([value, text]) => el("option", { value: String(value), selected: draft[key] === value }, text)),
+        // A stored value that is not in the list stays visible.
+        options.some(([v]) => v === draft[key]) ? null : el("option", { value: String(draft[key]), selected: true }, `${draft[key]} kbps`),
+      ),
+      hint ? el("small", { class: "opt-hint" }, hint) : null,
+    );
+
   const number = (key: NumKey, label: string, min: number, max: number, unit: string, hint?: string) =>
     el(
       "label",
@@ -526,6 +546,12 @@ export function openSettings(current: AppSettings, info: SettingsInfo, uiLanguag
             ["lpcm", t("settings.lpcmUnkomprimiert")],
           ],
           t("settings.automatischPassendeAc3"),
+        ),
+        numSelect(
+          "audio_bitrate_kbps",
+          t("settings.audioBitrate"),
+          [[0, t("settings.audioBitrateAuto")], ...[96, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640].map((k): [number, string] => [k, `${k} kbps`])],
+          t("settings.audioBitrateHint"),
         ),
         select(
           "track_label_mode",

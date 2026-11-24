@@ -1480,6 +1480,12 @@ pub struct MenuPageFiles {
     pub intro: Option<Intro>,
     /// Page fill colour under the intro's sprites.
     pub intro_fill: [u8; 3],
+    /// The frame the page was drawn on (4:3, or anamorphic 16:9 for a 16:9 custom layout): the
+    /// background and video layers must be composited on the same one.
+    pub frame: crate::author::MenuFrame,
+    /// 16:9 menus: spumux XML of the letterbox highlight, muxed as subpicture stream 1 (the
+    /// widescreen one in `spumux_xml` is stream 0); `None` for 4:3 menus.
+    pub letterbox_xml: Option<PathBuf>,
 }
 
 impl MenuPageFiles {
@@ -1578,6 +1584,8 @@ fn render_menu_page(
             custom: None,
             intro_fill: rendered.fill,
             intro: rendered.intro,
+            frame: opts.tv.into(),
+            letterbox_xml: None,
         };
         rendered.background.save(&files.background)?;
         if let (Some(fg), Some(path)) = (&rendered.foreground, &files.foreground) {

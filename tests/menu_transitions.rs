@@ -102,7 +102,7 @@ fn menu_transition_bridge_pgc_vmgm() {
         elements: vec![],
     };
 
-    let custom_layout = CustomLayout { title_screen: None, chapter_menus: None,
+    let custom_layout = CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),
@@ -318,7 +318,7 @@ fn menu_transition_cross_domain_and_vtsm() {
         elements: vec![],
     };
 
-    let custom_layout = CustomLayout { title_screen: None, chapter_menus: None,
+    let custom_layout = CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
         version: 1,
         canvas: Canvas::default(),
         highlight: Highlight::default(),

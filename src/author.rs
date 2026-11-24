@@ -34,6 +34,9 @@ use crate::template::Page;
 
 /// DVD-Video limit of buttons per menu.
 pub const MAX_BUTTONS: usize = 36;
+/// Buttons per 16:9 menu: its widescreen and letterbox button groups share the 36 PCI button
+/// slots (dvdauthor `dvdvob.c`: `36 / nrgrps` per group, here `dvd_mux::fix_vobus`).
+pub const MAX_WIDE_MENU_BUTTONS: usize = 18;
 /// DVD-Video limit of titles (and titlesets) per disc.
 pub const MAX_TITLES: usize = 99;
 /// DVD-Video limit of chapters per title.
@@ -74,6 +77,11 @@ impl MenuFrame {
     pub fn square(width: u32, height: u32) -> Self {
         MenuFrame { width, height, pixel_aspect: 1.0 }
     }
+
+    /// Display aspect 16:9 (an anamorphic DVD menu or a Blu-ray frame).
+    pub fn is_wide(&self) -> bool {
+        self.pixel_aspect * self.width as f64 > 1.5 * self.height as f64
+    }
 }
 
 impl TvStandard {
@@ -96,6 +104,13 @@ impl TvStandard {
     /// square-pixel pictures must be squeezed by its inverse to look undistorted in menus.
     pub fn menu_pixel_aspect(self) -> f64 {
         4.0 / 3.0 * self.height() as f64 / self.width() as f64
+    }
+
+    /// The frame of a DVD menu with display `aspect` (`16:9` = anamorphic: the same 720 pixels,
+    /// each 4/3 wider than on a 4:3 menu; anything else = 4:3).
+    pub fn menu_frame(self, aspect: &str) -> MenuFrame {
+        let dar = if aspect == "16:9" { 16.0 / 9.0 } else { 4.0 / 3.0 };
+        MenuFrame { width: self.width(), height: self.height(), pixel_aspect: dar * self.height() as f64 / self.width() as f64 }
     }
 
     /// Frame rate as ffmpeg expects it.
@@ -203,7 +218,7 @@ impl Resolution {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthorError {
     InvalidChapter(String),
-    TooManyButtons(usize),
+    TooManyButtons(usize, usize),
     TooManyTitles(usize),
     NoTitles,
     /// A PGC would exceed the VM command limit (internal error, never expected).
@@ -218,7 +233,7 @@ impl fmt::Display for AuthorError {
             AuthorError::InvalidChapter(c) => {
                 write!(f, "invalid chapter mark '{c}' (expected [[h:]m:]s[.frac])")
             }
-            AuthorError::TooManyButtons(n) => write!(f, "{n} buttons on one menu (DVD max {MAX_BUTTONS})"),
+            AuthorError::TooManyButtons(n, max) => write!(f, "{n} buttons on one menu (DVD max {max})"),
             AuthorError::TooManyTitles(n) => write!(f, "{n} titles (DVD max {MAX_TITLES})"),
             AuthorError::NoTitles => write!(f, "at least one title is required"),
             AuthorError::TooManyCommands { pgc, commands } => {
@@ -728,7 +743,7 @@ pub fn plan_buttons(
     }
 
     if buttons.len() > MAX_BUTTONS {
-        return Err(AuthorError::TooManyButtons(buttons.len()));
+        return Err(AuthorError::TooManyButtons(buttons.len(), MAX_BUTTONS));
     }
     // The template's default button becomes b1 (initially selected by the DVD player).
     if let Some(pos) = buttons
@@ -1017,12 +1032,19 @@ fn write_menus(
     pre: &str,
 ) -> Result<(), AuthorError> {
     let _ = writeln!(x, "{indent}<menus>");
-    let _ = writeln!(x, r#"{indent}  <video format="{}" aspect="{}"/>"#, tv.dvdauthor_format(), xml_escape(aspect));
+    if aspect == "16:9" {
+        // Mirrors `menu_pgcs`: letterbox only on 4:3 TVs, highlight stream 0 = widescreen, 1 = letterbox.
+        let _ = writeln!(x, r#"{indent}  <video format="{}" aspect="16:9" widescreen="nopanscan"/>"#, tv.dvdauthor_format());
+        let _ = writeln!(x, "{indent}  <subpicture>");
+        let _ = writeln!(x, r#"{indent}    <stream id="0" mode="widescreen"/>"#);
+        let _ = writeln!(x, r#"{indent}    <stream id="1" mode="letterbox"/>"#);
+        let _ = writeln!(x, "{indent}  </subpicture>");
+    } else {
+        let _ = writeln!(x, r#"{indent}  <video format="{}" aspect="{}"/>"#, tv.dvdauthor_format(), xml_escape(aspect));
+    }
     for (i, menu) in menus.iter().enumerate() {
         let menu_no = i as u32 + 1;
-        if menu.buttons.len() > MAX_BUTTONS {
-            return Err(AuthorError::TooManyButtons(menu.buttons.len()));
-        }
+        check_menu_buttons(menu, aspect)?;
         let entry = menu.entry.as_ref().map(|e| format!(r#" entry="{}""#, xml_escape(e))).unwrap_or_default();
         let _ = writeln!(x, "{indent}  <pgc{entry}>");
         let name = if menu.is_command_only() { format!("menu {menu_no} (dispatcher)") } else { menu.vob.clone() };
@@ -1177,7 +1199,8 @@ pub fn dvdauthor_xml(layout: &DvdLayout) -> Result<String, AuthorError> {
         let _ = writeln!(x, "    <fpc>{fpc}</fpc>");
         // dvdauthor needs a video format for the VMGM even without any menu in it.
         let _ = writeln!(x, "    <menus>");
-        let _ = writeln!(x, r#"      <video format="{}" aspect="{}"/>"#, tv.dvdauthor_format(), xml_escape(&layout.menu_aspect));
+        let widescreen = if layout.menu_aspect == "16:9" { r#" widescreen="nopanscan""# } else { "" };
+        let _ = writeln!(x, r#"      <video format="{}" aspect="{}"{widescreen}/>"#, tv.dvdauthor_format(), xml_escape(&layout.menu_aspect));
         let _ = writeln!(x, "    </menus>");
     } else {
         let fpc = if opts.auto_start {
@@ -1349,16 +1372,35 @@ fn entry_bits(entry: &str) -> Result<u32, AuthorError> {
     })
 }
 
+fn check_menu_buttons(menu: &MenuSpec, aspect: &str) -> Result<(), AuthorError> {
+    let max = if aspect == "16:9" { MAX_WIDE_MENU_BUTTONS } else { MAX_BUTTONS };
+    if menu.buttons.len() > max {
+        return Err(AuthorError::TooManyButtons(menu.buttons.len(), max));
+    }
+    Ok(())
+}
+
 fn menu_pgcs(menus: &[MenuSpec], domain: Domain, pre: &str, tv: TvStandard, aspect: &str) -> Result<crate::dvd_mux::PgcSet, AuthorError> {
     use crate::dvd_mux::{CellKind, Pgc, PgcSet};
     let kind = if domain == Domain::Vmgm { crate::dvdvm::Domain::Vmgm } else { crate::dvdvm::Domain::Vtsm };
     let mut set = PgcSet::new(kind);
     set.vg.vd.set_format(tv == TvStandard::Pal);
     set.vg.vd.set_aspect(aspect == "16:9");
-    for (i, menu) in menus.iter().enumerate() {
-        if menu.buttons.len() > MAX_BUTTONS {
-            return Err(AuthorError::TooManyButtons(menu.buttons.len()));
+    if aspect == "16:9" {
+        // dvdauthor `<video aspect="16:9" widescreen="nopanscan"/>`: 4:3 TVs letterbox (VTSM/VMGM
+        // video attribute: aspect 3, permitted display mode 2 = letterbox only), so the menu needs
+        // a widescreen and a letterbox highlight (subpicture mask 6 -> two PCI button groups).
+        set.vg.vd.vwidescreen = crate::dvd_mux::VW_NOPANSCAN;
+        if !menus.is_empty() {
+            // `<subpicture><stream id="0" mode="widescreen"/><stream id="1" mode="letterbox"/>`
+            // (`SubpDesc::idmap` = 128 | substream per display mode): PGC SPST 0x80 00 01 00. A
+            // VOB without substream 1 falls back to stream 0 for letterbox (`set_attributes`).
+            set.vg.sp[0].idmap = [0, 128, 129, 0];
+            set.vg.numsubpicturetracks = 1;
         }
+    }
+    for (i, menu) in menus.iter().enumerate() {
+        check_menu_buttons(menu, aspect)?;
         let mut pgc = Pgc::new();
         if let Some(e) = &menu.entry {
             pgc.entries = entry_bits(e)?;

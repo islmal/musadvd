@@ -21,11 +21,11 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::author::{
-    self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, Resolution, TvStandard, DvdLayout, MenuFrame, MenuKind, MenuLinks, MenuSpec, TitleEntry,
+    self, chapter_mark, AuthorError, ChapterEntry, ClipSource, PlaybackOptions, Resolution, TvStandard, DvdLayout, MenuKind, MenuLinks, MenuSpec, TitleEntry,
     TitleSpec, TitlesetSpec, VobSpec, MAX_CHAPTERS, MAX_TITLES,
 };
 use crate::calculator::{self, BitratePlan, CalcError, Clamp, DiscType, EncodingProfile, DVD_MAX_TOTAL_KBPS, LP_HALF_D1_BELOW_KBPS};
-use crate::encoder::{self, plan_audio, Aspect, AudioMode, AudioOut, AudioTarget, DvdVideoMode, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
+use crate::encoder::{self, plan_audio_kbps, Aspect, AudioMode, AudioOut, AudioTarget, DvdVideoMode, EncodeJob, EncodePhase, MenuAudio, VideoProcessing};
 use crate::menu_anim;
 use crate::config::HwAccelMode;
 use crate::i18n::tr;
@@ -242,28 +242,47 @@ pub fn unique_dir(parent: &Path, name: &str) -> PathBuf {
         .unwrap_or_else(|| parent.join(format!("{name} ({})", std::process::id())))
 }
 
-/// Deletes the previous DVD output. Retries briefly: right after a build, virus scanners or the
-/// Windows Explorer may still hold the freshly written VOBs open (os error 32).
-pub(crate) async fn remove_old_output(dir: &Path) -> Result<(), BuildError> {
+/// Windows errors that clear up by themselves: access denied (virus scanner, indexer), sharing and
+/// lock violation, directory not empty (a handle of an already deleted child is still closing).
+fn transient_delete_error(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | 33 | 145))
+}
+
+/// Deletes a directory tree, retrying `retries` times every `delay` on [`transient_delete_error`]s.
+/// A missing directory counts as deleted.
+async fn remove_dir_retry(dir: &Path, retries: u32, delay: std::time::Duration) -> std::io::Result<()> {
     let mut attempt = 0;
     loop {
         match std::fs::remove_dir_all(dir) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) if attempt < 10 && e.raw_os_error() == Some(32) => {
+            Err(e) if attempt < retries && transient_delete_error(&e) => {
                 attempt += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(delay).await;
             }
-            Err(e) if e.raw_os_error() == Some(32) => {
-                return Err(BuildError::Template(format!(
-                    "{}: the old DVD is still open in another program (e.g. VLC or Explorer). \
-                     Close it or choose a different --output.",
-                    dir.display()
-                )))
-            }
-            Err(e) => return Err(BuildError::File { path: dir.to_path_buf(), error: e }),
+            Err(e) => return Err(e),
         }
     }
+}
+
+/// Deletes the previous DVD output or a work directory. Retries briefly: right after a build,
+/// virus scanners or the Windows Explorer may still hold the freshly written VOBs open
+/// (os error 32 / 5).
+pub(crate) async fn remove_old_output(dir: &Path) -> Result<(), BuildError> {
+    match remove_dir_retry(dir, 10, std::time::Duration::from_millis(500)).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(32) => Err(BuildError::Template(format!(
+            "{}: the old DVD is still open in another program (e.g. VLC or Explorer).              Close it or choose a different --output.",
+            dir.display()
+        ))),
+        Err(e) => Err(BuildError::File { path: dir.to_path_buf(), error: e }),
+    }
+}
+
+/// Keep the work directory after a successful build: `--keep-work` / `keep_work`, or the
+/// environment variable `MUSADVD_KEEP_WORK=1` (also for the GUI, which has no such switch).
+pub(crate) fn keep_work(opts: &BuildOptions) -> bool {
+    opts.keep_work || std::env::var("MUSADVD_KEEP_WORK").is_ok_and(|v| !matches!(v.trim(), "" | "0"))
 }
 
 macro_rules! from_err {
@@ -389,6 +408,8 @@ pub struct BuildOptions {
     pub process_priority: ProcessPriority,
     /// How audio tracks are written (copy compliant AC-3/DTS, always AC-3, LPCM).
     pub audio_mode: AudioMode,
+    /// AC-3 bit rate of re-encoded tracks in kbit/s (0 = automatic); snapped per medium at plan time.
+    pub audio_bitrate_kbps: u32,
     /// How audio/subtitle tracks are named on menu buttons and in reports.
     pub track_label_mode: TrackLabelMode,
     /// Scaling method, filter and deinterlacing ("Videobearbeitung").
@@ -860,6 +881,7 @@ struct TitlePlan {
     aspect: Aspect,
     audio_mode: AudioMode,
     audio_modes: Vec<AudioMode>,
+    ac3_kbps: u32,
     track_label_mode: TrackLabelMode,
     ui_lang: UiLang,
     video: VideoProcessing,
@@ -900,7 +922,7 @@ impl TitlePlan {
             .enumerate()
             .map(|(idx, &i)| {
                 let mode = self.audio_modes.get(idx).copied().unwrap_or(self.audio_mode);
-                plan_audio(&self.info.audio[i], AudioTarget::Dvd, mode, self.loudnorm || self.info.trim.is_some())
+                plan_audio_kbps(&self.info.audio[i], AudioTarget::Dvd, mode, self.loudnorm || self.info.trim.is_some(), self.ac3_kbps)
             })
             .collect()
     }
@@ -1179,6 +1201,7 @@ async fn encode_title(
         hwaccel,
         audio_mode: t.audio_mode,
         audio_modes: t.audio_modes.clone(),
+        ac3_kbps: t.ac3_kbps,
         video: t.video,
         audio_filters,
         copy_video,
@@ -1344,6 +1367,12 @@ pub async fn build_dvd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send))
             }
         }
     }
+    if let (Err(e), Ok(out)) = (&result, std::fs::canonicalize(&opts.output)) {
+        let work = work_dir(&display_path(out), opts);
+        if !matches!(e, BuildError::Cancelled) && work.join(WORK_DIR).is_file() {
+            log(Event::Step(format!("Build failed, work folder kept: {}", work.display())));
+        }
+    }
     result
 }
 
@@ -1440,6 +1469,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             aspect,
             audio_mode: opts.audio_mode,
             audio_modes,
+            ac3_kbps: opts.audio_bitrate_kbps,
             track_label_mode: opts.track_label_mode,
             ui_lang: opts.ui_lang,
             video: opts.video.with_picture(sel.denoise, sel.brightness, sel.contrast, sel.saturation),
@@ -1876,6 +1906,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 let args = match files.motion_secs.filter(|_| files.is_motion()) {
                     _ if files.custom.is_some() => encoder::custom_menu_args(
                         tv,
+                        &files.frame,
                         files.custom.as_ref().expect("checked"),
                         files.motion_secs.unwrap_or(1.0),
                         audio.as_ref(),
@@ -1900,7 +1931,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     Some(intro) => {
                         // Stream 0 is the page background, the slot videos follow.
                         let streams: Vec<RawStream> = if let Some(media) = &files.custom {
-                            let frame = MenuFrame::from(tv);
+                            let frame = files.frame;
                             let rate = menu_anim::dvd_rate(tv);
                             std::iter::once(encoder::intro_background_stream(&frame, rate, media, intro.frames))
                                 .chain(intro.slots.iter().filter_map(|&l| encoder::intro_slot_stream(&frame, rate, &media.layers[l], intro.frames)))
@@ -1925,6 +1956,13 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     let spu_log = tools.spumux(&work, &xml, &raw, &vob, 0).await?;
                     std::fs::write(work.join(format!("{xml}.log")), spu_log).at(&work)?;
                     std::fs::remove_file(work.join(&raw)).at(&work.join(&raw))?;
+                    // 16:9 menus: the letterbox highlight is subpicture stream 1 (see `author::menu_pgcs`).
+                    if let Some(lb) = files.letterbox_xml.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()) {
+                        std::fs::rename(work.join(&vob), work.join(&raw)).at(&work.join(&raw))?;
+                        let lb_log = tools.spumux(&work, &lb, &raw, &vob, 1).await?;
+                        std::fs::write(work.join(format!("{lb}.log")), lb_log).at(&work)?;
+                        std::fs::remove_file(work.join(&raw)).at(&work.join(&raw))?;
+                    }
                 } else {
                     let dest = work.join(&vob);
                     if dest.exists() {
@@ -2145,7 +2183,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
 
     let layout = DvdLayout {
         dest: "DVD".into(),
-        menu_aspect: "4:3".into(),
+        menu_aspect: opts.custom_layout.as_ref().map_or("4:3", |c| c.menu_aspect()).into(),
         vmgm_menus,
         titlesets,
         playback: opts.playback,
@@ -2201,7 +2239,8 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     log(Event::Step(tf!(opts.ui_lang, "dvd_folder", path = video_ts.display())));
 
     // The work directory (intermediate MPEGs, menu PNGs, logs) is only kept on request.
-    let work_dir = if opts.keep_work {
+    let work_dir = if keep_work(opts) {
+        log(Event::Step(format!("Work folder kept: {}", work.display())));
         Some(work)
     } else {
         if let Err(e) = remove_old_output(&work).await {
@@ -2329,6 +2368,34 @@ mod tests {
         let c = custom_chapters(&[600.0, 0.0, 300.0, 300.4, -5.0, 1000.0], 900.0);
         assert_eq!(c.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0.0, 300.0, 600.0]);
         assert_eq!(custom_chapters(&[], 100.0).len(), 1);
+    }
+
+    #[test]
+    fn lower_audio_rate_leaves_more_video_kbps() {
+        let load = |audio_kbps| TitleLoad { duration_secs: 7200.0, audio_kbps, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
+        let video = |a| bitrate_plan(DiscType::Dvd5, &[load(a)], 1.0, EncodingProfile::Auto).unwrap().video_kbps;
+        assert!(video(192) > video(448), "{} vs {}", video(192), video(448));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn work_dir_removal_waits_for_a_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("musadvd-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // share_mode(0): nobody may open, delete or rename it while the handle lives.
+        let locked = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(dir.join("a.mpg")).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(locked);
+        });
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(remove_dir_retry(&dir, 10, std::time::Duration::from_millis(100))).unwrap();
+        closer.join().unwrap();
+        assert!(!dir.exists());
+        // A missing directory is fine; without retries a lock is reported.
+        rt.block_on(remove_dir_retry(&dir, 0, std::time::Duration::ZERO)).unwrap();
     }
 
     #[test]
@@ -2513,7 +2580,7 @@ mod tests {
             group: None,
             elements: vec![],
         };
-        let l = crate::layout::CustomLayout { title_screen: None, chapter_menus: None,
+        let l = crate::layout::CustomLayout { title_screen: None, chapter_menus: None, aspect: None,
             version: 1,
             canvas: crate::layout::Canvas::default(),
             highlight: crate::layout::Highlight::default(),
@@ -2797,6 +2864,7 @@ mod tests {
             aspect: Aspect::Wide,
             audio_mode: AudioMode::Auto,
             audio_modes: vec![AudioMode::Auto, AudioMode::Auto],
+            ac3_kbps: 0,
             track_label_mode: TrackLabelMode::SmartMetadata,
             ui_lang: UiLang::DE,
             video: VideoProcessing::default(),
@@ -2878,6 +2946,7 @@ mod tests {
             aspect: Aspect::Wide,
             audio_mode: AudioMode::Auto,
             audio_modes: vec![],
+            ac3_kbps: 0,
             track_label_mode: TrackLabelMode::SmartMetadata,
             ui_lang: UiLang::EN,
             video: VideoProcessing::default(),

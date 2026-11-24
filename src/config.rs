@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::author::{PlaybackOptions, Resolution, TvStandard};
-use crate::encoder::{AudioMode, BdEncoder, Deinterlace, DvdVideoMode, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
+use crate::encoder::{AudioMode, AC3_KBPS_BD, AC3_KBPS_DVD, BdEncoder, Deinterlace, DvdVideoMode, MenuAudio, ScaleFilter, ScaleMode, VideoProcessing};
 use crate::calculator::{DiscType, EncodingProfile};
 use crate::dvd::{default_jobs, AspectPolicy, BuildOptions, ChapterSettings};
 use crate::i18n::{available_languages, tr, UiLang};
@@ -127,6 +127,8 @@ pub struct AppSettings {
     pub force_first_subtitle: bool,
     /// See [`AUDIO_MODES`].
     pub audio_mode: String,
+    /// AC-3 bit rate of re-encoded audio in kbit/s; 0 = automatic. Snapped per medium at plan time.
+    pub audio_bitrate_kbps: u32,
     /// See [`TRACK_LABEL_MODES`].
     pub track_label_mode: String,
     /// See [`SCALE_MODES`].
@@ -195,6 +197,7 @@ impl Default for AppSettings {
             default_subtitle_language: String::new(),
             force_first_subtitle: false,
             audio_mode: AUDIO_MODES[0].into(),
+            audio_bitrate_kbps: 0,
             track_label_mode: TRACK_LABEL_MODES[0].into(),
             scale_mode: SCALE_MODES[0].into(),
             scale_filter: SCALE_FILTERS[0].into(),
@@ -678,6 +681,9 @@ impl AppSettings {
         self.encoding_profile = choice(&self.encoding_profile, ENCODING_PROFILES);
         self.process_priority = choice(&self.process_priority, PROCESS_PRIORITIES);
         self.audio_mode = choice(&self.audio_mode, AUDIO_MODES);
+        if !AC3_KBPS_DVD.contains(&self.audio_bitrate_kbps) && !AC3_KBPS_BD.contains(&self.audio_bitrate_kbps) {
+            self.audio_bitrate_kbps = 0;
+        }
         self.track_label_mode = choice(&self.track_label_mode, TRACK_LABEL_MODES);
         self.scale_mode = choice(&self.scale_mode, SCALE_MODES);
         self.scale_filter = choice(&self.scale_filter, SCALE_FILTERS);
@@ -854,6 +860,7 @@ impl AppSettings {
             "lpcm" => AudioMode::Lpcm,
             _ => AudioMode::Auto,
         };
+        opts.audio_bitrate_kbps = self.audio_bitrate_kbps;
         opts.track_label_mode = TrackLabelMode::from_setting(&self.track_label_mode);
         opts.video = self.video_processing();
         opts.loudnorm = self.loudnorm;
@@ -1191,5 +1198,16 @@ mod burn_studio_tests {
         assert_eq!(s.auto_speed.len(), 2, "rule without media ID dropped");
         assert_eq!((s.auto_speed[0].media_id.as_str(), s.auto_speed[0].speed.as_str()), ("RITEK-S04-66", "8"));
         assert_eq!(s.auto_speed[1].speed, "max", "unparsable speed");
+    }
+
+    #[test]
+    fn audio_bitrate_is_sanitized_and_reaches_the_build_options() {
+        let with = |k| AppSettings { audio_bitrate_kbps: k, ..AppSettings::default() }.sanitized().audio_bitrate_kbps;
+        assert_eq!(AppSettings::default().audio_bitrate_kbps, 0);
+        assert_eq!((with(0), with(96), with(448), with(640)), (0, 96, 448, 640));
+        assert_eq!((with(100), with(1000)), (0, 0));
+        let mut o = BuildOptions::default();
+        AppSettings { audio_bitrate_kbps: 256, ..AppSettings::default() }.apply_to(&mut o);
+        assert_eq!(o.audio_bitrate_kbps, 256);
     }
 }

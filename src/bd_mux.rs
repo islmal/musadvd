@@ -826,10 +826,10 @@ fn audio_stream(pid: u16, codec: Codec, lang: [u8; 3], info: AudioInfo) -> Strea
 
 /// Segments of a `.sup` stream as PES payloads (segment type, length, data) with their stamps.
 fn sup_aus(sup: &[u8], pid: u16) -> io::Result<Vec<Au>> {
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "Subtitle file: invalid .sup format");
     let mut aus = Vec::new();
     let mut i = 0;
     while i < sup.len() {
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, format!("invalid .sup format at byte {i}"));
         let h = sup.get(i..i + 13).filter(|h| &h[..2] == b"PG").ok_or_else(bad)?;
         let n = |at: usize| u32::from_be_bytes([h[at], h[at + 1], h[at + 2], h[at + 3]]) as i64;
         let len = u16::from_be_bytes([h[11], h[12]]) as usize;
@@ -839,6 +839,11 @@ fn sup_aus(sup: &[u8], pid: u16) -> io::Result<Vec<Au>> {
         i += 13 + len;
     }
     Ok(aus)
+}
+
+/// Checks that `sup` splits into whole `.sup` segments, exactly as [`MuxJob::mux`] reads it.
+pub fn validate_sup(sup: &[u8]) -> io::Result<()> {
+    sup_aus(sup, 0).map(drop)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -922,7 +927,8 @@ impl MuxJob {
         for s in &self.subs {
             let (pid, codec) = if s.ig { (bd_clip::IG_PID + ig, Codec::Ig) } else { (bd_clip::PGS_PID + pg, Codec::Pgs) };
             if s.ig { ig += 1 } else { pg += 1 }
-            sub_aus.extend(sup_aus(&std::fs::read(&s.sup)?, pid)?);
+            let named = |e: io::Error| io::Error::new(e.kind(), format!("Subtitle file {}: {e}", s.sup.display()));
+            sub_aus.extend(sup_aus(&std::fs::read(&s.sup).map_err(named)?, pid).map_err(named)?);
             streams.push(Stream { pid, codec, lang: s.lang, attr: 0, es_info: Vec::new() });
         }
 
