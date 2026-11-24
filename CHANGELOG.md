@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-24
+
+### Added
+
+- **Start page**: logo, New Project, Load Project and Burn Studio, plus a list of recent projects. Home and New Project buttons in the toolbar.
+- **Project settings tab** in the main window: output, encoding, video, audio, subtitle, menu/playback and chapter options moved out of the Settings dialog. Changes apply immediately (size estimate and quality badges follow) and are saved with each project; the Settings dialog keeps app-level options only.
+- **Quality readout** on every video card (e.g. "82% · Good") with tips for Fair and Low, and the planned video kbps and bits per pixel in the tooltip.
+- **Audio bitrate** setting: DVD 96–448 kbit/s, Blu-ray 192–640 kbit/s, Auto picks 192 for stereo and 448 for 5.1. The size estimate uses the same rates as the encode.
+- **Track reordering**: drag handles in the Audio and Subtitles tabs; embedded and external subtitles share one list, so an external `.srt` can become track 1. Batch reorder for selected videos (by language, external files included). The order is the disc's track order and is saved in projects.
+- **Subtitles & Audio menus** update when tracks are added, removed or reordered (with Undo).
+- **16:9 DVD menus** for widescreen Full D1 projects (automatic, or forced to 4:3/16:9), and a warning with a one-click fix when the videos' frame rates don't match PAL/NTSC.
+- **Regional CJK subtitle fonts**: Japanese, Hong Kong, Traditional and Simplified Chinese and Korean subtitles render with that region's glyph forms (from the track language and title hints).
+- **Burning**: the Auto speed shows what it will use for the inserted disc ("Auto (6x for this disc)"); erasing is pre-ticked for rewritable discs with data, and Burn asks for confirmation before erasing or writing write-once media.
+
+### Fixed
+
+- **Blu-ray/AVCHD with ASS/SRT subtitles** no longer fails with "invalid .sup format": large subtitle images are split across PGS segments. Every subtitle file is checked before muxing, and errors name the track.
+- **Blu-ray playlists** always keep an entry mark, and clips without a usable EP map are rejected instead of producing a broken disc.
+- **Work folder** (`.musadvd-work`) is reliably removed after a build (retries while Windows still holds files).
+- **Burn confirmation** opens in front of the burn window and closes with it; the speed box no longer shows "Maximum" while the disc is being read.
+- **Russian**: chapters are called главы/глава.
+
 ## [1.3.0] - 2026-11-22
 
 ### Added

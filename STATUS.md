@@ -1,6 +1,6 @@
 # STATUS — MusaDVD
 
-> State as of **2026-11-22** (1.3.0). Architecture/context only; facts: `SYSTEM_STATE.txt`; build rules: `CLAUDE.md`; module docs: `handbook/`.
+> State as of **2026-11-24** (1.4.0). Architecture/context only; facts: `SYSTEM_STATE.txt`; build rules: `CLAUDE.md`; module docs: `handbook/`.
 
 ## 1. Mission & Out-of-Scope
 
