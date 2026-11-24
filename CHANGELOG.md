@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-24
+
+### Fixed
+
+- **DVD 99-title limit counts merged titles**: videos merged with "Merge with previous" play as one title, so a project of 151 episodes merged into a few titles is no longer refused (the DVD and Blu-ray builders counted input files). The capacity bar shows titles and videos, e.g. "105 titles from 151 videos + 1 menus = 106, max 99".
+- **99 chapters per DVD title**: a merged title with more than 99 chapters now blocks Convert with a hint naming the video where a new title should start, instead of failing only after every file was analysed.
+
 ## [1.4.0] - 2026-11-24
 
 ### Added
