@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dropExternalKind, mixSubs, moveItem, reorderByLanguages, unmixSubs } from "./order";
+import { chapterOverflows, dropExternalKind, mixSubs, moveItem, reorderByLanguages, unmixSubs } from "./order";
 
 const tr = [
   { l: "eng", n: 1 },
@@ -21,6 +21,22 @@ describe("reorderByLanguages", () => {
   });
   it("leaves the list unchanged for empty prefs", () => {
     expect(reorderByLanguages(tr, byLang, [])).toEqual(tr);
+  });
+});
+
+describe("chapterOverflows", () => {
+  const ones = (n: number) => Array<number>(n).fill(1);
+  it("accepts 151 one-chapter videos merged into 2-4 titles", () => {
+    expect(chapterOverflows([ones(76), ones(75)], 99)).toEqual([]);
+    expect(chapterOverflows([ones(50), ones(50), ones(51)], 99)).toEqual([]);
+    expect(chapterOverflows([ones(38), ones(38), ones(38), ones(37)], 99)).toEqual([]);
+  });
+  it("flags one title of 151 merged videos and names the video to split at", () => {
+    expect(chapterOverflows([ones(151)], 99)).toEqual([{ group: 0, chapters: 151, splitAt: 99 }]);
+  });
+  it("counts every member's chapters, not only one per video", () => {
+    expect(chapterOverflows([[1], [40, 40, 30]], 99)).toEqual([{ group: 1, chapters: 110, splitAt: 2 }]);
+    expect(chapterOverflows([[99]], 99)).toEqual([]);
   });
 });
 

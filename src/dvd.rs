@@ -561,6 +561,16 @@ pub fn groups(selections: &[StreamSelection], n: usize) -> Vec<std::ops::Range<u
     out
 }
 
+/// At most [`MAX_TITLES`] titles. Merged inputs play as one title, so the limit is on the merge
+/// groups, not on the number of files.
+pub(crate) fn check_title_count(opts: &BuildOptions) -> Result<(), BuildError> {
+    let titles = groups(&opts.selections, opts.inputs.len()).len();
+    if titles > MAX_TITLES {
+        return Err(BuildError::Author(AuthorError::TooManyTitles(titles)));
+    }
+    Ok(())
+}
+
 /// One merged member: label, audio track count, subtitle track count.
 pub(crate) type MemberShape<'a> = (&'a str, usize, usize);
 
@@ -1416,9 +1426,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
     if opts.inputs.is_empty() {
         return Err(BuildError::Author(AuthorError::NoTitles));
     }
-    if opts.inputs.len() > MAX_TITLES {
-        return Err(BuildError::Author(AuthorError::TooManyTitles(opts.inputs.len())));
-    }
+    check_title_count(opts)?;
     if opts.resolution.is_hd() {
         return Err(BuildError::Template(format!(
             "Resolution {} only exists for Blu-ray – for a DVD choose Full D1, Half D1 or SIF",
@@ -2336,6 +2344,21 @@ mod tests {
                 .collect(),
             trim: None, audio_names: Default::default(),
         }
+    }
+
+    #[test]
+    fn title_limit_counts_merge_groups_not_files() {
+        let with = |merge: &dyn Fn(usize) -> bool| BuildOptions {
+            inputs: (0..151).map(|i| PathBuf::from(format!("ep{i}.mkv"))).collect(),
+            selections: (0..151).map(|i| StreamSelection { merge_with_previous: merge(i), ..Default::default() }).collect(),
+            ..BuildOptions::default()
+        };
+        // 151 episodes merged into 2 titles: fine.
+        assert!(check_title_count(&with(&|i| i != 0 && i != 76)).is_ok());
+        // 151 separate titles: over the limit, reported as titles.
+        assert!(matches!(check_title_count(&with(&|_| false)), Err(BuildError::Author(AuthorError::TooManyTitles(151)))));
+        // 100 titles (the 51 files after the 100th are merged into it): still too many.
+        assert!(matches!(check_title_count(&with(&|i| i >= 100)), Err(BuildError::Author(AuthorError::TooManyTitles(100)))));
     }
 
     #[test]

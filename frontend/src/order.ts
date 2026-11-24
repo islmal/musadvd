@@ -39,6 +39,24 @@ export function mergeBlock<T extends { id: number; mergeWithPrevious: boolean }>
   });
 }
 
+/**
+ * Merge groups whose chapters (sum over the members) exceed `max` – the DVD limit is 99 per title.
+ * `splitAt` is the member that pushes the title over the limit: starting a new title there fixes it.
+ */
+export function chapterOverflows(groups: number[][], max: number): { group: number; chapters: number; splitAt: number }[] {
+  const out: { group: number; chapters: number; splitAt: number }[] = [];
+  groups.forEach((members, group) => {
+    let sum = 0;
+    let splitAt = -1;
+    members.forEach((n, i) => {
+      sum += n;
+      if (splitAt < 0 && sum > max) splitAt = i;
+    });
+    if (splitAt >= 0) out.push({ group, chapters: sum, splitAt });
+  });
+  return out;
+}
+
 /** One subtitle in disc order: embedded (`s`) or external file (`x`). */
 export type MixedSub<E, X> = { kind: "s"; item: E } | { kind: "x"; item: X };
 

@@ -938,10 +938,10 @@
  "main.auchNameDesDvd": "Auch Name des DVD-Ordners: <Ausgabeordner>\\<Überschrift>\\VIDEO_TS. Standard ist der Name des ersten Videos.",
  "main.seiten": "Seiten: ",
  "main.dvdNavigation": "DVD-Navigation (Limit 99): ",
- "main.dvdNavigationCounts": "{videos} Videos + {menus} Menüs = {total} Gesamt",
+ "main.dvdNavigationCounts": "{titles} Titel + {menus} Menüs = {total} Gesamt",
  "main.dvdMenuLimitTitle": "DVD-Menülimit überschritten",
- "main.dvdMenuLimitDesc": "Das Projekt enthält {videos} Videos und {menus} Menüseiten ({total} insgesamt). Der DVD-Standard erlaubt im Hauptmenü-Bereich maximal 99 Einträge. Bei mehr als 99 bricht das Authoring ab. Bitte teile das Projekt auf mehrere Discs auf oder reduziere die Anzahl der Videos.",
- "main.dvdMenuLimitFooter": "DVD-Limit überschritten ({videos} Videos + {menus} Menüs = {total}, max. 99)",
+ "main.dvdMenuLimitDesc": "Das Projekt enthält {titles} Titel (zusammengeführte Videos zählen als einer) und {menus} Menüseiten ({total} insgesamt). Der DVD-Standard erlaubt im Hauptmenü-Bereich maximal 99 Einträge. Bei mehr als 99 bricht das Authoring ab. Führe mehr Videos zusammen, teile das Projekt auf mehrere Discs auf oder reduziere die Anzahl der Videos.",
+ "main.dvdMenuLimitFooter": "DVD-Limit überschritten ({titles} Titel + {menus} Menüs = {total}, max. 99)",
  "main.titelProSeite": "Titel pro Seite: ",
  "main.videoSlots": "Video-Slots: ",
  "main.jaMotionMenuAnimiert": "ja – Motion Menu animiert Vorschauen",
@@ -1613,5 +1613,7 @@
  "landing.forget": "Aus der Liste entfernen",
  "app.tab.project": "Projekteinstellungen",
  "settings.projectSettingsHint": "Wird mit dem Projekt gespeichert. Änderungen wirken sofort: Größenschätzung und Qualitätsanzeigen passen sich direkt an.",
- "settings.projectSettingsMoved": "Ausgabe-, Kodierungs-, Video-, Audio-, Untertitel-, Menü- und Kapiteloptionen stehen im Hauptfenster unter „Projekteinstellungen“ und werden mit jedem Projekt gespeichert."
+ "settings.projectSettingsMoved": "Ausgabe-, Kodierungs-, Video-, Audio-, Untertitel-, Menü- und Kapiteloptionen stehen im Hauptfenster unter „Projekteinstellungen“ und werden mit jedem Projekt gespeichert.",
+ "main.dvdMenuLimitFooterMerged": "DVD-Limit überschritten ({titles} Titel aus {videos} Videos + {menus} Menüs = {total}, max. 99)",
+ "main.dvdChapterLimit": "Zusammengeführter Titel {n} hat {chapters} Kapitel (DVD max. 99 pro Titel) – entferne bei „{label}“ das Häkchen „Mit vorherigem zusammenführen“, um dort einen neuen Titel zu beginnen"
 }

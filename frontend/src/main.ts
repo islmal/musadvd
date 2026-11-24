@@ -11,7 +11,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { clearAutosave, createAutosave, fingerprint, layoutFiles, pickOpenPath, pickSavePath, readAutosave, readProject, showMissing, withProjectSettings, writeProject, PROJECT_FORMAT, PROJECT_VERSION, type ProjectExternalSubtitle, type ProjectFile, type ProjectTitle } from "./project";
 import { confirmPreflight } from "./preflight";
 import { check } from "@tauri-apps/plugin-updater";
-import { dropExternalKind, mergeBlock, mixSubs, moveItem, reorderByLanguages, shapeMismatch, sortByOrder, unmixSubs } from "./order";
+import { chapterOverflows, dropExternalKind, mergeBlock, mixSubs, moveItem, reorderByLanguages, shapeMismatch, sortByOrder, unmixSubs } from "./order";
 import { ac3EncodeKbps, autoMenuAspect, fpsMatches, tvMismatch } from "./discRules";
 import { fontPicker } from "./fontPicker";
 import { openUpdateDialog } from "./updateDialog";
@@ -503,7 +503,10 @@ function frameName(): string {
 const singleVideoViolated = () => isBluray() && !!state.settings?.bd_single_video && state.titles.length > 1;
 
 interface MenuVideoCount {
+  /** Input files. */
   videos: number;
+  /** DVD titles: merged videos play as one. */
+  titles: number;
   menus: number;
   total: number;
   overLimit: boolean;
@@ -511,23 +514,32 @@ interface MenuVideoCount {
 
 function getMenuAndVideoCounts(): MenuVideoCount {
   const videos = state.titles.length;
+  const titles = titleGroups().length;
   let menus = 0;
   if (state.menuMode === "custom") {
     menus = state.customLayout ? state.customLayout.menus.filter((m) => m.role === "title").length : 0;
   } else {
-    if (videos === 0) {
+    if (titles === 0) {
       menus = 0;
-    } else if (videos === 1 && state.settings?.no_title_menu_for_single_title) {
+    } else if (titles === 1 && state.settings?.no_title_menu_for_single_title) {
       menus = 0;
     } else {
       const info = state.templates.find((t) => t.path === state.template);
       const perPage = info?.titlesPerPage && info.titlesPerPage > 0 ? info.titlesPerPage : 0;
-      menus = perPage > 0 ? Math.max(1, Math.ceil(videos / perPage)) : 1;
+      menus = perPage > 0 ? Math.max(1, Math.ceil(titles / perPage)) : 1;
     }
   }
-  const total = videos + menus;
+  const total = titles + menus;
   const overLimit = !isBluray() && total > 99;
-  return { videos, menus, total, overLimit };
+  return { videos, titles, menus, total, overLimit };
+}
+
+/** First merged DVD title over 99 chapters (the engine refuses it), with the video where a new title should start. */
+function chapterOverflow(): { title: number; chapters: number; splitAt: Title } | null {
+  if (isBluray()) return null;
+  const groups = titleGroups();
+  const [o] = chapterOverflows(groups.map((g) => g.map((t) => effChapters(t).length)), MAX_CHAPTERS);
+  return o ? { title: o.group + 1, chapters: o.chapters, splitAt: groups[o.group][o.splitAt] } : null;
 }
 
 function updateCustomDiscLabel() {
@@ -1552,16 +1564,20 @@ function renderFooter() {
             ? tr("main.avchdDvd9Waehlen")
             : tr("main.dvd9WaehlenOder");
     const counts = getMenuAndVideoCounts();
+    const overflow = chapterOverflow();
     text.textContent = singleVideoViolated()
       ? tr("main.nurEinVideoPro")
       : bdAudioBlocked()
         ? tr("main.bdAudioStrictBlocked", { title: bdAudioBlocked()!.label || bdAudioBlocked()!.meta.fileName })
       : counts.overLimit
-        ? tr("main.dvdMenuLimitFooter", {
+        ? tr(counts.titles === counts.videos ? "main.dvdMenuLimitFooter" : "main.dvdMenuLimitFooterMerged", {
+            titles: counts.titles,
             videos: counts.videos,
             menus: counts.menus,
             total: counts.total,
           })
+        : overflow
+          ? tr("main.dvdChapterLimit", { n: overflow.title, chapters: overflow.chapters, label: overflow.splitAt.label || overflow.splitAt.meta.fileName })
         : calc.fits
           ? tr("main.videoKbps", { base, fmtNum: fmtNum(calc.videoKbps), calc: calc.clamp === "max" ? tr("main.maximum") : "" })
           : tr("main.doesNotFit", { base, hint });
@@ -1578,6 +1594,7 @@ function renderFooter() {
     menusReady &&
     !singleVideoViolated() &&
     !counts.overLimit &&
+    !chapterOverflow() &&
     !state.titles.some((t) => copyVerdict(t)?.strict && copyVerdict(t)?.issue) &&
     !bdAudioBlocked() &&
     mergeMismatches().size === 0 &&
@@ -2614,7 +2631,7 @@ function renderCustomMenuTab(): HTMLElement {
             "p",
             { class: `menu-limit-info${counts.overLimit ? " warn" : ""}` },
             h("strong", {}, tr("main.dvdNavigation")),
-            tr("main.dvdNavigationCounts", { videos: counts.videos, menus: counts.menus, total: counts.total }),
+            tr("main.dvdNavigationCounts", { titles: counts.titles, menus: counts.menus, total: counts.total }),
           ),
           layoutIsStale()
             ? h(
@@ -2638,7 +2655,7 @@ function renderCustomMenuTab(): HTMLElement {
             "p",
             {},
             tr("main.dvdMenuLimitDesc", {
-              videos: counts.videos,
+              titles: counts.titles,
               menus: counts.menus,
               total: counts.total,
             }),
@@ -2783,7 +2800,7 @@ function renderTemplateChoice() {
             "p",
             { class: `menu-limit-info${counts.overLimit ? " warn" : ""}` },
             h("strong", {}, tr("main.dvdNavigation")),
-            tr("main.dvdNavigationCounts", { videos: counts.videos, menus: counts.menus, total: counts.total }),
+            tr("main.dvdNavigationCounts", { titles: counts.titles, menus: counts.menus, total: counts.total }),
           ),
           hasSub ? null : h("p", { class: "hint" }, tr("main.fehlendeUntermenuesRootKapitel")),
         ),
@@ -2800,7 +2817,7 @@ function renderTemplateChoice() {
           "p",
           {},
           tr("main.dvdMenuLimitDesc", {
-            videos: counts.videos,
+            titles: counts.titles,
             menus: counts.menus,
             total: counts.total,
           }),

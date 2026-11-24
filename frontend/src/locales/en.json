@@ -938,10 +938,10 @@
  "main.auchNameDesDvd": "Also the name of the DVD folder: <output folder>\\<heading>\\VIDEO_TS. Defaults to the name of the first video.",
  "main.seiten": "Pages: ",
  "main.dvdNavigation": "DVD Navigation (limit 99): ",
- "main.dvdNavigationCounts": "{videos} videos + {menus} menus = {total} total",
+ "main.dvdNavigationCounts": "{titles} titles + {menus} menus = {total} total",
  "main.dvdMenuLimitTitle": "DVD menu limit exceeded",
- "main.dvdMenuLimitDesc": "The project contains {videos} videos and {menus} menu pages ({total} in total). The DVD standard allows a maximum of 99 entries in the main menu area. Authoring will abort if total exceeds 99. Please split the project across multiple discs or reduce the number of videos.",
- "main.dvdMenuLimitFooter": "DVD limit exceeded ({videos} videos + {menus} menus = {total}, max 99)",
+ "main.dvdMenuLimitDesc": "The project contains {titles} titles (merged videos count as one) and {menus} menu pages ({total} in total). The DVD standard allows a maximum of 99 entries in the main menu area. Authoring will abort if total exceeds 99. Merge more videos, split the project across multiple discs or reduce the number of videos.",
+ "main.dvdMenuLimitFooter": "DVD limit exceeded ({titles} titles + {menus} menus = {total}, max 99)",
  "main.titelProSeite": "Titles per page: ",
  "main.videoSlots": "Video slots: ",
  "main.jaMotionMenuAnimiert": "yes – motion menu animates previews",
@@ -1613,5 +1613,7 @@
  "landing.forget": "Remove from list",
  "app.tab.project": "Project settings",
  "settings.projectSettingsHint": "Saved with the project. Changes apply immediately: the size estimate and quality badges update as you go.",
- "settings.projectSettingsMoved": "Output, encoding, video, audio, subtitle, menu and chapter options are in the main window under \"Project settings\" and are saved with each project."
+ "settings.projectSettingsMoved": "Output, encoding, video, audio, subtitle, menu and chapter options are in the main window under \"Project settings\" and are saved with each project.",
+ "main.dvdMenuLimitFooterMerged": "DVD limit exceeded ({titles} titles from {videos} videos + {menus} menus = {total}, max 99)",
+ "main.dvdChapterLimit": "Merged title {n} has {chapters} chapters (DVD max 99 per title) – untick \"Merge with previous\" on \"{label}\" to start a new title there"
 }

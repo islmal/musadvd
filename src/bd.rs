@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::author::{AuthorError, ClipSource, MenuFrame, Resolution, TvStandard, MAX_TITLES};
+use crate::author::{AuthorError, ClipSource, MenuFrame, Resolution, TvStandard};
 use crate::bd_menu::{self, BdNav};
 use crate::hdmv;
 use crate::bd_author::{BdProject, BdSubTrack, BdTitleFiles, SubKind};
@@ -696,9 +696,7 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     if opts.inputs.is_empty() {
         return Err(BuildError::Author(AuthorError::NoTitles));
     }
-    if opts.inputs.len() > MAX_TITLES {
-        return Err(BuildError::Author(AuthorError::TooManyTitles(opts.inputs.len())));
-    }
+    crate::dvd::check_title_count(opts)?;
     if !opts.resolution.is_hd() {
         return Err(BuildError::Template(format!(
             "Resolution {} is not possible for Blu-ray – please choose 1080p or 720p",
