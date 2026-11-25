@@ -302,19 +302,37 @@ pub fn plan_image_with(
     overrides: &HashMap<String, Vec<u8>>,
     audio_ts: bool,
 ) -> Result<ImagePlan, ImageError> {
+    plan_image_with_file_padding(video_ts, label, padding, &HashMap::new(), overrides, audio_ts)
+}
+
+/// [`plan_image_with`] with extra zero-sector `padding_before` keyed by uppercase file name
+/// (e.g. `VIDEO_TS.BUP`, `VTS_01_0.BUP` for IFO/BUP ECC block separation).
+pub fn plan_image_with_file_padding(
+    video_ts: &Path,
+    label: &str,
+    vts_padding: &HashMap<u32, u32>,
+    file_padding: &HashMap<String, u32>,
+    overrides: &HashMap<String, Vec<u8>>,
+    audio_ts: bool,
+) -> Result<ImagePlan, ImageError> {
     let mut entries = vec![TreeEntry::dir("VIDEO_TS")];
     if audio_ts {
         entries.insert(0, TreeEntry::dir("AUDIO_TS"));
     }
     for (name, source, size) in dvd_file_order(video_ts)? {
         let vts = name.strip_prefix("VTS_").and_then(|r| r[..2].parse::<u32>().ok());
-        let padding_before = match vts {
-            Some(n) if name.ends_with("_0.IFO") => padding.get(&n).copied().unwrap_or(0),
+        let vts_pad = match vts {
+            Some(n) if name.ends_with("_0.IFO") => vts_padding.get(&n).copied().unwrap_or(0),
             _ => 0,
         };
+        let extra_pad = file_padding.get(&name).copied().unwrap_or(0);
         let data = overrides.get(&name).cloned();
         let size = data.as_ref().map_or(size, |d| d.len() as u64);
-        entries.push(TreeEntry { data, padding_before, ..TreeEntry::file(&format!("VIDEO_TS/{name}"), source, size) });
+        entries.push(TreeEntry {
+            data,
+            padding_before: vts_pad + extra_pad,
+            ..TreeEntry::file(&format!("VIDEO_TS/{name}"), source, size)
+        });
     }
     plan_tree(label, &entries, &TreeOptions::default())
 }

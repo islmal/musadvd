@@ -651,7 +651,7 @@ pub fn write_image(ctx: &Ctx, drive: &DriveInfo, image: &Path, speed: &str, eras
         ctx.log("Warning: this image contains CSS-encrypted sectors. A copy on a blank disc will not play.");
     }
     let (probe, layer_break) = open_image(image)?;
-    let volume = isoread::IsoImage::open(File::open(image).map_err(|e| e.to_string())?).map(|i| i.label).unwrap_or_default();
+    let volume = isoread::DiscImage::open(File::open(image).map_err(|e| e.to_string())?).map(|i| i.label().to_string()).unwrap_or_default();
     drop(probe);
     let job = WriteJob { drive: drive.clone(), speed: speed.into(), erase, layer_break, volume, image: path_text(image) };
     write(ctx, &job, &|| open_image(image).map(|(s, _)| s))
@@ -848,10 +848,10 @@ pub fn verify(ctx: &Ctx, drive: &DriveInfo, image: Option<&Path>) -> Result<Outc
     #[allow(clippy::drop_non_drop)] // the guard has a real Drop on Windows only
     drop(_lock);
     eject_if(ctx, drive, s.io.eject_after.verify);
-    // Name the files of the first miscompares when the image is an ISO 9660 one.
+    // Name the files of the first miscompares when the image is an ISO 9660 or UDF one.
     let names = image
         .and_then(|p| File::open(p).ok())
-        .and_then(|f| isoread::IsoImage::open(f).ok())
+        .and_then(|f| isoread::DiscImage::open(f).ok())
         .and_then(|mut i| i.extent_map().ok())
         .map(|map| verifier::files_of(&report.miscompares, &map).into_iter().map(|(l, f)| (l, f.map(str::to_string))).collect::<Vec<_>>())
         .unwrap_or_default();

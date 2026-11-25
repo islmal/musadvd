@@ -16,10 +16,10 @@ use md5::{Digest, Md5};
 use crate::config::{StudioBuild, StudioFilter};
 
 use super::label::{sanitize_udf_label, sanitize_volume_label};
-use super::layerbreak::{plan_disc_with, Capacities, LayerBreak, PlanError};
+use super::layerbreak::{cell_starts, choose_layer_break, patch_tt_srpt, plan_disc_with, Capacities, LayerBreak, PlanError};
 use super::reader::{write_layout, Split, SplitWriter};
 use super::source::StreamSource;
-use super::udf::{self, plan_image_with, plan_tree, scan, ImageError, ImagePlan, Timestamp, Transform, TreeEntry, TreeOptions, SECTOR};
+use super::udf::{self, plan_image_with, plan_image_with_file_padding, plan_tree, scan, ImageError, ImagePlan, Timestamp, Transform, TreeEntry, TreeOptions, SECTOR};
 use super::udf250::{self, BdImagePlan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -251,6 +251,41 @@ fn ecc_shared(plan: &ImagePlan) -> Vec<String> {
     out
 }
 
+/// Computes zero-sector `padding_before` entries for `.BUP` files so no `.IFO` and `.BUP` share
+/// a 16-sector (32 KiB) ECC block.
+fn compute_bup_ecc_padding(plan: &ImagePlan) -> std::collections::HashMap<String, u32> {
+    let mut out = std::collections::HashMap::new();
+    let mut shift = 0u32;
+    let mut last_ifo_end: Option<(String, u32)> = None;
+    for f in &plan.files {
+        if f.name.ends_with(".IFO") && f.name.starts_with('V') {
+            let last = f.lba + shift + f.sectors().saturating_sub(1);
+            last_ifo_end = Some((f.name.replace(".IFO", ".BUP"), last));
+        } else if let Some((ref expected_bup, ifo_last)) = last_ifo_end {
+            if f.name == *expected_bup {
+                let bup_lba = f.lba + shift;
+                if ifo_last / 16 == bup_lba / 16 {
+                    let pad = (ifo_last / 16 + 1) * 16 - bup_lba;
+                    out.insert(f.name.clone(), pad);
+                    shift += pad;
+                }
+                last_ifo_end = None;
+            }
+        }
+    }
+    out
+}
+
+fn bup_before_vts(name: &str, vts: u32) -> bool {
+    if name == "VIDEO_TS.BUP" {
+        return true;
+    }
+    name.strip_prefix("VTS_")
+        .and_then(|r| r.get(..2))
+        .and_then(|s| s.parse::<u32>().ok())
+        .is_some_and(|n| n < vts)
+}
+
 // ---- the plan --------------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -375,17 +410,101 @@ fn plan_content(input: &BuildInput, cfg: &StudioBuild) -> Result<BuildPlan, Buil
                 .and_then(find_video_ts)
                 .ok_or_else(|| ImageError::NotDvdVideo("the VIDEO_TS folder disappeared".into()))?;
             let label = label(None);
-            let (mut image, layer_break) = match input.dvd_caps {
-                Some(caps) => {
-                    let disc = plan_disc_with(&video_ts, &label, caps, cfg.dvd.create_audio_ts, input.layer_break)?;
-                    (disc.image, disc.layer_break)
+            let mut bup_padding = std::collections::HashMap::new();
+            let (mut image, layer_break) = if cfg.dvd.ifo_bup_ecc_padding && input.layer_break.is_none() {
+                let base = plan_image_with(&video_ts, &label, &Default::default(), &Default::default(), cfg.dvd.create_audio_ts)?;
+                bup_padding = compute_bup_ecc_padding(&base);
+                let padded = if bup_padding.is_empty() {
+                    base
+                } else {
+                    plan_image_with_file_padding(&video_ts, &label, &Default::default(), &bup_padding, &Default::default(), cfg.dvd.create_audio_ts)?
+                };
+                match input.dvd_caps {
+                    Some(caps) => {
+                        let lb = choose_layer_break(padded.total_sectors, &cell_starts(&padded)?, caps).map_err(PlanError::LayerBreak)?;
+                        match lb {
+                            Some(LayerBreak { padding: Some((vts, pad)), .. }) => {
+                                let vts_padding = std::collections::HashMap::from([(vts, pad)]);
+                                let mut kept_bup: std::collections::HashMap<String, u32> =
+                                    bup_padding.into_iter().filter(|(k, _)| bup_before_vts(k, vts)).collect();
+                                let mid = plan_image_with_file_padding(
+                                    &video_ts,
+                                    &label,
+                                    &vts_padding,
+                                    &kept_bup,
+                                    &Default::default(),
+                                    cfg.dvd.create_audio_ts,
+                                )?;
+                                for (k, v) in compute_bup_ecc_padding(&mid) {
+                                    kept_bup.entry(k).or_insert(v);
+                                }
+                                bup_padding = kept_bup;
+                                let mut overrides = std::collections::HashMap::new();
+                                for name in ["VIDEO_TS.IFO", "VIDEO_TS.BUP"] {
+                                    let f = mid.file(name).expect("checked by plan_image");
+                                    let mut data = std::fs::read(&f.source).map_err(udf::io(&f.source))?;
+                                    patch_tt_srpt(&mut data, vts, pad)?;
+                                    overrides.insert(name.to_string(), data);
+                                }
+                                let final_img = plan_image_with_file_padding(
+                                    &video_ts,
+                                    &label,
+                                    &vts_padding,
+                                    &bup_padding,
+                                    &overrides,
+                                    cfg.dvd.create_audio_ts,
+                                )?;
+                                (final_img, lb)
+                            }
+                            _ => (padded, lb),
+                        }
+                    }
+                    None => (padded, None),
                 }
-                None => (plan_image_with(&video_ts, &label, &Default::default(), &Default::default(), cfg.dvd.create_audio_ts)?, None),
+            } else {
+                let (img, lb) = match input.dvd_caps {
+                    Some(caps) => {
+                        let disc = plan_disc_with(&video_ts, &label, caps, cfg.dvd.create_audio_ts, input.layer_break)?;
+                        (disc.image, disc.layer_break)
+                    }
+                    None => (plan_image_with(&video_ts, &label, &Default::default(), &Default::default(), cfg.dvd.create_audio_ts)?, None),
+                };
+                if cfg.dvd.ifo_bup_ecc_padding {
+                    // Forced layer break: only pad BUPs after L0 so the chosen break LBA stays put.
+                    let min_lba = lb.map_or(0, |b| b.l0_sectors);
+                    bup_padding = compute_bup_ecc_padding(&img)
+                        .into_iter()
+                        .filter(|(name, _)| img.file(name).is_some_and(|f| f.lba >= min_lba))
+                        .collect();
+                    if !bup_padding.is_empty() {
+                        let vts_padding: std::collections::HashMap<u32, u32> = lb.and_then(|b| b.padding).into_iter().collect();
+                        let mut overrides = std::collections::HashMap::new();
+                        for name in ["VIDEO_TS.IFO", "VIDEO_TS.BUP"] {
+                            if let Some(f) = img.file(name) {
+                                if let Some(d) = &f.data {
+                                    overrides.insert(name.to_string(), d.clone());
+                                }
+                            }
+                        }
+                        let padded = plan_image_with_file_padding(
+                            &video_ts,
+                            &label,
+                            &vts_padding,
+                            &bup_padding,
+                            &overrides,
+                            cfg.dvd.create_audio_ts,
+                        )?;
+                        (padded, lb)
+                    } else {
+                        (img, lb)
+                    }
+                } else {
+                    (img, lb)
+                }
             };
             if cfg.dvd.fix_vts_sectors {
-                image = fix_dvd_sectors(&video_ts, &label, image, layer_break, cfg.dvd.create_audio_ts, &mut warnings)?;
+                image = fix_dvd_sectors(&video_ts, &label, image, layer_break, &bup_padding, cfg.dvd.create_audio_ts, &mut warnings)?;
             }
-            // shortcut: only detected, not separated by padding (option `ifo_bup_ecc_padding`).
             warnings.extend(ecc_shared(&image));
             Ok(BuildPlan { content, label, image: BuiltImage::Udf(image), layer_break, skipped: vec![], warnings, timestamp })
         }
@@ -440,6 +559,7 @@ fn fix_dvd_sectors(
     label: &str,
     image: ImagePlan,
     layer_break: Option<LayerBreak>,
+    bup_padding: &std::collections::HashMap<String, u32>,
     audio_ts: bool,
     warnings: &mut Vec<String>,
 ) -> Result<ImagePlan, BuildError> {
@@ -462,7 +582,7 @@ fn fix_dvd_sectors(
     }
     warnings.push(format!("{changed} title start sectors corrected in VIDEO_TS.IFO/BUP"));
     let padding: std::collections::HashMap<u32, u32> = layer_break.and_then(|lb| lb.padding).into_iter().collect();
-    Ok(plan_image_with(video_ts, label, &padding, &overrides, audio_ts)?)
+    Ok(plan_image_with_file_padding(video_ts, label, &padding, bup_padding, &overrides, audio_ts)?)
 }
 
 // ---- writing ---------------------------------------------------------------------------------
@@ -810,6 +930,49 @@ mod tests {
         let src = stream_image(&plan, 64 * 1024, 0, 100, cancel.clone());
         cancel.store(true, Ordering::SeqCst);
         assert!(src.finish().is_err(), "the builder reports the interruption");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ifo_bup_ecc_padding_separates_shared_blocks() {
+        let dir = synthetic_dvd(
+            "dvd_ecc",
+            &[
+                (1, vec![Cell { first: 0, last: 1, flags: 0 }]),
+                (2, vec![Cell { first: 0, last: 499, flags: 0 }, Cell { first: 500, last: 999, flags: 0 }]),
+            ],
+        );
+        // Without padding: VIDEO_TS.IFO/.BUP and VTS_01_0.IFO/.BUP share 16-sector ECC blocks.
+        let off = StudioBuild { dvd: crate::config::StudioDvdBuild { ifo_bup_ecc_padding: false, ..Default::default() }, ..always() };
+        let plain = plan_build(&input(&dir), &off).unwrap();
+        assert!(plain.warnings.iter().any(|w| w.contains("VIDEO_TS.IFO and VIDEO_TS.BUP share an ECC block")));
+        assert!(plain.warnings.iter().any(|w| w.contains("VTS_01_0.IFO and VTS_01_0.BUP share an ECC block")));
+
+        // With padding: every IFO and its BUP sit in distinct 16-sector ECC blocks, and TT_SRPT is updated.
+        let on = StudioBuild { dvd: crate::config::StudioDvdBuild { ifo_bup_ecc_padding: true, ..Default::default() }, ..always() };
+        let padded = plan_build(&input(&dir), &on).unwrap();
+        assert!(!padded.warnings.iter().any(|w| w.contains("share an ECC block")), "{:?}", padded.warnings);
+        let BuiltImage::Udf(ref p) = padded.image else { panic!() };
+        for ifo_name in ["VIDEO_TS.IFO", "VTS_01_0.IFO", "VTS_02_0.IFO"] {
+            let bup_name = ifo_name.replace(".IFO", ".BUP");
+            let ifo = p.file(ifo_name).unwrap();
+            let bup = p.file(&bup_name).unwrap();
+            let ifo_last = ifo.lba + ifo.sectors().saturating_sub(1);
+            assert_ne!(ifo_last / 16, bup.lba / 16, "{ifo_name} and {bup_name} still share ECC block");
+        }
+        let vmg = p.file("VIDEO_TS.IFO").unwrap();
+        let data = vmg.data.as_ref().expect("TT_SRPT patched");
+        assert_eq!(be32(data, 2048 + 8 + 8), Some(p.file("VTS_01_0.IFO").unwrap().lba - vmg.lba));
+        assert_eq!(be32(data, 2048 + 8 + 12 + 8), Some(p.file("VTS_02_0.IFO").unwrap().lba - vmg.lba));
+
+        // Dual-layer with automatic layer break: ECC separation and 16-sector break alignment both hold.
+        let mut dl_inp = input(&dir);
+        dl_inp.dvd_caps = Some(Capacities { single_layer: padded.total_sectors() - 1, layer: padded.total_sectors() });
+        let dl = plan_build(&dl_inp, &on).unwrap();
+        assert!(!dl.warnings.iter().any(|w| w.contains("share an ECC block")), "{:?}", dl.warnings);
+        let lb = dl.layer_break.expect("needs two layers");
+        assert_eq!(lb.l0_sectors % 16, 0);
+
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -226,7 +226,7 @@ export function openStudioSettings(current: api.FullSettings, onSaved: (s: api.F
         t("studio.settings.dvdVideo"),
         check("build.dvd.create_audio_ts", t("studio.settings.leerenAudioTsOrdner")),
         check("build.dvd.fix_vts_sectors", t("studio.settings.titelsetSektorenTtSrpt")),
-        check("build.dvd.ifo_bup_ecc_padding", t("studio.settings.ifoBupInGetrennten"), { off: NOT_YET }),
+        check("build.dvd.ifo_bup_ecc_padding", t("studio.settings.ifoBupInGetrennten")),
         check("build.dvd.uppercase", t("studio.settings.namenInGrossbuchstaben"), { off: NOT_YET }),
         check("build.dvd.read_dvd_text", t("studio.settings.labelAusDvdText"), { off: NOT_YET }),
       ),
