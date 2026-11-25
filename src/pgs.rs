@@ -91,7 +91,7 @@ pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fp
     let frame = |t: f64| ((t * fps.0 as f64 / fps.1 as f64).round() as u64 * fps.1 as u64 * 90_000).div_ceil(fps.0 as u64);
     let norm: Vec<(u32, u32, &Picture)> = pictures
         .iter()
-        .filter(|p| p.image.width() > 0 && p.image.height() > 0)
+        .filter(|p| p.image.width() > 0 && p.image.height() > 0 && p.x < w && p.y < h)
         .map(|p| {
             let start = frame(p.start.max(MIN_START)) as u32;
             let end = (frame(p.end) as u32).max(start + 1);
@@ -391,5 +391,30 @@ mod tests {
         let decoded = crate::subpic::decode_pgs(&sup).unwrap();
         assert_eq!(decoded.pictures.len(), 1);
         assert!(decoded.pictures[0].y < 300 && decoded.pictures[0].y + decoded.pictures[0].image.height() > 700);
+    }
+
+    #[test]
+    fn off_canvas_adjacent_picture_still_clears_previous_cue() {
+        let on_canvas = Picture {
+            start: 1.0,
+            end: 2.0,
+            forced: false,
+            x: 100,
+            y: 100,
+            image: image::RgbaImage::from_pixel(40, 20, image::Rgba([255, 255, 255, 255])),
+        };
+        let off_canvas = Picture {
+            start: 2.0,
+            end: 3.0,
+            forced: false,
+            x: 2000,
+            y: 100,
+            image: image::RgbaImage::from_pixel(40, 20, image::Rgba([255, 255, 255, 255])),
+        };
+        let sup = build_sup_from_pictures(&[on_canvas, off_canvas], (1920, 1080), (24000, 1001));
+        crate::bd_mux::validate_sup(&sup).unwrap();
+        let decoded = crate::subpic::decode_pgs(&sup).unwrap();
+        assert_eq!(decoded.pictures.len(), 1);
+        assert!((decoded.pictures[0].end - 2.0).abs() < 0.05);
     }
 }
