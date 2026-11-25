@@ -431,6 +431,37 @@ describe("syncLayoutWithTitles on a landing layout", () => {
     expect(s.menus[0].elements.filter((e) => e.type === "video" && e.action)).toHaveLength(0);
     expectConsistent(s, 8);
   });
+
+  it("links title 1's existing chapter menu on a newly created episodes page", () => {
+    const one = [tracked(1, 1, 0, { chapters: 4 })];
+    const l = draftLayout(one, "PAL", "Disc");
+    const root1 = l.menus.find((m) => m.role === "root" && m.title === 1)!;
+    expect(root1).toBeTruthy();
+    const two = [...one, tracked(2, 1, 0, { chapters: 3 })];
+    const s = syncLayoutWithTitles(l, one.map((t) => t.path), two, "PAL", "Disc");
+    const eps = s.menus.filter((m) => menuGroup(m) === "episodes");
+    expect(eps).toHaveLength(1);
+    const vids = eps[0].elements.filter((e) => e.type === "video");
+    expect(vids).toHaveLength(2);
+    expect(vids.find((v) => v.title === 1)?.action).toEqual({ type: "menu", menu: root1.id });
+    expect(s.menus.filter((m) => m.role === "root" && m.title === 1)).toHaveLength(1);
+    expectConsistent(s, 2);
+  });
+
+  it("keeps title 1's root menu link on the new episodes page when reordered", () => {
+    const one = [tracked(1, 2, 0, { chapters: 1 })];
+    const l = draftLayout(one, "PAL", "Disc");
+    const root1 = l.menus.find((m) => m.role === "root" && m.title === 1)!;
+    const two = [{ ...tracked(2, 1, 0), index: 1 }, { ...one[0], index: 2 }];
+    const s = syncLayoutWithTitles(l, one.map((t) => t.path), two, "PAL", "Disc");
+    const eps = s.menus.filter((m) => menuGroup(m) === "episodes");
+    expect(eps).toHaveLength(1);
+    const vids = eps[0].elements.filter((e) => e.type === "video");
+    expect(vids).toHaveLength(2);
+    expect(vids.find((v) => v.title === 2)?.action).toEqual({ type: "menu", menu: root1.id });
+    expect(s.menus.filter((m) => m.role === "root" && m.title === 2)).toHaveLength(1);
+    expectConsistent(s, 2);
+  });
 });
 
 describe("batch styling, start button and after-playback", () => {

@@ -1716,9 +1716,19 @@ export function syncLayoutWithTitles(
     }
   }
 
-  const hasPlayTitle = (titleIdx: number) =>
-    out.menus.some((m) => m.role === "title" && m.elements.some((e) => e.action?.type === "playTitle" && e.action.title === titleIdx));
-  const hasRootMenu = (titleIdx: number) => out.menus.some((m) => m.role === "root" && m.title === titleIdx);
+  const episodesPages = () => out.menus.filter((m) => m.role === "title" && menuGroup(m) === "episodes");
+  const rootMenuId = (titleIdx: number) => out.menus.find((m) => m.role === "root" && m.title === titleIdx)?.id ?? null;
+  const hasPlayTitle = (titleIdx: number) => {
+    const eps = episodesPages();
+    const pages = eps.length > 0 ? eps : out.menus.filter((m) => m.role === "title");
+    return pages.some((m) => m.elements.some((e) => e.action?.type === "playTitle" && e.action.title === titleIdx));
+  };
+  const hasRootMenu = (titleIdx: number) => {
+    const rootId = rootMenuId(titleIdx);
+    if (!rootId) return false;
+    const eps = episodesPages();
+    return eps.length > 0 ? eps.some((m) => m.elements.some((e) => e.action?.type === "menu" && e.action.menu === rootId)) : true;
+  };
 
   // Layouts from before the themes are classic with per-title settings.
   const nav: SubNav = { theme: out.theme ?? "classic", settingsMode: out.settingsMode ?? "perTitle" };
@@ -1815,8 +1825,8 @@ export function syncLayoutWithTitles(
 
     if (!slot) continue;
 
-    let rootId: string | null = null;
-    if (needsVtsm) {
+    let rootId: string | null = rootMenuId(t.index);
+    if (!rootId && needsVtsm) {
       rootId = allocId("m");
       const submenus = buildTitleSubmenus(chap ? t : { ...t, chapters: 1 }, targetPage.id, out.canvas, tv, rootId, allocId, subStyle, nav);
       out.menus.push(...submenus);
