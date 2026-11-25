@@ -1913,7 +1913,19 @@ fn draw_text_square(content: &Content, w: u32, h: u32, canvas: Canvas, frame: Me
         }
     }
     let pad = (unit(padding.unwrap_or(0.0)).round().max(0.0) as u32).min((w.min(h) - 1) / 2);
-    let mut cov = menu::text_coverage(text, font, unit(*size), *bold, *italic, *wrap, align, w - 2 * pad, h - 2 * pad);
+    let mut cov = menu::text_coverage(
+        text,
+        &menu::TextBox {
+            family: font,
+            size_px: unit(*size),
+            bold: *bold,
+            italic: *italic,
+            wrap: *wrap,
+            align,
+            width: w - 2 * pad,
+            height: h - 2 * pad,
+        },
+    );
     if pad > 0 {
         let mut full = menu::Coverage::new(w, h);
         for y in 0..cov.height {
@@ -1976,18 +1988,20 @@ struct PageOutput {
     warnings: Vec<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_custom_page(
-    layout: &CustomLayout,
-    menu: &CustomMenu,
-    commands: &[Option<String>],
-    titles: &[LayoutTitle],
+struct RenderCustomPageParams<'a> {
+    layout: &'a CustomLayout,
+    menu: &'a CustomMenu,
+    commands: &'a [Option<String>],
+    titles: &'a [LayoutTitle],
     tv: TvStandard,
     frame: MenuFrame,
-    out_dir: &Path,
-    prefix: &str,
+    out_dir: &'a Path,
+    prefix: &'a str,
     default_secs: f64,
-) -> Result<PageOutput, LayoutError> {
+}
+
+fn render_custom_page(p: RenderCustomPageParams<'_>) -> Result<PageOutput, LayoutError> {
+    let RenderCustomPageParams { layout, menu, commands, titles, tv, frame, out_dir, prefix, default_secs } = p;
     let io = |p: &Path, e: &dyn fmt::Display| LayoutError(vec![format!("{}: {e}", p.display())]);
     let (fw, fh) = (frame.width, frame.height);
     let canvas = layout.canvas;
@@ -2256,7 +2270,16 @@ fn render_custom_page(
     highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
     select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
     std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, intro_secs.unwrap_or(0.0))).map_err(|e| io(&xml_path, &e))?;
-    let letterbox_xml = write_letterbox(out_dir, prefix, tv, frame, &highlight, &select, &buttons, intro_secs.unwrap_or(0.0))?;
+    let letterbox_xml = write_letterbox(LetterboxParams {
+        out_dir,
+        prefix,
+        tv,
+        frame,
+        highlight: &highlight,
+        select: &select,
+        buttons: &buttons,
+        start_secs: intro_secs.unwrap_or(0.0),
+    })?;
     let files = MenuPageFiles {
         background: out_dir.join(&hl_name),
         highlight: out_dir.join(&hl_name),
@@ -2305,19 +2328,21 @@ fn letterbox_mask(m: &IndexedImage) -> IndexedImage {
     out
 }
 
-/// 16:9 frames: writes the letterbox highlight (`{prefix}_lb_hl.png`, `_lb_sel.png`) and its
-/// spumux XML (subpicture stream 1, see `author::menu_pgcs`); `None` for 4:3.
-#[allow(clippy::too_many_arguments)]
-fn write_letterbox(
-    out_dir: &Path,
-    prefix: &str,
+struct LetterboxParams<'a> {
+    out_dir: &'a Path,
+    prefix: &'a str,
     tv: TvStandard,
     frame: MenuFrame,
-    highlight: &IndexedImage,
-    select: &IndexedImage,
-    buttons: &[MenuButton],
+    highlight: &'a IndexedImage,
+    select: &'a IndexedImage,
+    buttons: &'a [MenuButton],
     start_secs: f64,
-) -> Result<Option<PathBuf>, LayoutError> {
+}
+
+/// 16:9 frames: writes the letterbox highlight (`{prefix}_lb_hl.png`, `_lb_sel.png`) and its
+/// spumux XML (subpicture stream 1, see `author::menu_pgcs`); `None` for 4:3.
+fn write_letterbox(p: LetterboxParams<'_>) -> Result<Option<PathBuf>, LayoutError> {
+    let LetterboxParams { out_dir, prefix, tv, frame, highlight, select, buttons, start_secs } = p;
     if !frame.is_wide() || buttons.is_empty() {
         return Ok(None);
     }
@@ -2403,16 +2428,28 @@ fn render_fastplay_page(
     if fp.splash.is_none() {
         let mut img = RgbaImage::new(fw, fh);
         let font = "Arial";
-        let cov_title = menu::text_coverage("FastPlay", font, 40.0, true, false, false, "center", fw, 60);
+        let cov_title = menu::text_coverage(
+            "FastPlay",
+            &menu::TextBox { family: font, size_px: 40.0, bold: true, italic: false, wrap: false, align: "center", width: fw, height: 60 },
+        );
         menu::blend_coverage(&mut img, &cov_title, [255, 255, 255, 255], 0, (fh * 20 / 100) as i64, 255);
 
-        let cov_sub = menu::text_coverage("Playback starts shortly...", font, 24.0, false, false, false, "center", fw, 40);
+        let cov_sub = menu::text_coverage(
+            "Playback starts shortly...",
+            &menu::TextBox { family: font, size_px: 24.0, bold: false, italic: false, wrap: false, align: "center", width: fw, height: 40 },
+        );
         menu::blend_coverage(&mut img, &cov_sub, [200, 200, 200, 255], 0, (fh * 35 / 100) as i64, 255);
 
-        let b1_cov = menu::text_coverage("FastPlay", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
+        let b1_cov = menu::text_coverage(
+            "FastPlay",
+            &menu::TextBox { family: font, size_px: 28.0, bold: true, italic: false, wrap: false, align: "center", width: fw * 34 / 100, height: fh * 12 / 100 },
+        );
         menu::blend_coverage(&mut img, &b1_cov, [255, 255, 255, 255], (fw * 12 / 100) as i64, (fh * 76 / 100) as i64, 255);
 
-        let b2_cov = menu::text_coverage("Main menu", font, 28.0, true, false, false, "center", fw * 34 / 100, fh * 12 / 100);
+        let b2_cov = menu::text_coverage(
+            "Main menu",
+            &menu::TextBox { family: font, size_px: 28.0, bold: true, italic: false, wrap: false, align: "center", width: fw * 34 / 100, height: fh * 12 / 100 },
+        );
         menu::blend_coverage(&mut img, &b2_cov, [255, 255, 255, 255], (fw * 54 / 100) as i64, (fh * 76 / 100) as i64, 255);
 
         let text_path = out_dir.join(format!("{prefix}_text.png"));
@@ -2493,7 +2530,16 @@ fn render_fastplay_page(
     highlight.write_png(&out_dir.join(&hl_name)).map_err(|e| io(&out_dir.join(&hl_name), &e))?;
     select.write_png(&out_dir.join(&sel_name)).map_err(|e| io(&out_dir.join(&sel_name), &e))?;
     std::fs::write(&xml_path, author::spumux_xml(tv, &hl_name, &sel_name, &buttons, 0.0)).map_err(|e| io(&xml_path, &e))?;
-    let letterbox_xml = write_letterbox(out_dir, prefix, tv, frame, &highlight, &select, &buttons, 0.0)?;
+    let letterbox_xml = write_letterbox(LetterboxParams {
+        out_dir,
+        prefix,
+        tv,
+        frame,
+        highlight: &highlight,
+        select: &select,
+        buttons: &buttons,
+        start_secs: 0.0,
+    })?;
 
     let moving = matches!(background, MenuBackground::Video { .. }) || audio.is_some();
     let duration = fp.timeout_secs as f64;
@@ -2561,7 +2607,20 @@ pub fn build_custom_menus(
         .menus
         .par_iter()
         .enumerate()
-        .map(|(i, m)| render_custom_page(layout, m, &nav.commands[i], titles, tv, frame, out_dir, &format!("cm{:02}", i + 1), default_secs))
+        .map(|(i, m)| {
+            let prefix = format!("cm{:02}", i + 1);
+            render_custom_page(RenderCustomPageParams {
+                layout,
+                menu: m,
+                commands: &nav.commands[i],
+                titles,
+                tv,
+                frame,
+                out_dir,
+                prefix: &prefix,
+                default_secs,
+            })
+        })
         .collect::<Result<_, _>>()?;
 
     let mut vmgm_menus = Vec::new();
@@ -3891,7 +3950,10 @@ mod tests {
             }
             let (img, cov) = draw(&c);
             let mut old = RgbaImage::new(200, 80);
-            let old_cov = menu::text_coverage("Hi", "Arial", 40.0, true, false, false, "center", 200, 80);
+            let old_cov = menu::text_coverage(
+                "Hi",
+                &menu::TextBox { family: "Arial", size_px: 40.0, bold: true, italic: false, wrap: false, align: "center", width: 200, height: 80 },
+            );
             if shadow {
                 menu::blend_coverage(&mut old, &old_cov, [0, 0, 0, 170], 2, 2, 255);
             }

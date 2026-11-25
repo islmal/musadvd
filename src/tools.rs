@@ -42,6 +42,13 @@ impl fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
+fn missing_pipe(tool: &str, pipe: &str) -> ToolError {
+    ToolError::Io {
+        tool: tool.into(),
+        error: std::io::Error::new(std::io::ErrorKind::BrokenPipe, format!("missing piped {pipe}")),
+    }
+}
+
 /// CPU priority of the external tools (the UI's "process priority").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProcessPriority {
@@ -370,7 +377,7 @@ impl Toolchain {
     ) -> Result<(), ToolError> {
         let mut child =
             self.ffmpeg_command(args).spawn().map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
-        let stderr = child.stderr.take().expect("piped stderr");
+        let stderr = child.stderr.take().ok_or_else(|| missing_pipe("ffmpeg", "stderr"))?;
         let log = drive_ffmpeg_stderr(stderr, duration_secs, &mut progress).await;
         let status = child.wait().await.map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
         if status.success() {
@@ -404,16 +411,16 @@ impl Toolchain {
         main.stdin(Stdio::piped());
         let mut main_child = main.spawn().map_err(io("ffmpeg"))?;
         // Taken out of the Option at the end: only dropping the handle closes the pipe (EOF for ffmpeg).
-        let mut stdin = main_child.stdin.take();
-        let stderr = main_child.stderr.take().expect("piped stderr");
+        let mut stdin = Some(main_child.stdin.take().ok_or_else(|| missing_pipe("ffmpeg", "stdin"))?);
+        let stderr = main_child.stderr.take().ok_or_else(|| missing_pipe("ffmpeg", "stderr"))?;
 
         let mut readers = Vec::new();
         for s in streams {
             let mut cmd = self.command(&self.ffmpeg);
             cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]).args(&s.args).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = cmd.spawn().map_err(io("ffmpeg"))?;
-            let out = child.stdout.take().expect("piped stdout");
-            let mut err = child.stderr.take().expect("piped stderr");
+            let out = child.stdout.take().ok_or_else(|| missing_pipe("ffmpeg", "stdout"))?;
+            let mut err = child.stderr.take().ok_or_else(|| missing_pipe("ffmpeg", "stderr"))?;
             let log = tokio::spawn(async move {
                 let mut text = String::new();
                 let _ = err.read_to_string(&mut text).await;
@@ -450,7 +457,8 @@ impl Toolchain {
                 .await
                 .map_err(|e| ToolError::Failed { tool: "intro compositing".into(), status: "panic".into(), log: e.to_string() })?;
                 for frame in made {
-                    stdin.as_mut().expect("open until the end").write_all(&frame).await.map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
+                    let pipe = stdin.as_mut().ok_or_else(|| missing_pipe("ffmpeg", "stdin"))?;
+                    pipe.write_all(&frame).await.map_err(|error| ToolError::Io { tool: "ffmpeg".into(), error })?;
                 }
                 next += n;
             }
@@ -498,18 +506,19 @@ impl Toolchain {
         };
         let out_file = std::fs::File::create(dir.join(output)).map_err(io(output))?;
         let mut ffmpeg = self.ffmpeg_command(args);
-        let mut out_file = Some(out_file);
-        if stages.is_empty() {
-            ffmpeg.stdout(out_file.take().unwrap());
+        let mut out_file = if stages.is_empty() {
+            ffmpeg.stdout(out_file);
+            None
         } else {
             ffmpeg.stdout(Stdio::piped());
-        }
+            Some(out_file)
+        };
         let mut ff_child = ffmpeg.spawn().map_err(io("ffmpeg"))?;
         let mut upstream = ff_child.stdout.take().map(owned_file).transpose().map_err(io("ffmpeg"))?;
         let mut spumux = Vec::new();
         for (n, (xml, stream)) in stages.iter().enumerate() {
             let last = n + 1 == stages.len();
-            let input = upstream.take().expect("piped stdout");
+            let input = upstream.take().ok_or_else(|| missing_pipe("ffmpeg", "stdout"))?;
             let tool = format!("spumux ({xml})");
             let fail = |log: String| ToolError::Failed { tool: tool.clone(), status: String::new(), log };
             let text = std::fs::read_to_string(dir.join(xml)).map_err(|e| fail(e.to_string()))?;
@@ -518,7 +527,7 @@ impl Toolchain {
             }
             let defs = crate::spumux::parse_xml(&text, dir).map_err(|e| fail(e.to_string()))?;
             let sink: Box<dyn std::io::Write + Send> = if last {
-                Box::new(out_file.take().unwrap())
+                Box::new(out_file.take().ok_or_else(|| missing_pipe(output, "output file"))?)
             } else {
                 let (reader, writer) = std::io::pipe().map_err(io("spumux"))?;
                 upstream = Some(owned_file(reader).map_err(io("spumux"))?);
@@ -527,7 +536,7 @@ impl Toolchain {
             let id = *stream as u8;
             spumux.push((tool, tokio::task::spawn_blocking(move || crate::spumux::mux(input, sink, defs, id))));
         }
-        let stderr = ff_child.stderr.take().expect("piped stderr");
+        let stderr = ff_child.stderr.take().ok_or_else(|| missing_pipe("ffmpeg", "stderr"))?;
         let ff_log = drive_ffmpeg_stderr(stderr, duration_secs, &mut progress).await;
         let ff_status = ff_child.wait().await.map_err(io("ffmpeg"))?;
         let mut logs = Vec::new();
@@ -568,9 +577,9 @@ impl Toolchain {
         let mut cmd = self.ffmpeg_command(args);
         cmd.stdout(Stdio::piped());
         let mut child = cmd.spawn().map_err(io)?;
-        let stdout = owned_file(child.stdout.take().expect("piped stdout")).map_err(io)?;
+        let stdout = owned_file(child.stdout.take().ok_or_else(|| missing_pipe("ffmpeg", "stdout"))?).map_err(io)?;
         let task = tokio::task::spawn_blocking(move || sink(stdout));
-        let stderr = child.stderr.take().expect("piped stderr");
+        let stderr = child.stderr.take().ok_or_else(|| missing_pipe("ffmpeg", "stderr"))?;
         let log = drive_ffmpeg_stderr(stderr, duration_secs, &mut |p: FfmpegProgress| progress(p.fraction)).await;
         let status = child.wait().await.map_err(io)?;
         // A failing sink makes ffmpeg fail with a broken pipe: report the root cause.

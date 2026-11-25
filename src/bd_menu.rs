@@ -720,18 +720,19 @@ fn frame_key(k: &ElementKey, canvas: Canvas, frame: MenuFrame) -> ElementKey {
     ElementKey { x: k.x * sx, y: k.y * sy, w: k.w * sx, h: k.h * sy, ..*k }
 }
 
-/// Renders menu `index`: static layers (PNG), the IG stream data and the clip description. A page
-/// with an intro also gets the sprites its intro frames are composited from.
-#[allow(clippy::too_many_arguments)]
-fn render_page(
-    d: &Draw,
-    commands: &[Option<Vec<Command>>],
+struct RenderPageParams<'a> {
+    commands: &'a [Option<Vec<Command>>],
     default_selected_none: bool,
     rate: BdRate,
-    out_dir: &Path,
-    prefix: &str,
+    out_dir: &'a Path,
+    prefix: &'a str,
     default_secs: f64,
-) -> Result<BdPage, LayoutError> {
+}
+
+/// Renders menu `index`: static layers (PNG), the IG stream data and the clip description. A page
+/// with an intro also gets the sprites its intro frames are composited from.
+fn render_page(d: &Draw, p: RenderPageParams<'_>) -> Result<BdPage, LayoutError> {
+    let RenderPageParams { commands, default_selected_none, rate, out_dir, prefix, default_secs } = p;
     let (layout, menu, frame) = (d.layout, d.menu, d.frame);
     let canvas = layout.canvas;
     let (fw, fh) = (frame.width, frame.height);
@@ -1057,7 +1058,18 @@ pub fn render_pages(
             let d = Draw { layout, menu, titles, frame, intro: has_intro(layout, menu) };
             // Every menu selects its first button with SetButtonPage before its loop, so the ICS
             // has no default and a restarted clip keeps the focus (PSR10).
-            let mut page = render_page(&d, &nav.commands[i], true, rate, out_dir, &format!("bm{:02}", i + 1), default_secs)?;
+            let prefix = format!("bm{:02}", i + 1);
+            let mut page = render_page(
+                &d,
+                RenderPageParams {
+                    commands: &nav.commands[i],
+                    default_selected_none: true,
+                    rate,
+                    out_dir,
+                    prefix: &prefix,
+                    default_secs,
+                },
+            )?;
             page.warnings = page.warnings.into_iter().map(|w| format!("Menu '{}': {w}", menu.name)).collect();
             Ok(page)
         })

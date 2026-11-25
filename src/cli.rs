@@ -493,9 +493,7 @@ fn parse_duration(s: &str) -> Result<f64, String> {
     })
 }
 
-/// Burns `video_ts` (see `Command::Burn`); prints progress with the remaining time on stderr.
-#[allow(clippy::too_many_arguments)]
-fn burn(
+struct BurnCmdArgs {
     video_ts: PathBuf,
     drive: Option<String>,
     speed: String,
@@ -504,7 +502,11 @@ fn burn(
     erase: bool,
     eject: bool,
     keep_iso: Option<Option<PathBuf>>,
-) -> ExitCode {
+}
+
+/// Burns `video_ts` (see `Command::Burn`); prints progress with the remaining time on stderr.
+fn burn(args: BurnCmdArgs) -> ExitCode {
+    let BurnCmdArgs { video_ts, drive, speed, label, verify, erase, eject, keep_iso } = args;
     use crate::burner::layerbreak::Capacities;
     use crate::burner::{
         burn_video_ts, default_iso_path, is_bdmv_folder, media_problem, preferred_speed_for, speed_label, speed_x, system_burner,
@@ -707,7 +709,7 @@ pub fn is_subcommand(name: &str) -> bool {
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Burn { video_ts, drive, speed, label, no_verify, erase, no_eject, keep_iso } => {
-            burn(video_ts, drive, speed, label, !no_verify, erase, !no_eject, keep_iso)
+            burn(BurnCmdArgs { video_ts, drive, speed, label, verify: !no_verify, erase, eject: !no_eject, keep_iso })
         }
         Command::ReadDisc(a) => studio_cli::read_disc(a),
         Command::VerifyDisc(a) => studio_cli::verify_disc(a),

@@ -424,20 +424,38 @@ async fn prepare_bd_subtitles(tools: &Toolchain, t: &BdTitle, layout: &Layout, w
     Ok(())
 }
 
+struct EncodeBdTitleParams<'a> {
+    t: &'a BdTitle,
+    layout: &'a Layout,
+    work: &'a Path,
+    video_kbps: u32,
+    two_pass: bool,
+    fast: bool,
+    hw_decode: Option<HwAccelMode>,
+    encoder: BdEncoder,
+    maxrate_kbps: u32,
+    bufsize_kbit: u32,
+}
+
 /// Encodes one title: subtitle files (extracted or placeholders), then H.264 + AC-3 into
 /// `<stem>.mkv`. Returns the report, the hardware decoder used and the real duration.
-#[allow(clippy::too_many_arguments)]
 async fn encode_bd_title(
     tools: &Toolchain,
-    t: &BdTitle,
-    layout: &Layout,
-    work: &Path,
-    video_kbps: u32,
-    (two_pass, fast, hw_decode): (bool, bool, Option<HwAccelMode>),
-    encoder: BdEncoder,
-    (maxrate_kbps, bufsize_kbit): (u32, u32),
+    p: EncodeBdTitleParams<'_>,
     progress: JobProgress,
 ) -> Result<(TitleReport, Option<&'static str>, Option<String>, f64), BuildError> {
+    let EncodeBdTitleParams {
+        t,
+        layout,
+        work,
+        video_kbps,
+        two_pass,
+        fast,
+        hw_decode,
+        encoder,
+        maxrate_kbps,
+        bufsize_kbit,
+    } = p;
     let resolution = t.resolution;
     let (hwaccel, hwaccel_note) = match hw_decode {
         Some(mode) => tools.probe_hwaccel_for(&t.info.path, mode, Some(encoder)).await,
@@ -604,21 +622,25 @@ fn layout_titles(titles: &[BdTitle], groups: &[Range<usize>], disc: &Layout) -> 
         .collect()
 }
 
+struct BuildMenusParams<'a> {
+    layout: &'a crate::layout::CustomLayout,
+    titles: &'a [BdTitle],
+    groups: &'a [Range<usize>],
+    disc: &'a Layout,
+    opts: &'a BuildOptions,
+    rate: BdRate,
+    work: &'a Path,
+    jobs: usize,
+}
+
 /// Renders, encodes and muxes the menus of a custom layout into `<work>/BD/BDMV` as playlists /
 /// clips `0..count`; the titles follow with higher numbers (see [`bd_menu`]).
-#[allow(clippy::too_many_arguments)]
 async fn build_menus(
     tools: &Arc<Toolchain>,
-    layout: &crate::layout::CustomLayout,
-    titles: &[BdTitle],
-    groups: &[Range<usize>],
-    disc: &Layout,
-    opts: &BuildOptions,
-    rate: BdRate,
-    work: &Path,
-    jobs: usize,
+    p: BuildMenusParams<'_>,
     log: &mut (dyn FnMut(Event) + Send),
 ) -> Result<MenuStage, BuildError> {
+    let BuildMenusParams { layout, titles, groups, disc, opts, rate, work, jobs } = p;
     let cancel = &opts.cancel;
     let template = |e: crate::layout::LayoutError| BuildError::Template(e.to_string());
     // The setting switches the layout's intros off; without intro data nothing else changes.
@@ -990,7 +1012,21 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
     let menus = match menu_layout {
         Some(layout) => {
             log(Event::Eta(Eta::localized(opts.ui_lang, JobPhase::Menus, None, None, None)));
-            let stage = build_menus(&tools, layout, &titles, &groups, disc_layout, opts, menu_rate, &work, heavy_jobs, log).await?;
+            let stage = build_menus(
+                &tools,
+                BuildMenusParams {
+                    layout,
+                    titles: &titles,
+                    groups: &groups,
+                    disc: disc_layout,
+                    opts,
+                    rate: menu_rate,
+                    work: &work,
+                    jobs: heavy_jobs,
+                },
+                log,
+            )
+            .await?;
             for w in &stage.warnings {
                 warn(log, w.clone());
             }
@@ -1070,9 +1106,26 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
         .map(|(t, &encoder)| {
             let (t, tools, work, layout) = (t.clone(), tools.clone(), work.clone(), layout.clone());
             let video_kbps = t.copy_kbps.unwrap_or_else(|| crate::dvd::weighted_video_kbps(opts.disc, plan.video_kbps, t.weight, t.audio_kbps(&layout), floor));
-            let flags = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
+            let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
+            let (maxrate_kbps, bufsize_kbit) = vbv;
             job(move |progress| async move {
-                encode_bd_title(&tools, &t, &layout, &work, video_kbps, flags, encoder, vbv, progress).await
+                encode_bd_title(
+                    &tools,
+                    EncodeBdTitleParams {
+                        t: &t,
+                        layout: &layout,
+                        work: &work,
+                        video_kbps,
+                        two_pass,
+                        fast,
+                        hw_decode,
+                        encoder,
+                        maxrate_kbps,
+                        bufsize_kbit,
+                    },
+                    progress,
+                )
+                .await
             })
         })
         .collect();
