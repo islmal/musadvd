@@ -1014,6 +1014,6 @@ fn burst_and_long_gop_sources_fall_back_to_encoding() {
     }))
     .unwrap_or_else(|e| panic!("build failed: {e}"));
     assert!(warnings.iter().any(|w| w.starts_with("burst:") && w.contains("exceeds the disc's video buffer")), "{warnings:?}");
-    assert!(warnings.iter().any(|w| w.starts_with("gop:") && w.contains("keyframes up to 240 pictures apart")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.starts_with("gop:") && w.contains("keyframes up to 240 frames apart")), "{warnings:?}");
     std::fs::remove_dir_all(&dir).ok();
 }

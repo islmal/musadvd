@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-25
+
+### Added
+
+- **DTS-HD HR and DTS-HD MA audio copy on Blu-ray**: DTS-HD High Resolution and Master Audio streams can now be copied directly into Blu-ray BDMV titles (`0x85`/`0x86` stream types) without re-encoding.
+- **Burn Studio UDF 1.02 / 2.50 image reader & DVD-Video ECC padding**: Burn Studio can read files from existing UDF 1.02 and UDF 2.50 disc images, and adds 16-sector ECC block padding around `IFO`/`BUP` pairs when building DVD-Video images.
+- **Async Blu-ray copy scan in the GUI**: Blu-ray H.264 copy eligibility (including interlaced H.264 sources) is scanned asynchronously in the UI.
+
+### Changed
+
+- **fps-aware Blu-ray quality rating**: Blu-ray and AVCHD quality badges now scale bits-per-pixel by the target frame rate instead of assuming 23.976 fps for all rates.
+- **DVD copy audio-cap verdict & per-title override**: DVD copy checks now enforce the combined video+audio bitrate cap, respect per-title copy overrides, and re-evaluate the copy badge when forced deinterlacing is toggled.
+
+### Fixed
+
+- **Overlapping ASS-to-PGS subtitles**: overlapping subtitle cues are partitioned into non-overlapping intervals and composited onto a shared canvas (filtering off-canvas pictures), preventing dropped cues or PGS mux errors on Blu-ray and AVCHD.
+- **4K HDR live preview**: the live preview proxy now falls back cleanly when hardware acceleration or `zscale` tone-mapping is unavailable for 4K HDR sources.
+- **Landing-layout episodes chapter-menu sync**: adding an episodes page in the landing menu layout now keeps Title 1's root link intact.
+- **Slim-drive verify prompts**: IMAPI and Linux burners now wait for manual-latch slim trays to be closed before starting read-back verification.
+
 ## [1.5.1] - 2026-11-25
 
 ### Fixed
