@@ -761,22 +761,24 @@ pub fn text_lines(text: &str, family: &str, size_px: f32, bold: bool, italic: bo
     lines
 }
 
+/// Layout and font parameters for [`text_coverage`].
+pub(crate) struct TextBox<'a> {
+    pub family: &'a str,
+    pub size_px: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub wrap: bool,
+    pub align: &'a str,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Glyph coverage of `text` in a `width`x`height` box (menu editor texts): the lines of
 /// [`text_lines`], line height 1.2 em, from the top, each aligned `left`, `center` or `right`.
 /// Uses the same font chain (fallback fonts for missing characters) as template texts; lines
 /// wider than the box are cut off with "…".
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn text_coverage(
-    text: &str,
-    family: &str,
-    size_px: f32,
-    bold: bool,
-    italic: bool,
-    wrap: bool,
-    align: &str,
-    width: u32,
-    height: u32,
-) -> Coverage {
+pub(crate) fn text_coverage(text: &str, b: &TextBox<'_>) -> Coverage {
+    let TextBox { family, size_px, bold, italic, wrap, align, width, height } = *b;
     let mut cov = Coverage::new(width.max(1), height.max(1));
     let style = editor_style(family, size_px, bold, italic, align, height);
     let fonts = font_chain(&style);
@@ -1522,25 +1524,31 @@ pub fn render_menu(
     // Pages are independent: render and write them in parallel, keep the page order.
     let rendered: Vec<((MenuSpec, MenuPageFiles), Vec<String>)> = (1..=author::page_count(page, kind))
         .into_par_iter()
-        .map(|n| render_menu_page(template, page, kind, links, entry, prefix, out_dir, opts, n))
+        .map(|n| {
+            render_menu_page(
+                RenderMenuPageParams { template, page, kind, links, entry, prefix, out_dir, opts },
+                n,
+            )
+        })
         .collect::<Result<_, _>>()?;
     let (pages, warnings): (Vec<_>, Vec<Vec<String>>) = rendered.into_iter().unzip();
     Ok(RenderedMenu { pages, warnings: warnings.into_iter().flatten().collect() })
 }
 
-/// Renders and writes page `n` of a menu (see [`render_menu`]).
-#[allow(clippy::too_many_arguments)]
-fn render_menu_page(
-    template: &Template,
-    page: &Page,
-    kind: &MenuKind,
+struct RenderMenuPageParams<'a> {
+    template: &'a Template,
+    page: &'a Page,
+    kind: &'a MenuKind<'a>,
     links: MenuLinks,
-    entry: Option<&str>,
-    prefix: &str,
-    out_dir: &Path,
-    opts: &RenderOptions,
-    n: u32,
-) -> Result<((MenuSpec, MenuPageFiles), Vec<String>), MenuError> {
+    entry: Option<&'a str>,
+    prefix: &'a str,
+    out_dir: &'a Path,
+    opts: &'a RenderOptions<'a>,
+}
+
+/// Renders and writes page `n` of a menu (see [`render_menu`]).
+fn render_menu_page(p: RenderMenuPageParams<'_>, n: u32) -> Result<((MenuSpec, MenuPageFiles), Vec<String>), MenuError> {
+    let RenderMenuPageParams { template, page, kind, links, entry, prefix, out_dir, opts } = p;
     let mut warnings = Vec::new();
     {
         let (out_w, out_h) = opts.tv.size();

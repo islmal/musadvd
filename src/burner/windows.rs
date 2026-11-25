@@ -705,7 +705,10 @@ impl OpticalBurner for ImapiBurner {
                 let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Verifying disc …"));
             })
         };
-        burn_feed(drive_id, feed, len, None, speed, options, cancel, progress_tx, &mut verify)
+        burn_feed(
+            BurnFeedParams { drive_id, feed, len, ring: None, speed, options, cancel, progress_tx },
+            &mut verify,
+        )
     }
 
     fn burn_source(
@@ -749,7 +752,10 @@ impl OpticalBurner for ImapiBurner {
                 let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Verifying disc …"));
             })
         };
-        let result = burn_feed(drive_id, feed, sectors * 2048, stats.clone(), speed, options, cancel, progress_tx, &mut verify);
+        let result = burn_feed(
+            BurnFeedParams { drive_id, feed, len: sectors * 2048, ring: stats.clone(), speed, options, cancel, progress_tx },
+            &mut verify,
+        );
         if let Some(h) = producer {
             if result.is_err() {
                 stats.iter().for_each(RingStats::cancel);
@@ -767,19 +773,20 @@ impl OpticalBurner for ImapiBurner {
 
 type Verify<'a> = dyn FnMut(&mut File, &Sender<BurnProgress>) -> Result<(), BurnError> + 'a;
 
-/// Burns `len` bytes from `feed` (the common part of `burn_iso` and `burn_source`).
-#[allow(clippy::too_many_arguments)]
-fn burn_feed(
-    drive_id: &str,
+struct BurnFeedParams<'a> {
+    drive_id: &'a str,
     feed: Feed,
     len: u64,
     ring: Option<RingStats>,
     speed: WriteSpeed,
-    options: &BurnOptions,
-    cancel: &AtomicBool,
+    options: &'a BurnOptions,
+    cancel: &'a AtomicBool,
     progress_tx: Sender<BurnProgress>,
-    verify: &mut Verify<'_>,
-) -> Result<(), BurnError> {
+}
+
+/// Burns `len` bytes from `feed` (the common part of `burn_iso` and `burn_source`).
+fn burn_feed(p: BurnFeedParams<'_>, verify: &mut Verify<'_>) -> Result<(), BurnError> {
+    let BurnFeedParams { drive_id, feed, len, ring, speed, options, cancel, progress_tx } = p;
     let com = Com::init()?;
     let _standby = options.prevent_standby.then(StandbyGuard::new);
     let _ = progress_tx.send(BurnProgress::new(BurnPhase::Preparing, 0.0, "Preparing drive …"));

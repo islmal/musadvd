@@ -10,9 +10,6 @@
 //!
 //! GPL-2.0 (derived from dvdauthor).
 
-// The index loops mirror dvdauthor's C 1:1 (byte-identical output, easy diffing upstream).
-#![allow(clippy::needless_range_loop)]
-
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1527,8 +1524,8 @@ fn private_data(buf: &[u8; 2048], inoffset: u64, vnum: usize, set: &mut PgcSet, 
                     crs[substreamid].newcolors[j] =
                         COLOR_UNUSED | (buf[i + 2 + 3 * j] as i32) << 16 | (buf[i + 3 + 3 * j] as i32) << 8 | buf[i + 4 + 3 * j] as i32;
                 }
-                for j in n..16 {
-                    crs[substreamid].newcolors[j] = j as i32;
+                for (j, slot) in crs[substreamid].newcolors.iter_mut().enumerate().skip(n) {
+                    *slot = j as i32;
                 }
                 i += 2 + 3 * n;
             }
@@ -1616,25 +1613,25 @@ fn finish_vob_timing(vd: &VideoDesc, vob: &mut Vob, inoffset: u64, log: &mut Vec
     for pass in 0..3 {
         let mut pts_align: Pts = -1;
         let mut complained = false;
-        for j in 0..n {
-            if !vob.vobu[j].hasvideo {
+        for (j, vobu) in vob.vobu[..n].iter_mut().enumerate() {
+            if !vobu.hasvideo {
                 continue;
             }
             if pts_align == -1 {
-                pts_align = vob.vobu[j].firstvideopts * 2;
+                pts_align = vobu.firstvideopts * 2;
                 if pass == 1 {
                     pts_align += 1;
                 }
             }
-            let (fv, fi, nf) = (vob.vobu[j].firstvideopts, vob.vobu[j].firstifield, vob.vobu[j].numfields);
+            let (fv, fi, nf) = (vobu.firstvideopts, vobu.firstifield, vobu.numfields);
             let p0 = calcpts(vd, pass == 2, &mut complained, &mut pts_align, fv, -fi, log);
             let p1 = calcpts(vd, pass == 2, &mut complained, &mut pts_align, fv, -fi + nf, log);
-            vob.vobu[j].videopts = [p0, p1];
+            vobu.videopts = [p0, p1];
             if complained && pass < 2 {
                 break;
             }
-            vob.vobu[j].sectpts[0] = p0;
-            vob.vobu[j].sectpts[1] = if j + 1 == n && finalaudiopts > p1 { finalaudiopts } else { p1 };
+            vobu.sectpts[0] = p0;
+            vobu.sectpts[1] = if j + 1 == n && finalaudiopts > p1 { finalaudiopts } else { p1 };
         }
         if !complained {
             break;
@@ -1831,8 +1828,7 @@ pub fn set_attributes(set: &mut PgcSet) -> Result<()> {
         let mut best: i32 = -1;
         let mut matchidx: i32 = -1;
         let mut fnd = false;
-        for j in 0..vg.numaudiotracks {
-            let a = &vg.ad[j];
+        for (j, a) in vg.ad[..vg.numaudiotracks].iter().enumerate() {
             if a.aid != 0 {
                 continue;
             }
@@ -1929,21 +1925,21 @@ pub fn set_attributes(set: &mut PgcSet) -> Result<()> {
                     if l >= 32 {
                         return err("ERR:  no free subpicture slot");
                     }
-                    for m in 0..4 {
-                        pgc.subpmap[l][m] = if mask & (1 << m) != 0 { 128 + k as u8 } else { 127 };
+                    for (m, slot) in pgc.subpmap[l].iter_mut().enumerate() {
+                        *slot = if mask & (1 << m) != 0 { 128 + k as u8 } else { 127 };
                     }
                 }
             }
         }
         // Remove illegal modes and fill the modes the mask asks for with the main stream.
-        for l in 0..32 {
+        for subpmap in &mut pgc.subpmap {
             let mut mainid: i32 = -1;
-            for m in 0..4 {
-                if mask & (1 << m) == 0 && pgc.subpmap[l][m] & 128 == 128 {
-                    pgc.subpmap[l][m] = 127;
+            for (m, slot) in subpmap.iter_mut().enumerate() {
+                if mask & (1 << m) == 0 && *slot & 128 == 128 {
+                    *slot = 127;
                 }
-                if pgc.subpmap[l][m] & 128 != 0 {
-                    let id = (pgc.subpmap[l][m] & 127) as i32;
+                if *slot & 128 != 0 {
+                    let id = (*slot & 127) as i32;
                     if mainid == -1 {
                         mainid = id;
                     } else if mainid >= 0 && mainid != id {
@@ -1954,9 +1950,9 @@ pub fn set_attributes(set: &mut PgcSet) -> Result<()> {
             if mainid == -1 {
                 continue;
             }
-            for m in 0..4 {
-                if mask & (1 << m) != 0 && pgc.subpmap[l][m] & 128 == 0 && mainid >= 0 {
-                    pgc.subpmap[l][m] = 128 + mainid as u8;
+            for (m, slot) in subpmap.iter_mut().enumerate() {
+                if mask & (1 << m) != 0 && *slot & 128 == 0 && mainid >= 0 {
+                    *slot = 128 + mainid as u8;
                 }
             }
         }

@@ -303,10 +303,22 @@ fn fid(name: Option<&str>, dir: bool, icb_block: u32, unique: u32, tag_block: u3
     d
 }
 
+struct EfeParams<'a> {
+    file_type: u8,
+    long_ads: bool,
+    links: u16,
+    size: u64,
+    blocks: u64,
+    ads: &'a [u8],
+    unique: u64,
+    block: u32,
+    ts: &'a Timestamp,
+}
+
 /// Extended File Entry (one block). `ads` = encoded allocation descriptors (short_ad when
 /// `long_ads` is false, long_ad otherwise).
-#[allow(clippy::too_many_arguments)]
-fn efe(file_type: u8, long_ads: bool, links: u16, size: u64, blocks: u64, ads: &[u8], unique: u64, block: u32, ts: &Timestamp) -> Vec<u8> {
+fn efe(p: EfeParams<'_>) -> Vec<u8> {
+    let EfeParams { file_type, long_ads, links, size, blocks, ads, unique, block, ts } = p;
     let mut d = vec![0u8; SECTOR as usize];
     put16(&mut d, 20, 4); // ICB strategy 4
     put16(&mut d, 24, 1); // max entries
@@ -389,11 +401,40 @@ fn metadata_area(plan: &BdImagePlan, ts: &Timestamp) -> Vec<u8> {
             debug_assert_eq!(stream.len() as u64, n.dir_bytes);
             let links = 1 + n.children.iter().filter(|&&c| plan.nodes[c].dir).count() as u16;
             let blocks = n.dir_bytes.div_ceil(SECTOR);
-            put(&mut m, n.efe, &efe(4, false, links, n.dir_bytes, blocks, &short_ad(n.dir_bytes, n.data), n.unique as u64, n.efe, ts));
+            let ads = short_ad(n.dir_bytes, n.data);
+            put(
+                &mut m,
+                n.efe,
+                &efe(EfeParams {
+                    file_type: 4,
+                    long_ads: false,
+                    links,
+                    size: n.dir_bytes,
+                    blocks,
+                    ads: &ads,
+                    unique: n.unique as u64,
+                    block: n.efe,
+                    ts,
+                }),
+            );
             put(&mut m, n.data, &stream);
         } else {
             let ads: Vec<u8> = extents(n.data, n.size).iter().flat_map(|&(block, len)| long_ad(len, block)).collect();
-            put(&mut m, n.efe, &efe(5, true, 1, n.size, n.size.div_ceil(SECTOR), &ads, n.unique as u64, n.efe, ts));
+            put(
+                &mut m,
+                n.efe,
+                &efe(EfeParams {
+                    file_type: 5,
+                    long_ads: true,
+                    links: 1,
+                    size: n.size,
+                    blocks: n.size.div_ceil(SECTOR),
+                    ads: &ads,
+                    unique: n.unique as u64,
+                    block: n.efe,
+                    ts,
+                }),
+            );
         }
     }
     m
@@ -565,8 +606,10 @@ pub fn write_bd_to<W: Write>(
 
     // ---- Physical partition: metadata file entries, metadata, file data, mirror ---------------
     let meta_blocks = plan.meta_blocks as u64;
-    w.put(p, &efe(250, false, 1, meta_bytes, meta_blocks, &short_ad(meta_bytes, plan.meta1), 1, 0, ts))?;
-    w.put(p + 1, &efe(251, false, 1, meta_bytes, meta_blocks, &short_ad(meta_bytes, plan.meta2), 2, 1, ts))?;
+    let ads1 = short_ad(meta_bytes, plan.meta1);
+    let ads2 = short_ad(meta_bytes, plan.meta2);
+    w.put(p, &efe(EfeParams { file_type: 250, long_ads: false, links: 1, size: meta_bytes, blocks: meta_blocks, ads: &ads1, unique: 1, block: 0, ts }))?;
+    w.put(p + 1, &efe(EfeParams { file_type: 251, long_ads: false, links: 1, size: meta_bytes, blocks: meta_blocks, ads: &ads2, unique: 2, block: 1, ts }))?;
     let meta = metadata_area(plan, ts);
     w.put(p + plan.meta1, &meta)?;
 
@@ -699,7 +742,7 @@ mod tests {
     fn efe_layout() {
         let ts = Timestamp::now();
         let ads = long_ad(5000, 99);
-        let d = efe(5, true, 1, 5000, 3, &ads, 17, 42, &ts);
+        let d = efe(EfeParams { file_type: 5, long_ads: true, links: 1, size: 5000, blocks: 3, ads: &ads, unique: 17, block: 42, ts: &ts });
         assert_eq!(d.len(), 2048);
         assert_eq!((le16(&d, 0), le16(&d, 2), le32(&d, 12)), (266, 3, 42));
         assert_eq!((d[27], le16(&d, 34)), (5, 1), "file type and long_ad allocation");
@@ -760,7 +803,8 @@ mod tests {
         // The File Entry of such a file still fits one sector.
         let ads: Vec<u8> = e.iter().flat_map(|&(b, l)| long_ad(l, b)).collect();
         assert_eq!(ads.len(), 64);
-        assert!(efe(5, true, 1, size, size / SECTOR, &ads, 16, 3, &Timestamp::now()).len() == 2048);
+        let ts = Timestamp::now();
+        assert!(efe(EfeParams { file_type: 5, long_ads: true, links: 1, size, blocks: size / SECTOR, ads: &ads, unique: 16, block: 3, ts: &ts }).len() == 2048);
         // Partition end is aligned, so the image is about 3 GiB.
         assert!(plan.size_bytes() > size && plan.size_bytes() < size + (4 << 20));
         assert!(is_dual_layer(BD25_SECTORS + 1) && !is_dual_layer(BD25_SECTORS));
