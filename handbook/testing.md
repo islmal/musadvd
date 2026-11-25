@@ -79,6 +79,7 @@ tools are not part of the product.
 | `check-order.mjs` | Runs `frontend/src/order.ts` under Node as a unit test. |
 | `build_all.ps1` | Frontend, debug and release builds, then shortcut update. |
 | `update_shortcuts.ps1` | Refreshes the local `MusaDVD CLI` / `MusaDVD GUI` shortcuts. |
+| `.claude/check.sh` | Fast checks for the status report (`generate_state.sh` → `SYSTEM_STATE.txt`): `npm test` and `cargo test --workspace --lib --bins` (unit tests, ~2 min cold). The full `cargo test --workspace` stays a separate step before releases. |
 
 ## CI
 
