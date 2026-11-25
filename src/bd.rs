@@ -727,7 +727,17 @@ async fn build_menus(
     for (i, page) in pages.iter().enumerate() {
         cancel.check()?;
         let sup = page.igs.as_ref().map(|_| work.join(format!("menu_{:02}.sup", i + 1)));
-        let job = crate::bd_author::menu_job(work.join(format!("menu_{:02}.mkv", i + 1)), sup, i, page.intro.as_ref().map(|n| n.secs), page.still, rate, width, &bdmv, page.secs);
+        let job = crate::bd_author::menu_job(crate::bd_author::MenuJobParams {
+            mkv: work.join(format!("menu_{:02}.mkv", i + 1)),
+            sup,
+            number: i,
+            intro_secs: page.intro.as_ref().map(|n| n.secs),
+            still: page.still,
+            rate,
+            width,
+            bdmv: &bdmv,
+            duration_secs: page.secs,
+        });
         mux_log.push_str(&cancellable(cancel, crate::bd_mux::mux_title(tools, &job)).await?);
     }
     std::fs::write(work.join("mux_menus.log"), mux_log).at(work)?;
@@ -997,8 +1007,17 @@ pub async fn build_bd(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send)) 
                 None
             } else {
                 let aspect = if opts.aspect_policy == crate::dvd::AspectPolicy::Standard { Aspect::Standard } else { Aspect::Wide };
-                let (built, notes) = crate::bd_template::layout_from_template(&tpl, &opts.template, &layout_titles(&titles, &groups, &layout), &vec![None; groups.len()], &chapter_samples(&titles, &groups), aspect, &opts.chapters, opts.ui_lang)
-                    .map_err(|e| BuildError::Template(e.to_string()))?;
+                let (built, notes) = crate::bd_template::layout_from_template(crate::bd_template::TemplateLayoutParams {
+                    template: &tpl,
+                    template_path: &opts.template,
+                    titles: &layout_titles(&titles, &groups, &layout),
+                    thumbnails: &vec![None; groups.len()],
+                    chapter_starts: &chapter_samples(&titles, &groups),
+                    aspect,
+                    chapters: &opts.chapters,
+                    ui: opts.ui_lang,
+                })
+                .map_err(|e| BuildError::Template(e.to_string()))?;
                 for w in notes {
                     warn(log, w);
                 }

@@ -1831,7 +1831,16 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     ..RenderOptions::still(dir)
                 };
                 let prefix = format!("ts{:02}_{suffix}", i + 1);
-                rendered.push(menu::render_menu(template, page, &kind, MenuLinks { first, ..links }, Some(entry), &prefix, &work, &ropts)?);
+                rendered.push(menu::render_menu(&menu::RenderMenuParams {
+                    template,
+                    page,
+                    kind: &kind,
+                    links: MenuLinks { first, ..links },
+                    entry: Some(entry),
+                    prefix: &prefix,
+                    out_dir: &work,
+                    opts: &ropts,
+                })?);
             }
             Ok(rendered)
         };
@@ -1866,11 +1875,11 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                 let spec = ts_menus.first()?.iter().flat_map(|m| &m.pages).map(|(s, _)| s).find(|s| s.vob.starts_with(prefix) && s.entry.is_some())?;
                 ["root", "ptt", "audio"].into_iter().find(|e| spec.entry.as_deref() == Some(e))
             };
-            let mut main_menu = menu::render_menu(
-                &main,
-                title_page,
-                &MenuKind::Titles(&entries),
-                MenuLinks {
+            let mut main_menu = menu::render_menu(&menu::RenderMenuParams {
+                template: &main,
+                page: title_page,
+                kind: &MenuKind::Titles(&entries),
+                links: MenuLinks {
                     first: 1,
                     bonus: bonus_page.map(|_| main_total + 1),
                     episodes: episodes_page.map(|_| main_total + 1),
@@ -1878,10 +1887,10 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     title1_settings: entry_of("ts01_set").filter(|_| no_items),
                     ..MenuLinks::default()
                 },
-                Some("title"),
-                "vmgm",
-                &work,
-                &RenderOptions {
+                entry: Some("title"),
+                prefix: "vmgm",
+                out_dir: &work,
+                opts: &RenderOptions {
                     heading: Some(&main_heading),
                     background_video: titles[0].thumbnail.as_deref(),
                     ui_lang: ui,
@@ -1894,17 +1903,17 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                     menu_audio: main_menu_audio.as_ref(),
                     ..RenderOptions::still(&main_dir)
                 },
-            )?;
+            })?;
             if let Some(page) = episodes_page {
-                let episodes = menu::render_menu(
-                    &main,
+                let episodes = menu::render_menu(&menu::RenderMenuParams {
+                    template: &main,
                     page,
-                    &MenuKind::Titles(&entries),
-                    MenuLinks { first: main_total + 1, main_menu: Some(1), ..MenuLinks::default() },
-                    None,
-                    "episodes",
-                    &work,
-                    &RenderOptions {
+                    kind: &MenuKind::Titles(&entries),
+                    links: MenuLinks { first: main_total + 1, main_menu: Some(1), ..MenuLinks::default() },
+                    entry: None,
+                    prefix: "episodes",
+                    out_dir: &work,
+                    opts: &RenderOptions {
                         heading: Some(&tr(ui, "episodes")),
                         ui_lang: ui,
                         motion,
@@ -1915,20 +1924,20 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         menu_audio: main_menu_audio.as_ref(),
                         ..RenderOptions::still(&main_dir)
                     },
-                )?;
+                })?;
                 main_menu.pages.extend(episodes.pages);
                 main_menu.warnings.extend(episodes.warnings);
             }
             if let Some(page) = bonus_page {
-                let bonus = menu::render_menu(
-                    &main,
+                let bonus = menu::render_menu(&menu::RenderMenuParams {
+                    template: &main,
                     page,
-                    &MenuKind::Bonus(&entries[1..]),
-                    MenuLinks { first: main_total + 1, main_menu: Some(1), ..MenuLinks::default() },
-                    None,
-                    "bonus",
-                    &work,
-                    &RenderOptions {
+                    kind: &MenuKind::Bonus(&entries[1..]),
+                    links: MenuLinks { first: main_total + 1, main_menu: Some(1), ..MenuLinks::default() },
+                    entry: None,
+                    prefix: "bonus",
+                    out_dir: &work,
+                    opts: &RenderOptions {
                         heading: Some("Bonus"),
                         ui_lang: ui,
                         motion,
@@ -1939,7 +1948,7 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         menu_audio: main_menu_audio.as_ref(),
                         ..RenderOptions::still(&main_dir)
                     },
-                )?;
+                })?;
                 main_menu.pages.extend(bonus.pages);
                 main_menu.warnings.extend(bonus.warnings);
             }

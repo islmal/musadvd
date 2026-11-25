@@ -10,7 +10,7 @@ use std::path::Path;
 
 use musadvd::author::MenuFrame;
 use musadvd::bd::BdRate;
-use musadvd::bd_author::menu_job;
+use musadvd::bd_author::{menu_job, MenuJobParams};
 use musadvd::config::HwAccelMode;
 use musadvd::encoder::{bd_custom_menu_args, BackgroundOverlay, CustomMenuMedia, MenuBackground};
 use musadvd::igs::{self, IgButton, IgMenu, IgObject};
@@ -184,7 +184,17 @@ fn ig_display_set_starts_behind_the_entry_point_of_the_intro_mark() {
         std::fs::write(dir.join("menu.sup"), igs::build_sup(&ig_menu(code, t90 as u32, sparse))).unwrap();
         let bdmv = dir.join("BD").join("BDMV");
         musadvd::bd_mux::create_skeleton(&bdmv).unwrap();
-        let job = menu_job(mkv, Some(dir.join("menu.sup")), 0, Some(t), false, rate, 1920, &bdmv, t + 2.0);
+        let job = menu_job(MenuJobParams {
+            mkv,
+            sup: Some(dir.join("menu.sup")),
+            number: 0,
+            intro_secs: Some(t),
+            still: false,
+            rate,
+            width: 1920,
+            bdmv: &bdmv,
+            duration_secs: t + 2.0,
+        });
         rt.block_on(musadvd::bd_mux::mux_title(&tools, &job)).expect("mux");
 
         let report = check_clip(&bdmv, IG_PID, t90);
@@ -308,7 +318,17 @@ fn real_template_ig_display_sets_fit_the_budget() {
                 continue;
             }
             let samples: Vec<Vec<f64>> = titles.iter().map(|t| (0..t.chapters).map(|c| c as f64 * 20.0).collect()).collect();
-            let (layout, _) = musadvd::bd_template::layout_from_template(&tpl, &ini, &titles, &vec![None; titles.len()], &samples, Aspect::Wide, &musadvd::dvd::ChapterSettings::default(), musadvd::menu::UiLang::DE).unwrap();
+            let (layout, _) = musadvd::bd_template::layout_from_template(musadvd::bd_template::TemplateLayoutParams {
+                template: &tpl,
+                template_path: &ini,
+                titles: &titles,
+                thumbnails: &vec![None; titles.len()],
+                chapter_starts: &samples,
+                aspect: Aspect::Wide,
+                chapters: &musadvd::dvd::ChapterSettings::default(),
+                ui: musadvd::menu::UiLang::DE,
+            })
+            .unwrap();
             let traits = bd_menu::traits(&layout, &titles, frame);
             let nav = bd_menu::plan(&layout, &titles, &traits, PlaybackOptions::default(), &groups);
             let pages = bd_menu::render_pages(&layout, &titles, frame, rate, &nav, &out, 25.0).unwrap();

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use musadvd::author::{ClipSource, MenuFrame, TvStandard};
-use musadvd::bd_template::layout_from_template;
+use musadvd::bd_template::{layout_from_template, TemplateLayoutParams};
 use musadvd::dvd::ChapterSettings;
 use musadvd::encoder::Aspect;
 use musadvd::layout::{self, Canvas, CustomLayout, Element, LayoutTitle};
@@ -189,16 +189,16 @@ pub async fn import_convertx_template(path: String, titles: Vec<EditorTitle>, la
                 }
             })
             .collect();
-        let (layout, warnings) = layout_from_template(
-            &template,
-            Path::new(&path),
-            &layout_titles,
-            &vec![None; titles.len()],
-            &chapter_starts,
-            Aspect::Wide,
-            &ChapterSettings::default(),
-            UiLang::from_setting(&lang),
-        )
+        let (layout, warnings) = layout_from_template(TemplateLayoutParams {
+            template: &template,
+            template_path: Path::new(&path),
+            titles: &layout_titles,
+            thumbnails: &vec![None; titles.len()],
+            chapter_starts: &chapter_starts,
+            aspect: Aspect::Wide,
+            chapters: &ChapterSettings::default(),
+            ui: UiLang::from_setting(&lang),
+        })
         .map_err(|e| e.to_string())?;
         Ok(ImportedTemplate { layout, warnings })
     })

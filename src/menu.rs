@@ -725,12 +725,23 @@ fn wrap_text(fonts: &[FontArc], text: &str, em_px: f32, max_w: f32) -> Vec<Strin
     out
 }
 
+/// Layout and font parameters for [`text_lines`].
+pub struct TextLinesParams<'a> {
+    pub family: &'a str,
+    pub size_px: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub wrap: bool,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// The lines a menu editor text shows in its `width`×`height` box: one per `\n`, with `wrap`
 /// also broken to the box width. Lines starting below the box are dropped; with `wrap` the
 /// last shown line then ends with "…". (Without `wrap`, overlong lines are cut with "…" when
 /// drawn.) The editor shows exactly these lines.
-#[allow(clippy::too_many_arguments)]
-pub fn text_lines(text: &str, family: &str, size_px: f32, bold: bool, italic: bool, wrap: bool, width: u32, height: u32) -> Vec<String> {
+pub fn text_lines(text: &str, p: &TextLinesParams<'_>) -> Vec<String> {
+    let TextLinesParams { family, size_px, bold, italic, wrap, width, height } = *p;
     let style = editor_style(family, size_px, bold, italic, "left", height);
     let fonts = font_chain(&style);
     let mut lines: Vec<String> = if wrap && !fonts.is_empty() {
@@ -786,7 +797,7 @@ pub(crate) fn text_coverage(text: &str, b: &TextBox<'_>) -> Coverage {
         return cov;
     }
     let line_h = editor_line_height(size_px);
-    for (i, line) in text_lines(text, family, size_px, bold, italic, wrap, width, height).iter().enumerate() {
+    for (i, line) in text_lines(text, &TextLinesParams { family, size_px, bold, italic, wrap, width, height }).iter().enumerate() {
         let y = i as i32 * line_h;
         if line.trim().is_empty() {
             continue;
@@ -1504,51 +1515,38 @@ pub struct RenderedMenu {
     pub warnings: Vec<String>,
 }
 
+/// Inputs for [`render_menu`].
+#[derive(Clone, Copy)]
+pub struct RenderMenuParams<'a> {
+    pub template: &'a Template,
+    pub page: &'a Page,
+    pub kind: &'a MenuKind<'a>,
+    pub links: MenuLinks,
+    pub entry: Option<&'a str>,
+    pub prefix: &'a str,
+    pub out_dir: &'a Path,
+    pub opts: &'a RenderOptions<'a>,
+}
+
 /// Renders every page of a menu and writes `{prefix}_bg{s}.png`, `{prefix}_highlight{s}.png`,
 /// `{prefix}_select{s}.png` and `spumux_{prefix}{s}.xml`; the menu MPEG is `{prefix}{s}.mpg`.
 /// Motion pages (video slots with clips and `opts.motion`) additionally get `{prefix}_fg{s}.png`;
 /// their `_bg` then holds only the layers below the clips.
 /// `entry` is set on the first page's [`MenuSpec`].
-#[allow(clippy::too_many_arguments)]
-pub fn render_menu(
-    template: &Template,
-    page: &Page,
-    kind: &MenuKind,
-    links: MenuLinks,
-    entry: Option<&str>,
-    prefix: &str,
-    out_dir: &Path,
-    opts: &RenderOptions,
-) -> Result<RenderedMenu, MenuError> {
-    std::fs::create_dir_all(out_dir)?;
+pub fn render_menu(p: &RenderMenuParams<'_>) -> Result<RenderedMenu, MenuError> {
+    std::fs::create_dir_all(p.out_dir)?;
     // Pages are independent: render and write them in parallel, keep the page order.
-    let rendered: Vec<((MenuSpec, MenuPageFiles), Vec<String>)> = (1..=author::page_count(page, kind))
+    let rendered: Vec<((MenuSpec, MenuPageFiles), Vec<String>)> = (1..=author::page_count(p.page, p.kind))
         .into_par_iter()
-        .map(|n| {
-            render_menu_page(
-                RenderMenuPageParams { template, page, kind, links, entry, prefix, out_dir, opts },
-                n,
-            )
-        })
+        .map(|n| render_menu_page(*p, n))
         .collect::<Result<_, _>>()?;
     let (pages, warnings): (Vec<_>, Vec<Vec<String>>) = rendered.into_iter().unzip();
     Ok(RenderedMenu { pages, warnings: warnings.into_iter().flatten().collect() })
 }
 
-struct RenderMenuPageParams<'a> {
-    template: &'a Template,
-    page: &'a Page,
-    kind: &'a MenuKind<'a>,
-    links: MenuLinks,
-    entry: Option<&'a str>,
-    prefix: &'a str,
-    out_dir: &'a Path,
-    opts: &'a RenderOptions<'a>,
-}
-
 /// Renders and writes page `n` of a menu (see [`render_menu`]).
-fn render_menu_page(p: RenderMenuPageParams<'_>, n: u32) -> Result<((MenuSpec, MenuPageFiles), Vec<String>), MenuError> {
-    let RenderMenuPageParams { template, page, kind, links, entry, prefix, out_dir, opts } = p;
+fn render_menu_page(p: RenderMenuParams<'_>, n: u32) -> Result<((MenuSpec, MenuPageFiles), Vec<String>), MenuError> {
+    let RenderMenuParams { template, page, kind, links, entry, prefix, out_dir, opts } = p;
     let mut warnings = Vec::new();
     {
         let (out_w, out_h) = opts.tv.size();
@@ -1669,16 +1667,16 @@ pub fn render_menu_set(opts: &MenuSetOptions) -> Result<MenuSetSummary, MenuErro
         ..RenderOptions::still(template_dir)
     };
     let links = MenuLinks { first: 1, ..MenuLinks::default() };
-    let rendered = render_menu(
-        &template,
+    let rendered = render_menu(&RenderMenuParams {
+        template: &template,
         page,
-        &MenuKind::Titles(&entries),
+        kind: &MenuKind::Titles(&entries),
         links,
-        Some("title"),
-        "menu",
-        opts.output_dir,
-        &render_opts,
-    )?;
+        entry: Some("title"),
+        prefix: "menu",
+        out_dir: opts.output_dir,
+        opts: &render_opts,
+    })?;
 
     let mut files = Vec::new();
     let mut menus = Vec::new();

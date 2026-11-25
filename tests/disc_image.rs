@@ -244,7 +244,7 @@ fn golden_video_ts_image_hash() {
 /// builder: Windows mounts the image and every file reads back with its content.
 #[test]
 fn data_tree_mounts_with_long_names() {
-    use musadvd::burner::builder::{build_to_file, plan_build, BuildInput, Source};
+    use musadvd::burner::builder::{build_to_file, plan_build, BuildFileOptions, BuildInput, Source};
     use musadvd::burner::reader::Split;
     use musadvd::config::StudioBuild;
 
@@ -266,7 +266,8 @@ fn data_tree_mounts_with_long_names() {
     let input = BuildInput { sources: vec![Source { path: src.clone(), dest: String::new() }], label: "Datentest".into(), ..Default::default() };
     let plan = plan_build(&input, &StudioBuild::default()).unwrap();
     let iso = dir.join("data.iso");
-    build_to_file(&plan, &iso, Split::None, false, "none", &AtomicBool::new(false), |_| {}).unwrap();
+    let cancel = AtomicBool::new(false);
+    build_to_file(&plan, &iso, &BuildFileOptions { split: Split::None, md5: false, layout_file: "none", cancel: &cancel }, |_| {}).unwrap();
 
     if let Some(m) = mount(&iso) {
         assert_eq!(m.label, "DATENTEST");

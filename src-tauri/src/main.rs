@@ -1558,7 +1558,7 @@ fn main() -> std::process::ExitCode {
             builder
         }
     };
-    builder
+    if let Err(err) = builder
         .setup(|app| {
             // `--burn-studio`: start with the Burn Studio window only (the main window stays hidden).
             if std::env::args().any(|a| a == "--burn-studio") {
@@ -1669,7 +1669,10 @@ fn main() -> std::process::ExitCode {
             burn_studio::studio_template_preview
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the MusaDVD GUI");
+    {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
     std::process::ExitCode::SUCCESS
 }
 

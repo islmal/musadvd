@@ -626,20 +626,24 @@ fn verify_disc(drive: &Drive<'_>, mut src: Box<dyn SectorSource>, sectors: u64, 
     Ok(())
 }
 
+/// Parameters for [`burn_direct`].
+#[cfg(windows)]
+pub struct BurnDirectParams<'a> {
+    pub drive_id: &'a str,
+    pub spti_transport: bool,
+    pub source: Box<dyn SectorSource>,
+    pub speed: super::WriteSpeed,
+    pub options: &'a BurnOptions,
+    pub direct: &'a DirectOptions,
+    pub cancel: &'a AtomicBool,
+    pub tx: &'a Sender<BurnProgress>,
+}
+
 /// Opens the transport for `drive_id` and burns directly (Windows). `spti_transport`: SPTI
 /// (`\\.\X:`) instead of IMAPI's `IDiscRecorder2Ex`, which holds exclusive access meanwhile.
 #[cfg(windows)]
-#[allow(clippy::too_many_arguments)]
-pub fn burn_direct(
-    drive_id: &str,
-    spti_transport: bool,
-    source: Box<dyn SectorSource>,
-    speed: super::WriteSpeed,
-    options: &BurnOptions,
-    direct: &DirectOptions,
-    cancel: &AtomicBool,
-    tx: &Sender<BurnProgress>,
-) -> Result<(), BurnError> {
+pub fn burn_direct(p: BurnDirectParams<'_>) -> Result<(), BurnError> {
+    let BurnDirectParams { drive_id, spti_transport, source, speed, options, direct, cancel, tx } = p;
     use super::power::{DriveHandle, StandbyGuard};
     use super::spti::{ImapiExTransport, SptiTransport};
     use super::windows::{recorder, volume_paths, Com};

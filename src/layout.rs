@@ -722,16 +722,16 @@ pub(crate) fn button_rect(e: &Element, canvas: Canvas, frame: impl Into<MenuFram
     let frame = frame.into();
     let (w, h) = (frame.width, frame.height);
     if matches!(e.content, Content::Video { .. }) || is_unrotated(e.rotation) {
-        return Rect::from_template(
-            e.x.round() as i32,
-            e.y.round() as i32,
-            e.w.round().max(1.0) as u32,
-            e.h.round().max(1.0) as u32,
-            canvas.width,
-            canvas.height,
-            w,
-            h,
-        );
+        return Rect::from_template(crate::author::TemplateRect {
+            x: e.x.round() as i32,
+            y: e.y.round() as i32,
+            w: e.w.round().max(1.0) as u32,
+            h: e.h.round().max(1.0) as u32,
+            page_w: canvas.width,
+            page_h: canvas.height,
+            out_w: w,
+            out_h: h,
+        });
     }
     let sx = w as f64 / canvas.width.max(1) as f64;
     let sy = h as f64 / canvas.height.max(1) as f64;
@@ -808,7 +808,18 @@ pub fn element_text_lines(e: &Element, canvas: Canvas, tv: impl Into<MenuFrame> 
     let Content::Text { text, font, size, bold, italic, wrap, .. } = &e.content else { return None };
     let (_, _, w, h) = frame_box(e, canvas, tv);
     let w = (w as f64 * text_squeeze(tv.into())).round() as u32;
-    Some(menu::text_lines(text, font, frame_font_size(*size, canvas, tv), *bold, *italic, *wrap, w, h))
+    Some(menu::text_lines(
+        text,
+        &menu::TextLinesParams {
+            family: font,
+            size_px: frame_font_size(*size, canvas, tv),
+            bold: *bold,
+            italic: *italic,
+            wrap: *wrap,
+            width: w,
+            height: h,
+        },
+    ))
 }
 
 /// Computes remote-control directional navigation links (`(element_id, Navigation)`) for all

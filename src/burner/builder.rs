@@ -614,28 +614,32 @@ pub struct BuildReport {
     pub layout_file: Option<PathBuf>,
 }
 
+/// Options for [`build_to_file`].
+pub struct BuildFileOptions<'a> {
+    pub split: Split,
+    pub md5: bool,
+    pub layout_file: &'a str,
+    pub cancel: &'a AtomicBool,
+}
+
 /// Writes the planned image to `out` (split if asked), with the MD5 of the image and the layout
 /// file (`auto`, `none`, `dvd`, `mds`, `cue`) next to it.
-#[allow(clippy::too_many_arguments)]
 pub fn build_to_file(
     plan: &BuildPlan,
     out: &Path,
-    split: Split,
-    md5: bool,
-    layout_file: &str,
-    cancel: &AtomicBool,
+    opts: &BuildFileOptions<'_>,
     progress: impl FnMut(f64),
 ) -> Result<BuildReport, ImageError> {
     let sectors = plan.total_sectors();
-    let writer = SplitWriter::new(out, split, sectors as u64 * SECTOR);
-    let mut hw = HashWriter { inner: writer, md5: md5.then(Md5::new) };
-    let result = plan.image.write_to(&mut hw, out, &plan.timestamp, cancel, progress);
+    let writer = SplitWriter::new(out, opts.split, sectors as u64 * SECTOR);
+    let mut hw = HashWriter { inner: writer, md5: opts.md5.then(Md5::new) };
+    let result = plan.image.write_to(&mut hw, out, &plan.timestamp, opts.cancel, progress);
     let HashWriter { inner, md5: hasher } = hw;
     match result {
         Ok(()) => {
             let files = inner.commit().map_err(udf::io(out))?;
             let layout = if files.len() == 1 {
-                write_layout(&files[0], layout_file, sectors as u64, plan.layer_break.map(|l| l.l0_sectors)).map_err(udf::io(out))?
+                write_layout(&files[0], opts.layout_file, sectors as u64, plan.layer_break.map(|l| l.l0_sectors)).map_err(udf::io(out))?
             } else {
                 None
             };
@@ -761,7 +765,8 @@ mod tests {
         assert_eq!(bd.udf_label, "Meine Daten 2025");
 
         let out = dir.join("out.iso");
-        let report = build_to_file(&plan, &out, Split::None, true, "auto", &AtomicBool::new(false), |_| {}).unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = build_to_file(&plan, &out, &BuildFileOptions { split: Split::None, md5: true, layout_file: "auto", cancel: &cancel }, |_| {}).unwrap();
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(bytes.len() as u64, plan.total_sectors() as u64 * SECTOR);
         assert_eq!(report.md5.unwrap(), format!("{:x}", Md5::digest(&bytes)));
@@ -852,7 +857,8 @@ mod tests {
         assert_eq!((plan.content, plan.label.as_str()), (Content::Bluray, "MEIN_FILM"));
         let BuiltImage::Bd(ref bd) = plan.image else { panic!("UDF 2.50 expected") };
         let out = dir.join("bd.iso");
-        build_to_file(&plan, &out, Split::None, false, "none", &AtomicBool::new(false), |_| {}).unwrap();
+        let cancel = AtomicBool::new(false);
+        build_to_file(&plan, &out, &BuildFileOptions { split: Split::None, md5: false, layout_file: "none", cancel: &cancel }, |_| {}).unwrap();
         let img = std::fs::read(&out).unwrap();
         let at = bd.file_sector("BDMV/STREAM/00000.m2ts").unwrap() as usize * SECTOR as usize;
         for p in 0..10 {
@@ -863,7 +869,7 @@ mod tests {
         // Without the reset the bits survive.
         let plain = plan_build(&input(&dir), &always()).unwrap();
         let out2 = dir.join("bd2.iso");
-        build_to_file(&plain, &out2, Split::None, false, "none", &AtomicBool::new(false), |_| {}).unwrap();
+        build_to_file(&plain, &out2, &BuildFileOptions { split: Split::None, md5: false, layout_file: "none", cancel: &cancel }, |_| {}).unwrap();
         let BuiltImage::Bd(ref bd2) = plain.image else { panic!() };
         let img2 = std::fs::read(&out2).unwrap();
         assert_eq!(img2[bd2.file_sector("BDMV/STREAM/00000.m2ts").unwrap() as usize * SECTOR as usize], 0xC0);
@@ -882,18 +888,22 @@ mod tests {
         let cfg = StudioBuild::default();
         let plan = plan_build(&input(&dir), &cfg).unwrap();
         let out = dir.join("out.iso");
-        let report = build_to_file(&plan, &out, Split::Gb2, false, "auto", &AtomicBool::new(false), |_| {}).unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = build_to_file(&plan, &out, &BuildFileOptions { split: Split::Gb2, md5: false, layout_file: "auto", cancel: &cancel }, |_| {}).unwrap();
         assert_eq!(report.files, std::slice::from_ref(&out), "small image: one file, plain name");
         // Layout file for a dual-layer build.
         let mut with_break = plan;
         with_break.layer_break = Some(LayerBreak { l0_sectors: 640, padding: None });
         let out2 = dir.join("dl.iso");
-        let report = build_to_file(&with_break, &out2, Split::None, false, "auto", &AtomicBool::new(false), |_| {}).unwrap();
+        let report = build_to_file(&with_break, &out2, &BuildFileOptions { split: Split::None, md5: false, layout_file: "auto", cancel: &cancel }, |_| {}).unwrap();
         assert_eq!(std::fs::read_to_string(report.layout_file.unwrap()).unwrap(), "LayerBreak=640\r\ndl.iso\r\n");
         // Cancel leaves nothing behind.
         let cancelled = AtomicBool::new(true);
         let out3 = dir.join("c.iso");
-        assert!(matches!(build_to_file(&with_break, &out3, Split::None, false, "none", &cancelled, |_| {}), Err(ImageError::Cancelled)));
+        assert!(matches!(
+            build_to_file(&with_break, &out3, &BuildFileOptions { split: Split::None, md5: false, layout_file: "none", cancel: &cancelled }, |_| {}),
+            Err(ImageError::Cancelled)
+        ));
         assert!(!out3.exists() && !dir.join("c.iso.part").exists());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -907,7 +917,8 @@ mod tests {
         inp.label = "STREAM".into();
         let plan = plan_build(&inp, &cfg).unwrap();
         let out = dir.join("a.iso");
-        build_to_file(&plan, &out, Split::None, false, "none", &AtomicBool::new(false), |_| {}).unwrap();
+        let cancel = AtomicBool::new(false);
+        build_to_file(&plan, &out, &BuildFileOptions { split: Split::None, md5: false, layout_file: "none", cancel: &cancel }, |_| {}).unwrap();
         let want = std::fs::read(&out).unwrap();
 
         let mut src = stream_image(&plan, 256 * 1024, 20, 90, Arc::new(AtomicBool::new(false)));
