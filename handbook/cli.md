@@ -24,7 +24,9 @@ with Ctrl+C (child processes are killed).
   `--motion-menu` with `--motion-duration`, `--motion-silent`, `--menu-audio`,
   `--no-menu-animations`. Blu-rays have no ConvertX templates: without `--layout` they get no menu.
 - **Tracks and chapters**: `--audio-lang`, `--sub-lang`, `--no-subs`, `--chapter-minutes`,
-  `--audio auto|ac3|lpcm`, `--track-labels smart|language|generic`, `--loudnorm`.
+  `--audio auto|ac3|lpcm`, `--audio-bitrate KBPS|auto` (encoded AC-3; snapped to 96-448 on DVD,
+  192-640 on Blu-ray/AVCHD; auto = 448 for 5+ channels, else 192), `--track-labels
+  smart|language|generic`, `--loudnorm`.
 - **Blu-ray/AVCHD stream copy**: `--bd-video encode|auto|strict` (default `encode`) copies H.264
   that already meets the disc spec; `--bd-audio auto|encode|strict` (default `auto`) copies
   compliant audio: AC-3 (48 kHz, <= 6 ch, <= 640 kbit/s), DTS (48/96/192 kHz, <= 8 ch; DTS-HD
@@ -38,8 +40,12 @@ with Ctrl+C (child processes are killed).
   picture-filtered titles never copy.
 - **Video processing**: `--scale letterbox|panscan|stretch`, `--scale-filter
   bilinear|bicubic|lanczos`, `--deinterlace auto|yadif|off`.
-- **Structure**: `--merge 2,3` joins inputs behind one menu entry; `--single-video` (Blu-ray);
-  `--project-name`.
+- **Structure**: `--merge 2,3` joins inputs behind one menu entry (the 99-title limit counts
+  these merged titles, not files; a merged DVD title may have at most 99 chapters);
+  `--single-video` (Blu-ray); `--project-name`.
+- **AVCHD** (`--disc avchd5|avchd9`): written in the AVCHD form players expect on DVD media
+  (`BDMV` at the root, version `0100`, IDEX, AUXDATA, no CERTIFICATE); `burn` and `build-iso`
+  take the project folder or its `BDMV` like a Blu-ray.
 - **Performance**: `--jobs N`, `--two-pass` (pass 1 is a fast statistics-only run; pass 2 adds `-mbd rd`, and `-trellis 1 -intra_vlc 1` unless `--fast`), `--fast`, `--hw-decode`, `--hw-accel
   none|nvidia|intel|amd`, `--no-hw-encode`.
 - **Diagnostics**: `--keep-work` keeps `<output>/<project>.musadvd-work/` (intermediate files, logs).

@@ -17,6 +17,16 @@
   builds `BuildOptions` from its flags and ignores most stored settings.
 - `template_dir` points at ConvertXToDVD's template folder (or its install folder containing `Templates`); empty = the Windows default, and `CONVERTX_TEMPLATES` overrides both. With no templates found the GUI offers only the menu editor.
 - Settings that the engine does not act on stay visible in the UI but disabled, with the reason.
+- **Project settings**: the options that describe the disc (`PROJECT_SETTING_KEYS` in
+  `frontend/src/settings.ts`: TV standard, resolutions, encoding profile and target size, video
+  processing, audio mode and `audio_bitrate_kbps`, subtitle and audio languages, playback and menu
+  structure, chapters, volume label) are still `AppSettings` fields, but the GUI edits them in the
+  main window's Project settings tab, applies every change at once and saves them in the
+  `.musadvd` file (`settings` object). Opening a project writes them back to the settings file
+  (`withProjectSettings`: only those keys, only values of the same type); a new project starts
+  with the last used values. The General settings dialog keeps the app-level rest.
+- `audio_bitrate_kbps`: 0 = auto; any other value is snapped to the medium's AC-3 rates
+  (`sanitized()` resets values that are no AC-3 rate at all).
 
 ## Locale files
 

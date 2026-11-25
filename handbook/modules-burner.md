@@ -10,7 +10,7 @@ compile-checked only (`cargo check --lib --tests --target x86_64-unknown-linux-g
 | Module | Purpose |
 |---|---|
 | `udf.rs` | UDF 1.02 + ISO 9660 bridge writer for DVD-Video (`plan_image`) and file trees (`plan_tree`, optional Joliet). The image is **planned first** (every file gets its sector), then streamed (`write_image`). 2048-byte sectors. |
-| `udf250.rs` | Blu-ray image writer: UDF 2.50 with metadata partition, read-only, single session, no ISO bridge (`plan_bd_image`, `write_bd_image`). |
+| `udf250.rs` | Blu-ray image writer: UDF 2.50 with metadata partition, read-only, single session, no ISO bridge (`plan_bd_image`, `write_bd_image`). Also used for AVCHD on DVD media (`BDMV` at the root, no `CERTIFICATE`). |
 | `isoread.rs` | Read-only ISO 9660 access to an image: listing, lookup, file contents, sector-to-path map. UDF-only images (Blu-ray) are rejected. |
 | `layerbreak.rs` | Layer break for DVD-9: L0 at least L1, multiple of 16 sectors, break on a title-cell start; otherwise zero padding in front of a titleset and a patched `TT_SRPT`. |
 | `label.rs` | `sanitize_volume_label` (ISO d-characters, max 32); the frontend mirrors it in `frontend/src/label.ts`. |
@@ -43,7 +43,7 @@ compile-checked only (`cargo check --lib --tests --target x86_64-unknown-linux-g
 
 | Module | Purpose |
 |---|---|
-| `mod.rs` | Public entry points: `create_disc_image`, `burn_video_ts` (the single burn path of GUI and CLI), `OpticalBurner` trait (fake in `tests/burn_flow.rs`), `DriveInfo`, `Capacities`, `Overburn`, error types. |
+| `mod.rs` | Public entry points: `create_disc_image`, `burn_video_ts` (the single burn path of GUI and CLI), `OpticalBurner` trait (fake in `tests/burn_flow.rs`), `DriveInfo`, `Capacities`, `Overburn`, error types; media-aware Auto speed from the speeds the drive reports for the inserted disc (`auto_speed`, `preferred_speed_for`, `auto_speed_text`): the `auto_speed_x` ceiling, lowered to 2x for BD-RE, lifted to the fastest reported speed for rewritable DVDs (rated 6x/8x at most), BD-R 4x. |
 | `studio.rs` | Burn Studio operations (write, read, verify, build, Discovery). Reports through `Event`s, ends in an `Outcome`. |
 | `testutil.rs` | Synthetic disc content for tests. |
 

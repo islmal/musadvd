@@ -44,7 +44,7 @@ probe (ffprobe JSON, probe.rs)
   -> [1] menus      template.rs + menu.rs  (ConvertX template)
                     layout.rs              (custom layout from the menu editor)
                     masks -> spumux.rs     (subpicture muxing, native)
-  -> bitrate from the real menu size (calculator.rs)
+  -> bitrate from the real menu size (calculator.rs; floor by frame size, see "Size planning")
   -> [2] videos     encoder.rs: one ffmpeg run -> MPEG-2 + AC-3 program stream,
                     piped through one native subtitle stage per stream (textsub/subpic -> spumux)
   -> [3] authoring  author.rs -> dvdvm.rs / dvd_mux.rs / ifo.rs -> VIDEO_TS
@@ -53,7 +53,19 @@ probe (ffprobe JSON, probe.rs)
 ```
 
 Output layout: `<output>/<project>/VIDEO_TS/`; temporary files in `<output>/<project>.musadvd-work/`
-(removed after the build unless `keep_work`).
+(removed after the build unless `keep_work` or `MUSADVD_KEEP_WORK`; `dvd::remove_dir_retry` retries
+while Windows still holds files, and a failed build keeps the folder for diagnosis).
+
+**Titles and limits**: merged inputs (`merge_with_previous`) play as one title, so the 99-title
+limit counts merge groups (`dvd::check_title_count`, used by DVD and Blu-ray), not files. A merged
+DVD title may have at most 99 chapters in total; the GUI blocks Convert before that and offers
+"Split automatically" (`order.ts` `autoSplitPoints`).
+
+**Track order**: the order of the audio and subtitle lists is the disc's track order. Embedded and
+external subtitles form one list: `StreamSelection::subtitle_order` names every track by its source
+(stream index, or `EXTERNAL_SUB_SOURCE_BASE + i` for an external file), and `dvd::subtitle_order`
+turns it into a per-title permutation (`sub_order`) that labels, menu sources, IFO languages, spumux
+stream ids and the Blu-ray subtitle files all follow.
 
 **Video copy (`DvdVideoMode`)**: with `auto`/`strict`, `encoder::dvd_video_copy` decides per title
 whether compliant MPEG-2 is stream-copied (`-c:v copy`, still piped through the native subtitle
@@ -76,8 +88,47 @@ per title: libx264 or hardware H.264 (h264_nvenc / h264_qsv / h264_amf) -> title
   -> burner/udf250.rs  UDF 2.50 image with metadata partition (no ISO bridge)
 ```
 
-AVCHD is the same pipeline on DVD-5/9 media with AVCHD limits (BDMV on DVD media, not the 8.3
-camcorder layout). Only HDMV is supported: no BD-J, no pop-up menus.
+AVCHD is the same pipeline on DVD-5/9 media with AVCHD limits, written as tsMuxeR writes AVCHD:
+`BDMV` at the disc root with its long names (not the 8.3 `AVCHD/BDMV` layout of camcorder memory
+cards), version `0100` in `index.bdmv`, `MovieObject.bdmv`, the playlists and clip infos (BACKUP
+included), the `IDEX` ExtensionData in `index.bdmv` (`hdmv::avchd_index`), an `AUXDATA` folder, and
+neither the BD-J/META folders nor `CERTIFICATE` (`bd::avchd_versions`). Verified on a PS3 and a PS4;
+both treated the earlier Blu-ray-identical form (`0200`, no IDEX) as a data disc. BD-25/50 keep
+`0200`, the BD-J folders and `CERTIFICATE`. Only HDMV is supported: no BD-J, no pop-up menus.
+
+**Text subtitles on Blu-ray**: `pgs.rs` renders each cue to PGS; an object over 64 KB (big styled
+ASS signs) is split across ODS fragments (`igs::ods_segments`), and `bd_mux::validate_sup` checks
+every `.sup` before muxing, so a broken file fails with its track and byte position. CJK subtitles
+use regional fonts (`fonts::cjk_region`): Japanese, Hong Kong, Traditional/Simplified Chinese and
+Korean glyph forms, from the track language and title hints.
+
+## Size planning
+
+`dvd::bitrate_plan_at` solves one base video bitrate for the whole disc (quality weights scale it per
+title) from the target size minus audio, measured menu sizes, subtitles, copied titles and overhead:
+
+- **Bitrate floor by frame size** (`dvd::min_video_kbps`): DVD Full D1 1000, Half D1 600, SIF 400
+  kbit/s; Blu-ray 1080p 2500, 720p 1500 (AVCHD keeps its own 2000 where lower). With several
+  Blu-ray frame sizes the lowest floor applies to the whole plan.
+- **DVD overhead** grows with playing time (NAV packs) and the stream (pack/PES headers).
+- **Blu-ray/AVCHD overhead** is 8 % of every muxed stream (`BD_STREAM_OVERHEAD_RATIO`; measured
+  7.7 % of the raw streams, 7.42 % over the encoded files), copied and subtitle streams included.
+- **Subtitles**: 10 kbit/s per DVD track, 40 per Blu-ray track (text rendered to 1080p PGS measured
+  ~32 kbit/s).
+- **Hardware encoders** (NVENC/QSV/AMF selected) keep 0.5 % of the disc free
+  (`dvd::hw_reserve_mb`); their average bitrate is less exact than x264 2-pass. The build and the
+  GUI estimate (`calculate_project`) apply the same reserve.
+- **Audio**: encoded AC-3 uses the `audio_bitrate_kbps` setting snapped to the medium's rates
+  (`encoder::ac3_settings`; DVD 96-448, Blu-ray 192-640; auto = 448 for 5+ channels, else 192).
+
+Measured on four 24-min episodes as AVCHD-5 with NVENC: the old model (6 % of the disc, 10 kbit/s
+subtitles) only fitted because NVENC came in 2.9 % under its target; the corrected plan builds the
+same episodes to 4102 MB of 4300.
+
+**Quality rating** (GUI badges, `src-tauri` `project_calculation_with`): DVD bitrates are rated as
+the Full D1 bitrate with the same bits per pixel (Half D1/SIF are credited for their smaller
+frames); Blu-ray/AVCHD H.264 is rated by bits per pixel at its frame size (`h264_quality`, bands
+40 fair / 65 good / 85 excellent).
 
 **Audio copy (`BdAudioMode`)**: `encoder::bd_audio_copy` is the single rule set (returns the copy
 plan or an English reason); `plan_audio_bd` applies the mode, and `bd.rs` runs the strict check
@@ -108,6 +159,10 @@ Register map: `GPR1` chapter mark, `GPR2` play-all flag, `GPR3`-`GPR5`/`GPR7` in
 - **Custom layouts**: the menu editor produces a `CustomLayout` JSON (`layout.rs`,
   `frontend/src/layout.ts`); `layout::validate` enforces DVD limits (rectangular buttons, at most
   36 per menu, no overlaps, at most 128 VM commands per PGC).
+- **16:9 DVD menus** (`CustomLayout.aspect`, `layout::menu_aspect`): anamorphic 720-wide frame with
+  a widescreen (stream 0) and a letterbox (stream 1) subpicture stream, so highlights also line up
+  on 4:3 TVs; at most 18 buttons (`author::MAX_WIDE_MENU_BUTTONS`). The GUI picks 16:9 for
+  widescreen Full D1 projects unless the menu aspect is forced.
 - **Blu-ray**: the same `CustomLayout` on a 1920x1080 canvas; templates reach it through
   `bd_template.rs`, which scales pages and translates `ML_*` button locations to `layout::Action`s.
 - **Elements**: text, image, video and `rect` (fill, optional border in canvas units, scaled like

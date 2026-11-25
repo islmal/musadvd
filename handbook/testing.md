@@ -26,7 +26,35 @@ repository (PATH quirk, toolchain) is in [`../CLAUDE.md`](../CLAUDE.md).
 | Hygiene | `process_hygiene.rs`: fails on any `Command::new` in `src/` or `src-tauri/src/` outside `tools` |
 
 Unit tests live next to the code (`#[cfg(test)]`); `burner/spti.rs` and `mmcwrite.rs` test CDBs and
-the write sequence against byte-level expectations and a scripted fake drive.
+the write sequence against byte-level expectations and a scripted fake drive. Frontend logic lives
+in pure modules with vitest suites next to them (`frontend/src/*.test.ts`, `npm test`).
+
+Notable checks:
+- **Blu-ray text subtitles**: `bd_text_subs.rs` muxes an ASS/SRT track with objects over 64 KB into
+  a real `.m2ts` + `.clpi` (the "invalid .sup format" regression).
+- **AVCHD form**: `bluray.rs` `avchd5_builds_a_dvd_sized_bdmv` checks every file's `0100` version,
+  the IDEX position, the folders and the size, and reads a 200 s AVCHD build through libbluray;
+  the BD-25 fixture pins `0200`, the BD-J folders and `CERTIFICATE`. ffmpeg's `bluray:` protocol
+  skips playlists under 3 minutes, so libbluray checks need clips of at least that length.
+- **Size plan**: `dvd.rs` tests rebuild measured cases (four NVENC AVCHD episodes, a 19 h SIF DVD-9
+  collection, a 19 h 720p BD-25 collection) and check that the plan fits with the measured overhead.
+
+## Measuring the size model
+
+The planner's overhead constants come from real builds, not estimates. To re-measure: build a
+project with `--keep-work`, then compare each `BDMV/STREAM/*.m2ts` with its encoded
+`title_NN.mkv` + `.sup` in the work folder (container overhead), and the per-stream payload from
+`ffprobe -show_entries packet=stream_index,size` with the planned bitrates (encoder accuracy,
+subtitle rate). Last measurement (four 24-min episodes, AVCHD-5, NVENC): BDAV +7.42 % over the
+encoded files, PGS ~32 kbit/s per track, NVENC 2.9 % under its target; result 4102 MB of 4300.
+
+## Hardware results
+
+| Disc | Player | Result |
+|---|---|---|
+| AVCHD-5 on DVD-RW (`0100`, IDEX, root BDMV) | PS3 | Mounted as an AVCHD disc and played |
+| AVCHD-5 on DVD-RW (`0100`, IDEX, root BDMV) | PS4 | Played |
+| AVCHD-5 on DVD-RW (old Blu-ray-identical form, `0200`) | PS3 / PS4 | "Data Disc" / unsupported disc type |
 
 ## Oracles and fixtures
 
@@ -57,6 +85,12 @@ tools are not part of the product.
 `.github/workflows/release.yml` runs on `v*` tags (or manually): fetches the ffmpeg full build,
 `npm ci`, and builds the signed NSIS installer with `tauri-action`, plus the portable ZIP. The tag
 must match `version` in `src-tauri/tauri.conf.json` because the updater compares it.
+
+Every push to main also builds the rolling `nightly` pre-release. Its files are named after the
+version and `tauri-action` never overwrites an asset, so the Windows job first deletes all nightly
+assets ("Clear old nightly files"; the Linux job runs after it): the nightly always holds exactly
+the current build. Tagged releases are never touched. The in-app updater reads only the latest
+non-prerelease (`releases/latest/download/latest.json`), so the nightly cannot reach users.
 
 ## Blu-ray hardware test (PS4)
 
