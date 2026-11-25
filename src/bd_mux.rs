@@ -697,15 +697,74 @@ fn ac3_info(f: &[u8]) -> Option<(AudioInfo, u32)> {
     Some((AudioInfo { channels, rate, descriptor_tail: tail }, 1536))
 }
 
+fn dts_hd_exss_info(ex: &[u8]) -> Option<(u8, u32)> {
+    if ex.len() < 12 || ex[..4] != [0x64, 0x58, 0x20, 0x25] {
+        return None;
+    }
+    let mut pos = 40; // syncword (32) + reserved (8)
+    pos += 2; // nuExtSSIndex
+    let wide = bits(ex, pos, 1) != 0;
+    pos += 1;
+    pos += if wide { 12 } else { 8 }; // nuExtSSHeaderSize
+    pos += if wide { 20 } else { 16 }; // nuExtSSFsize
+    let static_fields = bits(ex, pos, 1) != 0;
+    pos += 1;
+    if !static_fields {
+        return None;
+    }
+    pos += 5; // nuRefClockCode (2) + nuExSSFrameDurationCode (3)
+    pos += if bits(ex, pos, 1) != 0 { 37 } else { 1 }; // bTimeStampFlag (+ 36-bit timestamp)
+    let n_pres = bits(ex, pos, 3) as usize + 1;
+    pos += 3;
+    let n_assets = bits(ex, pos, 3) as usize + 1;
+    pos += 3;
+    let mut masks = Vec::with_capacity(n_pres);
+    for _ in 0..n_pres {
+        masks.push(bits(ex, pos, n_assets));
+        pos += n_assets;
+    }
+    for &mask in &masks {
+        for a in 0..n_assets {
+            if (mask >> (n_assets - 1 - a)) & 1 != 0 {
+                pos += 8; // nuActiveAssetMask
+            }
+        }
+    }
+    if bits(ex, pos, 1) != 0 {
+        return None; // bMixMetadataEnbl: variable-length mix table; fall back to core
+    }
+    pos += 1;
+    // First AudioAssetDescriptor (ETSI TS 102 114 section 7.4.2):
+    pos += 12; // nuAssetDescriptFsize (9) + nuAssetIndex (3)
+    pos += if bits(ex, pos, 1) != 0 { 5 } else { 1 }; // bAssetTypeDescrPresent (+ 4)
+    pos += if bits(ex, pos, 1) != 0 { 25 } else { 1 }; // bLanguageDescrPresent (+ 24)
+    if bits(ex, pos, 1) != 0 {
+        let len = bits(ex, pos + 1, 10) as usize + 1;
+        pos += 11 + len * 8;
+    } else {
+        pos += 1;
+    }
+    pos += 5; // nuBitResolution
+    let rate_idx = bits(ex, pos, 4) as usize;
+    pos += 4;
+    let channels = bits(ex, pos, 8) as u8 + 1;
+    if pos + 8 > ex.len() * 8 {
+        return None;
+    }
+    const RATES: [u32; 16] = [8000, 16000, 32000, 64000, 128000, 22050, 44100, 88200, 176400, 352800, 12000, 24000, 48000, 96000, 192000, 384000];
+    Some((channels, RATES[rate_idx & 15]))
+}
+
 fn dts_info(f: &[u8]) -> Option<(AudioInfo, u32)> {
     if f.len() < 16 || f[..4] != [0x7F, 0xFE, 0x80, 0x01] {
         return None;
     }
     let nblks = bits(f, 39, 7);
+    let core_size = bits(f, 46, 14) as usize + 1;
     let (amode, sfreq) = (bits(f, 60, 6), bits(f, 66, 4));
     let lfe = bits(f, 66 + 4 + 5 + 5 + 3 + 1 + 1, 2) != 0;
     const CH: [u8; 16] = [1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 6, 6, 6, 7, 8, 8];
-    let rate = match sfreq {
+    let core_rate = match sfreq {
         1 => 8000,
         2 => 16000,
         3 => 32000,
@@ -717,7 +776,18 @@ fn dts_info(f: &[u8]) -> Option<(AudioInfo, u32)> {
         13 => 48000,
         _ => 48000,
     };
-    Some((AudioInfo { channels: CH[amode as usize & 15] + u8::from(lfe), rate, descriptor_tail: [0; 4] }, (nblks + 1) * 32))
+    let core_channels = CH[amode as usize & 15] + u8::from(lfe);
+    let core_samples = (nblks + 1) * 32;
+    let (channels, rate) = match f.get(core_size..).and_then(dts_hd_exss_info) {
+        Some((hd_ch, hd_rate)) => (hd_ch.max(core_channels), hd_rate.max(core_rate)),
+        None => (core_channels, core_rate),
+    };
+    let samples = if rate > core_rate && rate.is_multiple_of(core_rate) {
+        core_samples * (rate / core_rate)
+    } else {
+        core_samples
+    };
+    Some((AudioInfo { channels, rate, descriptor_tail: [0; 4] }, samples))
 }
 
 /// BD LPCM access unit: 4-byte header (size, channel assignment + rate, bits).
@@ -1162,5 +1232,88 @@ mod tests {
         assert_eq!(ats(3) as i64, ((BASE_PTS - VBV_LEN) * 300) & 0x3FFF_FFFF);
         // The padding is null packets on PID 0x1FFF.
         assert_eq!(pid(packets as usize - 1), 0x1FFF);
+    }
+
+    fn push_bits(v: &mut Vec<u8>, bit_pos: &mut usize, val: u64, n: usize) {
+        for i in (0..n).rev() {
+            let byte = *bit_pos / 8;
+            if byte >= v.len() {
+                v.push(0);
+            }
+            if (val >> i) & 1 != 0 {
+                v[byte] |= 1 << (7 - (*bit_pos % 8));
+            }
+            *bit_pos += 1;
+        }
+    }
+
+    fn synthetic_dts_hd_frame(core_len: usize, hd_rate_code: u64, hd_channels: u8) -> Vec<u8> {
+        let mut f = vec![0u8; core_len];
+        let mut p = 0;
+        push_bits(&mut f, &mut p, 0x7FFE_8001, 32); // core sync
+        push_bits(&mut f, &mut p, 1, 1); // FTYPE
+        push_bits(&mut f, &mut p, 31, 5); // SHORT
+        push_bits(&mut f, &mut p, 0, 1); // CPF
+        push_bits(&mut f, &mut p, 15, 7); // NBLKS = 15 -> 512 core samples
+        push_bits(&mut f, &mut p, (core_len - 1) as u64, 14); // FSIZE
+        push_bits(&mut f, &mut p, 9, 6); // AMODE = 9 (5 ch)
+        push_bits(&mut f, &mut p, 13, 4); // SFREQ = 13 (48 kHz)
+        push_bits(&mut f, &mut p, 0, 15); // RATE, MIX, DYNF, TIMEF, AUXF, HDCD, EXT_AUDIO_ID, EXT_AUDIO, ASPF
+        push_bits(&mut f, &mut p, 1, 2); // LFF = 1 (LFE present -> 6 ch core)
+
+        let mut ex = Vec::new();
+        let mut ep = 0;
+        push_bits(&mut ex, &mut ep, 0x6458_2025, 32); // ExSS sync
+        push_bits(&mut ex, &mut ep, 0, 8); // reserved
+        push_bits(&mut ex, &mut ep, 0, 2); // nuExtSSIndex
+        push_bits(&mut ex, &mut ep, 0, 1); // bHeaderSizeType = 0 (8/16 bits)
+        push_bits(&mut ex, &mut ep, 20, 8); // nuExtSSHeaderSize
+        push_bits(&mut ex, &mut ep, 64, 16); // nuExtSSFsize
+        push_bits(&mut ex, &mut ep, 1, 1); // bStaticFieldsPresent
+        push_bits(&mut ex, &mut ep, 2, 2); // nuRefClockCode = 48 kHz
+        push_bits(&mut ex, &mut ep, 0, 3); // nuExSSFrameDurationCode
+        push_bits(&mut ex, &mut ep, 0, 1); // bTimeStampFlag
+        push_bits(&mut ex, &mut ep, 0, 3); // nuNumAudioPres = 0 (1 presentation)
+        push_bits(&mut ex, &mut ep, 0, 3); // nuNumAssets = 0 (1 asset)
+        push_bits(&mut ex, &mut ep, 1, 1); // nuActiveExSSMask[0]
+        push_bits(&mut ex, &mut ep, 1, 8); // nuActiveAssetMask[0][0]
+        push_bits(&mut ex, &mut ep, 0, 1); // bMixMetadataEnbl = 0
+        push_bits(&mut ex, &mut ep, 16, 9); // nuAssetDescriptFsize
+        push_bits(&mut ex, &mut ep, 0, 3); // nuAssetIndex
+        push_bits(&mut ex, &mut ep, 0, 1); // bAssetTypeDescrPresent
+        push_bits(&mut ex, &mut ep, 0, 1); // bLanguageDescrPresent
+        push_bits(&mut ex, &mut ep, 0, 1); // bInfoTextPresent
+        push_bits(&mut ex, &mut ep, 23, 5); // nuBitResolution = 24-bit
+        push_bits(&mut ex, &mut ep, hd_rate_code, 4); // nuMaxSampleRate
+        push_bits(&mut ex, &mut ep, (hd_channels - 1) as u64, 8); // nuTotalNumChs
+        f.extend(ex);
+        f
+    }
+
+    #[test]
+    fn dts_hd_exss_header_and_clock() {
+        // 96 kHz 7.1 (rate code 13 = 96000 Hz, 8 ch) over a 48 kHz 5.1 core.
+        let frame = synthetic_dts_hd_frame(100, 13, 8);
+        let (info, samples) = dts_info(&frame).unwrap();
+        assert_eq!((info.channels, info.rate, samples), (8, 96_000, 1024));
+
+        // 192 kHz 5.1 (rate code 14 = 192000 Hz, 6 ch).
+        let frame_192 = synthetic_dts_hd_frame(100, 14, 6);
+        let (info_192, samples_192) = dts_info(&frame_192).unwrap();
+        assert_eq!((info_192.channels, info_192.rate, samples_192), (6, 192_000, 2048));
+
+        // AudioClock advances by 960 ticks (10.667 ms) per 512-core-sample frame even at 96 kHz.
+        let mut clock = AudioClock::new(Codec::DtsHdMa);
+        let au1 = clock.au(Pes { pts: Some(0), dts: None, payload: frame.clone() }, bd_clip::AUDIO_PID).unwrap();
+        let au2 = clock.au(Pes { pts: Some(0), dts: None, payload: frame }, bd_clip::AUDIO_PID).unwrap();
+        assert_eq!(au1[0].kind, Kind::CoreAudio);
+        assert_eq!((au1[0].pts, au1[0].dur), (BASE_PTS, 960));
+        assert_eq!((au2[0].pts, au2[0].dur), (BASE_PTS + 960, 960));
+
+        // Stream attributes & PMT coding types for 0x85 / 0x86.
+        let ma_stream = audio_stream(bd_clip::AUDIO_PID, Codec::DtsHdMa, *b"eng", info);
+        assert_eq!((ma_stream.codec.coding_type(), ma_stream.attr, ma_stream.es_info.as_slice()), (0x86, 0x64, &[][..]));
+        let hr_stream = audio_stream(bd_clip::AUDIO_PID + 1, Codec::DtsHdHr, *b"deu", AudioInfo { channels: 8, rate: 48_000, descriptor_tail: [0; 4] });
+        assert_eq!((hr_stream.codec.coding_type(), hr_stream.attr, hr_stream.es_info.as_slice()), (0x85, 0x61, &[][..]));
     }
 }

@@ -105,6 +105,8 @@ impl BdProject {
                     let codec = match t.audio_kinds.get(k).copied().unwrap_or(AudioKind::Ac3) {
                         AudioKind::Ac3 => Codec::Ac3,
                         AudioKind::Dts => Codec::Dts,
+                        AudioKind::DtsHdHr => Codec::DtsHdHr,
+                        AudioKind::DtsHdMa => Codec::DtsHdMa,
                         AudioKind::Lpcm => Codec::Lpcm,
                     };
                     (codec, lang_bytes(lang.as_deref()))

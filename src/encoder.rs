@@ -355,6 +355,8 @@ pub enum AudioTarget {
 pub enum AudioKind {
     Ac3,
     Dts,
+    DtsHdHr,
+    DtsHdMa,
     Lpcm,
 }
 
@@ -407,7 +409,7 @@ impl AudioOut {
     pub fn dvdauthor_format(self) -> &'static str {
         match self.kind() {
             AudioKind::Ac3 => "ac3",
-            AudioKind::Dts => "dts",
+            AudioKind::Dts | AudioKind::DtsHdHr | AudioKind::DtsHdMa => "dts",
             AudioKind::Lpcm => "pcm",
         }
     }
@@ -458,8 +460,9 @@ impl BdAudioMode {
     }
 }
 
-/// Copy of `a` onto a Blu-ray / AVCHD disc: AC-3, DTS (DTS-HD as its core), or a lossless LPCM
-/// repack of PCM/FLAC. `Err` is the English reason it cannot be copied.
+/// Copy of `a` onto a Blu-ray / AVCHD disc: AC-3, DTS / DTS-HD (HR/MA lossless copy on BD;
+/// AVCHD disallows DTS), or a lossless LPCM repack of PCM/FLAC. `Err` is the English reason it
+/// cannot be copied.
 pub fn bd_audio_copy(a: &AudioStream, target: AudioTarget) -> Result<AudioOut, String> {
     let avchd = match target {
         AudioTarget::Dvd => return Err("not a Blu-ray target".into()),
@@ -482,11 +485,32 @@ pub fn bd_audio_copy(a: &AudioStream, target: AudioTarget) -> Result<AudioOut, S
         }
         "dts" if avchd => Err("DTS cannot be copied to AVCHD".into()),
         "dts" => {
-            if ![48_000, 96_000, 192_000].contains(&rate) || a.channels > 8 {
+            if ![48_000, 96_000, 192_000].contains(&rate) || a.channels == 0 || a.channels > 8 {
                 return Err(format!("DTS needs 48/96/192 kHz and at most 8 channels (is {rate} Hz, {} ch)", a.channels));
             }
-            if profile.contains("HD") || profile.contains("96/24") {
-                // The extension substream is not Blu-ray DTS-HD; the core alone is a valid DTS track.
+            if profile.contains("Express") {
+                return Err("DTS Express cannot be copied as primary Blu-ray audio".into());
+            }
+            if profile.contains("MA") {
+                if rate == 192_000 && a.channels > 6 {
+                    return Err(format!("192 kHz DTS-HD MA supports at most 6 channels (is {} ch)", a.channels));
+                }
+                let k = kbps.unwrap_or(4000);
+                if k > 24_500 {
+                    return Err(format!("DTS-HD MA at {k} kbit/s exceeds 24500 kbit/s"));
+                }
+                Ok(AudioOut::Copy { kind: AudioKind::DtsHdMa, bsf: None, kbps: k, ch: a.channels })
+            } else if profile.contains("HD") {
+                if rate == 192_000 {
+                    return Err("DTS-HD HRA needs 48 or 96 kHz (is 192000 Hz)".into());
+                }
+                let k = kbps.unwrap_or(3000);
+                if k > 6_000 {
+                    return Err(format!("DTS-HD HRA at {k} kbit/s exceeds 6000 kbit/s"));
+                }
+                Ok(AudioOut::Copy { kind: AudioKind::DtsHdHr, bsf: None, kbps: k, ch: a.channels })
+            } else if profile.contains("96/24") {
+                // DTS 96/24 (non-HD): strip X96k so the 48 kHz core is a valid 0x82 DTS track.
                 let k = kbps.map_or(1536, |k| k.min(1536));
                 Ok(AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: k, ch: a.channels.min(6) })
             } else {
@@ -3169,12 +3193,12 @@ mod tests {
         // Mode "always AC-3" and filters rule copying out.
         assert!(matches!(kind(&ac3(384), Dvd, Ac3, false), AudioOut::Ac3 { .. }));
         assert!(matches!(kind(&ac3(384), Dvd, Auto, true), AudioOut::Ac3 { .. }));
-        // DTS: core copied on DVD (HD → core only), as is on BD, re-encoded on AVCHD; E-AC-3 never copied.
+        // DTS: core copied on DVD (HD → core only), lossless DTS-HD on BD, re-encoded on AVCHD; E-AC-3 never copied.
         let dts = audio("dts", 6, Some(1509), Some(48_000), Some("DTS"));
         assert!(matches!(kind(&dts, Dvd, Auto, false), AudioOut::Copy { kind: AudioKind::Dts, bsf: None, kbps: 1509, .. }));
         let hd = audio("dts", 8, Some(4000), Some(48_000), Some("DTS-HD MA"));
         assert!(matches!(kind(&hd, Dvd, Auto, false), AudioOut::Copy { bsf: Some("dca_core"), kbps: 1536, ch: 6, .. }));
-        assert!(matches!(kind(&hd, Bluray, Auto, false), AudioOut::Copy { bsf: Some("dca_core"), kbps: 1536, ch: 6, .. }));
+        assert!(matches!(kind(&hd, Bluray, Auto, false), AudioOut::Copy { kind: AudioKind::DtsHdMa, bsf: None, kbps: 4000, ch: 8 }));
         assert!(matches!(kind(&dts, Avchd, Auto, false), AudioOut::Ac3 { kbps: 448, ch: 6 }));
         assert!(matches!(kind(&audio("eac3", 6, Some(640), Some(48_000), None), Bluray, Auto, false), AudioOut::Ac3 { .. }));
     }
@@ -3208,13 +3232,27 @@ mod tests {
         use AudioTarget::*;
         let pcm = |codec: &str, ch, rate, bits| AudioStream { bits_per_raw_sample: bits, ..audio(codec, ch, None, Some(rate), None) };
         let why = |a: &AudioStream, t| bd_audio_copy(a, t).unwrap_err();
-        // DTS: 48/96/192 kHz and at most 8 channels; HD is copied as its core.
+        // DTS: 48/96/192 kHz and at most 8 channels; DTS-HD HR/MA copied losslessly on BD, core-only for 96/24.
         assert!(why(&audio("dts", 6, Some(1509), Some(44_100), Some("DTS")), Bluray).contains("48/96/192"));
         assert!(why(&audio("dts", 9, Some(1509), Some(48_000), Some("DTS")), Bluray).contains("at most 8"));
+        assert!(why(&audio("dts", 6, Some(256), Some(48_000), Some("DTS Express")), Bluray).contains("Express"));
         assert!(matches!(bd_audio_copy(&audio("dts", 6, Some(1509), Some(96_000), Some("DTS")), Bluray), Ok(AudioOut::Copy { bsf: None, kbps: 1509, .. })));
         let ma = audio("dts", 8, Some(4000), Some(48_000), Some("DTS-HD MA"));
-        assert_eq!(bd_audio_copy(&ma, Bluray), Ok(AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: 1536, ch: 6 }));
+        assert_eq!(bd_audio_copy(&ma, Bluray), Ok(AudioOut::Copy { kind: AudioKind::DtsHdMa, bsf: None, kbps: 4000, ch: 8 }));
+        let ma_96 = audio("dts", 8, Some(6500), Some(96_000), Some("DTS-HD MA + DTS:X"));
+        assert_eq!(bd_audio_copy(&ma_96, Bluray), Ok(AudioOut::Copy { kind: AudioKind::DtsHdMa, bsf: None, kbps: 6500, ch: 8 }));
+        let ma_192 = audio("dts", 6, Some(8000), Some(192_000), Some("DTS-HD MA"));
+        assert_eq!(bd_audio_copy(&ma_192, Bluray), Ok(AudioOut::Copy { kind: AudioKind::DtsHdMa, bsf: None, kbps: 8000, ch: 6 }));
+        assert!(why(&audio("dts", 8, Some(8000), Some(192_000), Some("DTS-HD MA")), Bluray).contains("at most 6"));
+        assert!(why(&audio("dts", 8, Some(25_000), Some(96_000), Some("DTS-HD MA")), Bluray).contains("24500"));
+        let hra = audio("dts", 8, Some(3018), Some(96_000), Some("DTS-HD HRA"));
+        assert_eq!(bd_audio_copy(&hra, Bluray), Ok(AudioOut::Copy { kind: AudioKind::DtsHdHr, bsf: None, kbps: 3018, ch: 8 }));
+        assert!(why(&audio("dts", 6, Some(3000), Some(192_000), Some("DTS-HD HRA")), Bluray).contains("48 or 96"));
+        assert!(why(&audio("dts", 8, Some(6500), Some(48_000), Some("DTS-HD HRA")), Bluray).contains("6000"));
+        let dts96 = audio("dts", 6, Some(1509), Some(96_000), Some("DTS 96/24"));
+        assert_eq!(bd_audio_copy(&dts96, Bluray), Ok(AudioOut::Copy { kind: AudioKind::Dts, bsf: Some("dca_core"), kbps: 1509, ch: 6 }));
         assert!(why(&ma, Avchd).contains("AVCHD"));
+        assert!(why(&hra, Avchd).contains("AVCHD"));
         // PCM / FLAC: lossless repack keeping the rate.
         let p = bd_audio_copy(&pcm("pcm_s24le", 6, 96_000, None), Bluray).unwrap();
         assert_eq!(p, AudioOut::Pcm { codec: "pcm_s24le", ch: 6, rate: 96_000 });
