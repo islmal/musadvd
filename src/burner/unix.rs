@@ -279,7 +279,7 @@ impl CliBurner {
         }
         if options.verify {
             let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Verifying disc …"));
-            let mut device = open_for_verify(drive_id)?;
+            let mut device = open_for_verify(drive_id, cancel, &progress_tx)?;
             let tx = progress_tx.clone();
             verify_against_image(&mut device, iso_path, cancel, &mut |f| {
                 let _ = tx.send(BurnProgress::new(BurnPhase::Verifying, f, "Verifying disc …"));
@@ -293,24 +293,33 @@ impl CliBurner {
     }
 }
 
-/// Opens `drive_id` for read-back verification, retrying briefly if the drive is still
-/// reloading/settling its TOC right after `growisofs` finishes (`ENOMEDIUM` = 123 on Linux).
-fn open_for_verify(drive_id: &str) -> std::io::Result<std::fs::File> {
-    let mut tried_close = false;
-    for attempt in 0..16 {
-        match std::fs::File::open(drive_id) {
-            Ok(f) => return Ok(f),
-            Err(e) if attempt < 15 && matches!(e.raw_os_error(), Some(123 | 16 | 11)) => {
-                if !tried_close && e.raw_os_error() == Some(123) {
-                    tried_close = true;
-                    let _ = blocking_tool_command("eject").args(["-t", drive_id]).status();
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            Err(e) => return Err(e),
-        }
+/// Opens `drive_id` for read-back verification. If the drive ejected or has not settled its TOC
+/// yet (`ENOMEDIUM` = 123 on Linux), asks it to close the tray (`eject -t`), prompts the user
+/// after 5 s if it is a manual-latch slim drive, and gives up after 3 minutes.
+fn open_for_verify(
+    drive_id: &str,
+    cancel: &AtomicBool,
+    progress_tx: &Sender<BurnProgress>,
+) -> Result<std::fs::File, BurnError> {
+    if let Some(file) = super::wait_for_tray(
+        cancel,
+        progress_tx,
+        super::TRAY_WARN_AFTER,
+        super::TRAY_TIMEOUT,
+        super::TRAY_POLL_INTERVAL,
+        || match std::fs::File::open(drive_id) {
+            Ok(f) => Ok(super::TrayPoll::Ready(f)),
+            Err(e) if e.raw_os_error() == Some(123) => Ok(super::TrayPoll::Absent),
+            Err(e) if matches!(e.raw_os_error(), Some(16 | 11)) => Ok(super::TrayPoll::Settling),
+            Err(e) => Err(BurnError::Io(e)),
+        },
+        || {
+            let _ = blocking_tool_command("eject").args(["-t", drive_id]).status();
+        },
+    )? {
+        return Ok(file);
     }
-    std::fs::File::open(drive_id)
+    std::fs::File::open(drive_id).map_err(BurnError::Io)
 }
 
 /// MMC over SG_IO: media probe from GET CONFIGURATION / READ DISC INFORMATION / GET PERFORMANCE
@@ -450,5 +459,19 @@ mod tests {
 
         let empty = DriveDetails { ready: false, current_profile: Some(0), ..Default::default() };
         assert!(!media_from_mmc(&empty, None).present);
+    }
+
+    #[test]
+    fn open_for_verify_opens_existing_and_errors_on_missing() {
+        let dir = std::env::temp_dir().join(format!("cx_unix_verify_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("disc.iso");
+        std::fs::write(&file, b"ok").unwrap();
+        let cancel = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(open_for_verify(file.to_str().unwrap(), &cancel, &tx).is_ok());
+        let missing = dir.join("missing.iso");
+        assert!(matches!(open_for_verify(missing.to_str().unwrap(), &cancel, &tx), Err(BurnError::Io(_))));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

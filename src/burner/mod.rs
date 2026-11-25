@@ -32,6 +32,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -753,6 +754,106 @@ pub fn verify_against_source(
     }
 }
 
+pub(crate) const MANUAL_TRAY_PROMPT: &str = "The drive cannot close its tray itself - push the tray in to verify the disc …";
+pub(crate) const TRAY_WARN_AFTER: Duration = Duration::from_secs(5);
+pub(crate) const TRAY_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const TRAY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Outcome of a single readiness check while waiting for a tray to close before verification.
+pub(crate) enum TrayPoll<T> {
+    /// Drive is ready (or hit an unrecoverable error that the verify open/read should report).
+    Ready(T),
+    /// Medium not present / tray appears open; ask the drive to load once, prompt after 5 s.
+    Absent,
+    /// Drive is still settling (e.g. becoming ready, EBUSY/EAGAIN); keep polling.
+    Settling,
+}
+
+/// Polls until the tray is closed and the drive is ready for verification, asking the drive to
+/// load once on the first `Absent`, prompting the user on `progress_tx` after `warn_after` if a
+/// slim manual-latch drive cannot close itself, and giving up after `timeout` (`Ok(None)`).
+pub(crate) fn wait_for_tray<T>(
+    cancel: &AtomicBool,
+    progress_tx: &Sender<BurnProgress>,
+    warn_after: Duration,
+    timeout: Duration,
+    poll_interval: Duration,
+    mut poll: impl FnMut() -> Result<TrayPoll<T>, BurnError>,
+    mut close_tray: impl FnMut(),
+) -> Result<Option<T>, BurnError> {
+    let start = Instant::now();
+    let (mut asked, mut warned) = (false, false);
+    loop {
+        match poll()? {
+            TrayPoll::Ready(v) => return Ok(Some(v)),
+            TrayPoll::Absent => {
+                if !asked {
+                    asked = true;
+                    close_tray();
+                } else if !warned && start.elapsed() > warn_after {
+                    warned = true;
+                    let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, MANUAL_TRAY_PROMPT));
+                }
+                if start.elapsed() > timeout {
+                    return Ok(None);
+                }
+            }
+            TrayPoll::Settling => {
+                if start.elapsed() > timeout {
+                    return Ok(None);
+                }
+            }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(BurnError::Cancelled);
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+/// SCSI `TEST UNIT READY` / `START STOP UNIT` tray wait for verification.
+#[cfg(windows)]
+pub(crate) fn wait_for_scsi_tray(
+    t: &dyn spti::ScsiTransport,
+    cancel: &AtomicBool,
+    progress_tx: &Sender<BurnProgress>,
+) -> Result<(), BurnError> {
+    wait_for_scsi_tray_with(t, cancel, progress_tx, TRAY_WARN_AFTER, TRAY_TIMEOUT, TRAY_POLL_INTERVAL)
+}
+
+#[cfg(any(windows, test))]
+fn wait_for_scsi_tray_with(
+    t: &dyn spti::ScsiTransport,
+    cancel: &AtomicBool,
+    progress_tx: &Sender<BurnProgress>,
+    warn_after: Duration,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(), BurnError> {
+    wait_for_tray(
+        cancel,
+        progress_tx,
+        warn_after,
+        timeout,
+        poll_interval,
+        || {
+            let r = t.exec(&spti::test_unit_ready(), spti::DataDir::None, &mut [], 30)?;
+            let Some(s) = r.sense.filter(|_| !r.ok()) else {
+                return Ok(TrayPoll::Ready(()));
+            };
+            let absent = s.key == 0x02 && s.asc == 0x3A;
+            if !absent && !s.recoverable() {
+                return Ok(TrayPoll::Ready(()));
+            }
+            Ok(if absent { TrayPoll::Absent } else { TrayPoll::Settling })
+        },
+        || {
+            let _ = t.exec(&spti::start_stop_unit(false), spti::DataDir::None, &mut [], 30);
+        },
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,5 +1049,107 @@ mod tests {
             Err(BurnError::VerifyFailed { sector: 2 })
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wait_for_tray_prompts_after_warn_and_stops_on_ready() {
+        let cancel = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut polls = 0u32;
+        let mut closes = 0u32;
+        let res = wait_for_tray(
+            &cancel,
+            &tx,
+            Duration::from_millis(15),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            || {
+                polls += 1;
+                if polls < 5 {
+                    Ok(TrayPoll::Absent)
+                } else {
+                    Ok(TrayPoll::Ready(42u32))
+                }
+            },
+            || closes += 1,
+        )
+        .unwrap();
+        assert_eq!(res, Some(42));
+        assert_eq!(closes, 1, "close_tray should only be attempted once");
+        let msgs: Vec<_> = rx.try_iter().collect();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].phase, BurnPhase::Verifying);
+        assert_eq!(msgs[0].message, MANUAL_TRAY_PROMPT);
+    }
+
+    #[test]
+    fn wait_for_tray_times_out_and_respects_cancel() {
+        let cancel = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut closes = 0u32;
+        let res: Option<()> = wait_for_tray(
+            &cancel,
+            &tx,
+            Duration::from_millis(5),
+            Duration::from_millis(25),
+            Duration::from_millis(10),
+            || Ok(TrayPoll::Absent),
+            || closes += 1,
+        )
+        .unwrap();
+        assert_eq!(res, None);
+        assert_eq!(closes, 1);
+        assert_eq!(rx.try_iter().count(), 1);
+
+        cancel.store(true, Ordering::Relaxed);
+        let err = wait_for_tray::<()>(
+            &cancel,
+            &tx,
+            Duration::from_millis(5),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            || Ok(TrayPoll::Settling),
+            || {},
+        );
+        assert!(matches!(err, Err(BurnError::Cancelled)));
+    }
+
+    #[test]
+    fn wait_for_scsi_tray_asks_load_once_and_warns() {
+        use std::cell::{Cell, RefCell};
+        struct MockScsi {
+            absent_polls: Cell<u32>,
+            sent: RefCell<Vec<Vec<u8>>>,
+        }
+        impl spti::ScsiTransport for MockScsi {
+            fn exec(&self, cdb: &[u8], _dir: spti::DataDir, _buf: &mut [u8], _timeout_s: u32) -> Result<spti::ScsiResult, BurnError> {
+                self.sent.borrow_mut().push(cdb.to_vec());
+                if cdb[0] == 0x00 && self.absent_polls.get() > 0 {
+                    self.absent_polls.set(self.absent_polls.get() - 1);
+                    return Ok(spti::ScsiResult {
+                        status: 2,
+                        sense: Some(spti::Sense { key: 0x02, asc: 0x3A, ascq: 0x00, progress: None }),
+                        transferred: 0,
+                    });
+                }
+                Ok(spti::ScsiResult { status: 0, sense: None, transferred: 0 })
+            }
+        }
+        let mock = MockScsi { absent_polls: Cell::new(4), sent: RefCell::new(Vec::new()) };
+        let cancel = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        wait_for_scsi_tray_with(
+            &mock,
+            &cancel,
+            &tx,
+            Duration::from_millis(15),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        let sent = mock.sent.borrow();
+        let loads = sent.iter().filter(|c| c.as_slice() == spti::start_stop_unit(false)).count();
+        assert_eq!(loads, 1, "start_stop_unit(false) sent once");
+        assert_eq!(rx.try_iter().count(), 1, "manual-latch prompt emitted once");
     }
 }
