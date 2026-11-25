@@ -100,7 +100,7 @@ fn all_templates_become_valid_blu_ray_menus() {
     use musadvd::author::{ClipSource, MenuFrame, PlaybackOptions};
     use musadvd::bd::BdRate;
     use musadvd::bd_menu;
-    use musadvd::bd_template::layout_from_template;
+    use musadvd::bd_template::{layout_from_template, TemplateLayoutParams};
     use musadvd::encoder::{Aspect, MenuLayer};
     use musadvd::layout::{validate_bd, LayoutTitle};
 
@@ -138,8 +138,17 @@ fn all_templates_become_valid_blu_ray_menus() {
             // Rendering 1080p layers is slow in debug builds: the pillarbox variant only runs once.
             let aspects: &[Aspect] = if count == 0 { &[Aspect::Standard] } else { &[Aspect::Wide] };
             for &aspect in aspects {
-                let (layout, _) = layout_from_template(&template, &ini, &titles, &vec![None; titles.len()], &vec![vec![5.0, 50.0]; titles.len()], aspect, &musadvd::dvd::ChapterSettings::default(), musadvd::menu::UiLang::DE)
-                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let (layout, _) = layout_from_template(TemplateLayoutParams {
+                    template: &template,
+                    template_path: &ini,
+                    titles: &titles,
+                    thumbnails: &vec![None; titles.len()],
+                    chapter_starts: &vec![vec![5.0, 50.0]; titles.len()],
+                    aspect,
+                    chapters: &musadvd::dvd::ChapterSettings::default(),
+                    ui: musadvd::menu::UiLang::DE,
+                })
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
                 validate_bd(&layout, &titles, frame).unwrap_or_else(|e| panic!("{name}: {e}"));
                 let nav = bd_menu::plan(&layout, &titles, &bd_menu::traits(&layout, &titles, frame), PlaybackOptions::default(), &titles.iter().map(|t| vec![t.chapters]).collect::<Vec<_>>());
                 let dir = out.join(format!("{count}"));

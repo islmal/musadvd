@@ -422,21 +422,25 @@ pub struct Rect {
     pub y1: u32,
 }
 
+/// Source and target coordinates for [`Rect::from_template`].
+#[derive(Debug, Clone, Copy)]
+pub struct TemplateRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub page_w: u32,
+    pub page_h: u32,
+    pub out_w: u32,
+    pub out_h: u32,
+}
+
 impl Rect {
     /// Converts a template rectangle into output coordinates: scales from page size to
     /// `out_w`x`out_h`, clips, and widens to even y values (subpicture fields are interlaced;
     /// spumux warns about odd y coordinates).
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_template(
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-        page_w: u32,
-        page_h: u32,
-        out_w: u32,
-        out_h: u32,
-    ) -> Option<Rect> {
+    pub fn from_template(r: TemplateRect) -> Option<Rect> {
+        let TemplateRect { x, y, w, h, page_w, page_h, out_w, out_h } = r;
         let sx = out_w as f64 / page_w.max(1) as f64;
         let sy = out_h as f64 / page_h.max(1) as f64;
         let clamp = |v: f64, max: u32| v.round().clamp(0.0, max as f64) as u32;
@@ -722,9 +726,16 @@ pub fn plan_buttons(
                 ButtonAction::Unsupported(other.to_string())
             }
         };
-        let Some(rect) =
-            Rect::from_template(b.x, b.y, b.width, b.height, page.width, page.height, out_w, out_h)
-        else {
+        let Some(rect) = Rect::from_template(TemplateRect {
+            x: b.x,
+            y: b.y,
+            w: b.width,
+            h: b.height,
+            page_w: page.width,
+            page_h: page.height,
+            out_w,
+            out_h,
+        }) else {
             warnings.push(format!("button '{}' lies outside the page, skipped", b.name));
             continue;
         };
@@ -1675,13 +1686,16 @@ mod tests {
 
     #[test]
     fn rect_is_even_and_clipped() {
-        let r = Rect::from_template(587, 475, 80, 76, 720, 576, 720, 576).unwrap();
+        let rect = |x, y, w, h, page_w, page_h, out_w, out_h| {
+            Rect::from_template(TemplateRect { x, y, w, h, page_w, page_h, out_w, out_h })
+        };
+        let r = rect(587, 475, 80, 76, 720, 576, 720, 576).unwrap();
         assert_eq!(r, Rect { x0: 587, y0: 474, x1: 667, y1: 552 });
-        let r = Rect::from_template(700, 570, 80, 76, 720, 576, 720, 576).unwrap();
+        let r = rect(700, 570, 80, 76, 720, 576, 720, 576).unwrap();
         assert_eq!((r.x1, r.y1), (720, 576));
-        assert!(Rect::from_template(800, 0, 10, 10, 720, 576, 720, 576).is_none());
+        assert!(rect(800, 0, 10, 10, 720, 576, 720, 576).is_none());
         // Scaling from an HD page.
-        let r = Rect::from_template(0, 0, 1920, 1080, 1920, 1080, 720, 576).unwrap();
+        let r = rect(0, 0, 1920, 1080, 1920, 1080, 720, 576).unwrap();
         assert_eq!(r, Rect { x0: 0, y0: 0, x1: 720, y1: 576 });
     }
 

@@ -694,7 +694,16 @@ impl OpticalBurner for ImapiBurner {
             if !is_write_feature_current(&rec) {
                 let source = Box::new(super::source::FileSource::open(iso_path)?);
                 let direct = super::mmcwrite::DirectOptions::default();
-                return super::mmcwrite::burn_direct(drive_id, true, source, speed, options, &direct, cancel, &progress_tx);
+                return super::mmcwrite::burn_direct(super::mmcwrite::BurnDirectParams {
+                    drive_id,
+                    spti_transport: true,
+                    source,
+                    speed,
+                    options,
+                    direct: &direct,
+                    cancel,
+                    tx: &progress_tx,
+                });
             }
         }
         let file = File::open(iso_path)?;
@@ -724,7 +733,16 @@ impl OpticalBurner for ImapiBurner {
         if let Ok(rec) = recorder(drive_id) {
             if !is_write_feature_current(&rec) {
                 let direct = super::mmcwrite::DirectOptions::default();
-                return super::mmcwrite::burn_direct(drive_id, true, source, speed, options, &direct, cancel, &progress_tx);
+                return super::mmcwrite::burn_direct(super::mmcwrite::BurnDirectParams {
+                    drive_id,
+                    spti_transport: true,
+                    source,
+                    speed,
+                    options,
+                    direct: &direct,
+                    cancel,
+                    tx: &progress_tx,
+                });
             }
         }
         let sectors = source.sectors();

@@ -122,24 +122,36 @@ impl BdProject {
     }
 }
 
+/// Parameters for [`menu_job`].
+pub struct MenuJobParams<'a> {
+    pub mkv: PathBuf,
+    pub sup: Option<PathBuf>,
+    pub number: usize,
+    pub intro_secs: Option<f64>,
+    pub still: bool,
+    pub rate: BdRate,
+    pub width: u32,
+    pub bdmv: &'a Path,
+    pub duration_secs: f64,
+}
+
 /// Mux job of one menu clip: video, its AC-3 sound and the Interactive Graphics stream (`sup`).
 /// Menu `number` is its playlist / clip number. With `intro_secs` the playlist gets a second
 /// mark where the loop behind the intro starts (the menu object restarts at it); `still` pages
 /// wait forever at their end.
-#[allow(clippy::too_many_arguments)]
-pub fn menu_job(mkv: PathBuf, sup: Option<PathBuf>, number: usize, intro_secs: Option<f64>, still: bool, rate: BdRate, width: u32, bdmv: &Path, duration_secs: f64) -> MuxJob {
+pub fn menu_job(p: MenuJobParams<'_>) -> MuxJob {
     // Rounded up to the millisecond: a mark before the keyframe would restart the intro.
-    let chapters = intro_secs.map_or_else(Vec::new, |t| vec![0.0, (t * 1000.0 - 1e-6).ceil() / 1000.0]);
+    let chapters = p.intro_secs.map_or_else(Vec::new, |t| vec![0.0, (t * 1000.0 - 1e-6).ceil() / 1000.0]);
     MuxJob {
-        mkv,
-        video: VideoSpec { fps: rate.fps, width, interlaced: rate.fake_interlaced, copy_vbv: None },
+        mkv: p.mkv,
+        video: VideoSpec { fps: p.rate.fps, width: p.width, interlaced: p.rate.fake_interlaced, copy_vbv: None },
         audio: vec![(Codec::Ac3, *b"und")],
-        subs: sup.into_iter().map(|sup| SubSpec { sup, lang: *b"und", ig: true }).collect(),
+        subs: p.sup.into_iter().map(|sup| SubSpec { sup, lang: *b"und", ig: true }).collect(),
         chapters,
-        number,
-        still,
-        bdmv: bdmv.to_path_buf(),
-        duration_secs,
+        number: p.number,
+        still: p.still,
+        bdmv: p.bdmv.to_path_buf(),
+        duration_secs: p.duration_secs,
     }
 }
 
@@ -212,13 +224,36 @@ mod tests {
     #[test]
     fn menu_marks() {
         let rate = BdRate { fps: (24000, 1001), fake_interlaced: false };
-        let menu = |intro| menu_job("m.mkv".into(), Some("m.sup".into()), 1, intro, true, rate, 1920, Path::new("b"), 10.0);
+        let menu = |intro| {
+            menu_job(MenuJobParams {
+                mkv: "m.mkv".into(),
+                sup: Some("m.sup".into()),
+                number: 1,
+                intro_secs: intro,
+                still: true,
+                rate,
+                width: 1920,
+                bdmv: Path::new("b"),
+                duration_secs: 10.0,
+            })
+        };
         let m = menu(None);
         assert!(m.chapters.is_empty() && m.still && m.number == 1 && m.subs[0].ig);
         assert_eq!(menu(Some(3.003)).chapters, vec![0.0, 3.003]);
         // Never before the keyframe at the loop start.
         assert_eq!(menu(Some(3.0447083)).chapters, vec![0.0, 3.045]);
-        assert!(menu_job("m.mkv".into(), None, 0, None, false, rate, 1920, Path::new("b"), 1.0).subs.is_empty());
+        let empty = menu_job(MenuJobParams {
+            mkv: "m.mkv".into(),
+            sup: None,
+            number: 0,
+            intro_secs: None,
+            still: false,
+            rate,
+            width: 1920,
+            bdmv: Path::new("b"),
+            duration_secs: 1.0,
+        });
+        assert!(empty.subs.is_empty());
     }
 
     #[test]

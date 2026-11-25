@@ -433,21 +433,24 @@ impl Nav<'_> {
     }
 }
 
+/// Inputs for [`layout_from_template`].
+pub struct TemplateLayoutParams<'a> {
+    pub template: &'a Template,
+    pub template_path: &'a Path,
+    pub titles: &'a [LayoutTitle],
+    pub thumbnails: &'a [Option<String>],
+    pub chapter_starts: &'a [Vec<f64>],
+    pub aspect: Aspect,
+    pub chapters: &'a ChapterSettings,
+    pub ui: UiLang,
+}
+
 /// Builds the Blu-ray menu layout of a ConvertX template. `thumbnails[i]` is an optional still
 /// for title `i + 1` (video slots show the moving clip without one); `chapter_starts[i][c]` is the
 /// source time of chapter `c + 1`'s sample frame of title `i + 1`. Texts follow `ui`. Returns the layout and
 /// German warnings.
-#[allow(clippy::too_many_arguments)] // mirrors the template inputs; a params struct would churn every caller
-pub fn layout_from_template(
-    template: &Template,
-    template_path: &Path,
-    titles: &[LayoutTitle],
-    thumbnails: &[Option<String>],
-    chapter_starts: &[Vec<f64>],
-    aspect: Aspect,
-    chapters: &ChapterSettings,
-    ui: UiLang,
-) -> Result<(CustomLayout, Vec<String>), LayoutError> {
+pub fn layout_from_template(p: TemplateLayoutParams<'_>) -> Result<(CustomLayout, Vec<String>), LayoutError> {
+    let TemplateLayoutParams { template, template_path, titles, thumbnails, chapter_starts, aspect, chapters, ui } = p;
     let fail = |m: &str| LayoutError(vec![m.to_string()]);
     if titles.is_empty() {
         return Err(fail("no titles for the menu"));
@@ -648,7 +651,17 @@ mod tests {
     }
 
     fn build(titles: &[LayoutTitle]) -> (CustomLayout, Vec<String>) {
-        layout_from_template(&template(), Path::new("t.ini"), titles, &vec![None; titles.len()], &vec![vec![11.0, 22.0, 33.0]; titles.len()], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap()
+        layout_from_template(TemplateLayoutParams {
+            template: &template(),
+            template_path: Path::new("t.ini"),
+            titles,
+            thumbnails: &vec![None; titles.len()],
+            chapter_starts: &vec![vec![11.0, 22.0, 33.0]; titles.len()],
+            aspect: Aspect::Wide,
+            chapters: &ChapterSettings::default(),
+            ui: UiLang::DE,
+        })
+        .unwrap()
     }
 
     fn five() -> Vec<LayoutTitle> {
@@ -739,7 +752,17 @@ mod tests {
     fn chapter_captions_follow_the_ui_language() {
         let titles = five();
         let texts = |ui| -> Vec<String> {
-            let (l, _) = layout_from_template(&template(), Path::new("t.ini"), &titles, &vec![None; titles.len()], &vec![vec![11.0, 22.0, 33.0]; titles.len()], Aspect::Wide, &ChapterSettings::default(), ui).unwrap();
+            let (l, _) = layout_from_template(TemplateLayoutParams {
+                template: &template(),
+                template_path: Path::new("t.ini"),
+                titles: &titles,
+                thumbnails: &vec![None; titles.len()],
+                chapter_starts: &vec![vec![11.0, 22.0, 33.0]; titles.len()],
+                aspect: Aspect::Wide,
+                chapters: &ChapterSettings::default(),
+                ui,
+            })
+            .unwrap();
             l.menus.iter().find(|m| m.id == "chap-2-p1").unwrap().elements.iter().filter_map(|e| match &e.content {
                 Content::Text { text, .. } => Some(text.clone()),
                 _ => None,
@@ -760,7 +783,17 @@ mod tests {
             + &video("Item0", 1, "ML_PAGE_BACKGROUND", 0, (0, 0, 424, 340));
         let tpl = Template::parse(&ini).unwrap();
         let titles = [lt("A", 1, &[1], &[]), lt("B", 1, &[1], &[]), lt("C", 1, &[1], &[])];
-        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
+        let (l, _) = layout_from_template(TemplateLayoutParams {
+            template: &tpl,
+            template_path: Path::new("t.ini"),
+            titles: &titles,
+            thumbnails: &[None, None, None],
+            chapter_starts: &vec![vec![1.0]; 3],
+            aspect: Aspect::Wide,
+            chapters: &ChapterSettings::default(),
+            ui: UiLang::DE,
+        })
+        .unwrap();
         let ids: Vec<&str> = l.menus.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(&ids[..2], ["title-p1", "bonus-p1"], "one main page although there are three titles");
         assert_eq!(actions(&l, "title-p1"), [Action::PlayTitle { title: 1 }, menu_to("bonus-p1")]);
@@ -780,7 +813,17 @@ mod tests {
         .concat();
         let tpl = Template::parse(&ini).unwrap();
         let titles = [lt("A", 1, &[1], &[]), lt("B", 1, &[1], &[]), lt("C", 1, &[1], &[])];
-        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &titles, &[None, None, None], &vec![vec![1.0]; 3], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
+        let (l, _) = layout_from_template(TemplateLayoutParams {
+            template: &tpl,
+            template_path: Path::new("t.ini"),
+            titles: &titles,
+            thumbnails: &[None, None, None],
+            chapter_starts: &vec![vec![1.0]; 3],
+            aspect: Aspect::Wide,
+            chapters: &ChapterSettings::default(),
+            ui: UiLang::DE,
+        })
+        .unwrap();
         let ids: Vec<&str> = l.menus.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(&ids[..3], ["title-p1", "episodes-p1", "episodes-p2"], "no bonus menu next to an episode menu: {ids:?}");
         // The bonus button is hidden, the episode button opens the list.
@@ -837,7 +880,17 @@ mod tests {
             [CXT\\pages\\Item0\\buttons\\Item0]\nname=b\nvalue=mask.png\nLeft=10\nTop=10\nWidth=154\nHeight=120\nlocation=ML_PLAY_ALL\n\
             [CXT\\pages\\Item0\\blocks\\Item0\\Gfx\\Item0]\nvalue=icon.png\ngfx_type=GT_BITMAP\nLocation=ML_PLAY_ALL\nLeft=10\nTop=10\nWidth=154\nHeight=120\nPaddingMethod=letterbox\n";
         let t = Template::parse(ini).unwrap();
-        let (l, w) = layout_from_template(&t, &dir.join("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
+        let (l, w) = layout_from_template(TemplateLayoutParams {
+            template: &t,
+            template_path: &dir.join("t.ini"),
+            titles: &[lt("A", 1, &[1], &[])],
+            thumbnails: &[None],
+            chapter_starts: &[vec![]],
+            aspect: Aspect::Wide,
+            chapters: &ChapterSettings::default(),
+            ui: UiLang::DE,
+        })
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let button = l.menus[0].elements.iter().find(|e| e.action.is_some()).unwrap_or_else(|| panic!("no button: {w:?}"));
         assert!(matches!(&button.content, Content::Image { src, fit: Fit::Contain, .. } if src.ends_with("mask.png")), "{:?}", button.content);
@@ -924,7 +977,17 @@ Width=100
 Height=40
 ";
         let tpl = Template::parse(ini).unwrap();
-        let (l, _) = layout_from_template(&tpl, Path::new("t.ini"), &[lt("A", 1, &[1], &[])], &[None], &[vec![]], Aspect::Wide, &ChapterSettings::default(), UiLang::DE).unwrap();
+        let (l, _) = layout_from_template(TemplateLayoutParams {
+            template: &tpl,
+            template_path: Path::new("t.ini"),
+            titles: &[lt("A", 1, &[1], &[])],
+            thumbnails: &[None],
+            chapter_starts: &[vec![]],
+            aspect: Aspect::Wide,
+            chapters: &ChapterSettings::default(),
+            ui: UiLang::DE,
+        })
+        .unwrap();
         assert!(l.animations);
         let m = &l.menus[0];
         assert_eq!(m.intro_secs, Some(3.0), "the page's intro length wins over the last key");

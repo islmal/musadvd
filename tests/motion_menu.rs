@@ -102,14 +102,34 @@ fn chapter_pages_start_sound_at_their_first_chapter() {
         ..RenderOptions::still(Path::new(DIR))
     };
     let out = std::env::temp_dir().join(format!("cx_chapter_sound_{}", std::process::id()));
-    let menu = menu::render_menu(&t, page, &kind, links, Some("ptt"), "chap", &out, &opts).unwrap();
+    let menu = menu::render_menu(&menu::RenderMenuParams {
+        template: &t,
+        page,
+        kind: &kind,
+        links,
+        entry: Some("ptt"),
+        prefix: "chap",
+        out_dir: &out,
+        opts: &opts,
+    })
+    .unwrap();
     let starts: Vec<f64> = menu.pages.iter().map(|(_, f)| f.audio.as_ref().unwrap().start_secs).collect();
     assert_eq!(starts, vec![0.0, 360.0]);
     assert!(menu.pages.iter().all(|(_, f)| f.audio.as_ref().unwrap().path == Path::new("movie.mkv")));
 
     // Without motion menus there is no sound at all (still menus).
     let still = RenderOptions { motion: false, ..opts };
-    let menu = menu::render_menu(&t, page, &kind, links, Some("ptt"), "chap_still", &out, &still).unwrap();
+    let menu = menu::render_menu(&menu::RenderMenuParams {
+        template: &t,
+        page,
+        kind: &kind,
+        links,
+        entry: Some("ptt"),
+        prefix: "chap_still",
+        out_dir: &out,
+        opts: &still,
+    })
+    .unwrap();
     assert!(menu.pages.iter().all(|(_, f)| f.audio.is_none() && !f.is_motion()));
     std::fs::remove_dir_all(&out).ok();
 }

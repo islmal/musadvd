@@ -514,7 +514,16 @@ fn burn_dispatch(
         };
         if use_direct {
             let direct = super::mmcwrite::DirectOptions::from_settings(&ctx.settings.write, &ctx.settings.io);
-            return super::mmcwrite::burn_direct(&drive.id, ctx.settings.io.transport == "spti", source, speed, options, &direct, &ctx.cancel, &tx);
+            return super::mmcwrite::burn_direct(super::mmcwrite::BurnDirectParams {
+                drive_id: &drive.id,
+                spti_transport: ctx.settings.io.transport == "spti",
+                source,
+                speed,
+                options,
+                direct: &direct,
+                cancel: &ctx.cancel,
+                tx: &tx,
+            });
         }
     }
     // CliBurner only burns files; sources (Discovery zeros, streamed builds) go straight through
@@ -682,7 +691,12 @@ pub fn write_files(ctx: &Ctx, drive: &DriveInfo, plan: &BuildPlan, speed: &str, 
     ctx.log("Building the image as a temporary file first for verification …");
     let rec = Recorder::new(ctx, 1.0);
     let total = plan.total_sectors() as u64;
-    let built = builder::build_to_file(plan, &tmp, Split::None, false, "none", &ctx.cancel, |f| rec.progress("building", f, total, None, "Building image …"));
+    let built = builder::build_to_file(
+        plan,
+        &tmp,
+        &builder::BuildFileOptions { split: Split::None, md5: false, layout_file: "none", cancel: &ctx.cancel },
+        |f| rec.progress("building", f, total, None, "Building image …"),
+    );
     let result = match built {
         Ok(_) => write(ctx, &job, &|| FileSource::open(&tmp).map(|s| Box::new(s) as Box<dyn SectorSource>).map_err(|e| e.to_string())),
         Err(_) if ctx.cancelled() => Ok(Outcome::cancelled()),
@@ -887,9 +901,17 @@ pub fn build(ctx: &Ctx, plan: &BuildPlan, out: &Path) -> Result<Outcome, String>
     let total = plan.total_sectors() as u64;
     let started = Instant::now();
     let rec = Recorder::new(ctx, 1.0);
-    let built = builder::build_to_file(plan, out, Split::parse(&b.split), s.general.md5_calculate, &b.layout_file, &ctx.cancel, |f| {
-        rec.progress("building", f, total, remaining(started, f), "Building image …");
-    });
+    let built = builder::build_to_file(
+        plan,
+        out,
+        &builder::BuildFileOptions {
+            split: Split::parse(&b.split),
+            md5: s.general.md5_calculate,
+            layout_file: &b.layout_file,
+            cancel: &ctx.cancel,
+        },
+        |f| rec.progress("building", f, total, remaining(started, f), "Building image …"),
+    );
     match built {
         Ok(r) => {
             let mut o = Outcome::ok(format!("{} sectors ({:.2} GB) written.", r.sectors, r.sectors as f64 * 2048.0 / 1e9));
