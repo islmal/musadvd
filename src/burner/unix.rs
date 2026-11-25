@@ -190,6 +190,9 @@ impl CliBurner {
         if !media.blank && !options.erase {
             return Err(BurnError::Unsupported(format!("the {} contains data and must not be erased", media.physical)));
         }
+        // `xorriso -blank as_needed` is complete here: it blanks sequential DVD-RW and leaves
+        // restricted-overwrite DVD-RW / DVD+RW / BD-RE ready to overwrite in place (and
+        // `probe_media_cli` already requires `xorriso`), so `dvd+rw-format` adds nothing.
         if !media.blank && media.physical.starts_with("DVD-RW") {
             let _ = progress_tx.send(BurnProgress::new(BurnPhase::Formatting, 0.0, "Erasing DVD-RW …"));
             let st = blocking_tool_command(self.xorriso()?).args(["-outdev", drive_id, "-blank", "as_needed"]).status()?;
