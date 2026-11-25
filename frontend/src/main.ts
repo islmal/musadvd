@@ -32,6 +32,7 @@ import {
   onBuildEvent,
   parseChaptersText,
   probeFile,
+  scanBdCopy,
   probeSubtitleFile,
   missingPaths,
   startConversion,
@@ -123,6 +124,8 @@ interface Title {
   subtitleStyle: SubtitleStyle;
   /** What happens when this title ends ("default" = the disc-wide playback settings). */
   afterPlayback: AfterPlayback;
+  /** Cached build-time scan (`scan_bd_copy`) for the current disc VBV class & rate. */
+  bdScan?: { key: string; status: "pending" | "done"; issue: string | null } | null;
 }
 
 type BdRes = "1080" | "720";
@@ -1225,7 +1228,13 @@ function calcInput() {
     })),
     motionMenu: usesMotion(),
     motionDuration: null,
-    bdMenuSecs: isBluray() && state.menuMode === "custom" && state.customLayout ? menuClipSecs(state.customLayout, 20) : [],
+    bdMenuSecs: isBluray()
+      ? state.menuMode === "custom" && state.customLayout
+        ? menuClipSecs(state.customLayout, 20)
+        : state.menuMode === "template" && state.titles.length > 0
+          ? Array(1 + 3 * state.titles.length).fill(1)
+          : []
+      : [],
   };
 }
 
@@ -1304,6 +1313,43 @@ const hasPictureFilters = (t: Title) =>
   Math.abs((t.contrast ?? 1) - 1) > 1e-4 ||
   Math.abs((t.saturation ?? 1) - 1) > 1e-4;
 
+function bdScanKey(t: Title): string | null {
+  const v = t.meta.video;
+  const mode = t.bdVideo ?? state.bdVideo;
+  if (!isBluray() || mode === "encode" || !v) return null;
+  const f = isAvchd() ? v.avchdFormat : v.bdFormat;
+  const copyIssue = isAvchd() ? v.avchdCopyIssue : v.bdCopyIssue;
+  if (!f || copyIssue) return null;
+  const res = t.bdResolution ?? projectBdRes();
+  const rate = t.bdRate || v.bdDefaultRates[`${state.settings?.tv_standard ?? "PAL"}${res}`];
+  if (res !== f.resolution || rate !== f.rate) return null;
+  if (isTrimmed(t) || t.crop || hasPictureFilters(t) || state.settings?.deinterlace === "yadif") return null;
+  return `${isAvchd() ? "avchd" : "bd"}:${f.rate}`;
+}
+
+function scheduleBdScans() {
+  for (const t of state.titles) {
+    const key = bdScanKey(t);
+    if (!key || t.bdScan?.key === key) continue;
+    const rate = key.slice(key.indexOf(":") + 1);
+    t.bdScan = { key, status: "pending", issue: null };
+    void scanBdCopy(t.meta.path, currentDisc(), rate).then(
+      (res) => {
+        if (t.bdScan?.key !== key) return;
+        t.bdScan = { key, status: "done", issue: res.issue };
+        renderTitleList();
+        renderTabs();
+        renderFooter();
+        scheduleCalc();
+      },
+      () => {
+        if (t.bdScan?.key !== key) return;
+        t.bdScan = { key, status: "done", issue: null };
+      },
+    );
+  }
+}
+
 /** Blu-ray/AVCHD video copy verdict of a title (null = the video is encoded anyway). Mirrors
  * the build: the title must keep the source's own format; trim, crop and picture filters always
  * force a re-encode; the disc's bitrate limit is checked there. `strict`: a failed copy stops the build. */
@@ -1317,6 +1363,8 @@ function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: 
   // An unset rate follows the TV standard and resolution settings, as in the build.
   const rate = t.bdRate || v.bdDefaultRates[`${state.settings?.tv_standard ?? "PAL"}${res}`];
   const changed = !!f && (res !== f.resolution || rate !== f.rate);
+  const key = bdScanKey(t);
+  const scanIssue = key && t.bdScan?.key === key && t.bdScan.status === "done" ? t.bdScan.issue : null;
   const issue =
     copyIssue ??
     (changed
@@ -1329,7 +1377,7 @@ function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: 
             ? tr("main.pictureFiltersActive")
             : state.settings?.deinterlace === "yadif"
               ? tr("main.deinterlaceForced")
-              : null);
+              : scanIssue);
   const strict = mode !== "auto";
   return issue ? { kbps: null, issue, strict } : { kbps: copyKbps, issue: null, strict };
 }
@@ -1373,6 +1421,7 @@ function renderVideoTab(t: Title) {
   const v = t.meta.video;
   const res = t.bdResolution ?? projectBdRes();
   const changed = () => {
+    scheduleBdScans();
     renderTitleList();
     renderFooter();
     scheduleCalc();
@@ -2978,6 +3027,7 @@ async function settingsApplied(saved: AppSettings) {
 }
 
 function renderAll() {
+  scheduleBdScans();
   syncMenuTitle();
   renderTvBanner();
   renderTitleList();

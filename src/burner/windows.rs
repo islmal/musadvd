@@ -925,6 +925,9 @@ fn burn_feed(p: BurnFeedParams<'_>, verify: &mut Verify<'_>) -> Result<(), BurnE
             return Err(BurnError::Backend("Verification not possible: the drive has no drive letter".into()));
         }
         let _ = progress_tx.send(BurnProgress::new(BurnPhase::Verifying, 0.0, "Verifying disc …"));
+        if let Ok(t) = super::spti::ImapiExTransport::open(drive_id) {
+            super::wait_for_scsi_tray(&t, cancel, &progress_tx)?;
+        }
         let mut device = power::open_raw_volume(&format!(r"\\.\{letter}"))?;
         verify(&mut device, &progress_tx)?;
     }

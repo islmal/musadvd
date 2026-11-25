@@ -404,6 +404,42 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BdCopyScanResult {
+    issue: Option<String>,
+    needs_timing: bool,
+}
+
+/// Scans a Blu-ray/AVCHD video stream-copy candidate through the disc's VBV buffer and keyframe
+/// distance rules (`bd_mux::scan_video`), matching the build-time check.
+#[tauri::command]
+async fn scan_bd_copy(state: State<'_, AppState>, path: String, disc: DiscType, rate: String) -> Result<BdCopyScanResult, String> {
+    if !disc.is_bluray() {
+        return Err("not a Blu-ray or AVCHD disc".into());
+    }
+    let bd_rate = musadvd::bd::BdRate::from_name(&rate, musadvd::author::Resolution::Hd1080)
+        .or_else(|| musadvd::bd::BdRate::from_name(&rate, musadvd::author::Resolution::Hd720))
+        .ok_or_else(|| format!("unknown Blu-ray frame rate {rate}"))?;
+    let tools = toolchain(&state).await?;
+    let info = probe::probe(&tools.ffprobe, Path::new(&path)).await.map_err(|e| e.to_string())?;
+    let v = info.video.as_ref().ok_or("no video stream")?;
+    let limits = disc.limits();
+    let vbv = (u64::from(limits.vbv_maxrate_kbps) * 1000, u64::from(limits.vbv_bufsize_kbit) * 1000);
+    let args = musadvd::bd_mux::scan_args(info.input_args(), v.index);
+    let (fps, keyint) = (bd_rate.fps, bd_rate.keyint());
+    let scan = tools
+        .ffmpeg_sink(&args, info.duration_secs, |_| {}, move |pipe| {
+            musadvd::bd_mux::scan_video(std::io::BufReader::with_capacity(1 << 20, pipe), fps, vbv)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(match scan {
+        Ok(s) => BdCopyScanResult { issue: s.issue(keyint), needs_timing: s.needs_timing },
+        Err(why) => BdCopyScanResult { issue: Some(why), needs_timing: false },
+    })
+}
+
 /// Probes a standalone external subtitle file (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.sup`).
 #[tauri::command]
 fn probe_subtitle_file(state: State<'_, AppState>, path: String) -> Result<ExternalSubtitleInfo, String> {
@@ -1163,14 +1199,22 @@ fn calculate_project(state: State<'_, AppState>, settings: ProjectSettings) -> R
     let app = state.settings();
     let res = app.title_resolution(settings.disc);
     // Same hardware-encoder reserve as the build ([`dvd::hw_reserve_mb`]), from the same settings mapping.
+    // Note: NVENC in practice lands ~3 % under its target bitrate (so AVCHD/BD discs often fill to ~95-96 %),
+    // while `dvd::bitrate_plan_at` keeps the conservative 0.5 % reserve so we never over-promise disc space.
     let mut opts = BuildOptions { disc: settings.disc, ..BuildOptions::default() };
     app.apply_to(&mut opts);
     let reserve = dvd::hw_reserve_mb(settings.disc, opts.hw_accel);
     project_calculation_with(settings, app.profile(), res, reserve)
 }
 
-/// Size of an encoded Blu-ray menu clip per second.
+/// Size of a still Blu-ray menu clip (1 s static frame + AC-3 + IGS + M2TS overhead).
+const BD_STILL_MENU_MB: f64 = 0.3;
+/// Size of an encoded Blu-ray motion menu clip per second (8 Mbit/s H.264 + 192 kbit/s AC-3 + 8 % BDAV).
 const BD_MENU_MB_PER_SEC: f64 = 1.1;
+
+fn estimate_bd_menu_mb(menu_secs: &[f64]) -> f64 {
+    menu_secs.iter().map(|&s| if s <= 1.0 { BD_STILL_MENU_MB } else { s * BD_MENU_MB_PER_SEC }).sum()
+}
 
 /// Full D1 bitrate with the same bits per pixel as `kbps` at the DVD title resolution, so the
 /// quality rating credits Half D1 / SIF with spending the same bitrate on fewer pixels.
@@ -1195,7 +1239,7 @@ fn project_calculation_with(settings: ProjectSettings, profile: EncodingProfile,
     let target_mb = settings.disc.target_mb();
     // A Blu-ray has menus only from the editor (8 Mbit/s H.264 + AC-3 + muxing ≈ 1.1 MB/s).
     let menu_mb = if settings.disc.is_bluray() {
-        settings.bd_menu_secs.iter().sum::<f64>() * BD_MENU_MB_PER_SEC
+        estimate_bd_menu_mb(&settings.bd_menu_secs)
     } else if let Some(layout) = &settings.custom_layout {
         dvd::estimate_custom_layout_mb(layout, settings.motion_duration.unwrap_or(DEFAULT_MOTION_SECS))
     } else {
@@ -1559,6 +1603,7 @@ fn main() -> std::process::ExitCode {
             get_available_languages,
             get_locale_data,
             probe_file,
+            scan_bd_copy,
             probe_subtitle_file,
             import_chapters_file,
             parse_chapters_text,
@@ -1787,7 +1832,7 @@ mod tests {
         // Menus from the editor: a still (1 s) and a 20 s loop.
         let with_menus = ProjectSettings { bd_menu_secs: vec![1.0, 20.0], ..project(DiscType::Bd25) };
         let m = project_calculation(with_menus, EncodingProfile::Auto, Hd1080).unwrap();
-        assert!((m.menu_mb - 21.0 * BD_MENU_MB_PER_SEC).abs() < 1e-9);
+        assert!((m.menu_mb - (BD_STILL_MENU_MB + 20.0 * BD_MENU_MB_PER_SEC)).abs() < 1e-9);
         assert!(r.fits && (20_000..35_000).contains(&r.video_kbps), "{}", r.video_kbps);
         assert_eq!(r.titles[0].quality, Quality::Good);
         assert!(r.titles[0].quality_percent >= 85.0, "{}", r.titles[0].quality_percent);
