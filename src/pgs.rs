@@ -1,7 +1,10 @@
-//! Text subtitles as Blu-ray Presentation Graphics: one epoch per cue (epoch-start display set with
-//! the rendered text, clear set at the end), in the `.sup` layout of [`crate::igs`]. Segment
-//! timestamps follow the decode-time rules tsMuxeR 2.7.0 applied to the same cues (plane clear
-//! 32 MB/s, object decode 16 MB/s; verified against its output).
+//! Text subtitles as Blu-ray Presentation Graphics: overlapping pictures are partitioned into
+//! non-overlapping display intervals (composited per interval so simultaneous cues stay visible
+//! together), in the `.sup` layout of [`crate::igs`]. Segment timestamps follow the decode-time
+//! rules tsMuxeR 2.7.0 applied to the same cues (plane clear 32 MB/s, object decode 16 MB/s;
+//! verified against its output).
+
+use std::borrow::Cow;
 
 use crate::igs::{ods_segments, rgb_to_ycrcb, rle_encode, segment, IgObject};
 use crate::subpic::Picture;
@@ -12,6 +15,61 @@ const MIN_START: f64 = 0.1;
 
 fn ticks(num: u64, rate: u64) -> u32 {
     (num * 90_000).div_ceil(rate) as u32
+}
+
+struct Interval<'a> {
+    start: u32,
+    end: u32,
+    active: Vec<&'a Picture>,
+}
+
+/// Composites `active` pictures onto their union bounding box, clamped to `canvas_size`.
+fn composite_pictures(active: &[&Picture], canvas_size: (u32, u32)) -> Option<(image::RgbaImage, u32, u32)> {
+    let (cw, ch) = canvas_size;
+    let x0 = active.iter().map(|p| p.x).min()?;
+    let y0 = active.iter().map(|p| p.y).min()?;
+    let x1 = active.iter().map(|p| p.x + p.image.width()).max()?.min(cw);
+    let y1 = active.iter().map(|p| p.y + p.image.height()).max()?.min(ch);
+    let (bw, bh) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if bw == 0 || bh == 0 {
+        return None;
+    }
+    let mut out = image::RgbaImage::new(bw, bh);
+    for p in active {
+        let ox = p.x - x0;
+        let oy = p.y - y0;
+        for (py, row) in p.image.rows().enumerate() {
+            let dy = oy + py as u32;
+            if dy >= bh {
+                break;
+            }
+            for (px, &src) in row.enumerate() {
+                let dx = ox + px as u32;
+                if dx >= bw {
+                    break;
+                }
+                let sa = src.0[3] as u32;
+                if sa == 0 {
+                    continue;
+                }
+                let dst = out.get_pixel_mut(dx, dy);
+                let da = dst.0[3] as u32;
+                if sa == 255 || da == 0 {
+                    *dst = src;
+                } else {
+                    let inv = 255 - sa;
+                    let out_a = sa + (da * inv + 127) / 255;
+                    if out_a > 0 {
+                        for c in 0..3 {
+                            dst.0[c] = ((src.0[c] as u32 * sa * 255 + dst.0[c] as u32 * da * inv + out_a * 127) / (out_a * 255)).min(255) as u8;
+                        }
+                        dst.0[3] = out_a.min(255) as u8;
+                    }
+                }
+            }
+        }
+    }
+    Some((out, x0, y0))
 }
 
 /// Frame-rate code of a PCS (BD: 1 = 24000/1001 … 7 = 60000/1001).
@@ -31,6 +89,36 @@ pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fp
     let (w, h) = canvas_size;
     let code = frame_rate_code(fps) << 4;
     let frame = |t: f64| ((t * fps.0 as f64 / fps.1 as f64).round() as u64 * fps.1 as u64 * 90_000).div_ceil(fps.0 as u64);
+    let norm: Vec<(u32, u32, &Picture)> = pictures
+        .iter()
+        .filter(|p| p.image.width() > 0 && p.image.height() > 0)
+        .map(|p| {
+            let start = frame(p.start.max(MIN_START)) as u32;
+            let end = (frame(p.end) as u32).max(start + 1);
+            (start, end, p)
+        })
+        .collect();
+    if norm.is_empty() {
+        return Vec::new();
+    }
+
+    let mut bounds: Vec<u32> = Vec::with_capacity(norm.len() * 2);
+    for &(s, e, _) in &norm {
+        bounds.push(s);
+        bounds.push(e);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut intervals: Vec<Interval<'_>> = Vec::new();
+    for win in bounds.windows(2) {
+        let (t0, t1) = (win[0], win[1]);
+        let active: Vec<&Picture> = norm.iter().filter(|&&(s, e, _)| s <= t0 && e >= t1).map(|&(_, _, p)| p).collect();
+        if !active.is_empty() {
+            intervals.push(Interval { start: t0, end: t1, active });
+        }
+    }
+
     let plane = ticks(w as u64 * h as u64, 32_000_000);
     let mut out = Vec::new();
     let mut number = 0u16;
@@ -56,10 +144,18 @@ pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fp
         }
         p
     };
-    for pic in pictures {
-        let (img, x, y) = (&pic.image, pic.x, pic.y);
-        let start = frame(pic.start.max(MIN_START));
-        let end = frame(pic.end).max(start + 1);
+    let mut prev_end_pts = 0u32;
+    for (idx, iv) in intervals.iter().enumerate() {
+        let (img, x, y): (Cow<'_, image::RgbaImage>, u32, u32) = if iv.active.len() == 1 {
+            let p = iv.active[0];
+            (Cow::Borrowed(&p.image), p.x, p.y)
+        } else {
+            let Some((img, x, y)) = composite_pictures(&iv.active, canvas_size) else {
+                continue;
+            };
+            (Cow::Owned(img), x, y)
+        };
+        let (start, end) = (iv.start, iv.end);
         let (iw, ih) = (img.width() as usize, img.height() as usize);
         if iw == 0 || ih == 0 {
             continue;
@@ -93,7 +189,9 @@ pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fp
         let rle = rle_encode(&px, iw, ih);
         let area = (iw * ih) as u64;
         let (win, obj) = (ticks(area, 32_000_000), ticks(area, 16_000_000));
-        let dts = (start as u32).saturating_sub(plane + win + 1);
+        let dts = start.saturating_sub(plane + win + 1).max(prev_end_pts + 1).min(start - 1);
+        let wds_pts = start.saturating_sub(win).max(dts);
+        let end_pts = (dts + obj).min(start - 1);
 
         let mut pds = vec![0, 0];
         // Index 0: transparent
@@ -103,19 +201,26 @@ pub fn build_sup_from_pictures(pictures: &[Picture], canvas_size: (u32, u32), fp
             pds.extend([(i as u8) + 1, y_c, cr, cb, c[3]]);
         }
         // Busy cues (outlines, anti-aliasing, typesetting) easily exceed one 64 KiB segment.
-        let ods = ods_segments(dts + obj, dts, &IgObject { id: 0, width: iw as u16, height: ih as u16, rle });
+        let ods = ods_segments(end_pts, dts, &IgObject { id: 0, width: iw as u16, height: ih as u16, rle });
 
-        out.extend(segment(start as u32, dts, 0x16, &pcs(0x80, &[(x as u16, y as u16)])));
-        out.extend(segment(start as u32 - win, dts, 0x17, &wds(x as u16, y as u16, iw as u16, ih as u16)));
+        out.extend(segment(start, dts, 0x16, &pcs(0x80, &[(x as u16, y as u16)])));
+        out.extend(segment(wds_pts, dts, 0x17, &wds(x as u16, y as u16, iw as u16, ih as u16)));
         out.extend(segment(dts, 0, 0x14, &pds));
         out.extend(ods.concat());
-        out.extend(segment(dts + obj, 0, 0x80, &[]));
+        out.extend(segment(end_pts, 0, 0x80, &[]));
+        prev_end_pts = end_pts;
 
-        // Clear set: the window is released at `end`.
-        let end = end as u32;
-        out.extend(segment(end, end - win - 90, 0x16, &pcs(0, &[])));
-        out.extend(segment(end - win, end - win - 90, 0x17, &wds(x as u16, y as u16, iw as u16, ih as u16)));
-        out.extend(segment(end - 90, 0, 0x80, &[]));
+        // Clear set: only needed if there is a gap before the next interval (or at the end).
+        let next_starts_at_end = intervals.get(idx + 1).is_some_and(|next| next.start == end);
+        if !next_starts_at_end {
+            let clear_end_pts = end.saturating_sub(90).max(prev_end_pts + 1).min(end);
+            let clear_dts = end.saturating_sub(win + 90).max(prev_end_pts + 1).min(clear_end_pts);
+            let clear_wds_pts = end.saturating_sub(win).max(clear_dts);
+            out.extend(segment(end, clear_dts, 0x16, &pcs(0, &[])));
+            out.extend(segment(clear_wds_pts, clear_dts, 0x17, &wds(x as u16, y as u16, iw as u16, ih as u16)));
+            out.extend(segment(clear_end_pts, 0, 0x80, &[]));
+            prev_end_pts = clear_end_pts;
+        }
     }
     out
 }
@@ -224,5 +329,67 @@ mod tests {
         assert_eq!(segs.len(), 8);
         assert!(segs[0].2 > 0 && segs[0].1 > segs[0].2);
         assert_eq!(&segs[0].3[..5], &[0x05, 0x00, 0x02, 0xD0, 0x70]);
+    }
+
+    #[test]
+    fn overlapping_cues_partition_and_composite_together() {
+        let canvas = Canvas::hd(1920, 1080);
+        let top = cue(1.0, 4.0, &["{\\an8}Top sign"]);
+        let bottom = cue(2.0, 3.0, &["Bottom line"]);
+        let sup = build_sup(&[top, bottom], &canvas, (24000, 1001));
+        crate::bd_mux::validate_sup(&sup).unwrap();
+
+        // DTS (or PTS when DTS == 0) must be non-decreasing across all segments.
+        let segs = parse(&sup);
+        let mut last_dts = 0u32;
+        for s in &segs {
+            let eff_dts = if s.2 == 0 { s.1 } else { s.2 };
+            assert!(eff_dts > 0 && eff_dts >= last_dts, "non-monotonic dts: {eff_dts} < {last_dts}");
+            last_dts = eff_dts;
+        }
+
+        let decoded = crate::subpic::decode_pgs(&sup).unwrap();
+        assert_eq!(decoded.pictures.len(), 3, "expected 3 intervals: [1..2, 2..3, 3..4]");
+        let (p0, p1, p2) = (&decoded.pictures[0], &decoded.pictures[1], &decoded.pictures[2]);
+        assert!((p0.start - 1.0).abs() < 0.05 && (p0.end - 2.0).abs() < 0.05);
+        assert!((p1.start - 2.0).abs() < 0.05 && (p1.end - 3.0).abs() < 0.05);
+        assert!((p2.start - 3.0).abs() < 0.05 && (p2.end - 4.0).abs() < 0.05);
+
+        // During [2..3], both top and bottom cues are visible in the same composited picture.
+        assert!(p0.y < 300 && p0.image.height() < 200);
+        assert_eq!((p2.x, p2.y, p2.image.dimensions()), (p0.x, p0.y, p0.image.dimensions()));
+        assert!(p1.y <= p0.y && p1.y + p1.image.height() > 700, "composited picture spans top to bottom: y={}, h={}", p1.y, p1.image.height());
+        let has_top = p1.image.rows().take(p0.image.height() as usize).any(|mut r| r.any(|px| px.0[3] > 0));
+        let has_bottom = p1.image.rows().skip((p1.image.height() / 2) as usize).any(|mut r| r.any(|px| px.0[3] > 0));
+        assert!(has_top && has_bottom, "both cues must have visible pixels in the overlap interval");
+    }
+
+    #[test]
+    fn three_way_overlap_and_adjacent_cues_produce_monotonic_intervals() {
+        let canvas = Canvas::hd(1920, 1080);
+        let cues = [
+            cue(1.0, 3.0, &["{\\an8}One"]),
+            cue(1.5, 2.5, &["{\\an5}Two"]),
+            cue(2.0, 4.0, &["Three"]),
+            cue(4.0, 5.0, &["Four"]),
+        ];
+        let sup = build_sup(&cues, &canvas, (24000, 1001));
+        crate::bd_mux::validate_sup(&sup).unwrap();
+        let decoded = crate::subpic::decode_pgs(&sup).unwrap();
+        assert_eq!(decoded.pictures.len(), 6);
+        for w in decoded.pictures.windows(2) {
+            assert!(w[0].end <= w[1].start + 1e-6, "pictures must not overlap: {:?} vs {:?}", (w[0].start, w[0].end), (w[1].start, w[1].end));
+        }
+    }
+
+    #[test]
+    fn identical_timestamps_composite_into_single_epoch() {
+        let canvas = Canvas::hd(1920, 1080);
+        let cues = [cue(1.0, 2.5, &["{\\an8}Top"]), cue(1.0, 2.5, &["Bottom"])];
+        let sup = build_sup(&cues, &canvas, (24000, 1001));
+        crate::bd_mux::validate_sup(&sup).unwrap();
+        let decoded = crate::subpic::decode_pgs(&sup).unwrap();
+        assert_eq!(decoded.pictures.len(), 1);
+        assert!(decoded.pictures[0].y < 300 && decoded.pictures[0].y + decoded.pictures[0].image.height() > 700);
     }
 }
