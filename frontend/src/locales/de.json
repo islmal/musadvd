@@ -1331,6 +1331,7 @@
  "main.aspectForced": "Seitenverhältnis-Einstellung weicht von der Quelle ab",
  "main.deinterlaceForced": "erzwungenes Deinterlacing",
  "main.scaleOverride": "Skalierung überschrieben",
+ "main.dvdBitrateTooHigh": "{kbps} kbit/s Video überschreitet das DVD-Limit von {max} kbit/s mit dem gewählten Ton",
  "project.dvdVideoApplied": "DVD-Videomodus wie im Projekt auf „{mode}“ gesetzt.",
  "preflight.copyFallback": "{title}: wird neu kodiert statt kopiert ({reason})",
  "preflight.copyDeinterlace": "{title}: Erzwungenes Deinterlacing ist aktiv, das Video wird möglicherweise neu kodiert statt kopiert.",

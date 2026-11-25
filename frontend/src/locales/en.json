@@ -1331,6 +1331,7 @@
  "main.aspectForced": "aspect ratio setting differs from the source",
  "main.deinterlaceForced": "forced deinterlacing",
  "main.scaleOverride": "scale override active",
+ "main.dvdBitrateTooHigh": "{kbps} kbit/s video exceeds the {max} kbit/s DVD limit with selected audio",
  "project.dvdVideoApplied": "DVD video mode set to \"{mode}\" as in the project.",
  "preflight.copyFallback": "{title}: will be re-encoded instead of copied ({reason})",
  "preflight.copyDeinterlace": "{title}: forced deinterlacing is on, so the video may be re-encoded instead of copied.",

@@ -14,8 +14,11 @@ export function dvdResOf(setting: string | null | undefined): DvdRes {
 }
 
 /** `bdRes` is the `bd_resolution` setting ("1080p" | "720p"); "720" and "BD720" are accepted too. */
-export function frameOf(medium: Medium, dvdRes: DvdRes, tv: "PAL" | "NTSC", bdRes?: string): Frame {
-  if (medium !== "dvd") return bdRes?.includes("720") ? { w: 1280, h: 720, fps: 23.976 } : { w: 1920, h: 1080, fps: 23.976 };
+export function frameOf(medium: Medium, dvdRes: DvdRes, tv: "PAL" | "NTSC", bdRes?: string, bdFps?: number): Frame {
+  if (medium !== "dvd") {
+    const fps = bdFps && Number.isFinite(bdFps) && bdFps > 0 ? bdFps : 23.976;
+    return bdRes?.includes("720") ? { w: 1280, h: 720, fps } : { w: 1920, h: 1080, fps };
+  }
   const pal = tv === "PAL";
   const w = dvdRes === "full" ? 720 : 352;
   const h = dvdRes === "sif" ? (pal ? 288 : 240) : pal ? 576 : 480;

@@ -2006,17 +2006,29 @@ pub enum MenuAudio {
 /// RGBA frames read from `pipe:0` (`Toolchain::ffmpeg_piped`) that covers the first `intro_secs`;
 /// a closed GOP starts at that mark, where the author splits the VOB into the intro and the page
 /// cell, and the sound crossfades there like on Blu-ray.
-#[allow(clippy::too_many_arguments)]
-pub fn motion_menu_args(
-    tv: TvStandard,
-    base: &Path,
-    foreground: Option<&Path>,
-    slots: &[VideoSlot],
-    duration_secs: f64,
-    audio: Option<&ClipSource>,
-    intro_secs: Option<f64>,
-    output: &Path,
-) -> Vec<OsString> {
+/// Inputs for [`motion_menu_args`].
+pub struct MotionMenuJob<'a> {
+    pub tv: TvStandard,
+    pub base: &'a Path,
+    pub foreground: Option<&'a Path>,
+    pub slots: &'a [VideoSlot],
+    pub duration_secs: f64,
+    pub audio: Option<&'a ClipSource>,
+    pub intro_secs: Option<f64>,
+    pub output: &'a Path,
+}
+
+/// Arguments compiling a motion menu: the still `base` (everything below the video slots),
+/// the moving sample clips overlaid at their slots, the transparent `foreground` (frames,
+/// captions, icons drawn above the slots) and AC-3 sound from `audio` (`None` = silence),
+/// encoded as a `duration_secs` long DVD MPEG-2 program stream of the TV standard `tv`.
+///
+/// `intro_secs` (whole GOPs, see `menu_anim::dvd_intro_frames`): the page opens with an intro of raw
+/// RGBA frames read from `pipe:0` (`Toolchain::ffmpeg_piped`) that covers the first `intro_secs`;
+/// a closed GOP starts at that mark, where the author splits the VOB into the intro and the page
+/// cell, and the sound crossfades there like on Blu-ray.
+pub fn motion_menu_args(job: &MotionMenuJob<'_>) -> Vec<OsString> {
+    let MotionMenuJob { tv, base, foreground, slots, duration_secs, audio, intro_secs, output } = *job;
     let d = format!("{duration_secs:.3}");
     let rate = tv.frame_rate();
     let mut a: Vec<OsString> = vec!["-y".into()];
@@ -2733,7 +2745,16 @@ mod tests {
     fn motion_menu_graph() {
         let slots = [slot(95, true, true), slot(273, false, false)];
         let menu_audio = ClipSource { path: "title1.mkv".into(), start_secs: 30.0, has_audio: true };
-        let a = motion_menu_args(TvStandard::Pal, Path::new("bg.png"), Some(Path::new("fg.png")), &slots, 25.0, Some(&menu_audio), None, Path::new("m.mpg"));
+        let a = motion_menu_args(&MotionMenuJob {
+            tv: TvStandard::Pal,
+            base: Path::new("bg.png"),
+            foreground: Some(Path::new("fg.png")),
+            slots: &slots,
+            duration_secs: 25.0,
+            audio: Some(&menu_audio),
+            intro_secs: None,
+            output: Path::new("m.mpg"),
+        });
         let s = joined(&a);
         assert!(s.starts_with("-y -loop 1 -framerate 25 -t 25.000 -i bg.png"), "{s}");
         assert!(s.contains("-stream_loop -1 -ss 12.500 -t 25.000 -i src95.mkv"));
@@ -2756,15 +2777,27 @@ mod tests {
 
     #[test]
     fn motion_menu_silence() {
-        let a = motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[slot(0, false, true)], 8.0, None, None, Path::new("m.mpg"));
+        let mk = |tv, base, slots, out| MotionMenuJob {
+            tv,
+            base: Path::new(base),
+            foreground: None,
+            slots,
+            duration_secs: 8.0,
+            audio: None,
+            intro_secs: None,
+            output: Path::new(out),
+        };
+        let slots_a = [slot(0, false, true)];
+        let slots_b = [slot(0, true, true)];
+        let a = motion_menu_args(&mk(TvStandard::Pal, "bg.png", &slots_a, "m.mpg"));
         let s = joined(&a);
         assert!(s.contains("-f lavfi -t 8.000 -i anullsrc=r=48000:cl=stereo"), "{s}");
         assert!(s.contains("[2:a]asetpts=N/SR/TB[aout]"), "silence is input 2 (no foreground)");
         assert!(!s.contains("[fg]"));
         // Clips with sound do not change the menu sound any more: silence stays silence.
-        let silent = joined(&motion_menu_args(TvStandard::Pal, Path::new("b"), None, &[slot(0, true, true)], 8.0, None, None, Path::new("m")));
+        let silent = joined(&motion_menu_args(&mk(TvStandard::Pal, "b", &slots_b, "m")));
         assert!(silent.contains("anullsrc") && !silent.contains("aresample"));
-        let ntsc = joined(&motion_menu_args(TvStandard::Ntsc, Path::new("b"), None, &[slot(0, true, true)], 8.0, None, None, Path::new("m")));
+        let ntsc = joined(&motion_menu_args(&mk(TvStandard::Ntsc, "b", &slots_b, "m")));
         assert!(ntsc.contains("-framerate 30000/1001") && ntsc.contains("-target ntsc-dvd"), "{ntsc}");
         assert!(ntsc.contains("fps=30000/1001"));
     }
@@ -2772,14 +2805,41 @@ mod tests {
     #[test]
     fn motion_menu_intro_reads_frames_from_the_pipe() {
         let audio = ClipSource { path: "a.mp3".into(), start_secs: 0.0, has_audio: true };
-        let a = joined(&motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[slot(0, false, true)], 28.0, Some(&audio), Some(3.0), Path::new("m.mpg")));
+        let a = joined(&motion_menu_args(&MotionMenuJob {
+            tv: TvStandard::Pal,
+            base: Path::new("bg.png"),
+            foreground: None,
+            slots: &[slot(0, false, true)],
+            duration_secs: 28.0,
+            audio: Some(&audio),
+            intro_secs: Some(3.0),
+            output: Path::new("m.mpg"),
+        }));
         assert!(a.contains("-f rawvideo -pix_fmt rgba -s 720x576 -r 25 -i pipe:0"), "{a}");
         assert!(a.contains("[mi]format=yuv420p") && a.contains("eof_action=pass"), "{a}");
         assert!(a.contains("acrossfade=d=0.500000"), "{a}");
         assert!(a.contains("-force_key_frames 3.000000 -flags +cgop -sc_threshold 1000000000"), "{a}");
-        let ntsc = joined(&motion_menu_args(TvStandard::Ntsc, Path::new("bg.png"), None, &[], 4.0, None, Some(3.0), Path::new("m.mpg")));
+        let ntsc = joined(&motion_menu_args(&MotionMenuJob {
+            tv: TvStandard::Ntsc,
+            base: Path::new("bg.png"),
+            foreground: None,
+            slots: &[],
+            duration_secs: 4.0,
+            audio: None,
+            intro_secs: Some(3.0),
+            output: Path::new("m.mpg"),
+        }));
         assert!(ntsc.contains("-s 720x480 -r 30000/1001 -i pipe:0"), "{ntsc}");
-        let plain = joined(&motion_menu_args(TvStandard::Pal, Path::new("bg.png"), None, &[], 4.0, None, None, Path::new("m.mpg")));
+        let plain = joined(&motion_menu_args(&MotionMenuJob {
+            tv: TvStandard::Pal,
+            base: Path::new("bg.png"),
+            foreground: None,
+            slots: &[],
+            duration_secs: 4.0,
+            audio: None,
+            intro_secs: None,
+            output: Path::new("m.mpg"),
+        }));
         assert!(!plain.contains("pipe:0") && !plain.contains("force_key_frames") && !plain.contains("cgop"), "{plain}");
         let bg = dvd_background_stream(TvStandard::Pal, [1, 2, 255], 75);
         assert_eq!(bg.frame_bytes, 720 * 576 * 4);

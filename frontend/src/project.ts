@@ -46,6 +46,7 @@ export interface ProjectTitle {
   bdResolution: "1080" | "720" | null;
   bdRate: string | null;
   bdVideo: "encode" | "copy" | null;
+  dvdVideo?: "encode" | "auto" | "copy" | null;
   bdQuality: "low" | "high" | null;
   denoise: number | null;
   brightness: number | null;
@@ -174,6 +175,7 @@ function titleOf(v: unknown): ProjectTitle | null {
     bdResolution: v.bdResolution === "1080" || v.bdResolution === "720" ? v.bdResolution : null,
     bdRate: nstr(v.bdRate),
     bdVideo: v.bdVideo === "encode" || v.bdVideo === "copy" ? v.bdVideo : null,
+    ...(v.dvdVideo === "encode" || v.dvdVideo === "auto" || v.dvdVideo === "copy" ? { dvdVideo: v.dvdVideo } : {}),
     bdQuality: v.bdQuality === "low" || v.bdQuality === "high" ? v.bdQuality : null,
     denoise: num(v.denoise),
     brightness: num(v.brightness),

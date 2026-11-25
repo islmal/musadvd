@@ -308,12 +308,12 @@ async fn probe_file(state: State<'_, AppState>, path: String) -> Result<VideoMet
     let audio_labels = probe::audio_labels(&info, label_mode, ui);
     let subtitle_labels = probe::subtitle_labels(&info, label_mode, ui);
     let chapter_settings = state.settings().chapters();
-    let mut bd = BuildOptions { disc: DiscType::Bd25, ..BuildOptions::default() };
-    settings.apply_to(&mut bd);
     // AVCHD also takes 1440×1080, so it gets its own native format and verdict.
+    // Probe with default VideoProcessing (like `dvd_copy_verdicts`); the GUI checks forced
+    // deinterlacing dynamically so toggling it in Settings updates badges without re-probing.
     let verdict = |avchd: bool| {
         let native = info.video.as_ref().and_then(|v| musadvd::bd::bd_native_format(v, avchd));
-        let copy = musadvd::encoder::bd_stream_copy(&info, bd.video, u32::MAX).and_then(|kbps| match (&info.video, native) {
+        let copy = musadvd::encoder::bd_stream_copy(&info, encoder::VideoProcessing::default(), u32::MAX).and_then(|kbps| match (&info.video, native) {
             (Some(v), None) => Err(musadvd::encoder::not_bd_format(v)),
             _ => Ok(kbps),
         });
@@ -1063,9 +1063,26 @@ fn default_output_dir() -> String {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectTitle {
+    #[serde(flatten)]
+    load: TitleLoad,
+    /// Encoded/copied Blu-ray frame rate in fps (omitted = 23.976).
+    #[serde(default)]
+    fps: Option<f64>,
+}
+
+#[cfg(test)]
+impl From<TitleLoad> for ProjectTitle {
+    fn from(load: TitleLoad) -> Self {
+        Self { load, fps: None }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectSettings {
     disc: DiscType,
-    titles: Vec<TitleLoad>,
+    titles: Vec<ProjectTitle>,
     motion_menu: bool,
     motion_duration: Option<f64>,
     /// Blu-ray menus from the editor: clip length of every menu in seconds (1 for stills).
@@ -1109,15 +1126,14 @@ fn quality(kbps: u32, disc: DiscType) -> f64 {
     ((kbps as f64 - l.min_video_kbps as f64) / (l.max_video_kbps - l.min_video_kbps) as f64 * 100.0).clamp(0.0, 100.0)
 }
 
-/// Quality percent of H.264 video (Blu-ray / AVCHD) from its bits per pixel at `res`, so 720p is
-/// credited for its smaller frame. Points (bpp → %), linear in log(bpp) between them; the label
-/// bands are 40 fair / 65 good / 85 excellent.
-// shortcut: assumes 23.976 fps (the GUI estimate knows no per-title rate); 50/59.94 fps titles rate
-// about twice too high – pass the frame rate in TitleLoad if that matters.
-fn h264_quality(kbps: u32, res: musadvd::author::Resolution) -> f64 {
+/// Quality percent of H.264 video (Blu-ray / AVCHD) from its bits per pixel at `res` and `fps`,
+/// so 720p is credited for its smaller frame and 50/59.94 fps clips are not overrated.
+/// Points (bpp → %), linear in log(bpp) between them; the label bands are 40 fair / 65 good / 85 excellent.
+fn h264_quality(kbps: u32, res: musadvd::author::Resolution, fps: f64) -> f64 {
     const POINTS: [(f64, f64); 5] = [(0.03, 0.0), (0.05, 40.0), (0.09, 65.0), (0.16, 85.0), (0.30, 100.0)];
     let (w, h) = res.frame_size(musadvd::author::TvStandard::Pal);
-    let bpp = kbps as f64 * 1000.0 / (w as f64 * h as f64 * 23.976);
+    let rate = if fps.is_finite() && fps > 0.0 { fps } else { 24000.0 / 1001.0 };
+    let bpp = kbps as f64 * 1000.0 / (w as f64 * h as f64 * rate);
     if bpp <= POINTS[0].0 {
         return 0.0;
     }
@@ -1199,15 +1215,17 @@ fn project_calculation_with(settings: ProjectSettings, profile: EncodingProfile,
             titles: vec![],
         });
     }
+    let loads: Vec<TitleLoad> = settings.titles.iter().map(|t| t.load).collect();
     let floor = dvd::min_video_kbps(settings.disc, res);
-    let plan = dvd::bitrate_plan_at(settings.disc, &settings.titles, menu_mb + reserve_mb, profile, floor).map_err(|e| e.to_string())?;
+    let plan = dvd::bitrate_plan_at(settings.disc, &loads, menu_mb + reserve_mb, profile, floor).map_err(|e| e.to_string())?;
     let titles = settings
         .titles
         .iter()
-        .map(|t| {
+        .map(|pt| {
+            let t = &pt.load;
             let v = t.copy_video_kbps.unwrap_or_else(|| dvd::weighted_video_kbps(settings.disc, plan.video_kbps, t.weight, t.audio_kbps, floor));
             if settings.disc.is_bluray() {
-                let p = h264_quality(v, res);
+                let p = h264_quality(v, res, pt.fps.unwrap_or(24000.0 / 1001.0));
                 return TitleCalc { video_kbps: v, quality_percent: p, quality: band(p) };
             }
             // Copied video keeps its own resolution.
@@ -1229,7 +1247,7 @@ fn project_calculation_with(settings: ProjectSettings, profile: EncodingProfile,
         fill_percent: plan.estimated_mb / target_mb as f64 * 100.0,
         fits: plan.clamp != Clamp::Min && plan.fits(),
         menu_mb,
-        total_secs: settings.titles.iter().filter(|t| t.copy_video_kbps.is_none()).map(|t| t.duration_secs).sum(),
+        total_secs: loads.iter().filter(|t| t.copy_video_kbps.is_none()).map(|t| t.duration_secs).sum(),
         titles,
     })
 }
@@ -1483,13 +1501,20 @@ fn main() -> std::process::ExitCode {
         return musadvd::cli::run(args);
     }
     self_update::cleanup_leftovers();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .manage(burn::BurnState::default())
-        .manage(burn_studio::StudioState::default())
-        .manage(preview::PreviewServer::start().expect("preview server"))
+        .manage(burn_studio::StudioState::default());
+    let builder = match preview::PreviewServer::start() {
+        Ok(server) => builder.manage(server),
+        Err(e) => {
+            eprintln!("warning: preview server disabled: {e}");
+            builder
+        }
+    };
+    builder
         .setup(|app| {
             // `--burn-studio`: start with the Burn Studio window only (the main window stays hidden).
             if std::env::args().any(|a| a == "--burn-studio") {
@@ -1649,8 +1674,8 @@ mod tests {
         let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
             titles: vec![
-                TitleLoad { duration_secs: 5400.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
-                TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 },
+                TitleLoad { duration_secs: 5400.0, audio_kbps: 448 + 192, subtitle_streams: 1, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into(),
+                TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into(),
             ],
             motion_menu: false,
             motion_duration: None,
@@ -1672,7 +1697,7 @@ mod tests {
         // 4 h on a DVD-5: a low bitrate that rates far below "good" at Full D1.
         let project = || ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 4.0 * 3600.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 4.0 * 3600.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into()],
             motion_menu: false,
             motion_duration: None,
             bd_menu_secs: vec![],
@@ -1692,24 +1717,29 @@ mod tests {
     #[test]
     fn bluray_quality_rates_bits_per_pixel() {
         use musadvd::author::Resolution;
-        // 2.1 Mbit/s at 720p (~0.095 bpp) is good H.264, not "0 % · Low".
-        let p720 = h264_quality(2100, Resolution::Hd720);
+        // 2.1 Mbit/s at 720p23.976 (~0.095 bpp) is good H.264, not "0 % · Low".
+        let p720 = h264_quality(2100, Resolution::Hd720, 23.976);
         assert!((65.0..85.0).contains(&p720), "{p720}");
         assert_eq!(band(p720), Quality::Good);
+        // At 50 or 59.94 fps the same bitrate has less than half the bits per pixel.
+        let p720_50 = h264_quality(2100, Resolution::Hd720, 50.0);
+        let p720_60 = h264_quality(2100, Resolution::Hd720, 60000.0 / 1001.0);
+        assert!(p720_50 < 40.0 && p720_60 < p720_50, "{p720_50} {p720_60}");
+        assert_eq!(band(p720_50), Quality::Poor);
         // The same bitrate at 1080p has fewer bits per pixel.
-        assert!(h264_quality(2100, Resolution::Hd1080) < 40.0);
+        assert!(h264_quality(2100, Resolution::Hd1080, 23.976) < 40.0);
         // 15 Mbit/s 1080p (the old "good" mark) is excellent; the floors stay above zero.
-        assert!(h264_quality(15_000, Resolution::Hd1080) >= 85.0);
-        assert!(h264_quality(1500, Resolution::Hd720) > 0.0 && h264_quality(2500, Resolution::Hd1080) > 0.0);
-        assert_eq!(h264_quality(100, Resolution::Hd1080), 0.0);
-        assert_eq!(h264_quality(80_000, Resolution::Hd720), 100.0);
+        assert!(h264_quality(15_000, Resolution::Hd1080, 23.976) >= 85.0);
+        assert!(h264_quality(1500, Resolution::Hd720, 23.976) > 0.0 && h264_quality(2500, Resolution::Hd1080, 23.976) > 0.0);
+        assert_eq!(h264_quality(100, Resolution::Hd1080, 23.976), 0.0);
+        assert_eq!(h264_quality(80_000, Resolution::Hd720, 23.976), 100.0);
     }
 
     #[test]
     fn calculation_too_long_for_dvd5() {
         let r = project_calculation(ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 8.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 8.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into()],
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
@@ -1727,7 +1757,7 @@ mod tests {
     fn calculation_follows_the_profile() {
         let project = || ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 1800.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into()],
             motion_menu: false,
             motion_duration: None,
             bd_menu_secs: vec![],
@@ -1744,7 +1774,7 @@ mod tests {
     fn blu_ray_calculation_uses_bd_limits() {
         let project = |disc| ProjectSettings {
             disc,
-            titles: vec![TitleLoad { duration_secs: 2.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 2.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into()],
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],
@@ -1765,26 +1795,39 @@ mod tests {
         let lp = project_calculation(project(DiscType::Bd50), EncodingProfile::Lp, Hd1080).unwrap();
         assert_eq!((lp.video_kbps, lp.clamp.as_str()), (12_000, "max"));
         // 24 h at 1080p does not fit a BD-25 even at the 2500 kbps floor.
-        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 24.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }], ..project(DiscType::Bd25) };
+        let long = ProjectSettings { titles: vec![TitleLoad { duration_secs: 24.0 * 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into()], ..project(DiscType::Bd25) };
         let r = project_calculation(long, EncodingProfile::Auto, Hd1080).unwrap();
         assert_eq!((r.clamp.as_str(), r.fits, r.video_kbps), ("min", false, 2500));
         assert!(r.titles[0].quality_percent <= 45.0, "{}", r.titles[0].quality_percent);
+        // A 50 fps 720p title rates lower than a 23.976 fps title at the same bitrate.
+        let base_load = TitleLoad { duration_secs: 6.0 * 3600.0, audio_kbps: 192, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
+        let q24 = project_calculation(ProjectSettings {
+            disc: DiscType::Bd25,
+            titles: vec![ProjectTitle { load: base_load, fps: Some(24000.0 / 1001.0) }],
+            motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None,
+        }, EncodingProfile::Auto, musadvd::author::Resolution::Hd720).unwrap().titles[0].quality_percent;
+        let q50 = project_calculation(ProjectSettings {
+            disc: DiscType::Bd25,
+            titles: vec![ProjectTitle { load: base_load, fps: Some(50.0) }],
+            motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None,
+        }, EncodingProfile::Auto, musadvd::author::Resolution::Hd720).unwrap().titles[0].quality_percent;
+        assert!(q50 < q24, "50 fps ({q50}) should rate lower than 23.976 fps ({q24})");
     }
 
     #[test]
     fn avchd_estimate_uses_avchd_limits() {
-        let titles = vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }];
+        let load = TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 };
         let r = project_calculation(
-            ProjectSettings { disc: DiscType::Avchd5, titles: titles.clone(), motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
+            ProjectSettings { disc: DiscType::Avchd5, titles: vec![load.into()], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
             EncodingProfile::Auto, musadvd::author::Resolution::FullD1,
         )
         .unwrap();
         assert_eq!(r.target_mb, 4300);
         assert!(r.fits && r.video_kbps > 5000 && r.video_kbps <= 15_000, "{}", r.video_kbps);
         // Ten hours do not fit a DVD-5 as AVCHD even at the 2000 kbps floor.
-        let long = TitleLoad { duration_secs: 10.0 * 3600.0, ..titles[0] };
+        let long = TitleLoad { duration_secs: 10.0 * 3600.0, ..load };
         let r = project_calculation(
-            ProjectSettings { disc: DiscType::Avchd5, titles: vec![long], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
+            ProjectSettings { disc: DiscType::Avchd5, titles: vec![long.into()], motion_menu: false, motion_duration: None, bd_menu_secs: vec![], custom_layout: None },
             EncodingProfile::Auto, musadvd::author::Resolution::FullD1,
         )
         .unwrap();
@@ -1853,7 +1896,7 @@ mod tests {
         };
         let s = ProjectSettings {
             disc: DiscType::Dvd5,
-            titles: vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }],
+            titles: vec![TitleLoad { duration_secs: 3600.0, audio_kbps: 448, subtitle_streams: 0, copy_video_kbps: None, copy_bytes: None, weight: 1.0 }.into()],
             motion_menu: true,
             motion_duration: Some(25.0),
             bd_menu_secs: vec![],

@@ -180,6 +180,8 @@ export interface TitleLoad {
   copyVideoKbps?: number | null;
   /** Quality weight of an encoded title (1 = normal). */
   weight?: number;
+  /** Actual Blu-ray title frame rate (fps) for accurate H.264 bpp quality rating. */
+  fps?: number | null;
 }
 
 export interface ProjectSettings {
@@ -223,6 +225,7 @@ export interface InputConfig {
   bdResolution?: string | null;
   bdRate?: string | null;
   bdVideo?: string | null;
+  dvdVideo?: string | null;
   bdQuality?: string | null;
   /** End action of the title ("default" | "next" | "mainMenu" | "titleMenu" | "loop"); omitted = "default". */
   afterPlayback?: string;

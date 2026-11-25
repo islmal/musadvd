@@ -110,6 +110,8 @@ interface Title {
   bdResolution: BdRes | null;
   bdRate: string | null;
   bdVideo: "encode" | "copy" | null;
+  /** DVD-Video per-title copy override (null = project setting). */
+  dvdVideo: "encode" | "auto" | "copy" | null;
   /** Share of the disc bitrate (null = normal). */
   bdQuality: "low" | "high" | null;
   /** Picture filters: denoise (hqdn3d luma, null = off) and eq adjustments (null = neutral). */
@@ -633,6 +635,7 @@ async function addFiles(paths: string[]): Promise<Title[]> {
         bdResolution: null,
         bdRate: null,
         bdVideo: null,
+        dvdVideo: null,
         bdQuality: null,
         denoise: null,
         brightness: null,
@@ -864,6 +867,7 @@ async function splitByChapters(t: Title) {
       bdResolution: t.bdResolution,
       bdRate: t.bdRate,
       bdVideo: t.bdVideo,
+      dvdVideo: t.dvdVideo,
       bdQuality: t.bdQuality,
       denoise: t.denoise,
       brightness: t.brightness,
@@ -1191,6 +1195,22 @@ function scheduleCalc() {
 }
 
 const QUALITY_WEIGHT = { low: 0.75, high: 1.25 }; // keep in sync with dvd::QUALITY_LOW / QUALITY_HIGH
+const BD_RATE_FPS: Record<string, number> = {
+  "23.976": 24000 / 1001,
+  "24": 24,
+  "25i": 25,
+  "29.97i": 30000 / 1001,
+  "50": 50,
+  "59.94": 60000 / 1001,
+};
+
+function titleBdFps(t: Title): number | null {
+  const v = t.meta.video;
+  if (!v) return null;
+  const res = t.bdResolution ?? projectBdRes();
+  const rate = t.bdRate || v.bdDefaultRates[`${state.settings?.tv_standard ?? "PAL"}${res}`];
+  return (rate && BD_RATE_FPS[rate]) || (v.fps > 0 ? v.fps : null);
+}
 
 function calcInput() {
   return {
@@ -1201,6 +1221,7 @@ function calcInput() {
       subtitleStreams: totalEnabledSubs(t),
       copyVideoKbps: copyVerdict(t)?.kbps ?? null,
       weight: isBluray() && t.bdQuality ? QUALITY_WEIGHT[t.bdQuality] : 1,
+      fps: isBluray() ? titleBdFps(t) : null,
     })),
     motionMenu: usesMotion(),
     motionDuration: null,
@@ -1306,38 +1327,44 @@ function bdCopy(t: Title): { kbps: number | null; issue: string | null; strict: 
           ? tr("main.cropActive")
           : hasPictureFilters(t)
             ? tr("main.pictureFiltersActive")
-            : null);
+            : state.settings?.deinterlace === "yadif"
+              ? tr("main.deinterlaceForced")
+              : null);
   const strict = mode !== "auto";
   return issue ? { kbps: null, issue, strict } : { kbps: copyKbps, issue: null, strict };
 }
 
 /** DVD video copy verdict of a title (null = encoded anyway). The backend probes the untrimmed,
- * uncropped file at Full D1; everything that changes the picture or the project's DVD format is
- * checked here, mirroring the build. `strict`: a failed copy stops the build. */
+ * uncropped file at Full D1; everything that changes the picture, audio cap, or the project's
+ * DVD format is checked here, mirroring the build. `strict`: a failed copy stops the build. */
 function dvdCopy(t: Title): { kbps: number | null; issue: string | null; strict: boolean } | null {
   const v = t.meta.video;
   const s = state.settings;
-  const mode = s?.dvd_video;
+  const mode = t.dvdVideo ?? s?.dvd_video;
   if (isBluray() || !s || !v || !mode || mode === "encode") return null;
   const tv = s.tv_standard;
+  const maxKbps = Math.max(0, 9800 - audioKbps(t));
+  const probedKbps = v.dvdCopyKbps?.[tv] ?? null;
   const issue =
     v.dvdCopyIssue?.[tv] ??
-    (s.dvd_resolution !== "Full D1"
-      ? tr("main.notFullD1")
-      : s.aspect_ratio_policy !== "Auto" && s.aspect_ratio_policy !== v.dvdAspect
-        ? tr("main.aspectForced")
-        : isTrimmed(t)
-        ? tr("main.trimActive")
-        : t.crop
-          ? tr("main.cropActive")
-          : hasPictureFilters(t)
-            ? tr("main.pictureFiltersActive")
-            : s.deinterlace === "yadif"
-              ? tr("main.deinterlaceForced")
-              : s.scale_mode !== "letterbox"
-                ? tr("main.scaleOverride")
-                : null);
-  return { kbps: issue ? null : (v.dvdCopyKbps?.[tv] ?? null), issue, strict: mode === "strict" };
+    (probedKbps != null && probedKbps > maxKbps
+      ? tr("main.dvdBitrateTooHigh", { kbps: probedKbps, max: maxKbps })
+      : s.dvd_resolution !== "Full D1"
+        ? tr("main.notFullD1")
+        : s.aspect_ratio_policy !== "Auto" && s.aspect_ratio_policy !== v.dvdAspect
+          ? tr("main.aspectForced")
+          : isTrimmed(t)
+            ? tr("main.trimActive")
+            : t.crop
+              ? tr("main.cropActive")
+              : hasPictureFilters(t)
+                ? tr("main.pictureFiltersActive")
+                : s.deinterlace === "yadif"
+                  ? tr("main.deinterlaceForced")
+                  : s.scale_mode !== "letterbox"
+                    ? tr("main.scaleOverride")
+                    : null);
+  return { kbps: issue ? null : probedKbps, issue, strict: mode === "strict" || mode === "copy" };
 }
 
 const copyVerdict = (t: Title) => bdCopy(t) ?? dvdCopy(t);
@@ -1357,6 +1384,45 @@ function renderVideoTab(t: Title) {
       { id, onchange: (e: Event) => on((e.target as HTMLSelectElement).value) },
       ...options.map(([val, label]) => h("option", { value: val, selected: val === value }, label)),
     );
+  if (!isBluray()) {
+    const dvdMode = state.settings?.dvd_video ?? "encode";
+    const projectMode = tr(dvdMode === "auto" ? "app.bdVideoAuto" : dvdMode === "strict" ? "app.bdVideoStrict" : "app.bdVideoEncode");
+    const c = dvdCopy(t);
+    const tv = state.settings?.tv_standard ?? "PAL";
+    return h(
+      "div",
+      { class: "video-tab" },
+      v
+        ? h(
+            "p",
+            { class: "hint" },
+            tr("main.bdSource", { codec: v.codec.toUpperCase(), w: v.width, h: v.height, fps: v.fps.toFixed(3), scan: v.interlaced ? "i" : "p" }),
+            v.dvdCopyKbps?.[tv] != null ? ` · ${v.dvdCopyKbps[tv]} kbit/s` : "",
+          )
+        : "",
+      h(
+        "div",
+        { class: "row" },
+        h("label", { for: "dvd-title-video" }, tr("main.bdVideoTitle")),
+        select(
+          "dvd-title-video",
+          t.dvdVideo ?? "",
+          [
+            ["", tr("main.projectDefault", { value: projectMode })],
+            ["encode", tr("app.bdVideoEncode")],
+            ["auto", tr("app.bdVideoAuto")],
+            ["copy", tr("main.bdVideoCopy")],
+          ],
+          (val) => {
+            t.dvdVideo = (val || null) as Title["dvdVideo"];
+            changed();
+          },
+        ),
+        copyBadge(t),
+      ),
+      c?.issue ? h("p", { class: "hint" }, tr("main.bdReencodeReason", { reason: c.issue })) : "",
+    );
+  }
   const label = (r: string) => (r.endsWith("i") ? r : `${r}p`);
   const projectMode = tr(state.bdVideo === "encode" ? "app.bdVideoEncode" : state.bdVideo === "auto" ? "app.bdVideoAuto" : "app.bdVideoStrict");
   const c = bdCopy(t);
@@ -1439,7 +1505,8 @@ const isDualLayer = () => ["dvd9", "bd50", "avchd9"].includes(state.disc);
 function qualityTip(t: Title, kbps: number): string {
   const tv = state.settings?.tv_standard ?? "PAL";
   const bdRes = t.bdResolution ? `${t.bdResolution}p` : state.settings?.bd_resolution;
-  const f = frameOf(planKey(), dvdResOf(state.settings?.dvd_resolution), tv, bdRes);
+  const fps = isBluray() ? (titleBdFps(t) ?? undefined) : undefined;
+  const f = frameOf(planKey(), dvdResOf(state.settings?.dvd_resolution), tv, bdRes, fps);
   return tr("quality.tooltip", { kbps: fmtNum(kbps), bpp: bitsPerPixel(kbps, f).toFixed(3), w: f.w, h: f.h, fps: f.fps });
 }
 
@@ -1643,10 +1710,8 @@ function select(id: number) {
 }
 
 function renderTabs() {
-  // The Video tab holds Blu-ray-only options.
   const videoTab = document.querySelector<HTMLButtonElement>('.tab[data-tab="video"]');
-  if (videoTab) videoTab.hidden = !isBluray();
-  if (state.tab === "video" && !isBluray()) state.tab = "audio";
+  if (videoTab) videoTab.hidden = false;
   document.querySelectorAll<HTMLButtonElement>(".tab").forEach((b) => {
     const active = b.dataset.tab === state.tab;
     b.classList.toggle("active", active);
@@ -3129,6 +3194,7 @@ async function convert() {
         bdResolution: isBluray() ? t.bdResolution : null,
         bdRate: isBluray() ? t.bdRate : null,
         bdVideo: isBluray() ? t.bdVideo : null,
+        dvdVideo: !isBluray() ? t.dvdVideo : null,
         bdQuality: isBluray() ? t.bdQuality : null,
         denoise: t.denoise,
         brightness: t.brightness,
@@ -3216,6 +3282,7 @@ function snapshotProject(): ProjectFile {
       bdResolution: t.bdResolution,
       bdRate: t.bdRate,
       bdVideo: t.bdVideo,
+      dvdVideo: t.dvdVideo,
       bdQuality: t.bdQuality,
       denoise: t.denoise,
       brightness: t.brightness,
@@ -3260,6 +3327,7 @@ function titleFromProject(p: ProjectTitle, probed: VideoMetadata, afterSkipped: 
       : [...meta.chapters].sort((a, b) => a.startSecs - b.startSecs).map((c) => ({ startSecs: c.startSecs, name: c.title ?? null }));
   return {
     ...rest,
+    dvdVideo: p.dvdVideo ?? null,
     id: nextId++,
     meta,
     audio: new Set(audio),

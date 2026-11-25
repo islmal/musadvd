@@ -1241,13 +1241,11 @@ fn output_fps(tv: TvStandard) -> f64 {
     }
 }
 
-/// Encodes one title straight into its DVD program stream (subtitles via piped spumux);
-/// reports its own progress (0..1) with frame telemetry.
-#[allow(clippy::too_many_arguments)]
-async fn encode_title(
-    tools: &Toolchain,
-    t: &TitlePlan,
-    work: &Path,
+/// Parameters for encoding one DVD title via [`encode_title`].
+struct EncodeTitleParams<'a> {
+    tools: &'a Toolchain,
+    title: &'a TitlePlan,
+    work: &'a Path,
     video_kbps: u32,
     two_pass: bool,
     fast: bool,
@@ -1255,7 +1253,12 @@ async fn encode_title(
     tv: TvStandard,
     resolution: Resolution,
     progress: JobProgress,
-) -> Result<(TitleReport, Option<&'static str>), BuildError> {
+}
+
+/// Encodes one title straight into its DVD program stream (subtitles via piped spumux);
+/// reports its own progress (0..1) with frame telemetry.
+async fn encode_title(p: EncodeTitleParams<'_>) -> Result<(TitleReport, Option<&'static str>), BuildError> {
+    let EncodeTitleParams { tools, title: t, work, video_kbps, two_pass, fast, hw_decode, tv, resolution, progress } = p;
     let copy_video = t.copy_kbps.is_some();
     let hwaccel = match hw_decode.filter(|_| !copy_video) {
         Some(mode) => tools.probe_hwaccel(&t.info.path, mode).await,
@@ -2000,16 +2003,16 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
                         files.intro.as_ref().map(|i| i.secs),
                         &work.join(&raw),
                     ),
-                    Some(secs) => encoder::motion_menu_args(
+                    Some(secs) => encoder::motion_menu_args(&encoder::MotionMenuJob {
                         tv,
-                        &files.background,
-                        files.foreground.as_deref(),
-                        &files.video_slots,
-                        secs,
-                        audio.as_ref(),
-                        files.intro.as_ref().map(|i| i.secs),
-                        &work.join(&raw),
-                    ),
+                        base: &files.background,
+                        foreground: files.foreground.as_deref(),
+                        slots: &files.video_slots,
+                        duration_secs: secs,
+                        audio: audio.as_ref(),
+                        intro_secs: files.intro.as_ref().map(|i| i.secs),
+                        output: &work.join(&raw),
+                    }),
                     None => encoder::menu_still_args(tv, &files.background, &work.join(&raw)),
                 };
                 let secs = files.motion_secs.unwrap_or(1.0);
@@ -2157,7 +2160,19 @@ async fn build_dvd_inner(opts: &BuildOptions, log: &mut (dyn FnMut(Event) + Send
             let video_kbps = t.copy_kbps.unwrap_or_else(|| plan.video_kbps.min(DVD_MAX_TOTAL_KBPS.saturating_sub(t.audio_kbps())));
             let (two_pass, fast, hw_decode) = (opts.two_pass, opts.fast_encode, opts.hw_decode.then_some(opts.hw_accel));
             job(move |progress| async move {
-                encode_title(&tools, &t, &work, video_kbps, two_pass, fast, hw_decode, tv, resolution, progress).await
+                encode_title(EncodeTitleParams {
+                    tools: &tools,
+                    title: &t,
+                    work: &work,
+                    video_kbps,
+                    two_pass,
+                    fast,
+                    hw_decode,
+                    tv,
+                    resolution,
+                    progress,
+                })
+                .await
             })
         })
         .collect();

@@ -7,11 +7,16 @@ describe("quality", () => {
   });
   it("computes bits per pixel", () => {
     expect(bitsPerPixel(5000, frameOf("dvd", "full", "NTSC"))).toBeCloseTo(0.483, 3);
+    expect(bitsPerPixel(2100, frameOf("bluray", "full", "PAL", "720p", 50))).toBeCloseTo(
+      bitsPerPixel(2100, frameOf("bluray", "full", "PAL", "720p", 25)) / 2,
+      5,
+    );
   });
   it("picks frames", () => {
     expect(frameOf("dvd", "half", "PAL")).toEqual({ w: 352, h: 576, fps: 25 });
     expect(frameOf("dvd", "sif", "NTSC")).toEqual({ w: 352, h: 240, fps: 29.97 });
     expect(frameOf("bluray", "full", "PAL", "720p").h).toBe(720);
+    expect(frameOf("bluray", "full", "PAL", "720p", 50)).toEqual({ w: 1280, h: 720, fps: 50 });
     expect(frameOf("avchd", "full", "PAL").w).toBe(1920);
     expect(dvdResOf("Half D1")).toBe("half");
     expect(dvdResOf("SIF")).toBe("sif");
