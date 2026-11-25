@@ -212,7 +212,9 @@ fn audio_choice(out: AudioOut, base: &str, mode: TrackLabelMode) -> AudioChoice 
         copy: matches!(out, AudioOut::Copy { .. }),
         codec: match out.kind() {
             musadvd::encoder::AudioKind::Ac3 => "ac3",
-            musadvd::encoder::AudioKind::Dts => "dts",
+            musadvd::encoder::AudioKind::Dts
+            | musadvd::encoder::AudioKind::DtsHdHr
+            | musadvd::encoder::AudioKind::DtsHdMa => "dts",
             musadvd::encoder::AudioKind::Lpcm => "lpcm",
         }
         .into(),

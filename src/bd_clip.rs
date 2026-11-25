@@ -18,6 +18,8 @@ pub enum Codec {
     H264,
     Ac3,
     Dts,
+    DtsHdHr,
+    DtsHdMa,
     Lpcm,
     Pgs,
     Ig,
@@ -30,6 +32,8 @@ impl Codec {
             Codec::H264 => 0x1B,
             Codec::Ac3 => 0x81,
             Codec::Dts => 0x82,
+            Codec::DtsHdHr => 0x85,
+            Codec::DtsHdMa => 0x86,
             Codec::Lpcm => 0x80,
             Codec::Pgs => 0x90,
             Codec::Ig => 0x91,
@@ -37,7 +41,7 @@ impl Codec {
     }
 
     fn is_audio(self) -> bool {
-        matches!(self, Codec::Ac3 | Codec::Dts | Codec::Lpcm)
+        matches!(self, Codec::Ac3 | Codec::Dts | Codec::DtsHdHr | Codec::DtsHdMa | Codec::Lpcm)
     }
 }
 
@@ -455,5 +459,24 @@ mod tests {
     #[test]
     fn end_codes() {
         assert_eq!([end_code(0), end_code(1), end_code(131072), end_code(1310719), end_code(1310720)], [0, 1, 2, 6, 7]);
+    }
+
+    #[test]
+    fn dts_hd_coding_types_in_clpi_and_mpls() {
+        assert_eq!(Codec::DtsHdHr.coding_type(), 0x85);
+        assert_eq!(Codec::DtsHdMa.coding_type(), 0x86);
+        let streams = [
+            video(),
+            Stream { pid: AUDIO_PID, codec: Codec::DtsHdMa, lang: *b"eng", attr: 0x64, es_info: vec![] },
+            Stream { pid: AUDIO_PID + 1, codec: Codec::DtsHdHr, lang: *b"deu", attr: 0x61, es_info: vec![] },
+        ];
+        let p = Playlist { clip: 0, start: 27_000_000, end: 27_090_090, marks: &[0.0], still: false, streams: &streams };
+        let m = mpls(&p);
+        // STN audio count = 2, and stream_entry coding bytes 0x86 (attr 0x64, "eng") and 0x85 (attr 0x61, "deu") appear.
+        assert!(m.windows(5).any(|w| w == [0x86, 0x64, b'e', b'n', b'g']));
+        assert!(m.windows(5).any(|w| w == [0x85, 0x61, b'd', b'e', b'u']));
+        let c = clpi(&Clip { streams: streams.to_vec(), packets: 100, start: 27_000_000, end: 27_090_090, ep: vec![] });
+        assert!(c.windows(5).any(|w| w == [0x86, 0x64, b'e', b'n', b'g']));
+        assert!(c.windows(5).any(|w| w == [0x85, 0x61, b'd', b'e', b'u']));
     }
 }
