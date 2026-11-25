@@ -391,13 +391,17 @@ impl<R: Read> TsReader<R> {
 
 struct VideoClock {
     n: i64,
+    /// Decode position in half-frames (1 per field, 2 per frame).
+    half_n: i64,
     pts0: Option<i64>,
+    /// PTS-DTS delay in half-frames.
     delay: i64,
     /// One frame in 90 kHz ticks.
     dur: f64,
     fps: (u32, u32),
     /// Disc buffer (bit/s, bits) of a stream-copied title; `None` = pass the stream through.
     vbv: Option<(u64, u64)>,
+    sps: Option<Sps>,
     repair: Option<TimingRepair>,
 }
 
@@ -406,15 +410,26 @@ impl VideoClock {
         let pts = pes.pts.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Video picture without PTS"))?;
         let first = self.n == 0;
         let pts0 = *self.pts0.get_or_insert(pts);
+        let half_dur = self.dur / 2.0;
         if first {
-            self.delay = ((pts - pes.dts.unwrap_or(pts)) as f64 / self.dur).round() as i64;
+            self.delay = ((pts - pes.dts.unwrap_or(pts)) as f64 / half_dur).round() as i64;
         }
-        let idx = ((pts - pts0) as f64 / self.dur).round();
-        let at = |frames: f64| BASE_PTS + (frames * self.dur).trunc() as i64;
-        let n = self.n;
-        let (pts, dts) = (at(idx), at((n - self.delay) as f64));
-        self.n += 1;
         let mut payload = if first { strip_user_data_sei(&pes.payload) } else { pes.payload };
+        if let Some(sps) = h264::nal_units(&payload)
+            .into_iter()
+            .find(|u| u.2 == h264::NAL_SPS)
+            .and_then(|u| Sps::parse(h264::nal_body(&payload, u)))
+        {
+            self.sps = Some(sps);
+        }
+        let field = self.sps.as_ref().is_some_and(|s| s.is_field_pic(&payload));
+        let step_half = if field { 1 } else { 2 };
+        let idx_half = ((pts - pts0) as f64 / half_dur).round();
+        let at_half = |half_frames: f64| BASE_PTS + (half_frames * half_dur).trunc() as i64;
+        let half_n = self.half_n;
+        let (pts, dts) = (at_half(idx_half), at_half((half_n - self.delay) as f64));
+        self.n += 1;
+        self.half_n += step_half;
         if first {
             if let Some(vbv) = self.vbv {
                 let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
@@ -422,9 +437,10 @@ impl VideoClock {
             }
         }
         if let Some(repair) = &mut self.repair {
-            payload = repair.apply(&payload, n, idx as i64 - (n - self.delay))?;
+            payload = repair.apply(&payload, half_n, step_half, idx_half as i64 - (half_n - self.delay))?;
         }
-        Ok(Au { pid, kind: Kind::Video { idr: is_idr(&payload) }, pts, dts, dur: self.dur as i64, payload })
+        let dur = if field { (self.dur / 2.0) as i64 } else { self.dur as i64 };
+        Ok(Au { pid, kind: Kind::Video { idr: is_idr(&payload) }, pts, dts, dur, payload })
     }
 }
 
@@ -443,15 +459,13 @@ fn timing_needed(au: &[u8], (rate, size): (u64, u64)) -> Result<Option<Sps>, Str
     if signalled && sei.contains(&h264::SEI_BUFFERING_PERIOD) && sei.contains(&h264::SEI_PIC_TIMING) {
         return Ok(None);
     }
-    if !sps.frame_mbs_only {
-        return Err("interlaced H.264 without Blu-ray timing information".into());
-    }
     Ok(Some(sps))
 }
 
-/// Adds Blu-ray timing to a copied progressive stream: every SPS gets VUI timing and the disc's
-/// NAL HRD, existing buffering-period / picture-timing SEI are replaced by ours (buffering period
-/// at every IDR, picture timing on every picture), delays from the disc's buffer model.
+/// Adds Blu-ray timing to a copied stream (progressive or interlaced): every SPS gets VUI timing
+/// and the disc's NAL HRD, existing buffering-period / picture-timing SEI are replaced by ours
+/// (buffering period at every IDR, picture timing on every picture), delays from the disc's
+/// buffer model.
 struct TimingRepair {
     fps: (u32, u32),
     hrd: Hrd,
@@ -459,8 +473,8 @@ struct TimingRepair {
     /// Original SPS NAL -> (id, rewritten NAL).
     sps: HashMap<Vec<u8>, (u32, Vec<u8>)>,
     sps_id: u32,
-    /// Picture number of the last buffering period.
-    last_bp: i64,
+    /// Half-frame position of the last buffering period.
+    last_bp_half: i64,
     frame_secs: f64,
 }
 
@@ -473,20 +487,20 @@ impl TimingRepair {
             hrd,
             sps: HashMap::new(),
             sps_id: sps.id,
-            last_bp: 0,
+            last_bp_half: 0,
             frame_secs: fps.1 as f64 / fps.0 as f64,
         }
     }
 
-    /// Access unit `n` (decode order) with its timing; `output_frames`: frames between its
-    /// removal and its display.
-    fn apply(&mut self, au: &[u8], n: i64, output_frames: i64) -> io::Result<Vec<u8>> {
+    /// Access unit at `half_n` (decode order, in half-frames: +1 per field, +2 per frame) with
+    /// `step_half` (1 or 2) and `output_half_frames` between its removal and its display.
+    fn apply(&mut self, au: &[u8], half_n: i64, step_half: i64, output_half_frames: i64) -> io::Result<Vec<u8>> {
         let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
         let units = h264::nal_units(au);
         let idr = units.iter().any(|u| u.2 == h264::NAL_IDR);
-        let removal = if n == 0 { 0 } else { 2 * (n - self.last_bp) };
+        let removal = if half_n == 0 { 0 } else { half_n - self.last_bp_half };
         if idr {
-            self.last_bp = n;
+            self.last_bp_half = half_n;
         }
         let mut out = Vec::with_capacity(au.len() + 64);
         let mut sei_at = None;
@@ -495,7 +509,7 @@ impl TimingRepair {
             match u.2 {
                 h264::NAL_SPS => {
                     if !self.sps.contains_key(body) {
-                        let sps = Sps::parse(body).ok_or_else(|| bad(format!("picture {n}: unreadable sequence parameter set")))?;
+                        let sps = Sps::parse(body).ok_or_else(|| bad(format!("picture {}: unreadable sequence parameter set", half_n / 2)))?;
                         let rewritten = sps.with_timing(self.fps, &self.hrd);
                         self.sps.insert(body.to_vec(), (sps.id, rewritten));
                     }
@@ -523,12 +537,13 @@ impl TimingRepair {
         let fullness = self.vbv.fill();
         let buffering = idr.then(|| (self.sps_id, self.vbv.initial_delay(fullness)));
         let mut sei = vec![0, 0, 0, 1];
-        sei.extend(h264::timing_sei(buffering, removal as u32, 2 * output_frames.max(0) as u32));
+        sei.extend(h264::timing_sei(buffering, removal as u32, output_half_frames.max(0) as u32));
         let at = sei_at.unwrap_or(out.len());
         out.splice(at..at, sei);
+        let pic_secs = if step_half == 1 { self.frame_secs / 2.0 } else { self.frame_secs };
         self.vbv
-            .picture(out.len() as f64 * 8.0, self.frame_secs)
-            .map_err(|missing| bad(format!("picture {n} needs {missing:.0} bits more than the disc's video buffer holds")))?;
+            .picture(out.len() as f64 * 8.0, pic_secs)
+            .map_err(|missing| bad(format!("picture {} needs {missing:.0} bits more than the disc's video buffer holds", half_n / 2)))?;
         Ok(out)
     }
 }
@@ -537,24 +552,24 @@ impl TimingRepair {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoScan {
     pub pictures: u64,
-    /// Largest distance between two IDR pictures (and from the last one to the end), in pictures.
+    /// Largest distance between two IDR pictures (and from the last one to the end), in frames.
     pub max_idr_gap: u64,
     /// Blu-ray timing will be added by the muxer.
     pub needs_timing: bool,
     /// First picture (and seconds into the title) whose bits are not in the disc's buffer yet.
     pub overflow: Option<(u64, f64)>,
-    /// Field-coded (interlaced) stream: picture counts are not frames, gap and buffer unchecked.
+    /// Interlaced stream (`!frame_mbs_only`); field-coded pictures advance the scan by half a frame.
     pub interlaced: bool,
 }
 
 impl VideoScan {
-    /// Why the stream cannot be copied onto a title with keyframes at most `keyint` pictures apart.
+    /// Why the stream cannot be copied onto a title with keyframes at most `keyint` frames apart.
     pub fn issue(&self, keyint: u32) -> Option<String> {
         if let Some((_, secs)) = self.overflow {
             return Some(format!("bitrate peak at {secs:.1} s exceeds the disc's video buffer"));
         }
-        (!self.interlaced && self.max_idr_gap > u64::from(keyint))
-            .then(|| format!("keyframes up to {} pictures apart (Blu-ray allows {keyint})", self.max_idr_gap))
+        (self.max_idr_gap > u64::from(keyint))
+            .then(|| format!("keyframes up to {} frames apart (Blu-ray allows {keyint})", self.max_idr_gap))
     }
 }
 
@@ -565,35 +580,45 @@ pub fn scan_video(ts: impl Read, fps: (u32, u32), vbv: (u64, u64)) -> io::Result
     let secs = fps.1 as f64 / fps.0 as f64;
     let mut model = Vbv::new(vbv.0, vbv.1);
     let mut scan = VideoScan { pictures: 0, max_idr_gap: 0, needs_timing: false, overflow: None, interlaced: false };
-    let mut last_idr = 0u64;
+    let mut sps: Option<Sps> = None;
+    let mut half_frames = 0u64;
+    let mut last_idr_half = 0u64;
+    let mut elapsed_secs = 0.0f64;
     while let Some((idx, pes)) = reader.next()? {
         if idx != 0 {
             continue;
         }
         let n = scan.pictures;
+        if let Some(parsed) = h264::nal_units(&pes.payload)
+            .into_iter()
+            .find(|u| u.2 == h264::NAL_SPS)
+            .and_then(|u| Sps::parse(h264::nal_body(&pes.payload, u)))
+        {
+            sps = Some(parsed);
+        }
         if n == 0 {
             match timing_needed(&pes.payload, vbv) {
                 Err(why) => return Ok(Err(why)),
-                Ok(sps) => scan.needs_timing = sps.is_some(),
+                Ok(needs) => scan.needs_timing = needs.is_some(),
             }
-            let units = h264::nal_units(&pes.payload);
-            scan.interlaced = units
-                .iter()
-                .find(|u| u.2 == h264::NAL_SPS)
-                .and_then(|&u| Sps::parse(h264::nal_body(&pes.payload, u)))
-                .is_some_and(|s| !s.frame_mbs_only);
+            scan.interlaced = sps.as_ref().is_some_and(|s| !s.frame_mbs_only);
         }
+        let field = sps.as_ref().is_some_and(|s| s.is_field_pic(&pes.payload));
+        let pic_secs = if field { secs / 2.0 } else { secs };
+        let step_half = if field { 1 } else { 2 };
         if h264::nal_units(&pes.payload).iter().any(|u| u.2 == h264::NAL_IDR) {
-            scan.max_idr_gap = scan.max_idr_gap.max(n - last_idr);
-            last_idr = n;
+            scan.max_idr_gap = scan.max_idr_gap.max((half_frames - last_idr_half).div_ceil(2));
+            last_idr_half = half_frames;
         }
         // shortcut: the SEI the muxer may add (~20 bytes a picture) is not counted here.
-        if !scan.interlaced && scan.overflow.is_none() && model.picture(pes.payload.len() as f64 * 8.0, secs).is_err() {
-            scan.overflow = Some((n, n as f64 * secs));
+        if scan.overflow.is_none() && model.picture(pes.payload.len() as f64 * 8.0, pic_secs).is_err() {
+            scan.overflow = Some((n, elapsed_secs));
         }
+        half_frames += step_half;
+        elapsed_secs += pic_secs;
         scan.pictures += 1;
     }
-    scan.max_idr_gap = scan.max_idr_gap.max(scan.pictures - last_idr);
+    scan.max_idr_gap = scan.max_idr_gap.max((half_frames - last_idr_half).div_ceil(2));
     Ok(Ok(scan))
 }
 
@@ -1004,7 +1029,7 @@ impl MuxJob {
 
         // Video and audio come from ffmpeg; their stream details are known after the first frames.
         let mut reader = TsReader::new(ts);
-        let mut video = VideoClock { n: 0, pts0: None, delay: 0, dur, fps: self.video.fps, vbv: self.video.copy_vbv, repair: None };
+        let mut video = VideoClock { n: 0, half_n: 0, pts0: None, delay: 0, dur, fps: self.video.fps, vbv: self.video.copy_vbv, sps: None, repair: None };
         let mut audio: Vec<AudioClock> = self.audio.iter().map(|&(codec, _)| AudioClock::new(codec)).collect();
         let mut queues: Vec<VecDeque<Au>> = (0..1 + audio.len()).map(|_| VecDeque::new()).collect();
         let mut sub_queue: VecDeque<Au> = {
@@ -1315,5 +1340,136 @@ mod tests {
         assert_eq!((ma_stream.codec.coding_type(), ma_stream.attr, ma_stream.es_info.as_slice()), (0x86, 0x64, &[][..]));
         let hr_stream = audio_stream(bd_clip::AUDIO_PID + 1, Codec::DtsHdHr, *b"deu", AudioInfo { channels: 8, rate: 48_000, descriptor_tail: [0; 4] });
         assert_eq!((hr_stream.codec.coding_type(), hr_stream.attr, hr_stream.es_info.as_slice()), (0x85, 0x61, &[][..]));
+    }
+
+    fn ts_of_aus(aus: &[(i64, Vec<u8>)]) -> Vec<u8> {
+        let mut ts = Vec::new();
+        for (pts, payload) in aus {
+            let mut pes = vec![0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5];
+            let p = *pts as u64;
+            pes.extend([
+                0x21 | (((p >> 30) & 7) as u8) << 1,
+                ((p >> 22) & 0xFF) as u8,
+                0x01 | (((p >> 15) & 0x7F) as u8) << 1,
+                ((p >> 7) & 0xFF) as u8,
+                0x01 | ((p & 0x7F) as u8) << 1,
+            ]);
+            pes.extend(payload);
+            let mut off = 0;
+            let mut first = true;
+            while off < pes.len() {
+                let mut pkt = [0xFFu8; 188];
+                pkt[0] = 0x47;
+                pkt[1] = if first { 0x41 } else { 0x01 };
+                pkt[2] = 0x00; // PID 0x100
+                let left = pes.len() - off;
+                if left >= 184 {
+                    pkt[3] = 0x10;
+                    pkt[4..].copy_from_slice(&pes[off..off + 184]);
+                    off += 184;
+                } else {
+                    pkt[3] = 0x30;
+                    let pad = 184 - left - 1;
+                    pkt[4] = pad as u8;
+                    if pad > 0 {
+                        pkt[5] = 0x00;
+                        pkt[6..5 + pad].fill(0xFF);
+                    }
+                    pkt[5 + pad..].copy_from_slice(&pes[off..]);
+                    off = pes.len();
+                }
+                ts.extend_from_slice(&pkt);
+                first = false;
+            }
+        }
+        ts
+    }
+
+    fn interlaced_sps_nal() -> Vec<u8> {
+        let mut w = h264::BitWriter::default();
+        w.u(100, 8);
+        w.u(0, 8);
+        w.u(41, 8);
+        w.ue(0);
+        w.ue(1);
+        w.ue(0);
+        w.ue(0);
+        w.bit(false);
+        w.bit(false);
+        w.ue(0); // log2_max_frame_num_minus4
+        w.ue(0);
+        w.ue(2);
+        w.ue(4);
+        w.bit(false);
+        w.ue(119);
+        w.ue(33);
+        w.bit(false); // frame_mbs_only = 0
+        w.bit(false); // mb_adaptive_frame_field = 0
+        w.bit(true);
+        w.bit(false);
+        w.bit(false); // no VUI
+        let mut nal = vec![0x67];
+        nal.extend(h264::escape(&w.finish()));
+        nal
+    }
+
+    fn field_au(sps: Option<&[u8]>, idr: bool, pad_bytes: usize) -> Vec<u8> {
+        let mut w = h264::BitWriter::default();
+        w.ue(0);
+        w.ue(if idr { 7 } else { 5 });
+        w.ue(0);
+        w.u(0, 4);
+        w.bit(true); // field_pic_flag = 1
+        w.bit(false); // bottom_field_flag = 0
+        let mut out = Vec::new();
+        if let Some(s) = sps {
+            out.extend([0, 0, 0, 1]);
+            out.extend(s);
+        }
+        out.extend([0, 0, 0, 1, if idr { 0x65 } else { 0x41 }]);
+        out.extend(h264::escape(&w.finish()));
+        out.resize(out.len() + pad_bytes, 0xAA);
+        out
+    }
+
+    #[test]
+    fn scan_video_supports_field_coded_interlaced_without_timing() {
+        let sps = interlaced_sps_nal();
+        // 50 fields at 25i (= 25 frames = 1.0 s), IDR at field 0 only.
+        let aus: Vec<(i64, Vec<u8>)> = (0..50)
+            .map(|i| (i * 1800, field_au((i == 0).then_some(&sps), i == 0, 200)))
+            .collect();
+        let ts = ts_of_aus(&aus);
+        let scan = scan_video(ts.as_slice(), (25, 1), (40_000_000, 30_000_000)).unwrap().expect("scans without pre-existing timing");
+        assert!(scan.interlaced);
+        assert!(scan.needs_timing);
+        assert_eq!(scan.pictures, 50);
+        assert_eq!(scan.max_idr_gap, 25);
+        assert_eq!(scan.issue(25), None);
+        assert!(scan.issue(24).is_some());
+
+        // Overflow in a field-coded stream is caught by the VBV check.
+        let big: Vec<(i64, Vec<u8>)> = (0..4)
+            .map(|i| (i * 1800, field_au((i == 0).then_some(&sps), i == 0, 60_000)))
+            .collect();
+        let scan_ov = scan_video(ts_of_aus(&big).as_slice(), (25, 1), (1_000_000, 500_000)).unwrap().unwrap();
+        assert!(scan_ov.overflow.is_some());
+        assert!(scan_ov.issue(25).is_some());
+
+        // VideoClock + TimingRepair advances DTS by half a frame (1800 ticks at 25i) per field.
+        let mut clock = VideoClock {
+            n: 0,
+            half_n: 0,
+            pts0: None,
+            delay: 0,
+            dur: 3600.0,
+            fps: (25, 1),
+            vbv: Some((40_000_000, 30_000_000)),
+            sps: None,
+            repair: None,
+        };
+        let a0 = clock.au(Pes { pts: Some(0), dts: Some(0), payload: aus[0].1.clone() }, bd_clip::VIDEO_PID).unwrap();
+        let a1 = clock.au(Pes { pts: Some(1800), dts: Some(1800), payload: aus[1].1.clone() }, bd_clip::VIDEO_PID).unwrap();
+        assert_eq!((a0.dts, a1.dts, a0.dur), (BASE_PTS, BASE_PTS + 1800, 1800));
     }
 }

@@ -336,7 +336,14 @@ export interface ConversionDone {
   warnings: string[];
 }
 
+export interface BdCopyScanResult {
+  issue: string | null;
+  needsTiming: boolean;
+}
+
 export const probeFile = (path: string) => invoke<VideoMetadata>("probe_file", { path });
+export const scanBdCopy = (path: string, disc: Disc, rate: string) =>
+  invoke<BdCopyScanResult>("scan_bd_copy", { path, disc, rate });
 export const probeSubtitleFile = (path: string) => invoke<ExternalSubtitleInfo>("probe_subtitle_file", { path });
 export const importChaptersFile = (path: string, fps?: number | null) =>
   invoke<ImportedChapter[]>("import_chapters_file", { path, fps: fps ?? null });

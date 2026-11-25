@@ -343,6 +343,8 @@ impl Vui {
 pub struct Sps {
     pub id: u32,
     pub frame_mbs_only: bool,
+    pub separate_colour_plane: bool,
+    pub log2_max_frame_num_minus4: u32,
     pub vui: Option<Vui>,
     /// NAL header byte and RBSP, and the bit position of `vui_parameters_present_flag` in it.
     header: u8,
@@ -375,10 +377,11 @@ impl Sps {
         let profile = r.u(8)?;
         r.u(16)?; // constraint flags, level_idc
         let id = r.ue()?;
+        let mut separate_colour_plane = false;
         if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
             let chroma = r.ue()?;
             if chroma == 3 {
-                r.flag()?;
+                separate_colour_plane = r.flag()?;
             }
             r.ue()?;
             r.ue()?;
@@ -391,7 +394,7 @@ impl Sps {
                 }
             }
         }
-        r.ue()?; // log2_max_frame_num_minus4
+        let log2_max_frame_num_minus4 = r.ue()?; // log2_max_frame_num_minus4
         match r.ue()? {
             0 => {
                 r.ue()?;
@@ -422,7 +425,36 @@ impl Sps {
         }
         let vui_at = r.pos();
         let vui = if r.flag()? { Some(Vui::parse(&mut r)?) } else { None };
-        Some(Sps { id, frame_mbs_only, vui, header, rbsp, vui_at })
+        Some(Sps { id, frame_mbs_only, separate_colour_plane, log2_max_frame_num_minus4, vui, header, rbsp, vui_at })
+    }
+
+    /// Whether `au` is coded as a single field (`field_pic_flag == 1`), from its first slice
+    /// header (ITU-T H.264 7.3.3). Returns `false` when `frame_mbs_only` is set or no slice header
+    /// is readable.
+    pub fn is_field_pic(&self, au: &[u8]) -> bool {
+        if self.frame_mbs_only {
+            return false;
+        }
+        for u in nal_units(au) {
+            if !matches!(u.2, 1 | 2 | 5) {
+                continue;
+            }
+            let body = nal_body(au, u);
+            let Some(payload) = body.get(1..) else { continue };
+            let rbsp = unescape(payload);
+            let mut r = BitReader::new(&rbsp);
+            if r.ue().is_none() || r.ue().is_none() || r.ue().is_none() {
+                continue;
+            }
+            if self.separate_colour_plane && r.u(2).is_none() {
+                continue;
+            }
+            if r.u(self.log2_max_frame_num_minus4 as usize + 4).is_none() {
+                continue;
+            }
+            return r.flag().unwrap_or(false);
+        }
+        false
     }
 
     /// The source's NAL HRD, if it signals one.
@@ -437,7 +469,7 @@ impl Sps {
         vui.timing = Some((fps.1, 2 * fps.0, true));
         vui.nal_hrd = Some(hrd.clone());
         vui.vcl_hrd = None;
-        // Our picture-timing SEI carries no pic_struct (progressive frames only).
+        // Our picture-timing SEI carries no pic_struct (cpb_removal_delay and dpb_output_delay only).
         vui.pic_struct = false;
         let mut w = BitWriter::default();
         w.copy(&self.rbsp, self.vui_at);
@@ -718,5 +750,62 @@ mod tests {
         assert_eq!(units.iter().map(|u| u.2).collect::<Vec<_>>(), vec![NAL_AUD, NAL_SPS, NAL_IDR]);
         assert_eq!(nal_body(&au, units[1]), &[0x67, 1, 2]);
         assert_eq!(nal_body(&au, units[2]), &[0x65, 9]);
+    }
+
+    fn interlaced_sps_without_hrd() -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.u(100, 8);
+        w.u(0, 8);
+        w.u(41, 8);
+        w.ue(0); // sps id
+        w.ue(1); // chroma 4:2:0
+        w.ue(0);
+        w.ue(0);
+        w.bit(false);
+        w.bit(false);
+        w.ue(0); // log2_max_frame_num_minus4 (4-bit frame_num)
+        w.ue(0); // poc type 0
+        w.ue(2);
+        w.ue(4); // refs
+        w.bit(false);
+        w.ue(119);
+        w.ue(33); // 1088 / 2 / 16 - 1
+        w.bit(false); // frame_mbs_only = 0
+        w.bit(false); // mb_adaptive_frame_field_flag = 0
+        w.bit(true); // direct_8x8
+        w.bit(false); // cropping
+        w.bit(false); // no VUI
+        let mut nal = vec![0x67];
+        nal.extend(escape(&w.finish()));
+        nal
+    }
+
+    fn slice_au(nal_type: u8, frame_num: u32, field_pic: Option<bool>) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.ue(0); // first_mb_in_slice
+        w.ue(if nal_type == NAL_IDR { 7 } else { 5 }); // slice_type
+        w.ue(0); // pic_parameter_set_id
+        w.u(frame_num, 4);
+        if let Some(fp) = field_pic {
+            w.bit(fp);
+            if fp {
+                w.bit(false); // bottom_field_flag
+            }
+        }
+        let mut au = vec![0, 0, 0, 1, 0x60 | nal_type];
+        au.extend(escape(&w.finish()));
+        au
+    }
+
+    #[test]
+    fn field_pic_detection() {
+        let prog = Sps::parse(&sps_without_hrd()).unwrap();
+        let inter = Sps::parse(&interlaced_sps_without_hrd()).unwrap();
+        assert!(!inter.frame_mbs_only);
+        let field_idr = slice_au(NAL_IDR, 0, Some(true));
+        let frame_idr = slice_au(NAL_IDR, 0, Some(false));
+        assert!(inter.is_field_pic(&field_idr));
+        assert!(!inter.is_field_pic(&frame_idr));
+        assert!(!prog.is_field_pic(&field_idr), "progressive SPS never reports field pictures");
     }
 }
