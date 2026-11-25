@@ -1,7 +1,8 @@
 # MusaDVD handbook
 
 All handbooks and reference documentation live in this folder. Project rules for contributors and
-agents are in [`../CLAUDE.md`](../CLAUDE.md); the architecture summary and open issues are in
+agents are in [`../CLAUDE.md`](../CLAUDE.md); the self-contained technical manual for coding
+agents (invariants, formulas, workflows) is [`../AGENTS.md`](../AGENTS.md); the architecture summary and open issues are in
 [`../STATUS.md`](../STATUS.md); the generated file tree is `../SYSTEM_STATE.txt`.
 
 ## Developer documentation (English, Markdown)
